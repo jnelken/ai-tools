@@ -21,6 +21,9 @@ Personal Claude Code skills, slash commands, and hooks I author and use across m
 | [`rum-review`](skills/rum-review) | Query Datadog RUM data, synthesize findings into categorized issues |
 | [`screenshot-pr`](skills/screenshot-pr) | Capture one signature screenshot from the deploy preview, embed in PR description |
 | [`slack-gif-creator`](skills/slack-gif-creator) | Build animated GIFs optimized for Slack |
+| [`superset-config`](skills/superset-config) | Configure superset.sh (agentic IDE) project scripts — setup/run/teardown |
+| [`use-spark`](skills/use-spark) | Query the Spark email client CLI — emails, calendar, contacts, scheduling |
+| [`wrapup-repos`](skills/wrapup-repos) | Wrap up in-progress work in one repo unattended — commit + write a decision list |
 
 Each skill is a directory with a `SKILL.md` (required) plus optional `scripts/`, `references/`, `assets/`.
 
@@ -38,6 +41,14 @@ Each skill is a directory with a `SKILL.md` (required) plus optional `scripts/`,
 
 Hooks need extra wiring in `~/.claude/settings.json` — see [`hooks/README.md`](hooks/README.md).
 
+### Automations (`automations/`)
+
+| Automation | Schedule | Purpose |
+|---|---|---|
+| [`worktree-wrapup`](automations/worktree-wrapup) | 2:45am / 7:45am / 12:45pm / 5:45pm daily (launchd) | Headlessly wrap up in-progress work in one repo via the `wrapup-repos` skill |
+
+Scheduling (the launchd plist) needs manual per-machine setup — see [`automations/README.md`](automations/README.md).
+
 ## Install
 
 Clone, then run the installer to symlink everything into `~/.claude/`:
@@ -52,6 +63,7 @@ The installer creates symlinks at:
 - `~/.claude/skills/<name>` → `~/code/claude-skills/skills/<name>` (per skill)
 - `~/.claude/commands/<name>.md` → `~/code/claude-skills/commands/<name>.md` (per slash command)
 - `~/.claude/hooks/<name>` → `~/code/claude-skills/hooks/<name>` (per hook)
+- `~/.claude/automations/<name>/<script>` → `~/code/claude-skills/automations/<name>/<script>` (per automation script; scheduling itself is separate, see [`automations/README.md`](automations/README.md))
 
 Safety: it **refuses to overwrite** existing non-symlink files/directories — manually `rm -rf` the conflicting path first if you want this repo's version.
 

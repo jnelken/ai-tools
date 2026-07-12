@@ -73,5 +73,23 @@ if [ -d "$REPO_ROOT/hooks" ]; then
   echo "        alone doesn't enable execution. See hooks/README.md for required config."
 fi
 
+# ── automations/ ──
+if [ -d "$REPO_ROOT/automations" ]; then
+  echo ""
+  echo "── automations ──"
+  for auto in "$REPO_ROOT/automations"/*/; do
+    [ -d "$auto" ] || continue
+    name="$(basename "${auto%/}")"
+    mkdir -p "$CLAUDE_DIR/automations/$name"
+    for script in "$auto"*.sh; do
+      [ -e "$script" ] || continue
+      link_one "$script" "$CLAUDE_DIR/automations/$name/$(basename "$script")" "automation script"
+    done
+  done
+  echo ""
+  echo "  Note: scheduling (launchd plists) isn't symlinked and doesn't auto-install —"
+  echo "        see automations/README.md to wire each automation up on a new machine."
+fi
+
 echo ""
 echo "Done."
