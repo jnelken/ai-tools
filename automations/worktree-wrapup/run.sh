@@ -39,3 +39,6 @@ find "$LOGDIR" -name 'run-*.log' -mtime +30 -delete 2>/dev/null
 
 # Keep a stable pointer to the latest log for easy checking.
 ln -sf "$LOG" "$LOGDIR/latest.log"
+
+# Refresh the dashboard (scans logs, (auto) commits, and NEXT-STEPS.md files).
+python3 "$ROOT/gen-dashboard.py" >> "$LOG" 2>&1

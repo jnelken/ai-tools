@@ -81,7 +81,7 @@ if [ -d "$REPO_ROOT/automations" ]; then
     [ -d "$auto" ] || continue
     name="$(basename "${auto%/}")"
     mkdir -p "$CLAUDE_DIR/automations/$name"
-    for script in "$auto"*.sh; do
+    for script in "$auto"*.sh "$auto"*.py; do
       [ -e "$script" ] || continue
       link_one "$script" "$CLAUDE_DIR/automations/$name/$(basename "$script")" "automation script"
     done

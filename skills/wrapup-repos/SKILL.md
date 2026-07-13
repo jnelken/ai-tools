@@ -36,7 +36,16 @@ Candidate repos are the direct children of `/Users/jake/Dropbox/code`.
 
 ## Step 1 — Select ONE repo
 
-For each git repo directly under `/Users/jake/Dropbox/code`:
+First build the **eligible** set: every git repo directly under `/Users/jake/Dropbox/code`, MINUS
+any repo the user has disabled. A repo is disabled (skip it entirely) if EITHER:
+- its name matches an uncommented line in `/Users/jake/Dropbox/code/.wrapup-ignore` (one
+  name or glob per line; `#` starts a comment; leading/trailing whitespace ignored), OR
+- a `.nowrapup` file exists at the repo root (portable per-repo opt-out that travels with the repo).
+
+If `.wrapup-ignore` doesn't exist, treat it as empty (nothing disabled). Never create, modify, or
+commit `.wrapup-ignore` or `.nowrapup` files — they are the user's toggles.
+
+Then, for each ELIGIBLE repo:
 1. `dirty` = line count of `git -C <repo> status --porcelain`.
 2. `recency` = the most recent of: last commit time (`git -C <repo> log -1 --format=%ct`) and the
    newest modification time among working-tree files (ignore `.git`, `node_modules`, and other
