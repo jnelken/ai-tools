@@ -23,3 +23,8 @@ and writes `NEXT-STEPS.md`. Single source of truth for the actual workflow is th
 [`wrapup-repos`](../skills/wrapup-repos/SKILL.md) skill — `run.sh` just invokes
 `claude -p` headlessly against it, so editing the skill changes both the on-demand
 `/wrapup-repos` and this scheduled job.
+
+After each run, `run.sh` also regenerates `~/.claude/automations/worktree-wrapup/dashboard.html`
+via `gen-dashboard.py` — a self-contained (file://-safe) status page covering run history,
+`NEXT-STEPS.md` decision lists, `(auto)` commits, and disabled repos across `~/Dropbox/code`.
+Open it directly in a browser to check the automation's state without digging through logs.
