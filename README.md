@@ -17,12 +17,14 @@ Personal Claude Code skills, slash commands, and hooks I author and use across m
 | [`monthly-retro-commits`](skills/monthly-retro-commits) | Export commit-level effort data (TSV, lines-changed sorted) for the retro skill |
 | [`move-diff`](skills/move-diff) | Relocate uncommitted changes to a different branch/worktree |
 | [`peer-review`](skills/peer-review) | Run Codex code review locally before pushing |
+| [`pr-review-gaps`](skills/pr-review-gaps) | Find sswt PRs never posted to `#pr-review`, with a hold-list for deliberately parked ones |
 | [`rebase-after-squash`](skills/rebase-after-squash) | Resolve rebase-after-squash-merge conflicts cleanly |
 | [`rum-review`](skills/rum-review) | Query Datadog RUM data, synthesize findings into categorized issues |
 | [`screenshot-pr`](skills/screenshot-pr) | Capture one signature screenshot from the deploy preview, embed in PR description |
 | [`slack-gif-creator`](skills/slack-gif-creator) | Build animated GIFs optimized for Slack |
 | [`superset-config`](skills/superset-config) | Configure superset.sh (agentic IDE) project scripts — setup/run/teardown |
 | [`use-spark`](skills/use-spark) | Query the Spark email client CLI — emails, calendar, contacts, scheduling |
+| [`weekly-slack-updates`](skills/weekly-slack-updates) | Generate + post the weekly "Dev Weekly" Slack changelog from cross-repo git history |
 | [`wrapup-repos`](skills/wrapup-repos) | Wrap up in-progress work in one repo unattended — commit + write a decision list |
 
 Each skill is a directory with a `SKILL.md` (required) plus optional `scripts/`, `references/`, `assets/`.
@@ -38,6 +40,8 @@ Each skill is a directory with a `SKILL.md` (required) plus optional `scripts/`,
 | Hook | When | Purpose |
 |---|---|---|
 | [`post-yesterdays-ccusage.sh`](hooks/post-yesterdays-ccusage.sh) | SessionStart | Post daily Claude + Codex token-usage summaries to Slack, catching up missed days |
+| [`set-process-name.sh`](hooks/set-process-name.sh) | PreToolUse (Bash) | Label agent-spawned node processes `{agent}-{script}-{branch}` so Activity Monitor shows origins — see [named-node-processes.md](hooks/named-node-processes.md) |
+| [`set-process-title.cjs`](hooks/set-process-title.cjs) | via `NODE_OPTIONS` | Injector applying the title to any node process; MCP servers self-label from their script basename |
 
 Hooks need extra wiring in `~/.claude/settings.json` — see [`hooks/README.md`](hooks/README.md).
 

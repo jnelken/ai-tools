@@ -53,3 +53,9 @@ If you already have a `hooks.SessionStart` array, append the new entry rather th
 ### Disabling
 
 Remove the entry from `settings.json` OR `unset SLACK_CCUSAGE_WEBHOOK_URL` to no-op.
+
+## set-process-name.sh + set-process-title.cjs
+
+A pair that labels every agent-spawned node process for Activity Monitor — `c-eslint-my-feature` instead of `node`. The PreToolUse hook rewrites Bash commands to export `PROCESS_NAME={agent}-{script}-{branch}`; the `.cjs` injector (loaded via `NODE_OPTIONS=--require`) applies it as the process title, falling back to the script basename so MCP servers self-label too.
+
+Full setup, optional MCP/Codex coverage, and gotchas: [`named-node-processes.md`](named-node-processes.md).

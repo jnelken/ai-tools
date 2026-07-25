@@ -44,6 +44,11 @@ yesterday=$(date -v-1d +%Y-%m-%d 2>/dev/null || date -d 'yesterday' +%Y-%m-%d)
 
 # Atomic claim — keyed on yesterday so parallel sessions don't both catch up
 lock="$state_dir/.lock-$yesterday"
+# If the lock is stale (left by a SIGKILL'd async hook), remove it first.
+if [ -d "$lock" ]; then
+  lock_age=$(( $(date +%s) - $(stat -f %m "$lock" 2>/dev/null || stat -c %Y "$lock" 2>/dev/null || echo 0) ))
+  [ "$lock_age" -gt 7200 ] && rmdir "$lock" 2>/dev/null || true
+fi
 mkdir "$lock" 2>/dev/null || exit 0
 trap 'rmdir "$lock" 2>/dev/null || true' EXIT
 
