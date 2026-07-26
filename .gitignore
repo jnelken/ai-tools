@@ -7,3 +7,7 @@ node_modules/
 .env
 .env.*
 !.env.example
+
+# wrapup-repos automation's own scratch note - untracked-forever was making
+# this repo look "recently touched" indefinitely to the recency heuristic.
+NEXT-STEPS.md
