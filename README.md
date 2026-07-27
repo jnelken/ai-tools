@@ -1,6 +1,6 @@
-# claude-skills
+# my-claude-tools
 
-Personal Claude Code skills, slash commands, and hooks I author and use across machines.
+Personal Claude Code skills, slash commands, hooks, automations, and statusline I author and use across machines.
 
 ## What's here
 
@@ -53,32 +53,41 @@ Hooks need extra wiring in `~/.claude/settings.json` — see [`hooks/README.md`]
 
 Scheduling (the launchd plist) needs manual per-machine setup — see [`automations/README.md`](automations/README.md).
 
+### Statusline (`statusline/`)
+
+| Script | Purpose |
+|---|---|
+| [`awesome-statusline.sh`](statusline/awesome-statusline.sh) | Bash statusline for Claude Code — context/usage-limit bars with a momentum-based color gradient, blink at high-risk pace, cost/session time, Node.js version |
+
+Unlike the other categories, installing this also patches `~/.claude/settings.json` (`statusLine.command`, with a timestamped backup) so Claude Code actually runs it — see [Install](#install) below. Requires `jq` (auto-installed by `install.sh` if missing).
+
 ## Install
 
 Clone, then run the installer to symlink everything into `~/.claude/`:
 
 ```bash
-git clone https://github.com/jnelken/claude-skills.git ~/code/claude-skills
-cd ~/code/claude-skills
+git clone https://github.com/jnelken/my-claude-tools.git ~/code/others/my-claude-tools
+cd ~/code/others/my-claude-tools
 ./install.sh
 ```
 
 The installer creates symlinks at:
-- `~/.claude/skills/<name>` → `~/code/claude-skills/skills/<name>` (per skill)
-- `~/.claude/commands/<name>.md` → `~/code/claude-skills/commands/<name>.md` (per slash command)
-- `~/.claude/hooks/<name>` → `~/code/claude-skills/hooks/<name>` (per hook)
-- `~/.claude/automations/<name>/<script>` → `~/code/claude-skills/automations/<name>/<script>` (per automation script; scheduling itself is separate, see [`automations/README.md`](automations/README.md))
+- `~/.claude/skills/<name>` → `~/code/others/my-claude-tools/skills/<name>` (per skill)
+- `~/.claude/commands/<name>.md` → `~/code/others/my-claude-tools/commands/<name>.md` (per slash command)
+- `~/.claude/hooks/<name>` → `~/code/others/my-claude-tools/hooks/<name>` (per hook)
+- `~/.claude/automations/<name>/<script>` → `~/code/others/my-claude-tools/automations/<name>/<script>` (per automation script; scheduling itself is separate, see [`automations/README.md`](automations/README.md))
+- `~/.claude/awesome-statusline.sh` → `~/code/others/my-claude-tools/statusline/awesome-statusline.sh`, plus `~/.claude/settings.json`'s `statusLine.command` is set to run it
 
 Safety: it **refuses to overwrite** existing non-symlink files/directories — manually `rm -rf` the conflicting path first if you want this repo's version.
 
 ## Update flow
 
 ```bash
-cd ~/code/claude-skills && git pull       # pull latest from any machine
-# edit anything in ~/.claude/{skills,commands,hooks}/ — symlinks mean the repo sees it
+cd ~/code/others/my-claude-tools && git pull   # pull latest from any machine
+# edit anything in ~/.claude/{skills,commands,hooks,automations,awesome-statusline.sh} — symlinks mean the repo sees it
 git add -A && git commit -m "..." && git push
 ```
 
 ## Sharing with coworkers
 
-These are personal skills and may reference my specific workflows/repos. If you find one useful, copy it locally and adapt — don't symlink directly from this repo into your `~/.claude/` unless you want my future edits to land in your config.
+These are personal tools and may reference my specific workflows/repos. If you find one useful, copy it locally and adapt — don't symlink directly from this repo into your `~/.claude/` unless you want my future edits to land in your config.

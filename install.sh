@@ -91,5 +91,46 @@ if [ -d "$REPO_ROOT/automations" ]; then
   echo "        see automations/README.md to wire each automation up on a new machine."
 fi
 
+# ── statusline/ ──
+if [ -d "$REPO_ROOT/statusline" ]; then
+  echo ""
+  echo "── statusline ──"
+
+  # jq is required to parse the statusline JSON on stdin.
+  if ! command -v jq >/dev/null 2>&1; then
+    echo "  jq not found — attempting automatic install…"
+    if   command -v brew    >/dev/null 2>&1; then brew install jq
+    elif command -v apt-get >/dev/null 2>&1; then sudo apt-get update && sudo apt-get install -y jq
+    elif command -v dnf     >/dev/null 2>&1; then sudo dnf install -y jq
+    elif command -v yum     >/dev/null 2>&1; then sudo yum install -y jq
+    elif command -v pacman  >/dev/null 2>&1; then sudo pacman -S --noconfirm jq
+    elif command -v zypper  >/dev/null 2>&1; then sudo zypper install -y jq
+    elif command -v apk     >/dev/null 2>&1; then sudo apk add jq
+    else
+      echo "  ⚠ No supported package manager found — install jq manually: https://jqlang.github.io/jq/download/"
+    fi
+  fi
+
+  link_one "$REPO_ROOT/statusline/awesome-statusline.sh" "$CLAUDE_DIR/awesome-statusline.sh" "statusline script"
+
+  if command -v jq >/dev/null 2>&1; then
+    SETTINGS="$CLAUDE_DIR/settings.json"
+    STATUSLINE_JSON='{"type":"command","command":"bash ~/.claude/awesome-statusline.sh"}'
+    mkdir -p "$CLAUDE_DIR"
+    if [ -f "$SETTINGS" ]; then
+      BACKUP="$SETTINGS.backup-$(date +%Y%m%d-%H%M%S)"
+      cp "$SETTINGS" "$BACKUP"
+      jq --argjson sl "$STATUSLINE_JSON" '.statusLine = $sl' "$SETTINGS" > "$SETTINGS.tmp" && mv "$SETTINGS.tmp" "$SETTINGS"
+      echo "  settings.json: statusLine set (backup: $(basename "$BACKUP"))"
+    else
+      jq -n --argjson sl "$STATUSLINE_JSON" '{statusLine: $sl}' > "$SETTINGS"
+      echo "  settings.json: created with statusLine set"
+    fi
+  else
+    echo "  ⚠ jq unavailable — skipped settings.json statusLine wiring. Set it manually:"
+    echo "     statusLine.command = \"bash ~/.claude/awesome-statusline.sh\""
+  fi
+fi
+
 echo ""
 echo "Done."
