@@ -1,0 +1,191 @@
+---
+name: close-out
+description: Use at the end of a long working session to confirm nothing was left orphaned before closing the thread — sweeps the conversation for unanswered questions, unfiled findings, retracted claims and "I'll do that later" promises, sweeps the machine for stray background processes, temp scripts, uncommitted/unpushed worktrees, un-announced PRs and stale sswt workspaces, files every real follow-up into Linear assigned to the user, then prints a large ASCII confirmation banner only if genuinely everything is clean. Trigger phrases include "wrap up this session", "can I close this thread", "close out", "close this out", "file the follow-ups", "am I safe to close this", "session wrap-up", "anything left hanging", "did we leave anything unfinished", "safe to end the session".
+---
+
+# Close Out
+
+## Overview
+
+A long session accumulates debris: a question you asked that never got answered, a bug you found in passing and never filed, a `nohup`'d job still burning CPU, a `tmp-*.ts` prod-DB script sitting untracked in a repo, a PR that never made it to `#pr-review`. None of that is visible from the last few messages — it's spread across hours of transcript and across the filesystem.
+
+This skill is the closing checklist. Five steps, in order: sweep the conversation (1), sweep the machine (2), file follow-ups into Linear (3), report what only the human can close (4), and — **only if 1–4 came back genuinely clean** — print a confirmation banner (5).
+
+The single worst outcome this skill can produce is a **false all-clear**: a banner that says "nothing orphaned" while a background job is still running, a finding is unfiled, or a temp credential script is sitting in a repo. The user will read that banner and close the thread. Every gate in step 5 exists to make that impossible — when in doubt, print the NOT CLEAN block instead.
+
+## When NOT to use
+
+- The user wants in-progress *code* tidied, committed, and a NEXT-STEPS file written across repos under `~/Dropbox/code` — that's [[wrapup-repos]]. This skill closes out a *conversation*; it does not finish anyone's half-written feature.
+- The user only wants to know which PRs haven't been announced in `#pr-review` — that's [[pr-review-gaps]], much cheaper.
+- The user only wants stray dev servers killed — that's [[reap-dev-servers]].
+- The session was short and single-purpose (one file edited, one question answered). Say so and skip; a five-step sweep on a ten-message session is noise.
+
+## Steps
+
+### 1. Sweep the conversation for unfinished business
+
+Re-read the **whole** session, start to finish — not the last few exchanges. Build a list, one row per item:
+
+| Category | What to look for |
+|---|---|
+| **Pending decision** | A question you asked the user that never got a direct answer. Scrolling past it is not an answer. |
+| **Unfiled finding** | A bug, perf problem, security smell, or observability gap you discovered and only ever mentioned in chat. |
+| **Retracted claim** | Anything you asserted in a *durable artifact* (Linear comment, PR body, ticket description, commit message, doc) that you later corrected or walked back. |
+| **Blocked work** | Something you started and stopped. Record *what* it's blocked on, by name. |
+| **Deferred promise** | Any "I'll do that after…", "worth doing later", "next step is…" you wrote and never came back to. |
+
+**Retracted claims get verified, not remembered.** If you corrected yourself mid-session, the correction is only real if it landed in the artifact. Go read the artifact — `gh pr view <n> --json body`, `mcp__claude_ai_Linear__get_issue`, `mcp__claude_ai_Linear__list_comments` — and confirm the wrong claim is actually gone or annotated. A correction that exists only in chat is an **outstanding item**: the durable record still says the wrong thing, and whoever reads it next has no idea.
+
+This applies more broadly: **prefer the durable system over the conversation's own narrative.** The transcript is a record of what you believed at the time, and parts of it were superseded. Linear, GitHub, and the filesystem are what's actually true now.
+
+### 2. Sweep for orphaned state
+
+Run these. Report findings as evidence (paths, PIDs, SHAs), not as conclusions.
+
+**a. Background processes and live tasks.**
+```bash
+ps aux | grep -Ei 'nohup|codex review|remote-exec|tsx watch|vite|pg_dump' | grep -v grep
+```
+Also enumerate in-harness background work with `TaskList` and any Monitor/background Bash still live. Anything this session started and no longer needs gets stopped with `TaskStop` (or reported with its PID if it's a detached shell process — do not kill processes you can't attribute to this session; see [[reap-dev-servers]] for the orphan-vs-live classification).
+
+**b. Temp/scratch scripts left inside a repo.** These must never be committed, and the dangerous ones are the ones that reach prod.
+```bash
+git status --porcelain | grep -Ei 'tmp-|scratch|scripts/tmp|\.bak$|debug-.*\.(ts|js|sh)$'
+```
+For each hit, check whether it touches credentials or prod:
+```bash
+grep -lE 'PROD_MGMT|DATABASE_URL|decryptConnectionUrl|API_KEY|SECRET|xoxp-' <paths>
+```
+**Report the path and why it's dangerous — do not print the file's contents into the transcript, and never `git add` it.** Recommend moving it to the session scratchpad or deleting it, and let the user choose.
+
+**c. Uncommitted and unpushed work across every worktree touched this session.** `git worktree list` alone is not enough — it only covers the current repo's set. Take the union of:
+- Superset `workspaces_list` (the authoritative sswt set), plus
+- `git worktree list` run from each root checkout touched this session (e.g. `/Users/jake/code/api`, `/Users/jake/code/woodrow`).
+
+Then, per worktree:
+```bash
+git -C "$WT" status --porcelain
+git -C "$WT" log --oneline @{u}..HEAD 2>/dev/null   # unpushed commits; error = no upstream, also a finding
+```
+
+**Split the results into two buckets — this matters for step 5.** A worktree counts as **touched this session** if you ran a command in it, edited a file in it, or acted on its branch/PR. Only touched worktrees gate the banner. Everything else — parked sswt workspaces, long-lived branches the session never went near — is **reported as context and does not block the close**. Without this split the gate latches NOT CLEAN forever on work that was never this session's to finish, and a banner that can never print teaches the user to ignore it.
+
+**d. PRs opened this session that never got reviewed or announced.** Per the user's `CLAUDE.md` post-PR workflow, an open PR needs a clean `/loop /peer-review` and a `#pr-review` Slack post.
+```bash
+gh pr list --repo <repo> --head "$BRANCH" --state open --json number,title,url,reviewDecision
+```
+Cross-check `~/.claude/state/pr-review-posted.jsonl` for the URL. Missing → outstanding. Do **not** post to Slack from this skill without asking; see [[pr-review-gaps]] for the gated posting flow.
+
+**e. sswt workspaces that are now empty or whose PR merged.** Verify emptiness *before* proposing anything:
+```bash
+git -C "$WT" status --porcelain          # must be empty
+git -C "$WT" log --oneline origin/main..HEAD   # must be empty
+```
+Only if both are empty (and any PR is merged/closed) may you *propose* deletion. `workspaces_delete` is marked destructive by the MCP server for good reason — **never call it without explicit user confirmation**, and always show the two command outputs as the evidence for why you think it's safe.
+
+**f. Stale `pr-review-posted.jsonl` entries.** The user's `CLAUDE.md` says to remove an entry once the PR's branch/worktree is gone. For each line in `~/.claude/state/pr-review-posted.jsonl`, check whether the branch still resolves and whether a workspace still exists; list the dead ones for removal (ask first — it's user state).
+
+**g. Durable learnings not yet written to memory.** Derive the project memory directory rather than hardcoding it (this skill runs in any repo):
+```bash
+MEM="$HOME/.claude/projects/$(pwd | sed 's:/:-:g')/memory"
+ls "$MEM"
+```
+If the session produced a durable, reusable fact — a gotcha, a corrected assumption, a convention — and it isn't in there, that's an outstanding item.
+
+### 3. File follow-ups in Linear
+
+Follow [[linear-ticket-gen]] for access, ID resolution, and the state/cycle defaults (including the Triage trap). If Linear MCP tools aren't authenticated, that skill owns the fallback — don't re-derive it here.
+
+**Duplicate-check FIRST, before creating anything.** Run `mcp__claude_ai_Linear__list_issues` with a keyword query built from the finding's core terms, and read descriptions, not just titles. If an overlapping ticket exists, **comment on it** (`mcp__claude_ai_Linear__save_comment`) instead of filing a near-duplicate. Creating a second ticket for work someone already tracked is a worse outcome than a slightly-off comment.
+
+Rules for what you file:
+
+- **Assign every ticket to the user.** `jake@concentro.io`, assignee id `20d3377a-786b-41e2-8308-3c7e1c07df2e`.
+- **Bundle by change, not by symptom.** Three findings that all get fixed by one edit and one deploy are **one ticket** — filing three means three restarts of the same work. Genuinely independent work gets its own ticket. Ask yourself: "would fixing these ship together?"
+- **Bodies carry the evidence, not a summary of it.** `file.ts:142` with the offending lines quoted; the verbatim error string; the measured number ("p99 3.4s across 812 requests, 2026-07-28"); the log excerpt; the PR/commit SHA. Someone picking this up cold in three weeks must not have to re-derive anything you already knew. "Investigate the slow query in the files route" is a failed ticket; the query, its plan, and its timing is a real one.
+- **Observability gaps get the `telemetry` label**, id `df76fea0-b81f-4c48-8068-c0f3a50271d0`. The separate `datadog` label exists for a different purpose — do not reach for it because the finding came from Datadog. Confirm label ids with `mcp__claude_ai_Linear__list_issue_labels` if anything looks off.
+- **If a ticket corrects an earlier claim, say so explicitly and date it.** e.g. "Correction (2026-07-30): the 2026-07-28 comment on CON-3271 said the rows were nulled by the migration. They were not — verified against prod, 19 rows still carry the old value."
+- **Never fabricate ticket content.** If you can't produce the evidence for a finding — the line number is gone, the log has rotated, the number was a guess — write *"evidence not captured; re-derive by <specific step>"* in the ticket. Inventing a plausible file:line is worse than admitting the gap, because it reads as verified.
+
+Create/update via `mcp__claude_ai_Linear__save_issue`. Record every identifier and URL you touched — step 5 reports them.
+
+### 4. Report what still needs the human
+
+A short, clearly separated list of what this skill **cannot** close out:
+
+- **Decisions only the user can make** — the unanswered questions from step 1, restated as decisions with the options.
+- **Prod changes awaiting authorisation** — anything you deliberately did not run.
+- **PRs awaiting approval** — open, reviewed or not, waiting on a human.
+- **Destructive cleanups you proposed but did not perform** — workspace deletions, temp-file removals, state-file edits.
+
+Be explicit that these block a truly clean close. Say it plainly: *"The following need you before this thread is genuinely closed."*
+
+### 5. The confirmation banner
+
+**The gate.** Print the success banner only if **every one** of these is true:
+
+1. Step 1 produced no unresolved item — every finding is either filed in Linear or explicitly dismissed by the user this session.
+2. Every retracted claim's correction was **verified in the durable artifact**, not just in chat.
+3. Step 2 found nothing **this session** left behind: no background process it started and should have stopped, no temp script it wrote into a repo, no uncommitted or unpushed work in a worktree it touched, no PR it opened that's missing its review/announcement, no state entry it made stale. Pre-existing debris the session never touched is reported, not gated on.
+4. Every follow-up from step 3 is actually filed or commented — you have the identifiers.
+5. Step 4's list is **empty**.
+
+**What "outstanding" means:** unfiled, unswept, or unstopped *in this session*. A ticket you filed is closed out — future work tracked in Linear is not an orphan, or the banner could never print. But an unmade decision, an unauthorized prod change, or a PR awaiting approval (step 4) **does** block the banner: those are open loops with no owner but the user.
+
+If all five hold:
+
+```
+╔══════════════════════════════════════════════════════════════════╗
+║                                                                  ║
+║        ███  SESSION WRAPPED — NOTHING ORPHANED  ███              ║
+║                                                                  ║
+╚══════════════════════════════════════════════════════════════════╝
+
+  Tickets filed/updated : CON-1234 (new), CON-1200 (commented)
+  PRs                   : #1118 merged, #1121 open (approved)
+  Worktrees             : 4 checked, all clean and pushed
+  Background tasks      : 2 stopped, 0 running
+  Memory                : 1 learning written (project_foo_gotcha.md)
+  Temp files            : none left in any repo
+```
+
+If **anything** fails the gate, print this instead — different frame character on purpose, so the two can never be confused at a glance:
+
+```
+████████████████████████████████████████████████████████████████
+█                                                              █
+█             NOT CLEAN — DO NOT CLOSE THIS THREAD             █
+█                                                              █
+████████████████████████████████████████████████████████████████
+
+  OUTSTANDING:
+  1. <exactly what remains, and what would clear it>
+  2. ...
+
+  NEEDS YOU:
+  - <step 4 items>
+```
+
+Never soften a partial result into the success banner, never print both, and never print the success banner "except for one small thing." One small thing is a NOT CLEAN.
+
+## Common mistakes
+
+- **Printing the banner because the sweep was tidy rather than because it was empty.** The gate is a five-item checklist with no partial credit. Walk it literally.
+- **Reading only the recent context in step 1.** The items most likely to be orphaned are the ones from hours ago that got buried under later work — that's precisely why they're orphaned.
+- **Trusting a mid-session correction.** You said "actually that's wrong" in chat; the Linear comment still says the wrong thing. Open the artifact and look.
+- **Filing five tickets for one deploy.** Bundle by change. Five tickets means five context reloads for the same fix.
+- **Writing summary-grade tickets.** "Look into the flaky test" costs the future reader everything you already knew. Paste the failure output.
+- **Inventing evidence to make a ticket look complete.** A fabricated `file.ts:88` will be trusted and will waste someone's afternoon. Write "evidence not captured" instead.
+- **Deleting a workspace, branch, or file because it "looked empty."** Verify with the two commands, show the output, then ask. `workspaces_delete` is irreversible.
+- **`cat`-ing a temp script that touches prod credentials into the transcript** to decide whether it matters. The path and a `grep -l` hit are enough to know it matters.
+- **Hardcoding the memory path.** It's derived from cwd — this skill runs in any repo.
+- **Only running `git worktree list` from the current repo.** sswt worktrees and the other root checkout both get missed. Take the union.
+- **Gating the banner on a parked worktree the session never touched.** That's someone's deliberately-parked work, not this session's debris — sweep it wide, report it, but gate narrow. A NOT CLEAN that can never clear is as useless as a false all-clear.
+- **Auto-posting to `#pr-review` during the sweep.** Report the gap; the posting flow is gated on confirmation ([[pr-review-gaps]]).
+- **Creating a duplicate Linear ticket because the search was title-only.** Read descriptions; comment on the existing issue when it overlaps.
+
+## Why this exists
+
+The cost of an orphaned item isn't the item — it's that nobody knows it exists. A bug found and not filed is worse than a bug never found, because the session's cost was paid and the value was thrown away on close. A background job left running burns money invisibly. A temp script with a prod connection string sitting untracked in a repo is one `git add -A` away from being a real incident.
+
+Closing a long thread is exactly when all of that gets dropped, because the interesting work is over and the remaining work is bookkeeping. This skill makes the bookkeeping mechanical and — crucially — makes "everything is fine" something that has to be *earned* against a checklist rather than *felt* at the end of a productive day.
