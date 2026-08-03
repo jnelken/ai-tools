@@ -122,7 +122,19 @@ while [[ ! "$current" > "$yesterday" ]]; do
       (tin   | lpad(7))  + "  " +
       (tout  | lpad(7))  + "  " +
       (cache | lpad(7));
+    # Claude-only variant that keeps cache creation (write) and cache read
+    # apart instead of summing them — ccusage reports them separately, and
+    # collapsing them loses the one signal that distinguishes profitable
+    # cache reuse from paying the write premium over and over.
+    def rowClaude(model; cost; tin; tout; cachew; cacher):
+      (model | rpad(12)) + "  " +
+      (cost  | lpad(7))  + "  " +
+      (tin   | lpad(7))  + "  " +
+      (tout  | lpad(7))  + "  " +
+      (cachew | lpad(7)) + "  " +
+      (cacher | lpad(7));
     def sep: ("─" * 50);
+    def sepClaude: ("─" * 58);
 
     # Pull the single-day row from each report. ccusage emits {"daily": [...]}
     # for days with data, bare [] for days with none, and we coerce a parse
@@ -147,24 +159,24 @@ while [[ ! "$current" > "$yesterday" ]]; do
       # ── Claude block ───────────────────────────────────────────────
       (if $chas then
         ($cr.modelBreakdowns // []) as $cm |
-        (($cr.cacheCreationTokens // 0) + ($cr.cacheReadTokens // 0)) as $ccache |
         "Claude\n" +
-        row("Model"; "Cost"; "Input"; "Output"; "Cache") + "\n" +
+        rowClaude("Model"; "Cost"; "Input"; "Output"; "CacheW"; "CacheR") + "\n" +
         (if ($cm | length) > 0
           then ($cm | map(
-            ((.cacheCreationTokens // 0) + (.cacheReadTokens // 0)) as $mc |
-            row(.modelName | claudeModel;
+            rowClaude(.modelName | claudeModel;
                 .cost // 0 | money;
                 .inputTokens // 0 | fmt;
                 .outputTokens // 0 | fmt;
-                $mc | fmt)
-          ) | join("\n")) + "\n" + sep + "\n"
+                .cacheCreationTokens // 0 | fmt;
+                .cacheReadTokens // 0 | fmt)
+          ) | join("\n")) + "\n" + sepClaude + "\n"
           else "" end) +
-        row("Claude";
+        rowClaude("Claude";
             $ccost | money;
             $cr.inputTokens // 0 | fmt;
             $cr.outputTokens // 0 | fmt;
-            $ccache | fmt)
+            $cr.cacheCreationTokens // 0 | fmt;
+            $cr.cacheReadTokens // 0 | fmt)
        else "Claude: no activity" end) +
       "\n\n" +
 
