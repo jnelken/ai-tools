@@ -72,6 +72,10 @@ If the team has `triageEnabled: true` (`team(id:"...") { triageEnabled }`), a ne
 
 Known project IDs, team ID, and sizing rules (milestone = 1–2 cycle chunk of work within a project; project = an ongoing feature area) live in reference memory — check there first rather than re-deriving from scratch, and update it when you learn something new or find a stale value.
 
+## Repo-scoped routing (Project/Labels from changed files)
+
+If the ticket is about a specific code change (not pure feedback/bug triage) and you're working in a repo with `.github/linear-routing.json`, check it before asking the user or leaving `projectId`/`labelIds` unset. It maps changed-file globs to a Linear Project and/or Labels — the same config an automated ticket-creation script in that repo consults, so a hand-filed ticket ends up routed the same way an automated one would be. Match its `labels` values against the workspace's existing "Product Area" label taxonomy (already loaded via `list_issue_labels`) rather than inventing new label text, and only set a `project` when the config says to — it's deliberately sparse (durable app boundaries only, not every feature area) to avoid stale project references.
+
 ## Common mistakes
 
 - Querying `milestones` instead of `projectMilestones` on `Project`

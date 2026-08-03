@@ -113,7 +113,8 @@ get_usage_7d_gradient_color() {
     get_usage_unified_gradient_color "$1"
 }
 
-# Expected % of window "used" if usage tracked the clock exactly:
+# Expected % of window "used" if usage tracked the clock exactly (5H only - see
+# get_weekday_expected_pct for 7D, which fronts-loads the ramp within the same window):
 # elapsed = window_seconds - remaining_seconds_to_reset, clamped to [0, window_seconds]
 get_expected_pct() {
     local reset_epoch="$1" window_seconds="$2"
@@ -124,6 +125,27 @@ get_expected_pct() {
     [[ $remaining -gt $window_seconds ]] && remaining=$window_seconds
     local elapsed=$((window_seconds - remaining))
     echo $(( elapsed * 100 / window_seconds ))
+}
+
+# Expected % for the 7D bar: the weekly quota is a hard reset at resets_at (like 5H,
+# just a 7-day cadence) - not a continuously-decaying rolling lookback. So real elapsed
+# time since the last reset is well-defined; we just spread the ramp to 100% over the
+# first workweek_seconds of that cycle (5 days) instead of the full 7, then hold flat -
+# no budget reserved for the last 2 days before the next reset. Self-adjusts to whatever
+# weekday/time your account's reset actually lands on; no calendar-day assumptions.
+get_weekday_expected_pct() {
+    local reset_epoch="$1" window_seconds="$2" workweek_seconds="$3"
+    [[ -z "$reset_epoch" || "$reset_epoch" == "null" ]] && { echo 0; return; }
+    local now_epoch=$(date +%s)
+    local remaining=$((reset_epoch - now_epoch))
+    [[ $remaining -lt 0 ]] && remaining=0
+    [[ $remaining -gt $window_seconds ]] && remaining=$window_seconds
+    local elapsed=$((window_seconds - remaining))
+    if [[ $elapsed -ge $workweek_seconds ]]; then
+        echo 100
+    else
+        echo $(( elapsed * 100 / workweek_seconds ))
+    fi
 }
 
 # Maps momentum (-cap..+cap) to a blue<->purple<->red crossover breakpoint (95..75..15):
@@ -372,9 +394,12 @@ format_reset_datetime() {
     LC_TIME=C _date_fmt "$reset_epoch" "%a %H:%M"
 }
 
-# Momentum: actual % used vs. expected % if usage tracked the clock exactly through the window
+# Momentum: actual % used vs. expected %. 5H expects the clock to track linearly through
+# the window; 7D expects the ramp to finish after workweek_seconds of the cycle instead
+# of the full 7 days (see get_weekday_expected_pct).
 FIVE_HOUR_WINDOW=18000    # 5 * 3600
 SEVEN_DAY_WINDOW=604800   # 7 * 86400
+WORKWEEK_SECONDS=432000   # 5 * 86400 - budget is expected to be fully spent by here
 MOMENTUM_CAP=40           # momentum magnitude (pts) at which bar color fully saturates blue/red
 MOMENTUM_BLINK_THRESHOLD=25
 
@@ -400,7 +425,7 @@ if [[ -n "$FIVE_HOUR_PCT" ]]; then
     SEVEN_DAY=$(printf "%.0f" "${SEVEN_DAY_PCT:-0}")
 
     FIVE_EXPECTED=$(get_expected_pct "$FIVE_HOUR_RESET" "$FIVE_HOUR_WINDOW")
-    SEVEN_EXPECTED=$(get_expected_pct "$SEVEN_DAY_RESET" "$SEVEN_DAY_WINDOW")
+    SEVEN_EXPECTED=$(get_weekday_expected_pct "$SEVEN_DAY_RESET" "$SEVEN_DAY_WINDOW" "$WORKWEEK_SECONDS")
     FIVE_MOMENTUM=$((FIVE_HOUR - FIVE_EXPECTED))
     SEVEN_MOMENTUM=$((SEVEN_DAY - SEVEN_EXPECTED))
 

@@ -13,6 +13,16 @@ This skill is the closing checklist. Five steps, in order: sweep the conversatio
 
 The single worst outcome this skill can produce is a **false all-clear**: a banner that says "nothing orphaned" while a background job is still running, a finding is unfiled, or a temp credential script is sitting in a repo. The user will read that banner and close the thread. Every gate in step 5 exists to make that impossible — when in doubt, print the NOT CLEAN block instead.
 
+## Report shape
+
+Open the response with a start marker, before step 1's findings print — a long session's transcript makes the sweep hard to relocate later, and this is the anchor to scroll back to:
+
+```
+────────────────────────────  CLOSE-OUT SWEEP  ────────────────────────────
+```
+
+Everything from step 1 through step 4 — every path, PID, SHA, ticket id, exactly as those steps produce it — is printed below that marker, in order. The step 5 banner (success or NOT CLEAN) is the **last** thing in the response, after all of it. Neither banner repeats the detail beneath the marker; both point back at it. This gives the response three fixed landmarks regardless of outcome: the start marker, the full detail, and the verdict at the very bottom.
+
 ## When NOT to use
 
 - The user wants in-progress *code* tidied, committed, and a NEXT-STEPS file written across repos under `~/Dropbox/code` — that's [[wrapup-repos]]. This skill closes out a *conversation*; it does not finish anyone's half-written feature.
@@ -132,7 +142,7 @@ Be explicit that these block a truly clean close. Say it plainly: *"The followin
 
 **What "outstanding" means:** unfiled, unswept, or unstopped *in this session*. A ticket you filed is closed out — future work tracked in Linear is not an orphan, or the banner could never print. But an unmade decision, an unauthorized prod change, or a PR awaiting approval (step 4) **does** block the banner: those are open loops with no owner but the user.
 
-If all five hold:
+If all five hold, print the full findings from steps 1–4 first, in order, below the start marker — then close with this banner **last**, after all of it, not instead of it:
 
 ```
 ╔══════════════════════════════════════════════════════════════════╗
@@ -140,6 +150,8 @@ If all five hold:
 ║        ███  SESSION WRAPPED — NOTHING ORPHANED  ███              ║
 ║                                                                  ║
 ╚══════════════════════════════════════════════════════════════════╝
+
+  Scroll up to the CLOSE-OUT SWEEP marker for the full rundown. Recap:
 
   Tickets filed/updated : CON-1234 (new), CON-1200 (commented)
   PRs                   : #1118 merged, #1121 open (approved)
@@ -149,7 +161,7 @@ If all five hold:
   Temp files            : none left in any repo
 ```
 
-If **anything** fails the gate, print this instead — different frame character on purpose, so the two can never be confused at a glance:
+If **anything** fails the gate, report the full findings from steps 1–4 first, in the body of the response, in order, below the start marker — every path, PID, SHA, and ticket id, exactly as those steps produced them. The box goes **last, after that detail, not instead of it** — it's a closing marker, not a substitute summary:
 
 ```
 ████████████████████████████████████████████████████████████████
@@ -158,13 +170,13 @@ If **anything** fails the gate, print this instead — different frame character
 █                                                              █
 ████████████████████████████████████████████████████████████████
 
-  OUTSTANDING:
-  1. <exactly what remains, and what would clear it>
-  2. ...
+  Scroll up to the CLOSE-OUT SWEEP marker for the full evidence. Before this thread can close, decide:
 
-  NEEDS YOU:
-  - <step 4 items>
+  1. <one line: the decision itself, not the evidence behind it>
+  2. ...
 ```
+
+Merge step 1's unresolved items and step 4's "needs you" list into that single numbered list — one line per decision, deduplicated, with no repeated paths, SHAs, or ticket bodies (those already appeared above). Each line must be phrased as something the user can actually decide or do right now ("stop process 41213 or confirm it should keep running", "approve PR #1121 or send it back", "pick A or B for the retention question") — if a finding can't be compressed to that, it isn't ready for the box; go resolve it further or rephrase it as a decision.
 
 Never soften a partial result into the success banner, never print both, and never print the success banner "except for one small thing." One small thing is a NOT CLEAN.
 
@@ -183,6 +195,8 @@ Never soften a partial result into the success banner, never print both, and nev
 - **Gating the banner on a parked worktree the session never touched.** That's someone's deliberately-parked work, not this session's debris — sweep it wide, report it, but gate narrow. A NOT CLEAN that can never clear is as useless as a false all-clear.
 - **Auto-posting to `#pr-review` during the sweep.** Report the gap; the posting flow is gated on confirmation ([[pr-review-gaps]]).
 - **Creating a duplicate Linear ticket because the search was title-only.** Read descriptions; comment on the existing issue when it overlaps.
+- **Re-pasting evidence into the closing box (either outcome).** The box is a marker at the bottom pointing back at the detail above, not a second copy of it — condense to one line per item.
+- **Skipping the start marker, or burying it after some findings already printed.** It only works as a scroll-back anchor if it's the very first thing in the report, before step 1's output.
 
 ## Why this exists
 
