@@ -144,7 +144,8 @@ None of this blocks the close on its own anymore — it gets written to `IN_PROG
 3. Keep anything still open that this session didn't touch — a previous session's unresolved item is not yours to drop just because you didn't get to it.
 4. Append this session's new items.
 5. Get today's actual date from the system clock (e.g. `date +%F`) — never reuse the file's previous date and never guess or infer it from conversation context. Set the `_Last updated:_` line to that date on every write, even if nothing else changed.
-6. Write the merged result back.
+6. Get this session's id from the `$CLAUDE_CODE_SESSION_ID` env var (e.g. `echo $CLAUDE_CODE_SESSION_ID`) and append a line to `## Close-out sessions` — date + session id. Append, never overwrite: this list is the full history of every session that has reconciled this file, and it's how a future session finds the `claude --resume <id>` (or Superset agent) that did the work described above.
+7. Write the merged result back.
 
 Suggested shape:
 
@@ -165,6 +166,10 @@ _Last updated: 2026-08-03 (close-out)_
 
 ## Deferred
 - [ ] Revisit the shared write-path guard once TICKET-1200 lands
+
+## Close-out sessions
+- 2026-08-01 — 3f9a1c2e-...
+- 2026-08-03 — 939449f5-...
 ```
 
 In the chat, do **not** reprint this list — point at it: *"N items written to `IN_PROGRESS.md` — see the file for details."* Restating the full text in the transcript defeats the purpose; the file is the durable copy, the chat is not.
