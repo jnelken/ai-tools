@@ -139,11 +139,12 @@ Collect what this skill **cannot** close out itself:
 None of this blocks the close on its own anymore — it gets written to `IN_PROGRESS.md` instead, at the root of whichever repo it's about (usually just the current repo; if step 2's worktree sweep touched others with their own open items, each gets its own file). Writing it down is what makes closing safe: nothing is lost, because a future session — or you, next week — opens the repo and finds exactly where things stood.
 
 **This is a running document, not a snapshot — reconcile, don't overwrite.** Before writing:
-1. Read the existing `IN_PROGRESS.md` if one is present.
+1. Read the existing `IN_PROGRESS.md` if one is present, and note its `_Last updated:_` date — that becomes the "previous entry" date in the resolved-since line.
 2. Check off or remove anything it lists that got resolved this session (say so in the chat pointer — "resolved 2 items from a prior IN_PROGRESS.md").
 3. Keep anything still open that this session didn't touch — a previous session's unresolved item is not yours to drop just because you didn't get to it.
 4. Append this session's new items.
-5. Write the merged result back.
+5. Get today's actual date from the system clock (e.g. `date +%F`) — never reuse the file's previous date and never guess or infer it from conversation context. Set the `_Last updated:_` line to that date on every write, even if nothing else changed.
+6. Write the merged result back.
 
 Suggested shape:
 
