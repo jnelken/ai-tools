@@ -1,6 +1,6 @@
 ---
 name: close-out
-description: Use at the end of a long working session to confirm nothing was left orphaned before closing the thread — sweeps the conversation for unanswered questions, unfiled findings, retracted claims and "I'll do that later" promises, sweeps the machine for stray background processes, temp scripts, uncommitted/unpushed worktrees, un-announced PRs and stale sswt workspaces, files every real follow-up into Linear assigned to the user, then prints a large ASCII confirmation banner only if genuinely everything is clean. Trigger phrases include "wrap up this session", "can I close this thread", "close out", "close this out", "file the follow-ups", "am I safe to close this", "session wrap-up", "anything left hanging", "did we leave anything unfinished", "safe to end the session".
+description: Use at the end of a long working session to confirm nothing was left orphaned before closing the thread — sweeps the conversation for unanswered questions, unfiled findings, retracted claims and "I'll do that later" promises, sweeps the machine for stray background processes, temp scripts, uncommitted/unpushed worktrees, un-announced PRs and stale sswt workspaces, files every real follow-up into Linear assigned to the user, writes anything only a human can decide into a running IN_PROGRESS.md so a future session can pick it up, then prints a large ASCII confirmation banner once the machine is genuinely clean (open decisions no longer block the close — they just have to be durably captured first). Trigger phrases include "wrap up this session", "can I close this thread", "close out", "close this out", "file the follow-ups", "am I safe to close this", "session wrap-up", "anything left hanging", "did we leave anything unfinished", "safe to end the session".
 ---
 
 # Close Out
@@ -9,9 +9,14 @@ description: Use at the end of a long working session to confirm nothing was lef
 
 A long session accumulates debris: a question you asked that never got answered, a bug you found in passing and never filed, a `nohup`'d job still burning CPU, a `tmp-*.ts` prod-DB script sitting untracked in a repo, a PR that never made it to `#pr-review`. None of that is visible from the last few messages — it's spread across hours of transcript and across the filesystem.
 
-This skill is the closing checklist. Five steps, in order: sweep the conversation (1), sweep the machine (2), file follow-ups into Linear (3), report what only the human can close (4), and — **only if 1–4 came back genuinely clean** — print a confirmation banner (5).
+This skill is the closing checklist. Five steps, in order: sweep the conversation (1), sweep the machine (2), file follow-ups into Linear (3), write what only the human can decide into a running `IN_PROGRESS.md` (4), and — **only once everything is either resolved or durably captured** — print a confirmation banner (5).
 
-The single worst outcome this skill can produce is a **false all-clear**: a banner that says "nothing orphaned" while a background job is still running, a finding is unfiled, or a temp credential script is sitting in a repo. The user will read that banner and close the thread. Every gate in step 5 exists to make that impossible — when in doubt, print the NOT CLEAN block instead.
+Two different outcomes call for two different responses, and conflating them is the bug this redesign fixes:
+
+- **Things this session left behind that it could still fix itself** — a background job it started, a temp script with a live secret, unpushed work in a worktree it touched. These are **dangerous, not just undecided**, and the skill must not paper over them. They still hard-block the banner.
+- **Things only the user can decide** — an unanswered question, a PR awaiting someone else's approval, a prod change awaiting authorization. Blocking the thread on these just to keep them visible was the wrong trade: the user loses nothing by closing as long as the decision is written somewhere durable. `IN_PROGRESS.md` is that durable place — a future session (or the user, next week) reads it and picks up exactly where this one left off.
+
+The single worst outcome this skill can produce is a **false all-clear**: a banner that says "nothing orphaned" while a background job is still running, a finding is unfiled, a temp credential script is sitting in a repo, or a decision exists only in this transcript and nowhere else. Every gate in step 5 exists to make that impossible — when in doubt, print the NOT CLEAN block instead.
 
 ## Report shape
 
@@ -21,11 +26,11 @@ Open the response with a start marker, before step 1's findings print — a long
 ────────────────────────────  CLOSE-OUT SWEEP  ────────────────────────────
 ```
 
-Everything from step 1 through step 4 — every path, PID, SHA, ticket id, exactly as those steps produce it — is printed below that marker, in order. The step 5 banner (success or NOT CLEAN) is the **last** thing in the response, after all of it. Neither banner repeats the detail beneath the marker; both point back at it. This gives the response three fixed landmarks regardless of outcome: the start marker, the full detail, and the verdict at the very bottom.
+Everything from step 1 through step 3 — every path, PID, SHA, ticket id, exactly as those steps produce it — is printed below that marker, in order. **Step 4's output does not get reprinted in the chat.** Its content lives in `IN_PROGRESS.md`; the transcript gets only a one-line pointer (file path + item count) — see step 4. Restating the full list of open questions in the response is exactly the failure mode this redesign removes: it's ephemeral the moment the thread closes, while the file persists. The step 5 banner (success or NOT CLEAN) is the **last** thing in the response, after all of it. It points back at both the detail above the marker and at `IN_PROGRESS.md`, it doesn't repeat either. This gives the response three fixed landmarks regardless of outcome: the start marker, the full detail, and the verdict at the very bottom.
 
 ## When NOT to use
 
-- The user wants in-progress *code* tidied, committed, and a NEXT-STEPS file written across repos under `~/Dropbox/code` — that's [[wrapup-repos]]. This skill closes out a *conversation*; it does not finish anyone's half-written feature.
+- The user wants in-progress *code* tidied, committed, and a NEXT-STEPS file written across repos under `~/Dropbox/code` — that's [[wrapup-repos]]. This skill closes out a *conversation*; it does not finish anyone's half-written feature. (If both skills have run against the same repo, you may find both `NEXT-STEPS.md` and `IN_PROGRESS.md` at its root — `NEXT-STEPS.md` is one wrapup-repos run's snapshot of what it did and the decisions it skipped; `IN_PROGRESS.md` is close-out's running log of open questions across sessions. Don't merge them into one file without the user asking — they're owned by different skills with different update semantics.)
 - The user only wants to know which PRs haven't been announced in `#pr-review` — that's [[pr-review-gaps]], much cheaper.
 - The user only wants stray dev servers killed — that's [[reap-dev-servers]].
 - The session was short and single-purpose (one file edited, one question answered). Say so and skip; a five-step sweep on a ten-message session is noise.
@@ -36,13 +41,15 @@ Everything from step 1 through step 4 — every path, PID, SHA, ticket id, exact
 
 Re-read the **whole** session, start to finish — not the last few exchanges. Build a list, one row per item:
 
-| Category | What to look for |
-|---|---|
-| **Pending decision** | A question you asked the user that never got a direct answer. Scrolling past it is not an answer. |
-| **Unfiled finding** | A bug, perf problem, security smell, or observability gap you discovered and only ever mentioned in chat. |
-| **Retracted claim** | Anything you asserted in a *durable artifact* (Linear comment, PR body, ticket description, commit message, doc) that you later corrected or walked back. |
-| **Blocked work** | Something you started and stopped. Record *what* it's blocked on, by name. |
-| **Deferred promise** | Any "I'll do that after…", "worth doing later", "next step is…" you wrote and never came back to. |
+| Category | What to look for | Where it ends up |
+|---|---|---|
+| **Pending decision** | A question you asked the user that never got a direct answer. Scrolling past it is not an answer. | `IN_PROGRESS.md` (step 4) |
+| **Unfiled finding** | A bug, perf problem, security smell, or observability gap you discovered and only ever mentioned in chat. | Linear (step 3) |
+| **Retracted claim** | Anything you asserted in a *durable artifact* (Linear comment, PR body, ticket description, commit message, doc) that you later corrected or walked back. | Fixed in place — verified, not filed |
+| **Blocked work** | Something you started and stopped. Record *what* it's blocked on, by name. | `IN_PROGRESS.md` (step 4) |
+| **Deferred promise** | Any "I'll do that after…", "worth doing later", "next step is…" you wrote and never came back to. | `IN_PROGRESS.md` (step 4) |
+
+A **pending decision**, **blocked work**, or **deferred promise** is not an item you keep holding until step 5 — hand it straight to step 4's `IN_PROGRESS.md` write. An **unfiled finding** is concrete, actionable work with no decision attached; it goes to Linear, same as before. The distinction is "does closing this out require someone's judgment?" — if yes, `IN_PROGRESS.md`; if no, file it and move on.
 
 **Retracted claims get verified, not remembered.** If you corrected yourself mid-session, the correction is only real if it landed in the artifact. Go read the artifact — `gh pr view <n> --json body`, `mcp__claude_ai_Linear__get_issue`, `mcp__claude_ai_Linear__list_comments` — and confirm the wrong claim is actually gone or annotated. A correction that exists only in chat is an **outstanding item**: the durable record still says the wrong thing, and whoever reads it next has no idea.
 
@@ -119,49 +126,83 @@ Rules for what you file:
 
 Create/update via `mcp__claude_ai_Linear__save_issue`. Record every identifier and URL you touched — step 5 reports them.
 
-### 4. Report what still needs the human
+### 4. Write what still needs the human to IN_PROGRESS.md
 
-A short, clearly separated list of what this skill **cannot** close out:
+Collect what this skill **cannot** close out itself:
 
 - **Decisions only the user can make** — the unanswered questions from step 1, restated as decisions with the options.
 - **Prod changes awaiting authorisation** — anything you deliberately did not run.
 - **PRs awaiting approval** — open, reviewed or not, waiting on a human.
 - **Destructive cleanups you proposed but did not perform** — workspace deletions, temp-file removals, state-file edits.
+- **Blocked work and deferred promises from step 1's table.**
 
-Be explicit that these block a truly clean close. Say it plainly: *"The following need you before this thread is genuinely closed."*
+None of this blocks the close on its own anymore — it gets written to `IN_PROGRESS.md` instead, at the root of whichever repo it's about (usually just the current repo; if step 2's worktree sweep touched others with their own open items, each gets its own file). Writing it down is what makes closing safe: nothing is lost, because a future session — or you, next week — opens the repo and finds exactly where things stood.
+
+**This is a running document, not a snapshot — reconcile, don't overwrite.** Before writing:
+1. Read the existing `IN_PROGRESS.md` if one is present.
+2. Check off or remove anything it lists that got resolved this session (say so in the chat pointer — "resolved 2 items from a prior IN_PROGRESS.md").
+3. Keep anything still open that this session didn't touch — a previous session's unresolved item is not yours to drop just because you didn't get to it.
+4. Append this session's new items.
+5. Write the merged result back.
+
+Suggested shape:
+
+```markdown
+# In Progress
+
+_Last updated: 2026-08-03 (close-out)_
+
+## Decisions needed
+- [ ] Retention: keep 30-day default or match the customer's ask of 90? (asked 2026-08-01, still open)
+
+## Blocked
+- [ ] Airtable resync script — blocked on webhook creds rotation, see #1142
+
+## Awaiting external action
+- [ ] PR #1121 awaiting review approval — https://github.com/...
+- [ ] Prod migration for CON-3288 awaiting authorisation to run
+
+## Deferred
+- [ ] Revisit the shared ExtractedValue write path once CON-3389 lands
+```
+
+In the chat, do **not** reprint this list — point at it: *"N items written to `IN_PROGRESS.md` — see the file for details."* Restating the full text in the transcript defeats the purpose; the file is the durable copy, the chat is not.
 
 ### 5. The confirmation banner
 
-**The gate.** Print the success banner only if **every one** of these is true:
+**The gate is now about danger and mechanics, not decisions.** Print the success banner only if **every one** of these is true:
 
-1. Step 1 produced no unresolved item — every finding is either filed in Linear or explicitly dismissed by the user this session.
+1. Every item from step 1 is accounted for: filed in Linear, fixed in place (retracted claims), or written into `IN_PROGRESS.md`. None exists **only** in this transcript.
 2. Every retracted claim's correction was **verified in the durable artifact**, not just in chat.
-3. Step 2 found nothing **this session** left behind: no background process it started and should have stopped, no temp script it wrote into a repo, no uncommitted or unpushed work in a worktree it touched, no PR it opened that's missing its review/announcement, no state entry it made stale. Pre-existing debris the session never touched is reported, not gated on.
+3. Step 2 found nothing **this session** left behind that it could have resolved itself: no background process it started and should have stopped, no temp script it wrote into a repo, no uncommitted or unpushed work in a worktree it touched, no PR it opened that's missing its review/announcement, no state entry it made stale. Pre-existing debris the session never touched is reported, not gated on.
 4. Every follow-up from step 3 is actually filed or commented — you have the identifiers.
-5. Step 4's list is **empty**.
+5. Step 4's items are all **written into `IN_PROGRESS.md` and the file is saved** — not just described in chat. The list no longer has to be *empty* to pass; it has to be *durable*.
 
-**What "outstanding" means:** unfiled, unswept, or unstopped *in this session*. A ticket you filed is closed out — future work tracked in Linear is not an orphan, or the banner could never print. But an unmade decision, an unauthorized prod change, or a PR awaiting approval (step 4) **does** block the banner: those are open loops with no owner but the user.
+**What still hard-blocks:** condition 3 — things this session itself caused and left in a state that costs money, leaks a secret, or would strand work if the thread closes right now. Those are fixable *tonight*, by you, and closing without fixing them is the false all-clear this skill exists to prevent.
 
-If all five hold, print the full findings from steps 1–4 first, in order, below the start marker — then close with this banner **last**, after all of it, not instead of it:
+**What no longer blocks:** an unmade decision, an unauthorized prod change, a PR awaiting someone else's approval — anything that was never yours to resolve. Those move from "block the thread" to "write it down" once step 4 runs. A ticket filed in Linear was already treated this way (future work tracked there isn't an orphan); `IN_PROGRESS.md` extends the same logic to the human-judgment items that don't fit a ticket.
+
+If all five hold, print the full findings from steps 1–3 first, in order, below the start marker, then a one-line pointer to `IN_PROGRESS.md` (path + item count) — then close with this banner **last**, after all of it, not instead of it:
 
 ```
 ╔══════════════════════════════════════════════════════════════════╗
 ║                                                                  ║
-║        ███  SESSION WRAPPED — NOTHING ORPHANED  ███              ║
+║        ███  SESSION WRAPPED — SAFE TO CLOSE  ███                 ║
 ║                                                                  ║
 ╚══════════════════════════════════════════════════════════════════╝
 
   Scroll up to the CLOSE-OUT SWEEP marker for the full rundown. Recap:
 
   Tickets filed/updated : CON-1234 (new), CON-1200 (commented)
-  PRs                   : #1118 merged, #1121 open (approved)
+  PRs                   : #1118 merged, #1121 open (awaiting approval — see below)
   Worktrees             : 4 checked, all clean and pushed
   Background tasks      : 2 stopped, 0 running
   Memory                : 1 learning written (project_foo_gotcha.md)
   Temp files            : none left in any repo
+  Open items            : 3 written to IN_PROGRESS.md (api/IN_PROGRESS.md) — nothing lost on close
 ```
 
-If **anything** fails the gate, report the full findings from steps 1–4 first, in the body of the response, in order, below the start marker — every path, PID, SHA, and ticket id, exactly as those steps produced them. The box goes **last, after that detail, not instead of it** — it's a closing marker, not a substitute summary:
+If **anything** in condition 3 (or 2 or 4) fails, report the full findings from steps 1–3 first, in the body of the response, in order, below the start marker — every path, PID, SHA, and ticket id, exactly as those steps produced them. The box goes **last, after that detail, not instead of it** — it's a closing marker, not a substitute summary:
 
 ```
 ████████████████████████████████████████████████████████████████
@@ -170,19 +211,23 @@ If **anything** fails the gate, report the full findings from steps 1–4 first,
 █                                                              █
 ████████████████████████████████████████████████████████████████
 
-  Scroll up to the CLOSE-OUT SWEEP marker for the full evidence. Before this thread can close, decide:
+  Scroll up to the CLOSE-OUT SWEEP marker for the full evidence. This session left something behind it can still fix:
 
-  1. <one line: the decision itself, not the evidence behind it>
+  1. <one line: the dangerous or mechanical thing itself, not the evidence behind it>
   2. ...
 ```
 
-Merge step 1's unresolved items and step 4's "needs you" list into that single numbered list — one line per decision, deduplicated, with no repeated paths, SHAs, or ticket bodies (those already appeared above). Each line must be phrased as something the user can actually decide or do right now ("stop process 41213 or confirm it should keep running", "approve PR #1121 or send it back", "pick A or B for the retention question") — if a finding can't be compressed to that, it isn't ready for the box; go resolve it further or rephrase it as a decision.
+This box now holds **only** condition-3-style items — things the assistant caused and can still resolve, plus any retracted claim not yet verified or step-3 follow-up not yet filed. Pending decisions and other human-only items do **not** belong in this box anymore; they belong in `IN_PROGRESS.md` regardless of whether the banner is success or NOT CLEAN. Each line must be phrased as something actionable right now ("stop process 41213 or confirm it should keep running", "delete the temp script at scripts/tmp/dump-prod.ts or move it out of the repo", "push the 3 unpushed commits in the woodrow worktree") — if a finding can't be compressed to that, it isn't ready for the box; go resolve it further.
 
-Never soften a partial result into the success banner, never print both, and never print the success banner "except for one small thing." One small thing is a NOT CLEAN.
+Never soften a partial result into the success banner, never print both, and never print the success banner "except for one small thing." One small thing left in condition 3 is a NOT CLEAN — but a long `IN_PROGRESS.md` is not "one small thing," it's the mechanism working as designed.
 
 ## Common mistakes
 
-- **Printing the banner because the sweep was tidy rather than because it was empty.** The gate is a five-item checklist with no partial credit. Walk it literally.
+- **Printing the banner because the sweep was tidy rather than because every gate condition holds.** Condition 3 (session-caused, still-dangerous debris) has no partial credit. Walk it literally.
+- **Dumping the full open-questions list into the chat instead of `IN_PROGRESS.md`.** That's the exact failure this redesign fixes — a list that only exists in the transcript is gone the moment the thread closes. Write it to the file; point at it in chat.
+- **Overwriting `IN_PROGRESS.md` wholesale.** It's a running document across sessions, not a snapshot from this one. Read it first, keep what's still open, note what got resolved, then merge in the new. Blind-overwriting silently drops another session's unresolved item.
+- **Putting a pending decision or an awaiting-approval PR into the NOT CLEAN box.** Those aren't condition-3 material anymore — they belong in `IN_PROGRESS.md` regardless of which banner prints.
+- **Treating a long `IN_PROGRESS.md` as reason to hold the banner back.** The banner's job is to confirm the machine is safe and nothing's lost, not that there's nothing left to think about. A well-populated file with real, actionable entries is success, not partial credit.
 - **Reading only the recent context in step 1.** The items most likely to be orphaned are the ones from hours ago that got buried under later work — that's precisely why they're orphaned.
 - **Trusting a mid-session correction.** You said "actually that's wrong" in chat; the Linear comment still says the wrong thing. Open the artifact and look.
 - **Filing five tickets for one deploy.** Bundle by change. Five tickets means five context reloads for the same fix.
@@ -203,3 +248,5 @@ Never soften a partial result into the success banner, never print both, and nev
 The cost of an orphaned item isn't the item — it's that nobody knows it exists. A bug found and not filed is worse than a bug never found, because the session's cost was paid and the value was thrown away on close. A background job left running burns money invisibly. A temp script with a prod connection string sitting untracked in a repo is one `git add -A` away from being a real incident.
 
 Closing a long thread is exactly when all of that gets dropped, because the interesting work is over and the remaining work is bookkeeping. This skill makes the bookkeeping mechanical and — crucially — makes "everything is fine" something that has to be *earned* against a checklist rather than *felt* at the end of a productive day.
+
+The earlier version of this skill earned that trust by blocking the close on anything unresolved, including things only the user could ever decide — which meant a pile of open questions could hold a thread open indefinitely for no reason other than that nobody had re-typed them somewhere durable. The fix isn't to lower the bar; it's to recognize that a decision written into `IN_PROGRESS.md` is exactly as safe as a ticket filed in Linear — durable, findable, not lost when the thread closes. What still has to be *resolved* before closing is narrower and sharper now: only the things this session itself broke and could still fix tonight.
