@@ -6,7 +6,7 @@
 # Line 2: 📂 full path 🌿(branch) | 💰 cost | ⏰ duration
 # Line 3: 🧠 Context bar 20 blocks % used (tokens)
 # Line 4: 🚀 Usage 5H bar 20 blocks % (Reset time)
-# Line 5: ⭐ Usage 7D bar 20 blocks % (Reset day time)
+# Line 5: ⭐ Usage 7D bar 20 blocks % (Reset day time), current 20% segment lit as it moves
 # % numbers use gradient end color + Bold
 # ============================================================================
 
@@ -100,6 +100,18 @@ get_usage_unified_gradient_color() {
     echo "$r;$g;$b"
 }
 
+# Blend an "r;g;b" gradient string toward white by pct% - used to mark the 7D bar's
+# 20% dividers (ruler ticks) as a lighter overlay without changing the underlying glyph.
+lighten_rgb() {
+    local rgb="$1" pct="$2"
+    local r="${rgb%%;*}" rest="${rgb#*;}"
+    local g="${rest%%;*}" b="${rest#*;}"
+    r=$(( r + (255 - r) * pct / 100 ))
+    g=$(( g + (255 - g) * pct / 100 ))
+    b=$(( b + (255 - b) * pct / 100 ))
+    echo "$r;$g;$b"
+}
+
 # Keep old functions for compatibility
 get_context_gradient_color() {
     get_unified_gradient_color "$1"
@@ -183,15 +195,35 @@ generate_bar() {
         # SGR-5 blink for high-risk pace; many terminals (e.g. iTerm2 default profile,
         # Windows Terminal) ignore blink and just render solid color - fine as a fallback.
         [[ $momentum -ge $MOMENTUM_BLINK_THRESHOLD ]] && blink="\033[5m"
+        # 7D only: light up whichever 20% segment the current pct falls in (4 columns),
+        # tracking usage as it moves through the week - not a static grid. The window
+        # jumps to the next segment as soon as pct crosses each 20/40/60/80% boundary,
+        # so it doubles as a "how far into this fifth am I" indicator via the existing
+        # filled/unfilled split inside the lit segment.
+        local tick_every=$((width / 5))
+        local cur_seg=$((pct / (100 / 5)))
+        [[ $cur_seg -gt 4 ]] && cur_seg=4
+        local seg_start=$((cur_seg * tick_every))
+        local seg_end=$((seg_start + tick_every))
+        local seg_lighten=32
         for ((i=0; i<filled; i++)); do
             local block_pct=$((i * 100 / width))
-            bar+="${blink}\033[38;2;$(get_usage_unified_gradient_color "$block_pct" "$mom_bp")m█"
+            local color=$(get_usage_unified_gradient_color "$block_pct" "$mom_bp")
+            if [[ "$type" == "7d" && $i -ge $seg_start && $i -lt $seg_end ]]; then
+                color=$(lighten_rgb "$color" "$seg_lighten")
+            fi
+            bar+="${blink}\033[38;2;${color}m█"
         done
         # Explicitly clear blink (SGR-25) before the background - a color change alone doesn't
         # reset the blink attribute, so without this the unfilled tail would blink too.
         [[ -n "$blink" ]] && bar+="\033[25m"
         for ((i=0; i<width-filled; i++)); do
-            bar+="\033[38;2;${end_color}m░"
+            local color="$end_color"
+            local col=$((filled + i))
+            if [[ "$type" == "7d" && $col -ge $seg_start && $col -lt $seg_end ]]; then
+                color=$(lighten_rgb "$end_color" "$seg_lighten")
+            fi
+            bar+="\033[38;2;${color}m░"
         done
     else
         local end_color=$(get_context_gradient_color "$pct")

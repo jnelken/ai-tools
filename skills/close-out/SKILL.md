@@ -30,7 +30,7 @@ Everything from step 1 through step 3 — every path, PID, SHA, ticket id, exact
 
 ## When NOT to use
 
-- The user wants in-progress *code* tidied, committed, and a NEXT-STEPS file written across repos under `~/Dropbox/code` — that's [[wrapup-repos]]. This skill closes out a *conversation*; it does not finish anyone's half-written feature. (If both skills have run against the same repo, you may find both `NEXT-STEPS.md` and `IN_PROGRESS.md` at its root — `NEXT-STEPS.md` is one wrapup-repos run's snapshot of what it did and the decisions it skipped; `IN_PROGRESS.md` is close-out's running log of open questions across sessions. Don't merge them into one file without the user asking — they're owned by different skills with different update semantics.)
+- The user wants in-progress *code* tidied, committed, and a NEXT-STEPS file written across repos under `~/Dropbox/code` — that's [[wrapup-repos]]. This skill closes out a *conversation*; it does not finish anyone's half-written feature. (If both skills have run against the same repo, you may find both `NEXT-STEPS.md` at its root and `.claude/IN_PROGRESS.md` — `NEXT-STEPS.md` is one wrapup-repos run's snapshot of what it did and the decisions it skipped, and it does get committed; `IN_PROGRESS.md` is close-out's running log of open questions across sessions, and it does **not** get committed — see step 4. Don't merge them into one file without the user asking — they're owned by different skills with different update semantics.)
 - The user only wants to know which PRs haven't been announced in `#pr-review` — that's [[pr-review-gaps]], much cheaper.
 - The user only wants stray dev servers killed — that's [[reap-dev-servers]].
 - The session was short and single-purpose (one file edited, one question answered). Say so and skip; a five-step sweep on a ten-message session is noise.
@@ -136,16 +136,18 @@ Collect what this skill **cannot** close out itself:
 - **Destructive cleanups you proposed but did not perform** — workspace deletions, temp-file removals, state-file edits.
 - **Blocked work and deferred promises from step 1's table.**
 
-None of this blocks the close on its own anymore — it gets written to `IN_PROGRESS.md` instead, at the root of whichever repo it's about (usually just the current repo; if step 2's worktree sweep touched others with their own open items, each gets its own file). Writing it down is what makes closing safe: nothing is lost, because a future session — or you, next week — opens the repo and finds exactly where things stood.
+None of this blocks the close on its own anymore — it gets written to `.claude/IN_PROGRESS.md` instead, inside whichever repo it's about (usually just the current repo; if step 2's worktree sweep touched others with their own open items, each gets its own file, still under that repo's `.claude/`). Writing it down is what makes closing safe: nothing is lost, because a future session — or you, next week — opens the repo and finds exactly where things stood.
+
+**This file must never be committed.** It's local session-continuity state, not project documentation — a future *session*, not a teammate reading the repo, is the audience. Before writing it for the first time in a given repo, check whether `.gitignore` already excludes it (a broad `.claude/` or `.claude/*` entry covers it); if not, add a `.claude/IN_PROGRESS.md` line to `.gitignore` yourself. Never `git add` or commit the file itself, in any repo — same rule as the temp/scratch scripts in step 2b.
 
 **This is a running document, not a snapshot — reconcile, don't overwrite.** Before writing:
-1. Read the existing `IN_PROGRESS.md` if one is present, and note its `_Last updated:_` date — that becomes the "previous entry" date in the resolved-since line.
+1. Read the existing `.claude/IN_PROGRESS.md` if one is present, and note its `_Last updated:_` date — that becomes the "previous entry" date in the resolved-since line.
 2. Check off or remove anything it lists that got resolved this session (say so in the chat pointer — "resolved 2 items from a prior IN_PROGRESS.md").
 3. Keep anything still open that this session didn't touch — a previous session's unresolved item is not yours to drop just because you didn't get to it.
 4. Append this session's new items.
 5. Get today's actual date from the system clock (e.g. `date +%F`) — never reuse the file's previous date and never guess or infer it from conversation context. Set the `_Last updated:_` line to that date on every write, even if nothing else changed.
 6. Get this session's id from the `$CLAUDE_CODE_SESSION_ID` env var (e.g. `echo $CLAUDE_CODE_SESSION_ID`) and append a line to `## Close-out sessions` — date + session id. Append, never overwrite: this list is the full history of every session that has reconciled this file, and it's how a future session finds the `claude --resume <id>` (or Superset agent) that did the work described above.
-7. Write the merged result back.
+7. Create the `.claude/` directory first if it doesn't exist yet, then write the merged result to `.claude/IN_PROGRESS.md`.
 
 Suggested shape:
 
@@ -172,7 +174,7 @@ _Last updated: 2026-08-03 (close-out)_
 - 2026-08-03 — 939449f5-...
 ```
 
-In the chat, do **not** reprint this list — point at it: *"N items written to `IN_PROGRESS.md` — see the file for details."* Restating the full text in the transcript defeats the purpose; the file is the durable copy, the chat is not.
+In the chat, do **not** reprint this list — point at it: *"N items written to `.claude/IN_PROGRESS.md` — see the file for details."* Restating the full text in the transcript defeats the purpose; the file is the durable copy, the chat is not.
 
 ### 5. The confirmation banner
 
@@ -205,7 +207,7 @@ If all five hold, print the full findings from steps 1–3 first, in order, belo
   Background tasks      : 2 stopped, 0 running
   Memory                : 1 learning written (project_foo_gotcha.md)
   Temp files            : none left in any repo
-  Open items            : 3 written to IN_PROGRESS.md (api/IN_PROGRESS.md) — nothing lost on close
+  Open items            : 3 written to IN_PROGRESS.md (api/.claude/IN_PROGRESS.md, not committed) — nothing lost on close
 ```
 
 If **anything** in condition 3 (or 2 or 4) fails, report the full findings from steps 1–3 first, in the body of the response, in order, below the start marker — every path, PID, SHA, and ticket id, exactly as those steps produced them. The box goes **last, after that detail, not instead of it** — it's a closing marker, not a substitute summary:
@@ -232,6 +234,7 @@ Never soften a partial result into the success banner, never print both, and nev
 - **Printing the banner because the sweep was tidy rather than because every gate condition holds.** Condition 3 (session-caused, still-dangerous debris) has no partial credit. Walk it literally.
 - **Dumping the full open-questions list into the chat instead of `IN_PROGRESS.md`.** That's the exact failure this redesign fixes — a list that only exists in the transcript is gone the moment the thread closes. Write it to the file; point at it in chat.
 - **Overwriting `IN_PROGRESS.md` wholesale.** It's a running document across sessions, not a snapshot from this one. Read it first, keep what's still open, note what got resolved, then merge in the new. Blind-overwriting silently drops another session's unresolved item.
+- **Committing `.claude/IN_PROGRESS.md`, or writing it to the repo root instead of `.claude/`.** It's local session-continuity state, not a project artifact — never `git add` it, and make sure `.gitignore` actually excludes it before or right after the first write in a given repo.
 - **Putting a pending decision or an awaiting-approval PR into the NOT CLEAN box.** Those aren't condition-3 material anymore — they belong in `IN_PROGRESS.md` regardless of which banner prints.
 - **Treating a long `IN_PROGRESS.md` as reason to hold the banner back.** The banner's job is to confirm the machine is safe and nothing's lost, not that there's nothing left to think about. A well-populated file with real, actionable entries is success, not partial credit.
 - **Reading only the recent context in step 1.** The items most likely to be orphaned are the ones from hours ago that got buried under later work — that's precisely why they're orphaned.
