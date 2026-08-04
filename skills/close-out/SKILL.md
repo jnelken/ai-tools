@@ -156,14 +156,14 @@ _Last updated: 2026-08-03 (close-out)_
 - [ ] Retention: keep 30-day default or match the customer's ask of 90? (asked 2026-08-01, still open)
 
 ## Blocked
-- [ ] Airtable resync script — blocked on webhook creds rotation, see #1142
+- [ ] Sync script — blocked on a third-party credential rotation, see #1142
 
 ## Awaiting external action
 - [ ] PR #1121 awaiting review approval — https://github.com/...
-- [ ] Prod migration for CON-3288 awaiting authorisation to run
+- [ ] Prod migration for TICKET-1234 awaiting authorisation to run
 
 ## Deferred
-- [ ] Revisit the shared ExtractedValue write path once CON-3389 lands
+- [ ] Revisit the shared write-path guard once TICKET-1200 lands
 ```
 
 In the chat, do **not** reprint this list — point at it: *"N items written to `IN_PROGRESS.md` — see the file for details."* Restating the full text in the transcript defeats the purpose; the file is the durable copy, the chat is not.
