@@ -162,6 +162,14 @@ Add to `~/.claude/settings.json` (alongside any existing `SessionStart` entries 
 - Cross-device pickup rides on whatever syncs the worktree itself (e.g. Dropbox for repos under `~/Dropbox/code`). Root checkouts (`~/code/woodrow`, `~/code/api`) and sswt workspaces won't sync a doc to another device on their own.
 - The narrative body is only as good as the assistant keeping it updated — nothing mechanically enforces that beyond the frontmatter timestamps.
 
+### Relationship to NEXT-STEPS.md and IN_PROGRESS.md
+
+Three different repo-root files can legitimately coexist under `~/Dropbox/code`, each owned by a different mechanism with different update semantics — don't merge them:
+
+- **`.claude-sessions/<id>.md`** (this hook family) — live, per-session, ephemeral. Gone the moment a session exits cleanly; only lingers past that if the session crashed, until the next staleness sweep.
+- **`NEXT-STEPS.md`** ([[wrapup-repos]]) — one wrap-up run's snapshot, overwritten wholesale each time it runs. `wrapup-repos` also **reads** `.claude-sessions/*.md` as one of its signal sources: a live doc makes it skip that repo entirely (same tier as a mid-rebase repo); a crashed session's doc feeds its "understand the direction" step, since it's the only record of what that session was doing.
+- **`IN_PROGRESS.md`** ([[close-out]]) — a durable, reconciled log of open questions across many sessions, appended-to rather than overwritten.
+
 ### Disabling
 
 Remove all three entries from `settings.json`.

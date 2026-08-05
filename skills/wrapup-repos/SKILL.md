@@ -30,6 +30,11 @@ Candidate repos are the direct children of `/Users/jake/Dropbox/code`.
 - Touch ONLY the single repo you select. Never modify files outside it.
 - SKIP any repo mid-operation: if `.git/MERGE_HEAD`, `.git/rebase-merge`, `.git/rebase-apply`, or
   `.git/CHERRY_PICK_HEAD` exists, do not touch it — pick a different repo.
+- SKIP any repo with a **live** session doc: if any `.claude-sessions/*.md` at the repo root has
+  `updated_at_epoch` within the last 15 minutes, someone is actively working there right now — do
+  not touch it, pick a different repo. (These docs are written by this machine's session-doc hooks;
+  see `hooks/README.md`. A doc that's present but NOT within that window is a different case — see
+  Step 2, it's signal, not a skip.)
 - If a change isn't OBVIOUS and LOW-RISK, DON'T make it — write it up as a decision instead.
 - If there's nothing meaningful to do, say so briefly and stop. Never manufacture churn or make
   cosmetic commits just to have done something.
@@ -75,6 +80,12 @@ In the selected repo:
   comments touched by the recent diff. Also read the diff itself for architectural intent: a new
   abstraction introduced but not yet used elsewhere, a stubbed function, a half-wired
   integration — these imply a direction even when no doc states it.
+- Check `.claude-sessions/*.md` at the repo root too. Since the hard safety rule above already
+  skipped this repo if one was live, any file you find here belongs to a session that ended
+  *without* a clean exit — a crash, a `kill -9`, a closed lid — so it's the only record of what
+  that session was actually trying to do; a cleanly-closed session's doc is deleted immediately and
+  leaves nothing to find. Read its body as directional signal, same tier as `ROADMAP.md`/`PLAN.md`,
+  and note its `session_id` (from the frontmatter) if it meaningfully shaped Step 5's decisions.
 - This scan feeds Step 5's decisions section — the goal is to leave the user forward-looking
   choices, not only a list of what stalled.
 
@@ -106,7 +117,10 @@ If you made changes and there is anything sensible to commit:
 Create or overwrite `NEXT-STEPS.md` at the selected repo's root. This is the FIRST thing the user
 reads when they return — keep it tight, scannable, and decision-focused:
 
-1. **Header** — repo picked, why (dirty count / recency), timestamp, branch.
+1. **Header** — repo picked, why (dirty count / recency), timestamp, branch. If a candidate repo
+   was skipped this run for a live session doc, or a crashed session's `.claude-sessions/*.md`
+   informed this pick, say so here and cite the `session_id` (so the user can `claude --resume
+   <id>` to inspect it directly).
 2. **What I did this run** — bullets of concrete changes + commit hash(es), or "no changes".
 3. **Build/verify state** — which command ran and its result (pass/fail + key errors).
 4. **Decisions for you** — the most important section. Do not limit this to decisions that were
