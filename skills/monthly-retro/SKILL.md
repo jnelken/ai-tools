@@ -4,13 +4,14 @@ Use this skill when asked to generate a monthly retrospective for a single team 
 
 ## Source of truth
 
-- One or more local repo checkouts you commit to (e.g. a frontend + backend pair)
-- `fp retro:commits` — personal CLI command that fetches commits with line stats; adapt to whatever local equivalent you have (`git log --shortstat` works as a fallback)
+- `/Users/jake/code/woodrow` — frontend repo
+- `/Users/jake/code/api` — backend repo
+- `fp retro:commits` — commit + line-stat fetch command
 
 ## Standard run command
 
 ```bash
-fp retro:commits --repo ~/code/<repo> --author "<Your Name>" --since "YYYY-MM-01" --until "YYYY-MM-31"
+fp retro:commits --repo /Users/jake/code/woodrow --author "Jake Nelken" --since "YYYY-MM-01" --until "YYYY-MM-31"
 ```
 
 The script outputs TSV sorted by lines changed descending:
