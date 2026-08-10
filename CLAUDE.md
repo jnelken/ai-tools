@@ -1,6 +1,6 @@
-# claude-tools
+# ai-tools
 
-Personal Claude Code tooling repo for jake — skills, hooks, commands, and automations that get symlinked into `~/.claude/` via `install.sh`.
+Personal AI coding tools repo for jake — Claude Code and Cursor skills, hooks, commands, and automations. Claude pieces get symlinked into `~/.claude/` via `install.sh`.
 
 ## Agent permissions
 

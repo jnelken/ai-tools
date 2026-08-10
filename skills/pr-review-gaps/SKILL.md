@@ -36,7 +36,7 @@ a periodic/ad-hoc audit and needs a confirmation step every time.
    - `woodrow` → `Concentro-Inc/woodrow`
    - `woodrow (alt)` → `Concentro-Inc/woodrow`
    - `folio-platform` → `Concentro-Inc/folio-platform`
-   - Anything else → skip, it's not a PR-tracked repo (e.g. `internal-tools`, `claude-skills`,
+   - Anything else → skip, it's not a PR-tracked repo (e.g. `internal-tools`, `ai-tools`,
      `gh-tab-mgmt`, `CC-statusline-node`).
 
 3. **Find each workspace's open PR.** For each (repo, branch) pair:

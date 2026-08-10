@@ -1,6 +1,6 @@
-# my-claude-tools
+# ai-tools
 
-Personal Claude Code skills, slash commands, hooks, automations, and statusline I author and use across machines.
+Personal AI coding tools — Claude Code and Cursor skills, slash commands, hooks, automations, and statusline I author and use across machines.
 
 ## What's here
 
@@ -66,24 +66,24 @@ Unlike the other categories, installing this also patches `~/.claude/settings.js
 Clone, then run the installer to symlink everything into `~/.claude/`:
 
 ```bash
-git clone https://github.com/jnelken/my-claude-tools.git ~/code/others/my-claude-tools
-cd ~/code/others/my-claude-tools
+git clone https://github.com/jnelken/ai-tools.git ~/code/ai-tools
+cd ~/code/ai-tools
 ./install.sh
 ```
 
 The installer creates symlinks at:
-- `~/.claude/skills/<name>` → `~/code/others/my-claude-tools/skills/<name>` (per skill)
-- `~/.claude/commands/<name>.md` → `~/code/others/my-claude-tools/commands/<name>.md` (per slash command)
-- `~/.claude/hooks/<name>` → `~/code/others/my-claude-tools/hooks/<name>` (per hook)
-- `~/.claude/automations/<name>/<script>` → `~/code/others/my-claude-tools/automations/<name>/<script>` (per automation script; scheduling itself is separate, see [`automations/README.md`](automations/README.md))
-- `~/.claude/awesome-statusline.sh` → `~/code/others/my-claude-tools/statusline/awesome-statusline.sh`, plus `~/.claude/settings.json`'s `statusLine.command` is set to run it
+- `~/.claude/skills/<name>` → `~/code/ai-tools/skills/<name>` (per skill)
+- `~/.claude/commands/<name>.md` → `~/code/ai-tools/commands/<name>.md` (per slash command)
+- `~/.claude/hooks/<name>` → `~/code/ai-tools/hooks/<name>` (per hook)
+- `~/.claude/automations/<name>/<script>` → `~/code/ai-tools/automations/<name>/<script>` (per automation script; scheduling itself is separate, see [`automations/README.md`](automations/README.md))
+- `~/.claude/awesome-statusline.sh` → `~/code/ai-tools/statusline/awesome-statusline.sh`, plus `~/.claude/settings.json`'s `statusLine.command` is set to run it
 
 Safety: it **refuses to overwrite** existing non-symlink files/directories — manually `rm -rf` the conflicting path first if you want this repo's version.
 
 ## Update flow
 
 ```bash
-cd ~/code/others/my-claude-tools && git pull   # pull latest from any machine
+cd ~/code/ai-tools && git pull   # pull latest from any machine
 # edit anything in ~/.claude/{skills,commands,hooks,automations,awesome-statusline.sh} — symlinks mean the repo sees it
 git add -A && git commit -m "..." && git push
 ```
