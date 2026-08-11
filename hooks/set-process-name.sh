@@ -14,6 +14,17 @@ TITLE_SCRIPT="$HOME/.claude/hooks/set-process-title.cjs"
 # silently drop the rest of a multi-line command (heredocs, scripts, etc.).
 cmd=$(jq -r '.tool_input.command')
 
+# Only Node processes read NODE_OPTIONS/PROCESS_NAME, so skip the subshell
+# wrap entirely when the command has no Node-launching subcommand. Wrapping
+# unconditionally turned every Bash call into compound shell syntax
+# ("( export ...; ...\ncmd\n)"), which defeats Claude Code's permission
+# allowlist matching (it can't statically verify a subshell) and forced a
+# manual approval prompt on plain commands like `grep`/`find`/`cd` that were
+# already allowlisted on their own.
+if ! echo "$cmd" | grep -qE '\b(node|npm|npx|yarn|pnpm|tsx|ts-node|vitest|jest|nodemon|next|vite|webpack|rollup|esbuild|playwright|cypress|storybook|gulp|grunt|turbo|nx|lerna)\b'; then
+  exit 0
+fi
+
 branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null | sed 's/[^a-zA-Z0-9._-]/-/g' || echo 'main')
 
 # Single-char agent initial (first letters collide: claude/codex/copilot/cursor).
