@@ -24,33 +24,17 @@ Before anything else, collect:
 3. Get the commit log using `git log <base-branch>..HEAD --oneline` (only as a hint; never describe intermediate or reverted work).
 4. Check if a PR already exists for this branch using `gh pr view --json number,title,body 2>&1`.
 5. **If a PR already exists with a non-empty body**: skip description generation entirely — only update the title (for Linear ticket normalization). Jump to step 7.
-6. Generate the PR title and a **dead-simple body**:
+6. Generate the PR title and body:
    - **Title**: clear, concise, imperative; no "PR:" prefix; Linear ticket appended in parentheses (handled by the backfill section below).
-   - **Body** — exactly two sections, nothing else:
-
-     ```markdown
-     **TL;DR:** <one-to-three-sentence summary based on the net diff vs base>
-
-     ## Validation
-     - [ ] manual QA step
-     - [ ] manual QA step
-     ```
-
-   - Validation lists **manual QA only** — what a human clicks through in the running app/system. Never write "all tests pass," "ran lint," "typecheck succeeds," or list automated commands; CI already reports those.
-   - Do **not** add Context, What Changed, Why, Summary, Test plan, Commits, Notes, or any other section. The TL;DR plus the diff is enough.
-   - Exception: for large multi-area refactors (10+ files spanning multiple reviewer-relevant areas), you may add a `## What Changed` section with bullets grouped by area. Skip it otherwise.
+   - **Body**: follow the **PR Descriptions** format in the user's global CLAUDE.md (`~/.claude/CLAUDE.md`) exactly — that doc is the single source of truth for section shape, skimmability rules, and what to omit. Don't duplicate that guidance here; read it fresh each time in case it's changed.
    - No `🤖 Generated with` footer.
 7. Push the branch to origin if not already pushed (`git push -u origin <branch>`). **Before pushing**, if the current branch equals the base branch (e.g. you're on `main`/`master` itself), STOP and confirm with the user — running a PR workflow from the base branch is almost certainly a mistake, and pushing could ship unintended work to production.
 8. If a PR exists with a non-empty body, only update the title: `gh pr edit --title "..."`. If a PR exists with an empty body, edit title and body. Otherwise create a new PR **as a draft**. `gh` rejects `--draft` combined with `--web` (`the --draft flag is not supported with --web`), so create it headless and open the browser as a separate step: `gh pr create --draft --title "..." --body "..."` then `gh pr view --web`.
-9. Use a HEREDOC for the PR body to preserve formatting:
+9. Use a HEREDOC for the PR body to preserve formatting (body content per the global CLAUDE.md format resolved in step 6):
 
    ```bash
    gh pr create --draft --title "Imperative title (CON-1234)" --body "$(cat <<'EOF'
-   **TL;DR:** One-to-three sentence summary of what changes and why, based on the net diff vs base.
-
-   ## Validation
-   - [ ] Manual step a reviewer can perform in the app
-   - [ ] Manual step a reviewer can perform in the app
+   ...body per global CLAUDE.md PR Descriptions format...
    EOF
    )"
    gh pr view --web
@@ -99,11 +83,11 @@ Extract `identifier` (e.g. `CON-42`) and `url` from the response. If creation fa
 Format the final PR title as: `PR title (IDENTIFIER)` and print:
 > `Created Linear issue IDENTIFIER: <url>`
 
-Prepend `Linear issue: <url>` to the PR body **above the TL;DR** (replacing any existing `Linear issue:` line).
+Prepend `Linear issue: <url>` to the very top of the PR body (replacing any existing `Linear issue:` line).
 
 ## Important
 
-- Body shape is non-negotiable: TL;DR + Validation only (plus the optional What Changed for big multi-area refactors). No other sections.
+- Body shape comes from the user's global CLAUDE.md — do not hardcode or duplicate a format here.
 - DO NOT use EnterPlanMode or ExitPlanMode tools.
 - DO NOT ask for user approval on the PR itself — just analyze and create.
 - The Linear ticket check is the one exception — only ask if a ticket is already found (use it or create new); auto-create without asking if none is found.
