@@ -68,7 +68,7 @@ See the script header for the full logic (handles `--all`, `--mirror`, explicit 
 
 ## enforce-claude-symlinks.sh
 
-A **pre-commit hook** (runs via `git hook-path` / `.git/hooks/pre-commit`) that enforces the symlink policy: all version-controlled files in `~/.claude/` must either be symlinks pointing to `ai-tools/`, or be on a sensitive-data allowlist.
+A **pre-commit hook** (runs via `git hook-path` / `.git/hooks/pre-commit`) that enforces the symlink policy at commit time: all version-controlled files in `~/.claude/` must either be symlinks pointing to `ai-tools/`, or be on a sensitive-data allowlist.
 
 **Rationale:** `~/.claude/` should be a thin symlink layer into version-controlled content, not a source of truth. This keeps hooks, commands, and agent definitions in sync across devices while keeping sensitive local config (allowlists, tokens, session state) safely out of the repo.
 
@@ -80,6 +80,37 @@ ln -s ../../hooks/enforce-claude-symlinks.sh .git/hooks/pre-commit
 ```
 
 The hook will reject a commit from `ai-tools` if any regular files (not symlinks) exist under `~/.claude/hooks/`, `~/.claude/commands/`, or `~/.claude/agents/` **except** those on the sensitive allowlist (currently: `block-push-to-main.allowlist` and `*.json` settings files).
+
+## claude-symlink-hygiene.sh
+
+A **SessionStart hook** (runs at the top of every Claude Code session) that nudges about unsymlinked files in `~/.claude/` before they become a blocker.
+
+When it detects new regular files in `~/.claude/{hooks,commands,agents}/`, it emits a friendly message with fix instructions. Uses a 24-hour cooldown per file-set so it only nudges once a day even if you open the same repo multiple times.
+
+### settings.json wiring
+
+Already wired in by default (added during initial setup). If missing, add:
+
+```json
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"$HOME/.claude/hooks/claude-symlink-hygiene.sh\""
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+### Allowlist
+
+Files that are OK to be local (not symlinked) are listed in the `allowlist` array at the top of the script. Add entries there if you have legitimate local-only files in `~/.claude/`.
 
 ## Personal-repo gate
 
