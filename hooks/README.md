@@ -60,6 +60,27 @@ A pair that labels every agent-spawned node process for Activity Monitor — `c-
 
 Full setup, optional MCP/Codex coverage, and gotchas: [`named-node-processes.md`](named-node-processes.md).
 
+## block-push-to-main.sh
+
+Prevents accidental `git push` to `main` from Claude Code without breaking terminal-driven pushes. Wired into `.claude/settings.json` as a `PreToolUse` hook on Bash, it blocks any `git push` command that would target the main branch. Repos can be allowlisted (one per line) in `~/.claude/hooks/block-push-to-main.allowlist` to skip the check — `ai-tools` is included by default since agents may push to main there freely.
+
+See the script header for the full logic (handles `--all`, `--mirror`, explicit refspecs, and implicit main-branch pushes from the current branch).
+
+## enforce-claude-symlinks.sh
+
+A **pre-commit hook** (runs via `git hook-path` / `.git/hooks/pre-commit`) that enforces the symlink policy: all version-controlled files in `~/.claude/` must either be symlinks pointing to `ai-tools/`, or be on a sensitive-data allowlist.
+
+**Rationale:** `~/.claude/` should be a thin symlink layer into version-controlled content, not a source of truth. This keeps hooks, commands, and agent definitions in sync across devices while keeping sensitive local config (allowlists, tokens, session state) safely out of the repo.
+
+To activate:
+```bash
+cd /path/to/ai-tools
+mkdir -p .git/hooks
+ln -s ../../hooks/enforce-claude-symlinks.sh .git/hooks/pre-commit
+```
+
+The hook will reject a commit from `ai-tools` if any regular files (not symlinks) exist under `~/.claude/hooks/`, `~/.claude/commands/`, or `~/.claude/agents/` **except** those on the sensitive allowlist (currently: `block-push-to-main.allowlist` and `*.json` settings files).
+
 ## Personal-repo gate
 
 `personal-repo-hygiene-check.sh` and all three `session-doc-*.sh` hooks share the same gate: they only run inside repos whose `origin` remote is owned by an allowed GitHub owner (default `jnelken`, override with `PERSONAL_REPO_OWNERS`, comma-separated). Concentro-Inc repos (`woodrow`, `api`, and anything cloned from that org) — or any other org — are silently skipped. A repo with **no** configured `origin` remote is treated as personal (assumed local-only scratch work, not a cloned company repo).
