@@ -63,6 +63,27 @@ process owns the session) are classified **CLEAN** — the agent exited on its
 own before the crash, and typing into that tab is a deliberate choice, not
 an automatic one.
 
+### Dormant tabs (lazily-materialized workspaces)
+
+Superset materializes a workspace's ptys **lazily**: after a reboot, a
+restored tab does not exist in the daemon at all — `terminals list` omits it
+and `terminals send` returns "Not found" — until the user first views that
+workspace in the UI. The binding row in `host.db` is there the whole time,
+so these sessions are still identifiable; they just can't be typed into yet.
+
+The script reports these as **TO-BE-RESUMED**, naming the origin workspace.
+Because a dormant tab lacks the `created_at` ordering proof (the pty was
+never re-created), the substitute check is transcript mtime: the session
+must have written its `.jsonl` within the lookback window before boot time,
+i.e. it was actually alive when the machine went down. Two ways to resume
+them:
+
+1. Open the workspace in Superset (the tab materializes, `created_at`
+   updates, the ordering check starts working) and rerun the skill, or
+2. Rerun with `--create-tabs --apply` — resumes each one in a **new** tab in
+   its origin workspace via `terminals create`. The dormant tab's binding
+   row is untouched (different terminal_id), so nothing is overwritten.
+
 ### The overwrite hazard this script protects against
 
 `terminal_agent_bindings` is keyed on `terminal_id`. The moment a *new*
@@ -92,6 +113,10 @@ bash /Users/jake/code/ai-tools/skills/resume-superset-sessions/detect-and-resume
 # After reviewing the report, actually send the resume commands
 bash /Users/jake/code/ai-tools/skills/resume-superset-sessions/detect-and-resume.sh --apply
 bash /Users/jake/code/ai-tools/skills/resume-superset-sessions/detect-and-resume.sh --all --apply
+
+# Also resume dormant tabs (workspaces not viewed in Superset since reboot)
+# by opening NEW tabs in their origin workspaces
+bash /Users/jake/code/ai-tools/skills/resume-superset-sessions/detect-and-resume.sh --all --create-tabs --apply
 
 # Tune the non-Superset lookback window (default 24h before boot time)
 bash /Users/jake/code/ai-tools/skills/resume-superset-sessions/detect-and-resume.sh --window 48
@@ -123,7 +148,10 @@ anything, and never writes to `host.db`.
   `terminal_agent_bindings` row to key off of at all. The global sweep finds
   these by transcript mtime falling in the window just before boot time and
   prints a `cd <cwd> && claude --resume <id>` for a human to run — it is
-  never auto-resumed.
+  never auto-resumed. Before calling anything "non-Superset" the sweep
+  cross-references `host.db` by session id: a session whose workspace simply
+  hasn't been viewed since reboot is reported as a dormant Superset tab with
+  its origin workspace, not as a plain-terminal session.
 - **The statusline `🪪<session-id>` fallback only helps sometimes.** It's
   used for live tabs that have *no* binding row (claude launched by hand,
   not by a Superset agent) to identify what's running in them. After a full

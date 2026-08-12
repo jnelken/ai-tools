@@ -66,6 +66,10 @@
 #                                        ambiguity errors out with the matches)
 #   detect-and-resume.sh --apply         snapshot bindings, then actually send
 #   detect-and-resume.sh --all --apply   both
+#   detect-and-resume.sh --create-tabs   also resume DORMANT tabs (workspaces
+#                                        not yet viewed in Superset since
+#                                        reboot, so the original tab can't be
+#                                        typed into) by opening NEW tabs
 #   detect-and-resume.sh --window 48     global-sweep lookback in hours (def 24)
 #   detect-and-resume.sh --no-sweep      skip the non-Superset global sweep
 #
@@ -83,6 +87,7 @@ shopt -s nullglob
 WORKSPACE_MODE="current"
 WS_QUERY=""
 APPLY=0
+CREATE_TABS=0
 WINDOW_HOURS=24
 SWEEP=1
 
@@ -99,6 +104,7 @@ while [ $# -gt 0 ]; do
       WORKSPACE_MODE="one"
       ;;
     --apply) APPLY=1 ;;
+    --create-tabs) CREATE_TABS=1 ;;
     --window)
       shift
       WINDOW_HOURS="${1:-24}"
@@ -124,10 +130,14 @@ case "$WINDOW_HOURS" in
 esac
 
 STATE_DIR="$HOME/.claude/state/session-recovery"
+# kern.boottime looks like: { sec = 1786543978, usec = 69662 } Tue Aug 12 ...
+# ("usec = " contains "sec = " as a substring, hence the brace anchor).
+BOOT_EPOCH=$(sysctl -n kern.boottime 2>/dev/null | sed -n 's/.*{ sec = \([0-9]*\).*/\1/p' || true)
 CANDIDATES_FILE=$(mktemp -t resume-candidates)
+DORMANT_FILE=$(mktemp -t resume-dormant)
 OVERALL_EXIT=0
 
-cleanup() { rm -f "$CANDIDATES_FILE"; }
+cleanup() { rm -f "$CANDIDATES_FILE" "$DORMANT_FILE"; }
 trap cleanup EXIT
 
 # ---------------------------------------------------------------------------
@@ -323,6 +333,92 @@ short_id() {
 }
 
 # ---------------------------------------------------------------------------
+# Dormant tabs
+# ---------------------------------------------------------------------------
+# Superset materializes a workspace's ptys LAZILY - a restored tab does not
+# exist in the daemon (and `terminals list` omits it, `terminals send` returns
+# "Not found") until the user first views that workspace in the UI. The
+# binding row in host.db is there the whole time, though, so a crashed
+# session in a never-viewed-since-reboot workspace is still identifiable -
+# it just can't be typed into yet.
+#
+# For every binding in the workspace whose terminal is NOT in the daemon's
+# live list (and not disposed), classify:
+#   - session live      -> already resumed somewhere; leave alone
+#   - dead + transcript -> TO-BE-RESUMED: either open the workspace in
+#     Superset and rerun (the tab materializes, created_at updates, and the
+#     normal deterministic path takes over), or with --create-tabs --apply
+#     spawn a NEW tab in that workspace running the resume.
+# Appends every dormant session id to DORMANT_FILE so the global sweep
+# doesn't re-report it, and TO-BE-RESUMED rows to CANDIDATES_FILE tagged
+# "create" when --create-tabs is on.
+
+check_dormant_tabs() {
+  local ws_id="$1" ws_worktree="$2" live_ids="$3"
+  local esc rows count i row term_id session_id status live transcript short_t short_s
+
+  [ -z "$DB" ] && return
+  esc=$(sql_escape "$ws_id")
+  rows=$(sqlite_json "SELECT b.terminal_id, b.agent_session_id, COALESCE(t.status,'') AS status
+    FROM terminal_agent_bindings b LEFT JOIN terminal_sessions t ON t.id = b.terminal_id
+    WHERE b.workspace_id='${esc}' AND b.agent_session_id IS NOT NULL;")
+  [ -z "$rows" ] && return
+  count=$(printf '%s' "$rows" | jq 'length' 2>/dev/null || echo 0)
+  [ "$count" -eq 0 ] && return
+
+  i=0
+  while [ "$i" -lt "$count" ]; do
+    row=$(printf '%s' "$rows" | jq -r ".[$i] | [.terminal_id, .agent_session_id, .status] | @tsv")
+    i=$((i + 1))
+    term_id=$(printf '%s' "$row" | cut -f1)
+    session_id=$(printf '%s' "$row" | cut -f2)
+    status=$(printf '%s' "$row" | cut -f3)
+
+    # Tab is live in the daemon -> already handled by classify_tab.
+    printf '%s\n' "$live_ids" | grep -qx "$term_id" && continue
+    # Tab was closed on purpose -> its binding is history, not a candidate.
+    [ "$status" != "active" ] && continue
+
+    short_t=$(short_id "$term_id")
+    short_s=$(short_id "$session_id")
+    printf '%s\n' "$session_id" >> "$DORMANT_FILE"
+
+    live=$(check_live_session "$session_id")
+    if [ "$live" = "live" ]; then
+      echo "  tab=$short_t  session=$short_s  (dormant)  -> LIVE (session already running elsewhere; leaving alone)"
+      continue
+    fi
+    transcript=$(transcript_exists "$session_id")
+    if [ "$transcript" != "yes" ]; then
+      echo "  tab=$short_t  session=$short_s  (dormant)  -> NEEDS-MANUAL (no transcript found for this session id)"
+      continue
+    fi
+
+    # A dormant tab lacks the created_at ordering proof (the pty was never
+    # re-created), so substitute: the transcript must have been written in the
+    # window shortly before boot, i.e. the session was actually alive when the
+    # machine went down. Idle-but-alive sessions rewrite their transcript
+    # hourly, so anything alive at the crash has an mtime within ~1h of it.
+    local tf tmtime
+    tf=$(ls "$HOME"/.claude/projects/*/"${session_id}.jsonl" 2>/dev/null | head -1)
+    tmtime=$(stat -f %m "$tf" 2>/dev/null || echo 0)
+    if [ -n "$BOOT_EPOCH" ] && { [ "$tmtime" -ge "$BOOT_EPOCH" ] || [ "$tmtime" -lt $((BOOT_EPOCH - WINDOW_HOURS * 3600)) ]; }; then
+      echo "  tab=$short_t  session=$short_s  (dormant)  -> CLEAN (transcript not written in the ${WINDOW_HOURS}h before boot - session wasn't alive at the crash; resume manually if wanted)"
+      continue
+    fi
+
+    if [ "$CREATE_TABS" -eq 1 ]; then
+      echo "  tab=$short_t  session=$short_s  (dormant)  -> TO-BE-RESUMED (will open a NEW tab via terminals create)"
+      printf '%s\t%s\t%s\t%s\t%s\n' "$ws_id" "$term_id" "$session_id" "$ws_worktree" "create" >> "$CANDIDATES_FILE"
+    else
+      echo "  tab=$short_t  session=$short_s  (dormant)  -> TO-BE-RESUMED (tab not materialized: this workspace hasn't been viewed in Superset since reboot)"
+      echo "      either: open the workspace in Superset, then rerun this skill"
+      echo "      or:     rerun with --create-tabs --apply to resume it in a new tab now"
+    fi
+  done
+}
+
+# ---------------------------------------------------------------------------
 # Per-tab classification
 # ---------------------------------------------------------------------------
 # Appends a tab-separated line to CANDIDATES_FILE for every RESUME verdict:
@@ -391,7 +487,7 @@ classify_tab() {
   idle=$(idle_check "$ws_id" "$term_id" "$created_at")
   if [ "$idle" = "idle" ]; then
     echo "  tab=$short_t  session=$short_s  title=\"$title\"  c=reversed  d=dead  e=present  f=idle  -> RESUME"
-    printf '%s\t%s\t%s\t%s\n' "$ws_id" "$term_id" "$session_id" "$ws_worktree" >> "$CANDIDATES_FILE"
+    printf '%s\t%s\t%s\t%s\t%s\n' "$ws_id" "$term_id" "$session_id" "$ws_worktree" "send" >> "$CANDIDATES_FILE"
   else
     echo "  tab=$short_t  session=$short_s  title=\"$title\"  c=reversed  d=dead  e=present  f=${idle}  -> NEEDS-MANUAL (shell doesn't look idle; not sending into it automatically)"
   fi
@@ -466,8 +562,10 @@ process_workspaces() {
     terms_json=$(superset terminals list --workspace "$ws_id" --json 2>/dev/null || echo '{"sessions":[]}')
     sessions_count=$(printf '%s' "$terms_json" | jq '.sessions | length' 2>/dev/null || echo 0)
     if [ "$sessions_count" -eq 0 ]; then
+      # No materialized tabs - but dormant bindings may still exist (the
+      # workspace just hasn't been viewed in Superset since reboot), so the
+      # dormant check below must still run.
       echo "  (no live terminal tabs)"
-      continue
     fi
 
     while IFS=$'\t' read -r term_id created_at exited title; do
@@ -475,6 +573,12 @@ process_workspaces() {
       [ "$exited" = "true" ] && continue
       classify_tab "$ws_id" "$ws_worktree" "$term_id" "$created_at" "$title"
     done < <(printf '%s' "$terms_json" | jq -r '.sessions[] | [.terminalId, (.createdAt|tostring), (.exited|tostring), (.title // "")] | @tsv')
+
+    # Bindings whose tab the daemon doesn't know about (yet): lazily-restored
+    # workspaces that haven't been viewed since reboot.
+    local live_ids
+    live_ids=$(printf '%s' "$terms_json" | jq -r '.sessions[].terminalId' 2>/dev/null || true)
+    check_dormant_tabs "$ws_id" "$ws_worktree" "$live_ids"
   done < <(printf '%s' "$target_json" | jq -r '.[] | [.id, .name, .branch, .worktreePath] | @tsv')
 }
 
@@ -486,11 +590,8 @@ run_global_sweep() {
   echo
   echo "== Global sweep: sessions outside Superset tabs (last ${WINDOW_HOURS}h before boot) =="
 
-  local boot_line boot_epoch window_start
-  boot_line=$(sysctl -n kern.boottime 2>/dev/null || true)
-  # kern.boottime looks like: { sec = 1786543978, usec = 69662 } Tue Aug 12 ...
-  # Note "usec = " contains "sec = " as a substring, so anchor on the brace.
-  boot_epoch=$(printf '%s' "$boot_line" | sed -n 's/.*{ sec = \([0-9]*\).*/\1/p' || true)
+  local boot_epoch window_start
+  boot_epoch="$BOOT_EPOCH"
   if [ -z "$boot_epoch" ]; then
     echo "Could not determine boot time via sysctl kern.boottime - skipping global sweep."
     return
@@ -514,6 +615,29 @@ run_global_sweep() {
 
       if [ -s "$CANDIDATES_FILE" ] && cut -f3 "$CANDIDATES_FILE" | grep -qx "$session_id"; then
         continue
+      fi
+      # Already reported as a dormant Superset tab in a workspace section.
+      if [ -s "$DORMANT_FILE" ] && grep -qx "$session_id" "$DORMANT_FILE"; then
+        continue
+      fi
+
+      # A session can look "non-Superset" here purely because its workspace
+      # hasn't been viewed since reboot (tabs materialize lazily and this run
+      # may not have scanned that workspace). The binding row knows better.
+      if [ -n "$DB" ]; then
+        local origin
+        origin=$(sqlite_json "SELECT w.name AS name, w.branch AS branch, b.workspace_id AS wsid
+          FROM terminal_agent_bindings b LEFT JOIN workspaces w ON w.id = b.workspace_id
+          WHERE b.agent_session_id='$(sql_escape "$session_id")' LIMIT 1;" | jq -r '.[0] // empty | "\(.name)\t\(.branch)\t\(.wsid)"' 2>/dev/null || true)
+        if [ -n "$origin" ]; then
+          found=1
+          echo
+          echo "  session $session_id"
+          echo "    origin: SUPERSET workspace \"$(printf '%s' "$origin" | cut -f1)\" ($(printf '%s' "$origin" | cut -f2)) [$(printf '%s' "$origin" | cut -f3)]"
+          echo "    dormant tab - not materialized because that workspace hasn't been viewed in Superset since reboot."
+          echo "    to resume: open the workspace in Superset and rerun this skill, or rerun with --all --create-tabs --apply"
+          continue
+        fi
       fi
 
       found=1
@@ -555,8 +679,12 @@ apply_or_report_candidates() {
 
   if [ "$APPLY" -eq 0 ]; then
     echo "== Dry run: commands that would be sent (rerun with --apply) =="
-    while IFS=$'\t' read -r ws_id term_id session_id worktree; do
-      echo "superset terminals send --workspace $ws_id --terminal $term_id --text 'cd ${worktree} && claude --resume ${session_id}'"
+    while IFS=$'\t' read -r ws_id term_id session_id worktree mode; do
+      if [ "$mode" = "create" ]; then
+        echo "superset terminals create --workspace $ws_id --cwd ${worktree} --command 'claude --resume ${session_id}'"
+      else
+        echo "superset terminals send --workspace $ws_id --terminal $term_id --text 'cd ${worktree} && claude --resume ${session_id}'"
+      fi
     done < "$CANDIDATES_FILE"
     return
   fi
@@ -588,10 +716,23 @@ apply_or_report_candidates() {
   echo "Snapshotted current bindings to: $snapshot_file"
 
   local fail_count=0
-  while IFS=$'\t' read -r ws_id term_id session_id worktree; do
+  while IFS=$'\t' read -r ws_id term_id session_id worktree mode; do
     [ -z "$term_id" ] && continue
-    local cmd="cd ${worktree} && claude --resume ${session_id}"
     echo
+    if [ "$mode" = "create" ]; then
+      # Dormant tab: the daemon can't reach the original terminal until the
+      # workspace is viewed in the UI, so resume in a NEW tab instead. The
+      # dormant tab's binding row is untouched (different terminal_id).
+      echo "-> workspace=$(short_id "$ws_id") NEW TAB: claude --resume ${session_id}"
+      if superset terminals create --workspace "$ws_id" --cwd "$worktree" --command "claude --resume ${session_id}"; then
+        echo "   created."
+      else
+        echo "   FAILED to create a tab in this workspace."
+        fail_count=$((fail_count + 1))
+      fi
+      continue
+    fi
+    local cmd="cd ${worktree} && claude --resume ${session_id}"
     echo "-> workspace=$(short_id "$ws_id") terminal=$(short_id "$term_id"): $cmd"
     if superset terminals send --workspace "$ws_id" --terminal "$term_id" --text "$cmd"; then
       sleep 2
