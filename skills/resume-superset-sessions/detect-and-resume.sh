@@ -61,6 +61,9 @@
 # Usage:
 #   detect-and-resume.sh                 dry run, current workspace only
 #   detect-and-resume.sh --all           dry run, every workspace on this host
+#   detect-and-resume.sh --workspace <q> dry run, one workspace by id, name, or
+#                                        branch (partial, case-insensitive;
+#                                        ambiguity errors out with the matches)
 #   detect-and-resume.sh --apply         snapshot bindings, then actually send
 #   detect-and-resume.sh --all --apply   both
 #   detect-and-resume.sh --window 48     global-sweep lookback in hours (def 24)
@@ -78,6 +81,7 @@ shopt -s nullglob
 # ---------------------------------------------------------------------------
 
 WORKSPACE_MODE="current"
+WS_QUERY=""
 APPLY=0
 WINDOW_HOURS=24
 SWEEP=1
@@ -85,6 +89,15 @@ SWEEP=1
 while [ $# -gt 0 ]; do
   case "$1" in
     --all) WORKSPACE_MODE="all" ;;
+    --workspace)
+      shift
+      WS_QUERY="${1:-}"
+      if [ -z "$WS_QUERY" ]; then
+        echo "--workspace expects an id, name, or branch (may be partial)" >&2
+        exit 1
+      fi
+      WORKSPACE_MODE="one"
+      ;;
     --apply) APPLY=1 ;;
     --window)
       shift
@@ -395,7 +408,33 @@ process_workspaces() {
   local workspaces_json target_json match_id
   workspaces_json=$(superset workspaces list --json 2>/dev/null || echo '[]')
 
-  if [ "$WORKSPACE_MODE" = "current" ]; then
+  if [ "$WORKSPACE_MODE" = "one" ]; then
+    # --workspace <query>: exact id first, then case-insensitive substring
+    # match on id / name / branch. Ambiguity is an error, not a guess.
+    target_json=$(printf '%s' "$workspaces_json" | jq --arg q "$WS_QUERY" '
+      ([.[] | select(.id == $q)]) as $exact |
+      if ($exact | length) > 0 then $exact
+      else [.[] | select(
+        ((.id // "") | ascii_downcase | contains($q | ascii_downcase)) or
+        ((.name // "") | ascii_downcase | contains($q | ascii_downcase)) or
+        ((.branch // "") | ascii_downcase | contains($q | ascii_downcase)) or
+        ((.projectName // "") | ascii_downcase | contains($q | ascii_downcase)) or
+        ((.worktreePath // "") | ascii_downcase | contains($q | ascii_downcase))
+      )]
+      end' 2>/dev/null || echo '[]')
+    local match_count
+    match_count=$(printf '%s' "$target_json" | jq 'length' 2>/dev/null || echo 0)
+    if [ "$match_count" -eq 0 ]; then
+      echo "No workspace matches --workspace '$WS_QUERY'. Available:" >&2
+      printf '%s' "$workspaces_json" | jq -r '.[] | "  \(.projectName // "?")/\(.name)  (\(.branch))  [\(.id)]"' >&2
+      exit 1
+    fi
+    if [ "$match_count" -gt 1 ]; then
+      echo "--workspace '$WS_QUERY' is ambiguous ($match_count matches) - be more specific:" >&2
+      printf '%s' "$target_json" | jq -r '.[] | "  \(.projectName // "?")/\(.name)  (\(.branch))  [\(.id)]"' >&2
+      exit 1
+    fi
+  elif [ "$WORKSPACE_MODE" = "current" ]; then
     # Bind worktreePath before piping to startswith - inside `$pwd | ...` the
     # context is the $pwd string, so a bare .worktreePath there is an error.
     match_id=$(printf '%s' "$workspaces_json" | jq -r --arg pwd "$PWD" \
@@ -575,7 +614,7 @@ apply_or_report_candidates() {
 # Main
 # ---------------------------------------------------------------------------
 
-echo "resume-superset-sessions: mode=$WORKSPACE_MODE apply=$APPLY window=${WINDOW_HOURS}h sweep=$SWEEP"
+echo "resume-superset-sessions: mode=$WORKSPACE_MODE${WS_QUERY:+ query=\"$WS_QUERY\"} apply=$APPLY window=${WINDOW_HOURS}h sweep=$SWEEP"
 
 process_workspaces
 apply_or_report_candidates

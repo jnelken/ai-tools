@@ -84,6 +84,11 @@ bash /Users/jake/code/ai-tools/skills/resume-superset-sessions/detect-and-resume
 # Dry run, every workspace on this host
 bash /Users/jake/code/ai-tools/skills/resume-superset-sessions/detect-and-resume.sh --all
 
+# Dry run, one specific workspace from anywhere - matches id, name, branch,
+# project name, or worktree path (partial, case-insensitive). Exact-id match
+# wins outright; anything ambiguous errors out listing the matches.
+bash /Users/jake/code/ai-tools/skills/resume-superset-sessions/detect-and-resume.sh --workspace con-3485
+
 # After reviewing the report, actually send the resume commands
 bash /Users/jake/code/ai-tools/skills/resume-superset-sessions/detect-and-resume.sh --apply
 bash /Users/jake/code/ai-tools/skills/resume-superset-sessions/detect-and-resume.sh --all --apply
