@@ -2,7 +2,7 @@
 # ============================================================================
 # Awesome Statusline - Legacy 2.0.1
 # ============================================================================
-# Line 1: 🤖 Model | ✅ Git | 🐍 Env | 🎨 Style
+# Line 1: 🤖 Model 🪪 session-id | ✅ Git | 🐍 Env | 🎨 Style
 # Line 2: 📂 full path 🌿(branch) | 💰 cost | ⏰ duration
 # Line 3: 🧠 Context bar 20 blocks % used (tokens)
 # Line 4: 🚀 Usage 5H bar 20 blocks % (Reset time)
@@ -19,6 +19,7 @@ input=$(cat)
 
 # Parse JSON input
 MODEL=$(echo "$input" | jq -r '.model.display_name // "Unknown"')
+SESSION_ID=$(echo "$input" | jq -r '.session_id // empty')
 CURRENT_DIR=$(echo "$input" | jq -r '.workspace.current_dir // "."')
 CONTEXT_SIZE=$(echo "$input" | jq -r '.context_window.context_window_size // 200000')
 CURRENT_USAGE=$(echo "$input" | jq -r '.context_window.current_usage // null')
@@ -307,7 +308,14 @@ fi
 STYLE_DISPLAY=""
 [[ -n "$OUTPUT_STYLE" ]] && STYLE_DISPLAY="🎨 $(cat_peach)${OUTPUT_STYLE}${RESET}"
 
-LINE1="${MODEL_DISPLAY} │ ${GIT_STATUS_DISPLAY} │ ${ENV_DISPLAY} │ ${STYLE_DISPLAY}"
+# Session ID: kept on line 1, immediately after the model segment, so it survives
+# a crash-restored terminal snapshot (only the top statusline rows are preserved)
+# and lands before any soft-wrap on narrow terminals. Recovery tooling reads this
+# to map a dead terminal buffer back to its resumable session.
+SESSION_DISPLAY=""
+[[ -n "$SESSION_ID" ]] && SESSION_DISPLAY=" $(cat_overlay)🪪${SESSION_ID}${RESET}"
+
+LINE1="${MODEL_DISPLAY}${SESSION_DISPLAY} │ ${GIT_STATUS_DISPLAY} │ ${ENV_DISPLAY} │ ${STYLE_DISPLAY}"
 
 # ============================================================================
 # Line 2: Directory + Branch | Cost | Duration
