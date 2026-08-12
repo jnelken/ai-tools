@@ -84,6 +84,15 @@ them:
    its origin workspace via `terminals create`. The dormant tab's binding
    row is untouched (different terminal_id), so nothing is overwritten.
 
+The old ghost tab (frozen snapshot, idle shell) survives a `--create-tabs`
+resume and will materialize whenever the workspace is next viewed. Add
+`--close-ghosts` to dispose each one automatically — `terminals close`
+works on dormant terminals (unlike `send`) — but only after the resumed
+session is verified alive in its new tab, because closing a terminal
+**clears its binding row**, destroying the session pointer. Same-tab
+resumes never leave a ghost: the resume happens in the original tab and
+the snapshot just scrolls up into history.
+
 ### The overwrite hazard this script protects against
 
 `terminal_agent_bindings` is keyed on `terminal_id`. The moment a *new*
@@ -115,8 +124,9 @@ bash /Users/jake/code/ai-tools/skills/resume-superset-sessions/detect-and-resume
 bash /Users/jake/code/ai-tools/skills/resume-superset-sessions/detect-and-resume.sh --all --apply
 
 # Also resume dormant tabs (workspaces not viewed in Superset since reboot)
-# by opening NEW tabs in their origin workspaces
-bash /Users/jake/code/ai-tools/skills/resume-superset-sessions/detect-and-resume.sh --all --create-tabs --apply
+# by opening NEW tabs in their origin workspaces; --close-ghosts disposes each
+# old ghost tab once its session is verified alive in the new one
+bash /Users/jake/code/ai-tools/skills/resume-superset-sessions/detect-and-resume.sh --all --create-tabs --close-ghosts --apply
 
 # Tune the non-Superset lookback window (default 24h before boot time)
 bash /Users/jake/code/ai-tools/skills/resume-superset-sessions/detect-and-resume.sh --window 48
@@ -138,8 +148,9 @@ In `--apply` mode the script sends `cd <worktreePath> && claude --resume
 <session-id>` into each candidate tab (never `--fork-session` — this must
 land in the session's original working directory, since transcripts are
 keyed by cwd), waits 2 seconds, and reads back the tab so you can confirm
-claude actually came up. It never runs `terminals close`, never deletes
-anything, and never writes to `host.db`.
+claude actually came up. It never deletes anything and never writes to
+`host.db`; the only tab it ever closes is an old dormant ghost under the
+opt-in `--close-ghosts` flag, after verifying the resume.
 
 ## Limitations
 

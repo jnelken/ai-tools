@@ -54,8 +54,11 @@
 #     superset terminals send --workspace <ws> --terminal <id> \
 #       --text 'cd <worktreePath> && claude --resume <session-id>'
 #
-# This script never runs `terminals close`, never deletes anything, and
-# never writes to host.db.
+# This script never deletes anything and never writes to host.db. The one
+# tab-closing behavior is strictly opt-in: --close-ghosts closes an old
+# dormant ghost tab ONLY after its session is verified alive in the new tab
+# `--create-tabs` opened for it (closing clears the tab's binding row, so
+# order matters).
 # ---------------------------------------------------------------------------
 #
 # Usage:
@@ -70,6 +73,9 @@
 #                                        not yet viewed in Superset since
 #                                        reboot, so the original tab can't be
 #                                        typed into) by opening NEW tabs
+#   detect-and-resume.sh --close-ghosts  with --create-tabs --apply: close each
+#                                        old dormant ghost tab once its session
+#                                        is verified alive in the new tab
 #   detect-and-resume.sh --window 48     global-sweep lookback in hours (def 24)
 #   detect-and-resume.sh --no-sweep      skip the non-Superset global sweep
 #
@@ -88,6 +94,7 @@ WORKSPACE_MODE="current"
 WS_QUERY=""
 APPLY=0
 CREATE_TABS=0
+CLOSE_GHOSTS=0
 WINDOW_HOURS=24
 SWEEP=1
 
@@ -105,6 +112,7 @@ while [ $# -gt 0 ]; do
       ;;
     --apply) APPLY=1 ;;
     --create-tabs) CREATE_TABS=1 ;;
+    --close-ghosts) CLOSE_GHOSTS=1 ;;
     --window)
       shift
       WINDOW_HOURS="${1:-24}"
@@ -726,6 +734,28 @@ apply_or_report_candidates() {
       echo "-> workspace=$(short_id "$ws_id") NEW TAB: claude --resume ${session_id}"
       if superset terminals create --workspace "$ws_id" --cwd "$worktree" --command "claude --resume ${session_id}"; then
         echo "   created."
+        if [ "$CLOSE_GHOSTS" -eq 1 ]; then
+          # Close the old dormant ghost tab - but only once the resumed
+          # session is verifiably alive in its new tab. `terminals close`
+          # works on dormant terminals (unlike `send`) and CLEARS the
+          # binding row, so closing before the resume is confirmed would
+          # destroy the only pointer to the session (snapshot aside).
+          local waited=0 resumed_live="dead"
+          while [ "$waited" -lt 15 ]; do
+            sleep 3; waited=$((waited + 3))
+            resumed_live=$(check_live_session "$session_id")
+            [ "$resumed_live" = "live" ] && break
+          done
+          if [ "$resumed_live" = "live" ]; then
+            if superset terminals close --workspace "$ws_id" --terminal "$term_id" >/dev/null 2>&1; then
+              echo "   ghost tab $(short_id "$term_id") closed."
+            else
+              echo "   could not close ghost tab $(short_id "$term_id") - close it manually."
+            fi
+          else
+            echo "   resumed session not confirmed live after ${waited}s - leaving ghost tab $(short_id "$term_id") alone."
+          fi
+        fi
       else
         echo "   FAILED to create a tab in this workspace."
         fail_count=$((fail_count + 1))
