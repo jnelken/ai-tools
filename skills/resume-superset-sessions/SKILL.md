@@ -117,7 +117,11 @@ pre-send state is on disk.
 Run from its own directory by absolute path — dry run first, always:
 
 ```bash
-# Dry run, current workspace only (matches $PWD against workspace worktreePaths)
+# Dry run, current workspace only (matches $PWD against workspace worktreePaths).
+# If the current directory isn't inside any workspace worktree, this errors out
+# listing the available workspaces - it never silently falls back to scanning
+# all of them. Scope beyond the current workspace is always explicit: --all or
+# --workspace <query>.
 bash /Users/jake/code/ai-tools/skills/resume-superset-sessions/detect-and-resume.sh
 
 # Dry run, every workspace on this host

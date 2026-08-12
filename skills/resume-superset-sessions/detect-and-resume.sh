@@ -63,6 +63,9 @@
 #
 # Usage:
 #   detect-and-resume.sh                 dry run, current workspace only
+#                                        (errors out if $PWD isn't inside a
+#                                        workspace worktree - never silently
+#                                        widens to all workspaces)
 #   detect-and-resume.sh --all           dry run, every workspace on this host
 #   detect-and-resume.sh --workspace <q> dry run, one workspace by id, name, or
 #                                        branch (partial, case-insensitive;
@@ -552,8 +555,13 @@ process_workspaces() {
     match_id=$(printf '%s' "$workspaces_json" | jq -r --arg pwd "$PWD" \
       '[.[] | (.worktreePath // "") as $w | select($w != "" and (($pwd == $w) or ($pwd | startswith($w + "/"))))][0].id // empty' 2>/dev/null || true)
     if [ -z "$match_id" ]; then
-      echo "Notice: current directory ($PWD) doesn't match any workspace worktreePath - falling back to --all."
-      target_json="$workspaces_json"
+      # No silent scope-widening: an --apply run from a non-workspace cwd must
+      # never touch every workspace on the host just because the cwd didn't
+      # match. Scanning everything is always an explicit choice (--all).
+      echo "Current directory ($PWD) doesn't match any workspace worktreePath." >&2
+      echo "Rerun with --all to scan every workspace, or --workspace <query> for one of:" >&2
+      printf '%s' "$workspaces_json" | jq -r '.[] | "  \(.projectName // "?")/\(.name)  (\(.branch))  [\(.id)]"' >&2
+      exit 1
     else
       target_json=$(printf '%s' "$workspaces_json" | jq --arg id "$match_id" '[.[] | select(.id == $id)]')
     fi
