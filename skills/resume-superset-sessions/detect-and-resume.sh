@@ -410,8 +410,16 @@ check_dormant_tabs() {
     local tf tmtime
     tf=$(ls "$HOME"/.claude/projects/*/"${session_id}.jsonl" 2>/dev/null | head -1)
     tmtime=$(stat -f %m "$tf" 2>/dev/null || echo 0)
-    if [ -n "$BOOT_EPOCH" ] && { [ "$tmtime" -ge "$BOOT_EPOCH" ] || [ "$tmtime" -lt $((BOOT_EPOCH - WINDOW_HOURS * 3600)) ]; }; then
-      echo "  tab=$short_t  session=$short_s  (dormant)  -> CLEAN (transcript not written in the ${WINDOW_HOURS}h before boot - session wasn't alive at the crash; resume manually if wanted)"
+    # No kill event after the session's last activity => it ended on its own
+    # (user exit / tab close), NOT a crash. Never presume a session dead just
+    # because no process is running now - only classify TO-BE-RESUMED when a
+    # detected kill event (the boot) postdates its last write.
+    if [ -n "$BOOT_EPOCH" ] && [ "$tmtime" -ge "$BOOT_EPOCH" ]; then
+      echo "  tab=$short_t  session=$short_s  (dormant)  -> CLEAN (last activity was after boot, no crash event since - it exited deliberately; resume manually if wanted)"
+      continue
+    fi
+    if [ -n "$BOOT_EPOCH" ] && [ "$tmtime" -lt $((BOOT_EPOCH - WINDOW_HOURS * 3600)) ]; then
+      echo "  tab=$short_t  session=$short_s  (dormant)  -> CLEAN (went quiet more than ${WINDOW_HOURS}h before the crash - wasn't alive when the machine went down; resume manually if wanted)"
       continue
     fi
 

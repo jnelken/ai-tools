@@ -63,6 +63,15 @@ process owns the session) are classified **CLEAN** — the agent exited on its
 own before the crash, and typing into that tab is a deliberate choice, not
 an automatic one.
 
+**Governing principle: no kill event, no crash.** A session with no live
+process is never presumed dead-by-accident. Every RESUME/TO-BE-RESUMED
+classification requires positive evidence that a kill event postdates the
+session's last activity: the pty-recreation ordering proof for materialized
+tabs, or a transcript last-write falling in the window just before boot time
+for dormant tabs and the sweep. A session whose last activity is *after* the
+most recent boot ended for some ordinary reason (user exit, tab close) and
+is reported CLEAN — resuming it is a human decision.
+
 ### Dormant tabs (lazily-materialized workspaces)
 
 Superset materializes a workspace's ptys **lazily**: after a reboot, a
