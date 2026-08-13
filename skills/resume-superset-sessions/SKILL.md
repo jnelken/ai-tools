@@ -124,7 +124,9 @@ Run from its own directory by absolute path — dry run first, always:
 # --workspace <query>.
 bash /Users/jake/code/ai-tools/skills/resume-superset-sessions/detect-and-resume.sh
 
-# Dry run, every workspace on this host
+# Dry run, every workspace on this host. If the workspace matching $PWD is
+# among them, it's reordered to the front (nothing is skipped) so its tabs
+# are classified - and therefore resumed - before any other workspace's.
 bash /Users/jake/code/ai-tools/skills/resume-superset-sessions/detect-and-resume.sh --all
 
 # Dry run, one specific workspace from anywhere - matches id, name, branch,
@@ -164,6 +166,35 @@ keyed by cwd), waits 2 seconds, and reads back the tab so you can confirm
 claude actually came up. It never deletes anything and never writes to
 `host.db`; the only tab it ever closes is an old dormant ghost under the
 opt-in `--close-ghosts` flag, after verifying the resume.
+
+## Performance
+
+Two things are cached, both chosen because the underlying fact cannot change
+out from under a rerun within the same crash window:
+
+- **Live-session lookups.** `check_live_session` used to re-glob and
+  re-parse every `~/.claude/sessions/*.json` file on every call - and a
+  single run calls it once per candidate tab, per dormant binding, and per
+  global-sweep transcript, so a fleet-sized sweep meant repeating that scan
+  dozens of times. It's now built once per invocation into an in-memory
+  index.
+- **Global-sweep transcript metadata.** Extracting a session's `cwd` and
+  title-ish string means reading up to 200KB off a `.jsonl` file and piping
+  it through `jq`/`grep`. That's cached across separate invocations in
+  `~/.claude/state/session-recovery/transcript-metadata-cache.json`, keyed
+  by path with the file's mtime folded into each entry — a changed (or
+  deleted, on rewrite) transcript just misses rather than ever serving stale
+  data. The cache is rebuilt from scratch each run out of whatever was
+  actually touched, so it self-prunes; the sweep's final line reports
+  hit/miss counts.
+
+**Deliberately not cached:** anything read from Superset's `host.db`,
+`superset terminals list`/`read`, or process liveness. That state is exactly
+what a RESUME/LIVE/CLEAN verdict depends on being fresh — caching it would
+risk sending a resume command based on a stale snapshot. In practice, for a
+host with many workspaces, the dominant cost of an `--all` run is the
+per-workspace `superset terminals list` round-trip and the idle-detection
+`ps` ancestry walk — both load-bearing and intentionally live every time.
 
 ## Limitations
 

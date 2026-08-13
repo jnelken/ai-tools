@@ -67,6 +67,9 @@
 #                                        workspace worktree - never silently
 #                                        widens to all workspaces)
 #   detect-and-resume.sh --all           dry run, every workspace on this host
+#                                        (the workspace matching $PWD, if any,
+#                                        is processed - and therefore resumed
+#                                        first under --apply)
 #   detect-and-resume.sh --workspace <q> dry run, one workspace by id, name, or
 #                                        branch (partial, case-insensitive;
 #                                        ambiguity errors out with the matches)
@@ -85,6 +88,22 @@
 # Must run on macOS default bash 3.2: no associative arrays, no mapfile, no
 # ${var,,}. All JSON handled via jq. set -e is guarded everywhere a grep/pgrep
 # "no match" is an expected, non-fatal outcome (`|| true`, or inside `if`).
+#
+# Two perf shortcuts, both correctness-preserving (never serve stale liveness
+# data - only skip re-deriving facts that cannot have changed):
+#   - check_live_session() consults a live-sessions index built ONCE per
+#     invocation (build_live_sessions_index) instead of re-globbing and
+#     re-parsing ~/.claude/sessions/*.json on every call - a single run can
+#     call it dozens of times.
+#   - The global sweep's per-transcript cwd/title extraction (a 200KB read +
+#     jq/grep per file) is cached across INVOCATIONS in
+#     ~/.claude/state/session-recovery/transcript-metadata-cache.json, keyed
+#     by path with mtime folded into each entry so a changed or deleted file
+#     just misses. Rebuilt fresh each run from whatever's actually touched,
+#     so it also self-prunes. Superset-side state (workspaces/terminals/
+#     bindings/process liveness) is intentionally NEVER cached this way - that
+#     data must always reflect what's true right now, which is the entire
+#     point of a RESUME classification.
 
 set -uo pipefail
 shopt -s nullglob
@@ -146,9 +165,18 @@ STATE_DIR="$HOME/.claude/state/session-recovery"
 BOOT_EPOCH=$(sysctl -n kern.boottime 2>/dev/null | sed -n 's/.*{ sec = \([0-9]*\).*/\1/p' || true)
 CANDIDATES_FILE=$(mktemp -t resume-candidates)
 DORMANT_FILE=$(mktemp -t resume-dormant)
+LIVE_SESSIONS_FILE=$(mktemp -t resume-live-sessions)
 OVERALL_EXIT=0
 
-cleanup() { rm -f "$CANDIDATES_FILE" "$DORMANT_FILE"; }
+# Persistent, self-invalidating cache of the global sweep's per-transcript
+# metadata (cwd / ai-title extraction). Keyed by absolute path with the
+# file's mtime folded into each entry, so a changed (or deleted, on rewrite)
+# transcript just misses instead of ever serving stale data. This is the
+# expensive part of a re-run across a fleet of old sessions: each miss reads
+# up to 200KB off disk and pipes it through jq/grep.
+SWEEP_CACHE_FILE="$STATE_DIR/transcript-metadata-cache.json"
+
+cleanup() { rm -f "$CANDIDATES_FILE" "$DORMANT_FILE" "$LIVE_SESSIONS_FILE"; }
 trap cleanup EXIT
 
 # ---------------------------------------------------------------------------
@@ -207,23 +235,36 @@ get_binding_json() {
   fi
 }
 
-# Is there a currently-running claude process actually attached to this
-# session id? Checked two ways (belt-and-suspenders per spec):
-#   1. ~/.claude/sessions/<pid>.json only exists for LIVE sessions (dead ones
-#      are reaped) - match sessionId, then confirm the pid is really alive.
-#   2. pgrep -f "claude.*<session-id>" as a fallback signal.
-check_live_session() {
-  local session_id="$1" f sid pid
+# Built ONCE per invocation (see build_live_sessions_index below) instead of
+# re-globbing + re-parsing every ~/.claude/sessions/*.json file on every call.
+# A single run can call check_live_session dozens of times (once per
+# candidate tab, per dormant binding, per global-sweep transcript) - without
+# this index that's O(sessions-on-disk) work repeated that many times.
+build_live_sessions_index() {
+  : > "$LIVE_SESSIONS_FILE"
+  local f sid pid
   for f in "$HOME"/.claude/sessions/*.json; do
     sid=$(jq -r '.sessionId // empty' "$f" 2>/dev/null || true)
-    if [ "$sid" = "$session_id" ]; then
-      pid=$(jq -r '.pid // empty' "$f" 2>/dev/null || true)
-      if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
-        echo "live"
-        return
-      fi
+    [ -z "$sid" ] && continue
+    pid=$(jq -r '.pid // empty' "$f" 2>/dev/null || true)
+    if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+      printf '%s\n' "$sid" >> "$LIVE_SESSIONS_FILE"
     fi
   done
+}
+
+# Is there a currently-running claude process actually attached to this
+# session id? Checked two ways (belt-and-suspenders per spec):
+#   1. The precomputed index above (~/.claude/sessions/<pid>.json only
+#      exists for LIVE sessions - dead ones are reaped - confirmed via
+#      kill -0 at index-build time).
+#   2. pgrep -f "claude.*<session-id>" as a fallback signal.
+check_live_session() {
+  local session_id="$1"
+  if grep -qxF "$session_id" "$LIVE_SESSIONS_FILE" 2>/dev/null; then
+    echo "live"
+    return
+  fi
   if pgrep -f "claude.*${session_id}" >/dev/null 2>&1; then
     echo "live"
     return
@@ -567,6 +608,17 @@ process_workspaces() {
     fi
   else
     target_json="$workspaces_json"
+    # --all scans every workspace, but reviving is highest-value where the
+    # user is actually sitting right now. Reorder (never drop) so the
+    # workspace matching $PWD is classified - and therefore resumed - before
+    # any other workspace, without changing what gets covered.
+    local cur_id
+    cur_id=$(printf '%s' "$workspaces_json" | jq -r --arg pwd "$PWD" \
+      '[.[] | (.worktreePath // "") as $w | select($w != "" and (($pwd == $w) or ($pwd | startswith($w + "/"))))][0].id // empty' 2>/dev/null || true)
+    if [ -n "$cur_id" ]; then
+      target_json=$(printf '%s' "$target_json" | jq --arg id "$cur_id" 'sort_by(.id != $id)')
+      echo "(current workspace matched by \$PWD - processing it first)"
+    fi
   fi
 
   local count
@@ -628,6 +680,20 @@ run_global_sweep() {
     return
   fi
 
+  # Self-invalidating cache of the expensive part below: extracting cwd/title
+  # from a transcript means reading up to 200KB off disk and piping it
+  # through jq/grep. Keyed by path with mtime folded into each entry, so a
+  # file that changed since the last run (or was deleted) just misses rather
+  # than ever serving stale data. Rebuilt from scratch each run (only entries
+  # actually touched this run are written back), so it also self-prunes.
+  local sweep_cache_json="{}" cache_hits=0 cache_misses=0
+  if [ -f "$SWEEP_CACHE_FILE" ]; then
+    sweep_cache_json=$(cat "$SWEEP_CACHE_FILE" 2>/dev/null || echo '{}')
+    printf '%s' "$sweep_cache_json" | jq -e . >/dev/null 2>&1 || sweep_cache_json='{}'
+  fi
+  local new_cache_entries_file
+  new_cache_entries_file=$(mktemp -t resume-sweep-cache-entries)
+
   local found=0 f mtime session_id live birth offset cwd title
   for f in "${files[@]}"; do
     mtime=$(stat -f %m "$f" 2>/dev/null || echo 0)
@@ -667,10 +733,27 @@ run_global_sweep() {
       found=1
       birth=$(stat -f %B "$f" 2>/dev/null || echo "$mtime")
       offset=$(( (mtime - birth) % 3600 ))
-      # The first line may be a summary/title entry without cwd - take the
-      # first entry in the file that carries one.
-      cwd=$(head -50 "$f" 2>/dev/null | jq -r '.cwd // empty' 2>/dev/null | grep -m1 . || true)
-      title=$(head -c 200000 "$f" 2>/dev/null | grep -m1 -o '"type":"ai-title"[^}]*' 2>/dev/null || true)
+
+      local cached_entry cached_mtime
+      cached_entry=$(printf '%s' "$sweep_cache_json" | jq -c --arg f "$f" '.[$f] // empty' 2>/dev/null || true)
+      cached_mtime=""
+      if [ -n "$cached_entry" ] && [ "$cached_entry" != "null" ]; then
+        cached_mtime=$(printf '%s' "$cached_entry" | jq -r '.mtime // empty' 2>/dev/null || true)
+      fi
+
+      if [ -n "$cached_mtime" ] && [ "$cached_mtime" = "$mtime" ]; then
+        cwd=$(printf '%s' "$cached_entry" | jq -r '.cwd // empty' 2>/dev/null || true)
+        title=$(printf '%s' "$cached_entry" | jq -r '.title // empty' 2>/dev/null || true)
+        cache_hits=$((cache_hits + 1))
+      else
+        # The first line may be a summary/title entry without cwd - take the
+        # first entry in the file that carries one.
+        cwd=$(head -50 "$f" 2>/dev/null | jq -r '.cwd // empty' 2>/dev/null | grep -m1 . || true)
+        title=$(head -c 200000 "$f" 2>/dev/null | grep -m1 -o '"type":"ai-title"[^}]*' 2>/dev/null || true)
+        cache_misses=$((cache_misses + 1))
+      fi
+      jq -cn --arg f "$f" --argjson mtime "$mtime" --arg cwd "$cwd" --arg title "$title" \
+        '{($f): {mtime: $mtime, cwd: $cwd, title: $title}}' >> "$new_cache_entries_file" 2>/dev/null || true
 
       echo
       echo "  session $session_id"
@@ -684,6 +767,14 @@ run_global_sweep() {
       fi
     fi
   done
+
+  if [ -s "$new_cache_entries_file" ]; then
+    mkdir -p "$STATE_DIR"
+    jq -s 'add // {}' "$new_cache_entries_file" > "$SWEEP_CACHE_FILE" 2>/dev/null || true
+  fi
+  rm -f "$new_cache_entries_file"
+  echo
+  echo "(transcript metadata cache: ${cache_hits} hit, ${cache_misses} miss)"
 
   if [ "$found" -eq 0 ]; then
     echo "No candidate crashed sessions found outside Superset tabs in the lookback window."
@@ -803,6 +894,7 @@ apply_or_report_candidates() {
 
 echo "resume-superset-sessions: mode=$WORKSPACE_MODE${WS_QUERY:+ query=\"$WS_QUERY\"} apply=$APPLY window=${WINDOW_HOURS}h sweep=$SWEEP"
 
+build_live_sessions_index
 process_workspaces
 apply_or_report_candidates
 
