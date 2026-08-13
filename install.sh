@@ -1,6 +1,15 @@
 #!/usr/bin/env bash
 # Symlink skills, slash commands, and hooks from this repo into ~/.claude/.
 # Refuses to clobber existing non-symlink files/dirs — manually merge if needed.
+#
+# GOTCHA: the symlink is on the SKILL DIRECTORY, not its individual files
+# (e.g. ~/.claude/skills/<name> -> this repo's skills/<name>). Any rm/ln/cp
+# against a path *inside* an installed skill (~/.claude/skills/<name>/foo)
+# resolves straight through that symlink to the real file in this repo. Never
+# `rm` + `ln -s` a file at such a path expecting to "add" a symlink — it
+# deletes the repo's actual file and replaces it with a symlink pointing at
+# its own path. If a per-file symlink is ever truly wanted, target the
+# resolved repo path directly, never the ~/.claude/skills/... path.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
