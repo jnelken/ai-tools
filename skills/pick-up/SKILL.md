@@ -1,7 +1,6 @@
 ---
 name: pick-up
-description: Resume where a previous session left off — read this repo's IN_PROGRESS.md in Plan mode and present a plan to finish the work it lists.
-disable-model-invocation: true
+description: Resume where a previous session left off — read this repo's IN_PROGRESS.md in Plan mode, present a plan to finish the work it lists, and reconcile the file with anything found already done or stale.
 ---
 
 # pick-up
@@ -11,7 +10,8 @@ The other end of [[close-out]]. Close-out writes what still needs a human into
 the repo's current state, and turns it into a plan the user approves before anything
 runs.
 
-Nothing in this skill mutates state. It ends at an approved plan.
+The only thing this skill writes is the handoff file itself, and only to reconcile it
+with what it finds (step 5). It touches no other state before the plan is approved.
 
 ## 1. Enter Plan mode first
 
@@ -59,8 +59,9 @@ Classify every item as **still open**, **already done**, or **stale/invalid**, w
 evidence for anything not still open. Don't silently drop an item — an item you
 believe is done is a claim the user gets to see and correct.
 
-Leave the file alone. Pick-up doesn't check boxes or rewrite `IN_PROGRESS.md`;
-close-out owns those edits at the end of the session.
+Note the exact edits this implies for the file, but don't make them yet — plan mode
+permits writing only the plan file, and a verdict the user is about to correct must not
+already be on disk. Step 5 applies them once the plan is approved.
 
 ## 4. Present the plan
 
@@ -73,6 +74,9 @@ close-out owns those edits at the end of the session.
   rather than quietly picking one. That's why those items were written down instead of
   executed.
 - Lists what you found already done or stale, and why.
+- States the edits step 5 will make to the handoff file — which items get checked off,
+  struck, or annotated. The user is approving those edits too, and this is their one
+  chance to say "no, that isn't done" before a wrong verdict is written down.
 - Flags anything with real-world side effects (live account mutations, prod changes,
   outbound messages) before the step that causes it.
 
@@ -81,9 +85,38 @@ as a decision for the user, or as an explicit "already done / no longer applies"
 evidence. An item that exists in the file and nowhere in the plan is the failure mode
 this skill exists to prevent.
 
+## 5. Reconcile the handoff file
+
+If step 3 found nothing stale, skip this — rewriting a file that was already accurate is
+churn, and it costs the `_Last updated:_` date its meaning.
+
+Otherwise, once the plan is approved, edit the handoff file **before starting the work**.
+A session that dies mid-task should still leave the file more accurate than it found it,
+and that only holds if the reconciliation is the first thing that lands. Apply the
+verdicts the user approved, not the ones you arrived at — if they corrected one, theirs
+is the one that goes in the file.
+
+- Check off items verified done, each with a compressed note of the evidence
+  (`- [x] … — landed in a1b2c3d`). That evidence is what stops a later session
+  re-verifying the same thing.
+- Mark stale or invalidated items as such with a one-line why, rather than deleting them
+  silently. A dropped item reads as an item nobody ever wrote down.
+- Rewrite prose that a verdict falsified. A context section asserting something that is
+  no longer true is worse than a stale checkbox, because nothing signals it as stale —
+  if the file says "we decided not to build X" and X shipped, that sentence has to go.
+- Leave still-open items, and the reasoning behind them, exactly as they are.
+- Update `_Last updated:_`, and append a `_Picked up:_` line with the date and session id
+  so the provenance of the edit is visible next to close-out's own record.
+
+Then start the work. What this skill owns is reconciling the file with reality;
+[[close-out]] still owns adding new open items and decisions at the end of a session.
+
 ## Notes
 
 - Multiple repos can each carry their own `IN_PROGRESS.md`. This skill reads the current
   repo's. If the user wants a cross-repo sweep, ask which repos rather than guessing.
-- The file is gitignored local session state. Never `git add` it, and never commit a
-  change to it as part of picking up.
+- The file is gitignored local session state. Step 5 edits it on disk and nothing more —
+  never `git add` it, and never commit a change to it as part of picking up.
+- Step 5 only ever *reconciles*: it records what is already true. It never marks an item
+  done because the plan intends to do it, and never adds items — that's close-out's job.
+  If picking up reveals new work, it belongs in the plan, not appended to the file.
