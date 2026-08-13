@@ -81,6 +81,46 @@ ln -s ../../hooks/enforce-claude-symlinks.sh .git/hooks/pre-commit
 
 The hook will reject a commit from `ai-tools` if any regular files (not symlinks) exist under `~/.claude/hooks/`, `~/.claude/commands/`, or `~/.claude/agents/` **except** those on the sensitive allowlist (currently: `block-push-to-main.allowlist` and `*.json` settings files).
 
+## pick-up-nudge.sh
+
+A **SessionStart hook** that surfaces unresolved `IN_PROGRESS.md` content at the top of a fresh session, so it isn't missed until someone remembers to check. The counterpart to the `pick-up` skill's own lookup order (lives in `~/.claude/skills/pick-up`, not this repo).
+
+"Unresolved" means at least one open checklist item (`- [ ]`), not just file presence — `close-out` clears resolved entries in place, so a file left with only a header/close-out-log has nothing to pick up and stays silent.
+
+### Requirements
+
+- `git`, `jq` on `PATH`
+
+### settings.json wiring
+
+Add to `~/.claude/settings.json` (alongside any existing `SessionStart` entries — append, don't replace):
+
+```json
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          { "type": "command", "command": "bash \"$HOME/.claude/hooks/pick-up-nudge.sh\"" }
+        ]
+      }
+    ]
+  }
+}
+```
+
+### Behavior
+
+- Looks for `.claude/IN_PROGRESS.md` first, then repo-root `IN_PROGRESS.md` — same order `pick-up` uses.
+- Bails silently outside a git repo, if neither file exists, or if `jq` is missing.
+- Counts open (`- [ ]`) checklist lines; if zero, stays silent even when the file exists.
+- Emits via `hookSpecificOutput.additionalContext` telling the assistant to mention the open-item count and offer `/pick-up` — explicitly instructed not to read the file or act on its items itself, since `pick-up` owns that flow (plan-mode read, verification against current state, then user approval).
+- No cooldown, unlike the hygiene nudges below — every session start in a repo with real open work should surface it, not just once a day.
+
+### Disabling
+
+Remove the entry from `settings.json`.
+
 ## claude-symlink-hygiene.sh
 
 A **SessionStart hook** (runs at the top of every Claude Code session) that nudges about unsymlinked files in `~/.claude/` before they become a blocker.
