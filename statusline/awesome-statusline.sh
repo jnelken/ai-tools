@@ -487,6 +487,41 @@ else
 fi
 
 # ============================================================================
+# Write usage values to temp file for agent access
+# ============================================================================
+
+USAGE_FILE="$HOME/.claude/state/claude-usage.json"
+mkdir -p "$(dirname "$USAGE_FILE")" 2>/dev/null
+
+# Build usage JSON (includes data even if loading, for agent consumption)
+USAGE_JSON=$(jq -n \
+  --arg five_pct "${FIVE_HOUR:-0}" \
+  --arg seven_pct "${SEVEN_DAY:-0}" \
+  --arg five_reset "${FIVE_RESET_FMT:-unknown}" \
+  --arg seven_reset "${SEVEN_RESET_FMT:-unknown}" \
+  --arg five_reset_epoch "${FIVE_HOUR_RESET:-}" \
+  --arg seven_reset_epoch "${SEVEN_DAY_RESET:-}" \
+  --arg five_momentum "${FIVE_MOMENTUM:-0}" \
+  --arg seven_momentum "${SEVEN_MOMENTUM:-0}" \
+  '{
+    timestamp: now,
+    five_hour: {
+      used_percentage: ($five_pct | tonumber),
+      reset_at: $five_reset,
+      reset_epoch: ($five_reset_epoch | tonumber? // null),
+      momentum: ($five_momentum | tonumber)
+    },
+    seven_day: {
+      used_percentage: ($seven_pct | tonumber),
+      reset_at: $seven_reset,
+      reset_epoch: ($seven_reset_epoch | tonumber? // null),
+      momentum: ($seven_momentum | tonumber)
+    }
+  }')
+
+echo "$USAGE_JSON" > "$USAGE_FILE" 2>/dev/null
+
+# ============================================================================
 # Output
 # ============================================================================
 echo -e "$LINE1"
