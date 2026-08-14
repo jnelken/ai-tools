@@ -71,6 +71,39 @@ if [ -d "$REPO_ROOT/hooks" ]; then
   echo ""
   echo "  Note: hooks are wired up via ~/.claude/settings.json — symlinking the script"
   echo "        alone doesn't enable execution. See hooks/README.md for required config."
+
+  # Diff symlinked hook scripts against settings.json to flag ones that are
+  # present on disk but not actually wired into any hooks.<EVENT> entry.
+  SETTINGS="$CLAUDE_DIR/settings.json"
+  if command -v jq >/dev/null 2>&1 && [ -f "$SETTINGS" ]; then
+    NOT_WIRED=()
+    for hook in "$REPO_ROOT/hooks"/*; do
+      [ -e "$hook" ] || continue
+      name="$(basename "$hook")"
+      case "$name" in
+        README*|*.md) continue ;;
+        # Wired outside settings.json's hooks tree — not applicable here.
+        enforce-claude-symlinks.sh) continue ;;  # git pre-commit hook (.git/hooks/pre-commit)
+        set-process-title.cjs) continue ;;       # loaded via env.NODE_OPTIONS, not hooks.*
+      esac
+      if ! jq -e --arg name "$name" \
+        '.hooks // {} | to_entries[] | .value[]? | .hooks[]? | select(.command? and (.command | contains($name)))' \
+        "$SETTINGS" >/dev/null 2>&1; then
+        NOT_WIRED+=("$name")
+      fi
+    done
+    if [ ${#NOT_WIRED[@]} -gt 0 ]; then
+      echo ""
+      echo "  ⚠ Symlinked but NOT wired in settings.json (inactive until added):"
+      for n in "${NOT_WIRED[@]}"; do
+        echo "     - $n"
+      done
+      echo "     See hooks/README.md for the exact settings.json entry for each."
+    else
+      echo ""
+      echo "  ✓ All hooks are wired in settings.json."
+    fi
+  fi
 fi
 
 # ── automations/ ──
