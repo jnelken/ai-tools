@@ -1,5 +1,5 @@
 #!/bin/bash
-# resume-superset-sessions: after a machine crash/power loss, Superset
+# resume-sswts: after a machine crash/power loss, Superset
 # restores terminal tabs (same terminal_id, a fresh idle `zsh -l`, and a
 # frozen visual snapshot that is renderer-side xterm state, NOT recoverable
 # data) but the `claude` process that used to live in each tab is gone.
@@ -892,7 +892,7 @@ apply_or_report_candidates() {
 # Main
 # ---------------------------------------------------------------------------
 
-echo "resume-superset-sessions: mode=$WORKSPACE_MODE${WS_QUERY:+ query=\"$WS_QUERY\"} apply=$APPLY window=${WINDOW_HOURS}h sweep=$SWEEP"
+echo "resume-sswts: mode=$WORKSPACE_MODE${WS_QUERY:+ query=\"$WS_QUERY\"} apply=$APPLY window=${WINDOW_HOURS}h sweep=$SWEEP"
 
 build_live_sessions_index
 process_workspaces

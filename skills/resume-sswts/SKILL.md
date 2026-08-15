@@ -1,9 +1,9 @@
 ---
-name: resume-superset-sessions
+name: resume-sswts
 description: Use after a machine crash, power loss, or forced restart to bring Claude Code sessions that were running inside Superset workspace terminal tabs back to life. Superset restores the tabs themselves (same terminal, a fresh idle shell) but the claude process inside each one is gone; this skill relaunches `claude --resume <session-id>` in the exact same tab it died in, and separately sweeps for crashed sessions that were running in plain (non-Superset) terminals. Trigger phrases include "resume my crashed sessions", "the machine died, bring my claude sessions back", "restore interrupted claude tabs", "my computer restarted, resume everything", "power went out, get my sessions back". Distinguishes a session that crashed mid-flight from one the user exited on purpose - only the former gets auto-resumed.
 ---
 
-# Resume Superset Sessions
+# Resume sswts
 
 Finds Superset terminal tabs that were hosting a live Claude Code session at
 the moment of a crash/reboot, and relaunches `claude --resume <session-id>`
@@ -122,32 +122,32 @@ Run from its own directory by absolute path — dry run first, always:
 # listing the available workspaces - it never silently falls back to scanning
 # all of them. Scope beyond the current workspace is always explicit: --all or
 # --workspace <query>.
-bash /Users/jake/code/ai-tools/skills/resume-superset-sessions/detect-and-resume.sh
+bash /Users/jake/code/ai-tools/skills/resume-sswts/detect-and-resume.sh
 
 # Dry run, every workspace on this host. If the workspace matching $PWD is
 # among them, it's reordered to the front (nothing is skipped) so its tabs
 # are classified - and therefore resumed - before any other workspace's.
-bash /Users/jake/code/ai-tools/skills/resume-superset-sessions/detect-and-resume.sh --all
+bash /Users/jake/code/ai-tools/skills/resume-sswts/detect-and-resume.sh --all
 
 # Dry run, one specific workspace from anywhere - matches id, name, branch,
 # project name, or worktree path (partial, case-insensitive). Exact-id match
 # wins outright; anything ambiguous errors out listing the matches.
-bash /Users/jake/code/ai-tools/skills/resume-superset-sessions/detect-and-resume.sh --workspace con-3485
+bash /Users/jake/code/ai-tools/skills/resume-sswts/detect-and-resume.sh --workspace con-3485
 
 # After reviewing the report, actually send the resume commands
-bash /Users/jake/code/ai-tools/skills/resume-superset-sessions/detect-and-resume.sh --apply
-bash /Users/jake/code/ai-tools/skills/resume-superset-sessions/detect-and-resume.sh --all --apply
+bash /Users/jake/code/ai-tools/skills/resume-sswts/detect-and-resume.sh --apply
+bash /Users/jake/code/ai-tools/skills/resume-sswts/detect-and-resume.sh --all --apply
 
 # Also resume dormant tabs (workspaces not viewed in Superset since reboot)
 # by opening NEW tabs in their origin workspaces; --close-ghosts disposes each
 # old ghost tab once its session is verified alive in the new one
-bash /Users/jake/code/ai-tools/skills/resume-superset-sessions/detect-and-resume.sh --all --create-tabs --close-ghosts --apply
+bash /Users/jake/code/ai-tools/skills/resume-sswts/detect-and-resume.sh --all --create-tabs --close-ghosts --apply
 
 # Tune the non-Superset lookback window (default 24h before boot time)
-bash /Users/jake/code/ai-tools/skills/resume-superset-sessions/detect-and-resume.sh --window 48
+bash /Users/jake/code/ai-tools/skills/resume-sswts/detect-and-resume.sh --window 48
 
 # Skip the non-Superset global sweep entirely
-bash /Users/jake/code/ai-tools/skills/resume-superset-sessions/detect-and-resume.sh --no-sweep
+bash /Users/jake/code/ai-tools/skills/resume-sswts/detect-and-resume.sh --no-sweep
 ```
 
 Show the user the dry-run report before doing anything else. If every

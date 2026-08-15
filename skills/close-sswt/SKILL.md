@@ -104,7 +104,7 @@ just this one:
 superset terminals list --workspace "$SUPERSET_WORKSPACE_ID" --json
 ```
 For any terminal besides this one, note whether it's idle or busy and, if bound to a
-Claude session (via the same `terminal_agent_bindings` mechanism [[resume-superset-sessions]]
+Claude session (via the same `terminal_agent_bindings` mechanism [[resume-sswts]]
 reads), what that session is doing. A busy sibling terminal is exactly the kind of thing
 someone would be furious to lose silently.
 
