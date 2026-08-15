@@ -3,6 +3,9 @@
 # session's handoff doc — updated_at + a one-line git diff --stat summary —
 # so the staleness sweep in session-doc-start.sh has an accurate signal.
 # No LLM call here on purpose: this fires every turn, so it has to be cheap.
+#
+# Also refreshes the durable global mirror (see session-doc-start.sh) at
+# the same cadence, so its updated_at stays an accurate liveness signal too.
 
 set -u  # NOT -e — graceful no-op on any failure
 
@@ -69,3 +72,30 @@ tmp="$file.tmp.$$"
   echo "---"
   printf '%s\n' "$body"
 } > "$tmp" && mv "$tmp" "$file"
+
+# --- Durable, worktree-independent mirror -----------------------------
+main_repo_root=$(git -C "$repo_root" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)
+main_repo_root="${main_repo_root%/.git}"
+[ -z "$main_repo_root" ] && exit 0
+
+repo_key="$(basename "$main_repo_root")-$(printf '%s' "$main_repo_root" | shasum -a 256 | cut -c1-8)"
+global_file="$HOME/.claude/state/repo-sessions/$repo_key/$session_id.md"
+[ -f "$global_file" ] || exit 0
+
+global_tmp="$global_file.tmp.$$"
+{
+  echo "---"
+  echo "session_id: $session_id"
+  echo "started_at: $started_at"
+  echo "started_at_epoch: $started_epoch"
+  echo "updated_at: $now_iso"
+  echo "updated_at_epoch: $now_epoch"
+  echo "branch: $branch"
+  echo "host: $host"
+  echo "cwd: $repo_root"
+  echo "main_repo_root: $main_repo_root"
+  echo "worktree_path: $repo_root"
+  [ -n "$diff_stat" ] && echo "last_diff_stat: \"$diff_stat\""
+  echo "---"
+  printf '%s\n' "$body"
+} > "$global_tmp" && mv "$global_tmp" "$global_file"

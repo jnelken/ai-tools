@@ -26,6 +26,29 @@ There are no sidecar files or indexes tied to the transcript — but the JSONL
 format is internal and changes between releases, so prefer the built-in
 mechanisms below over moving files by hand.
 
+## Repo-scoped fast path (try this first, from inside a git repo)
+
+Every session-doc-start/stop/end hook mirrors its handoff doc to
+`~/.claude/state/repo-sessions/<repo_key>/<session_id>.md` — a durable,
+worktree-independent location keyed by the repo's git-common-dir, so it
+survives the worktree that wrote it being torn down. If the search is
+happening from inside a git repo (rather than a bare keyword hunt with no
+repo context), check here before falling back to the broader search below:
+
+```bash
+main_repo_root=$(git rev-parse --path-format=absolute --git-common-dir)
+main_repo_root="${main_repo_root%/.git}"
+repo_key="$(basename "$main_repo_root")-$(printf '%s' "$main_repo_root" | shasum -a 256 | cut -c1-8)"
+ls -t ~/.claude/state/repo-sessions/"$repo_key"/*.md 2>/dev/null
+```
+
+Each doc's frontmatter names the session (`session_id`), where it was
+running (`worktree_path`), and whether it ended cleanly (`ended_cleanly:
+true` — absent for a crashed/killed or still-live session). Sort by
+`updated_at` to find the most recent unresolved one. This only covers
+sessions in personal (`jnelken`-owned) repos — the hooks that write these
+docs skip Concentro-Inc and other company repos entirely.
+
 ## Finding a lost session by keyword
 
 Delegate this search to a sub-agent when it's more than one quick grep — the

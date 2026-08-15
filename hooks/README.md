@@ -204,13 +204,15 @@ Remove the entry from `settings.json`, or `export HYGIENE_NUDGE_COOLDOWN_HOURS=9
 
 ## session-doc-start.sh + session-doc-stop.sh + session-doc-end.sh
 
-Gives every Claude Code session running inside a git worktree a small, live "what's happening here right now" doc at `.claude-sessions/<session_id>.md` (worktree root) — so another device or agent glancing at the directory can see active work in flight, including a session ID, branch, host, and a handoff-oriented body. Meant as a **live presence indicator**, not a durable log: it's created at session start, kept fresh through the session, and removed on clean exit.
+Gives every Claude Code session running inside a git worktree a small, live "what's happening here right now" doc at `.claude-sessions/<session_id>.md` (worktree root) — so another device or agent glancing at the directory can see active work in flight, including a session ID, branch, host, and a handoff-oriented body. This local doc is a **live presence indicator**, not a durable log: it's created at session start, kept fresh through the session, and removed on clean exit — which means it's destroyed along with the worktree if the worktree is torn down before a clean exit (`close-sswt`, `git worktree remove`, `superset workspaces delete`).
 
-- **`session-doc-start.sh`** (`SessionStart`) — creates/refreshes `.claude-sessions/<session_id>.md` (preserving `started_at` and the body across a resume), and sweeps every *other* doc in the same dir whose `updated_at` is older than `SESSION_DOC_STALE_HOURS` (default `6`). Injects a standing instruction via `additionalContext` telling the assistant to keep the body updated with 2–4 sentences on current work + next steps.
-- **`session-doc-stop.sh`** (`Stop`, fires after every assistant turn) — mechanical-only refresh (no LLM call, since this fires every turn): bumps `updated_at` and records a one-line `git diff --stat` summary. Keeps the staleness signal accurate between narrative updates.
-- **`session-doc-end.sh`** (`SessionEnd`) — deletes this session's own doc on clean exit.
+To survive that, every write to the local doc is mirrored to a second, durable copy outside any worktree: `~/.claude/state/repo-sessions/<repo_key>/<session_id>.md`, where `repo_key` is derived from the repo's git-common-dir (`basename` + an 8-char sha256 of the full path) — the same value from any linked worktree of the repo or the main checkout. Same frontmatter/body as the local doc, plus `main_repo_root`, `worktree_path` (mirrors `cwd`, kept for clarity once read outside the worktree that wrote it), and `ended_cleanly`.
 
-Cleanup is **staleness-based, not liveness-based** — a doc is swept purely by its `updated_at` age, never by checking whether the session that wrote it is still running. A crashed or `kill -9`'d session's doc just ages out on the next `SessionStart` sweep in that worktree; nothing needs to detect the crash.
+- **`session-doc-start.sh`** (`SessionStart`) — creates/refreshes `.claude-sessions/<session_id>.md` (preserving `started_at` and the body across a resume) and its global mirror; sweeps every *other* local doc in the same dir whose `updated_at` is older than `SESSION_DOC_STALE_HOURS` (default `6`), and separately sweeps global docs already marked `ended_cleanly: true` whose `updated_at` is older than `SESSION_DOC_GLOBAL_STALE_DAYS` (default `30`) — an unresolved global doc is never swept by age alone. Injects a standing instruction via `additionalContext` telling the assistant to keep the body updated with 2–4 sentences on current work + next steps; if other global docs for this repo look orphaned (not `ended_cleanly`, and either their `worktree_path` no longer exists or they've gone quiet 15+ minutes), the count and path are appended to that same context as a discovery nudge — mention only, doesn't act.
+- **`session-doc-stop.sh`** (`Stop`, fires after every assistant turn) — mechanical-only refresh (no LLM call, since this fires every turn): bumps `updated_at` and records a one-line `git diff --stat` summary, on both the local doc and its global mirror. Keeps the staleness signal accurate between narrative updates.
+- **`session-doc-end.sh`** (`SessionEnd`) — deletes this session's own local doc on clean exit. The global mirror is **not** deleted — it's rewritten with `ended_cleanly: true` instead, so retention depends on how the session actually ended rather than on an unverified assumption about whether `SessionEnd` fires cleanly when a workspace's terminals are killed out from under it.
+
+Local-doc cleanup is **staleness-based, not liveness-based** — swept purely by `updated_at` age, never by checking whether the session that wrote it is still running. A crashed or `kill -9`'d session's local doc just ages out on the next `SessionStart` sweep in that worktree; its global mirror persists (without `ended_cleanly: true`) until something resolves it, since nothing here can distinguish "crashed" from "still running elsewhere" by age alone.
 
 ### Requirements
 
@@ -251,14 +253,15 @@ Add to `~/.claude/settings.json` (alongside any existing `SessionStart` entries 
 
 ### Known limitations
 
-- Cross-device pickup rides on whatever syncs the worktree itself (e.g. Dropbox for repos under `~/Dropbox/code`). Root checkouts (`~/code/woodrow`, `~/code/api`) and sswt workspaces won't sync a doc to another device on their own.
+- Cross-device pickup rides on whatever syncs the worktree itself (e.g. Dropbox for repos under `~/Dropbox/code`). Root checkouts (`~/code/woodrow`, `~/code/api`) and sswt workspaces won't sync a doc to another device on their own. The global mirror doesn't help here either — `~/.claude/state/` is machine-local, so it survives worktree teardown but not a device switch.
 - The narrative body is only as good as the assistant keeping it updated — nothing mechanically enforces that beyond the frontmatter timestamps.
+- The `ended_cleanly` semantics rest on an unverified assumption: that a `superset workspaces delete` kill doesn't also fire `SessionEnd` cleanly for terminals it kills. If it turns out `SessionEnd` *does* fire reliably there, global docs would end up marked `ended_cleanly: true` (and eventually swept) even for teardown-interrupted work — worth confirming empirically before relying on this for anything high-stakes.
 
 ### Relationship to NEXT-STEPS.md and IN_PROGRESS.md
 
 Three different repo-root files can legitimately coexist under `~/Dropbox/code`, each owned by a different mechanism with different update semantics — don't merge them:
 
-- **`.claude-sessions/<id>.md`** (this hook family) — live, per-session, ephemeral. Gone the moment a session exits cleanly; only lingers past that if the session crashed, until the next staleness sweep.
+- **`.claude-sessions/<id>.md`** (this hook family) — live, per-session, ephemeral. Gone the moment a session exits cleanly; only lingers past that if the session crashed, until the next staleness sweep. Its global mirror at `~/.claude/state/repo-sessions/<repo_key>/<id>.md` survives worktree teardown and clean exit alike (marked `ended_cleanly: true` rather than deleted), so it's the one to check via [[move-session]] after a worktree that had in-progress work is gone.
 - **`NEXT-STEPS.md`** ([[wrapup-repos]]) — one wrap-up run's snapshot, overwritten wholesale each time it runs. `wrapup-repos` also **reads** `.claude-sessions/*.md` as one of its signal sources: a live doc makes it skip that repo entirely (same tier as a mid-rebase repo); a crashed session's doc feeds its "understand the direction" step, since it's the only record of what that session was doing.
 - **`IN_PROGRESS.md`** ([[close-out]]) — a durable, reconciled log of open questions across many sessions, appended-to rather than overwritten.
 

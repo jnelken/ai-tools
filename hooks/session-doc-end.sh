@@ -3,6 +3,16 @@
 # Best-effort — if this is missed (crash, kill -9), the doc self-heals via
 # the staleness sweep in session-doc-start.sh next time this worktree
 # starts a session.
+#
+# The durable global mirror (see session-doc-start.sh) is handled
+# differently: it is never deleted here, only marked ended_cleanly: true.
+# `superset workspaces delete` kills every terminal in a workspace, and
+# whether SessionEnd fires cleanly on that kill the same way it does on a
+# normal /exit is unverified — an unconditional delete would risk erasing
+# the exact interrupted-work record this mirror exists to preserve, at
+# the moment it matters most. Marking clean-vs-not makes retention depend
+# on how the session actually ended, not on an assumption about hook
+# timing.
 
 set -u  # NOT -e — graceful no-op on any failure
 
@@ -37,3 +47,40 @@ if [ -n "$origin_url" ]; then
 fi
 
 rm -f "$repo_root/.claude-sessions/$session_id.md" 2>/dev/null || true
+
+# --- Durable, worktree-independent mirror -----------------------------
+main_repo_root=$(git -C "$repo_root" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)
+main_repo_root="${main_repo_root%/.git}"
+[ -z "$main_repo_root" ] && exit 0
+
+repo_key="$(basename "$main_repo_root")-$(printf '%s' "$main_repo_root" | shasum -a 256 | cut -c1-8)"
+global_file="$HOME/.claude/state/repo-sessions/$repo_key/$session_id.md"
+[ -f "$global_file" ] || exit 0
+
+get_field() { grep -m1 "^$1:" "$global_file" 2>/dev/null | sed "s/^$1: *//"; }
+started_at=$(get_field started_at)
+started_epoch=$(get_field started_at_epoch)
+branch=$(get_field branch)
+host=$(get_field host)
+body=$(awk '/^---$/{c++; next} c>=2' "$global_file")
+
+now_epoch=$(date +%s)
+now_iso=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+
+global_tmp="$global_file.tmp.$$"
+{
+  echo "---"
+  echo "session_id: $session_id"
+  echo "started_at: $started_at"
+  echo "started_at_epoch: $started_epoch"
+  echo "updated_at: $now_iso"
+  echo "updated_at_epoch: $now_epoch"
+  echo "branch: $branch"
+  echo "host: $host"
+  echo "cwd: $repo_root"
+  echo "main_repo_root: $main_repo_root"
+  echo "worktree_path: $repo_root"
+  echo "ended_cleanly: true"
+  echo "---"
+  printf '%s\n' "$body"
+} > "$global_tmp" && mv "$global_tmp" "$global_file"
