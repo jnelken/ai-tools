@@ -9,6 +9,7 @@ Personal AI coding tools — Claude Code and Cursor skills, slash commands, hook
 | Skill | Purpose |
 |---|---|
 | [`babysit-pr`](skills/babysit-pr) | Iteratively address automated reviewer threads (Codex, CodeRabbit, etc.) on the current PR |
+| [`logo-gestalt`](skills/logo-gestalt) | Gestalt logo design: symbol inventory, shared-vector matching, SVG + raster preview board, vision critique |
 | [`cleanup-local-branches`](skills/cleanup-local-branches) | Phased cross-repo cleanup of stale branches + worktrees with reflog-recovery log |
 | [`datadog-tofu-sync`](skills/datadog-tofu-sync) | Reconcile `infra/datadog/` (OpenTofu) with live Datadog state — import monitors, fix stale IDs |
 | [`datadog-tool-selection`](skills/datadog-tool-selection) | Guide for picking the right Datadog tool for an observability question |
