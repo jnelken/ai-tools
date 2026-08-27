@@ -256,13 +256,13 @@ Otherwise:
    ROUNDS=$(cat "$GIT_DIR/peer-review-rounds" 2>/dev/null || echo 0)
    EFFORT="${CLAUDE_EFFORT:-default}"
    ```
-   State the model you're running as from your own system context (there's no env var for it — e.g. "Claude Sonnet 5").
+   State the model you're running as from your own system context (there's no env var for it — e.g. "Claude Sonnet 5"). This line credits Codex with the review and you with triaging/applying the findings — don't collapse it into "reviewed with <model>", which misattributes the review itself to you.
 
 4. Post one comment (a fresh comment each time this step runs — not an edit-in-place). The body is two parts, in this order: the round-count/model line, then a blank line, then a short prose **summary** — the same substance you'd give the user directly in chat, not the raw step-6 table. Reference the specific fix(es) (file:line or a one-line description of the bug) and the commit SHA(s); if a round found nothing, say so plainly ("No issues found."). If step 8 runs after multiple `/loop` rounds, the summary covers the cumulative set of fixes across *all* rounds since the last push/notify, not just the final one — synthesize from every round's step-6 report you generated this session, not only the last.
 
    ```bash
    gh pr comment "$PR_NUM" --body "$(cat <<EOF
-Local peer review: $ROUNDS round(s) of \`codex review\` completed before this push (reviewed with <model>, reasoning effort: $EFFORT).
+Local peer review: $ROUNDS round(s) of \`codex review\` completed before this push (findings triaged and applied by <model>, reasoning effort: $EFFORT).
 
 <summary>
 EOF
@@ -271,7 +271,7 @@ EOF
 
    Example:
    ```
-   Local peer review: 1 round of `codex review` completed before this push (reviewed with Claude Sonnet 5, reasoning effort: high).
+   Local peer review: 1 round of `codex review` completed before this push (findings triaged and applied by Claude Sonnet 5, reasoning effort: high).
 
    Found one real bug: `groupKey` used `??`, which only falls back on null/undefined — so items with `label: ""` (rather than `null`) all collapsed into a single group and got hidden as spurious duplicates of one another. Fixed by falling back with `||` instead, added a regression test for the empty-string case, and re-ran the full suite clean (committed as `abc1234de`).
    ```
