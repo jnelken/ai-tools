@@ -1,7 +1,6 @@
 ---
 name: pr-review-gaps
-description: Use when auditing which open sswt-tracked PRs across api/woodrow/folio-platform have not yet been posted to the #pr-review Slack channel, and optionally posting the gaps after confirmation. Trigger phrases include "check pr-review gaps", "which PRs haven't been posted to pr-review", "find unshared PRs", "audit the pr-review channel", "sswt PRs not shared yet".
----
+description: "Use when auditing which open sswt-tracked PRs across api/woodrow/folio-platform have not yet been posted to the #pr-review Slack channel, and optionally posting the gaps after confirmation. Trigger phrases include \"check pr-review gaps\", \"which PRs haven't been posted to pr-review\", \"find unshared PRs\", \"audit the pr-review channel\", \"sswt PRs not shared yet\"."---
 
 # PR Review Gaps
 
