@@ -2,6 +2,7 @@
 # Claude Code PreToolUse hook on Bash: blocks any `git push` whose target
 # resolves to the `main` branch. Pushes from the user's own terminal are
 # unaffected — this only fires when Claude initiates the bash call.
+# Opt-in per repo via a denylist (see step 0) — off everywhere else.
 set -u
 
 input=$(cat)
@@ -18,21 +19,36 @@ deny() {
   exit 0
 }
 
-# 0. Repo root is explicitly allowlisted — skip every check below. One
-# absolute repo path per line in the allowlist file; '#' comments and blank
-# lines ignored. Keeps the block globally on for every other repo.
-allowlist="$HOME/.claude/hooks/block-push-to-main.allowlist"
-if [[ -f "$allowlist" ]]; then
-  repo_root=$(git -C "${CLAUDE_PROJECT_DIR:-.}" rev-parse --show-toplevel 2>/dev/null || true)
-  if [[ -n "$repo_root" ]]; then
-    while IFS= read -r line; do
-      line="${line%%#*}"
-      line="$(printf '%s' "$line" | sed -E 's/^[[:space:]]+|[[:space:]]+$//g')"
-      [[ -z "$line" ]] && continue
-      [[ "$line" == "$repo_root" ]] && exit 0
-    done < "$allowlist"
-  fi
+# 0. Only enforce in repos listed in the denylist. One repo name per line;
+# matched against the `origin` remote's repo name (works across worktrees
+# and Superset workspaces, which live at unrelated paths), falling back to
+# the repo root directory name when there's no remote. '#' comments and
+# blank lines ignored. No denylist file, no match, or no repo at all -> allow.
+denylist="$HOME/.claude/hooks/block-push-to-main.denylist"
+[[ -f "$denylist" ]] || exit 0
+
+repo_root=$(git -C "${CLAUDE_PROJECT_DIR:-.}" rev-parse --show-toplevel 2>/dev/null || true)
+[[ -n "$repo_root" ]] || exit 0
+
+remote_url=$(git -C "$repo_root" remote get-url origin 2>/dev/null || true)
+if [[ -n "$remote_url" ]]; then
+  repo_name="${remote_url%.git}"
+  repo_name="${repo_name##*/}"
+else
+  repo_name="${repo_root##*/}"
 fi
+
+matched=0
+while IFS= read -r line; do
+  line="${line%%#*}"
+  line="$(printf '%s' "$line" | sed -E 's/^[[:space:]]+|[[:space:]]+$//g')"
+  [[ -z "$line" ]] && continue
+  if [[ "$line" == "$repo_name" ]]; then
+    matched=1
+    break
+  fi
+done < "$denylist"
+[[ "$matched" -eq 1 ]] || exit 0
 
 # 1. Not a git push? Allow.
 [[ "$cmd" =~ git[[:space:]]+push ]] || exit 0
