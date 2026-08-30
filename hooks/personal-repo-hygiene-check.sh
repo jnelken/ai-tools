@@ -1,22 +1,42 @@
 #!/usr/bin/env bash
-# SessionStart hook: nudge repo hygiene conventions when a session opens
-# inside a git repo. Four independent, best-effort checks:
-#   1. plan docs live under docs/plans/ (or docs/plans/archive/)
-#   2. if an ADR dir already exists, its entries follow the convention
-#   3. PRODUCT.md + DESIGN.md both missing -> suggest /impeccable
-#   4. .superset/config.json missing -> suggest /superset-config
-#   5. ROADMAP.md missing or a stub -> surface it (CLAUDE.md owns the call);
-#      opt out per-repo with a .noroadmap file at the repo root
+# SessionStart hook (SYNC): surface repo hygiene for the repo this session is
+# actually in, plus a one-line pointer to problems elsewhere.
+#
+# Split of labor with hygiene-scan-all.sh (the async sibling):
+#   - This hook checks the CWD repo LIVE every session (~0.2s). The repo you're
+#     working in is the one most likely to have changed, so it is never served
+#     from cache.
+#   - ~/.claude/HYGIENE.md holds the other repos, refreshed in the background at
+#     most daily. We read at most ONE summary line from it — never inject the
+#     whole report into context.
+#
+# All checks live in lib/hygiene-checks.sh, shared with the scanner so the two
+# can't drift.
 #
 # Never blocks a session: every failure mode is a silent no-op.
-#
 # State: ~/.claude/state/hygiene-nudges/<repo-hash>.json holds
-# last_nudged_at_epoch, so a repo you open ten times a day only gets
-# nudged once per HYGIENE_NUDGE_COOLDOWN_HOURS (default 24).
+# last_nudged_at_epoch, so a repo opened ten times a day nudges once per
+# HYGIENE_NUDGE_COOLDOWN_HOURS (default 24). Tier-1 problems ignore the
+# cooldown — a corrupt .git or a 300-day-old unpushed commit is not a nudge.
 
 set -u  # NOT -e — graceful no-op on any failure
 
 command -v jq >/dev/null 2>&1 || exit 0
+
+# Resolve through the ~/.claude/hooks/ symlink — that's how settings.json
+# invokes this, and dirname of the symlink is NOT where lib/ lives.
+_src="${BASH_SOURCE[0]}"
+while [ -L "$_src" ]; do
+  _dir=$(cd -P "$(dirname "$_src")" 2>/dev/null && pwd)
+  _src=$(readlink "$_src")
+  case "$_src" in /*) ;; *) _src="$_dir/$_src" ;; esac
+done
+LIB="$(cd -P "$(dirname "$_src")" 2>/dev/null && pwd)/lib/hygiene-checks.sh"
+[ -r "$LIB" ] || exit 0
+# shellcheck source=lib/hygiene-checks.sh
+. "$LIB" || exit 0
+
+REPORT="${HYGIENE_REPORT:-$HOME/.claude/HYGIENE.md}"
 
 input=$(cat 2>/dev/null || true)
 cwd=$(printf '%s' "$input" | jq -r '.cwd // empty' 2>/dev/null || true)
@@ -25,138 +45,59 @@ cwd="${cwd:-$PWD}"
 repo_root=$(cd "$cwd" 2>/dev/null && git rev-parse --show-toplevel 2>/dev/null || true)
 [ -z "$repo_root" ] && exit 0
 
-# Personal-repo gate: only run inside repos owned by an allowed GitHub
-# owner (default: jnelken) — never Concentro-Inc or any other org. A repo
-# with no configured origin remote is treated as personal (local-only
-# scratch work, not a cloned company repo).
-personal_owners="${PERSONAL_REPO_OWNERS:-jnelken}"
-origin_url=$(git -C "$repo_root" remote get-url origin 2>/dev/null || true)
-if [ -n "$origin_url" ]; then
-  is_personal=0
-  old_ifs="$IFS"; IFS=','
-  for owner in $personal_owners; do
-    case "$origin_url" in
-      *"github.com:$owner/"*|*"github.com/$owner/"*) is_personal=1 ;;
-    esac
-  done
-  IFS="$old_ifs"
-  [ "$is_personal" -eq 1 ] || exit 0
-fi
+hygiene_is_personal_repo "$repo_root" || exit 0
 
-command -v shasum >/dev/null 2>&1 || exit 0
-repo_hash=$(printf '%s' "$repo_root" | shasum -a 256 | cut -c1-16)
+# --- live check of THIS repo ------------------------------------------------
+out=$(hygiene_scan_repo "$repo_root" 2>/dev/null)
+problems=$(printf '%s\n' "$out" | sed -n 's/^PROBLEM://p')
+missing=$(printf '%s\n' "$out" | sed -n 's/^MISSING://p' | paste -sd, - | sed 's/,/, /g')
 
-state_dir="$HOME/.claude/state/hygiene-nudges"
-mkdir -p "$state_dir" 2>/dev/null || exit 0
-state_file="$state_dir/$repo_hash.json"
-
-cooldown_hours="${HYGIENE_NUDGE_COOLDOWN_HOURS:-24}"
-cooldown_seconds=$(( cooldown_hours * 3600 ))
-now_epoch=$(date +%s)
-
-if [ -f "$state_file" ]; then
-  last_epoch=$(jq -r '.last_nudged_at_epoch // 0' "$state_file" 2>/dev/null || echo 0)
-  case "$last_epoch" in ''|*[!0-9]*) last_epoch=0 ;; esac
-  if [ "$now_epoch" -lt "$(( last_epoch + cooldown_seconds ))" ]; then
-    exit 0
+# --- cooldown applies to advisory notes only, never to real problems --------
+show_advisory=1
+if command -v shasum >/dev/null 2>&1; then
+  repo_hash=$(printf '%s' "$repo_root" | shasum -a 256 | cut -c1-16)
+  state_dir="$HOME/.claude/state/hygiene-nudges"
+  mkdir -p "$state_dir" 2>/dev/null
+  state_file="$state_dir/$repo_hash.json"
+  cooldown_hours="${HYGIENE_NUDGE_COOLDOWN_HOURS:-24}"
+  now_epoch=$(date +%s)
+  if [ -f "$state_file" ]; then
+    last_epoch=$(jq -r '.last_nudged_at_epoch // 0' "$state_file" 2>/dev/null || echo 0)
+    case "$last_epoch" in ''|*[!0-9]*) last_epoch=0 ;; esac
+    [ "$now_epoch" -lt "$(( last_epoch + cooldown_hours * 3600 ))" ] && show_advisory=0
   fi
+  [ "$show_advisory" -eq 1 ] && \
+    jq -n --arg t "$now_epoch" '{"last_nudged_at_epoch": ($t | tonumber)}' > "$state_file" 2>/dev/null
 fi
 
-notes=()
-
-# --- 1. plan docs location -------------------------------------------------
-plan_hits=()
-while IFS= read -r f; do
-  [ -z "$f" ] && continue
-  base=$(basename "$f")
-  if printf '%s' "$base" | grep -qiE 'plan'; then
-    plan_hits+=("${f#"$repo_root"/}")
-  elif head -5 "$f" 2>/dev/null | grep -q '\*\*Suggested execution:\*\*'; then
-    plan_hits+=("${f#"$repo_root"/}")
-  fi
-done < <(find "$repo_root" "$repo_root/docs" -maxdepth 1 -iname '*.md' 2>/dev/null)
-
-if [ "${#plan_hits[@]}" -gt 0 ]; then
-  joined=$(IFS=', '; echo "${plan_hits[*]}")
-  notes+=("Plan-looking doc(s) outside docs/plans/: $joined. Consider moving them to docs/plans/ (or docs/plans/archive/ if superseded).")
+notes=""
+if [ -n "$problems" ]; then
+  while IFS= read -r p; do
+    [ -n "$p" ] && notes="$notes
+- $p"
+  done <<< "$problems"
+fi
+if [ "$show_advisory" -eq 1 ] && [ -n "$missing" ]; then
+  notes="$notes
+- Missing here: $missing. Offer these only if this session gives a real reason to (see the ROADMAP.md / docs conventions in CLAUDE.md); don't create them unprompted."
 fi
 
-# --- 2. ADR practice (only if already adopted) ------------------------------
-adr_dir=""
-for d in docs/adr docs/decisions adr; do
-  if [ -d "$repo_root/$d" ]; then
-    adr_dir="$repo_root/$d"
-    break
-  fi
-done
-
-if [ -n "$adr_dir" ]; then
-  adr_issues=()
-  while IFS= read -r f; do
-    [ -z "$f" ] && continue
-    base=$(basename "$f")
-    ok=1
-    printf '%s' "$base" | grep -qE '^[0-9]{4}-.+\.md$' || ok=0
-    grep -qiE '^status:' "$f" 2>/dev/null || ok=0
-    [ "$ok" -eq 0 ] && adr_issues+=("$base")
-  done < <(find "$adr_dir" -maxdepth 1 -iname '*.md' 2>/dev/null)
-
-  if [ "${#adr_issues[@]}" -gt 0 ]; then
-    joined=$(IFS=', '; echo "${adr_issues[*]}")
-    notes+=("ADR dir ${adr_dir#"$repo_root"/} has entries not following NNNN-title.md + a Status: field: $joined.")
-  fi
+# --- one summary line for every OTHER repo, read from the cached report ------
+other=""
+if [ -f "$REPORT" ]; then
+  this_name=$(basename "$repo_root")
+  other=$(awk -v skip="$this_name" '
+    /^## /      { repo = substr($0, 4); next }
+    /^  - /     { if (repo != skip && repo != "") { print repo; repo = "" } }
+  ' "$REPORT" 2>/dev/null | sort -u | paste -sd, - | sed 's/,/, /g')
+fi
+if [ -n "$other" ]; then
+  n=$(printf '%s' "$other" | awk -F', ' '{print NF}')
+  notes="$notes
+- $n other repo(s) have open problems: $other — details in \`$REPORT\` (don't act on these unless asked)."
 fi
 
-# --- 3. PRODUCT.md + DESIGN.md ---------------------------------------------
-if [ ! -f "$repo_root/PRODUCT.md" ] && [ ! -f "$repo_root/DESIGN.md" ]; then
-  notes+=("No PRODUCT.md or DESIGN.md found. Consider running /impeccable to establish product/design docs.")
-fi
+[ -z "$notes" ] && exit 0
 
-# --- 4. superset-config -------------------------------------------------
-if [ ! -f "$repo_root/.superset/config.json" ]; then
-  notes+=("No .superset/config.json found. Consider running /superset-config to set up setup/run/teardown scripts.")
-fi
-
-# --- 5. ROADMAP.md present and non-stub ------------------------------------
-# Surfaces the fact only; the "ROADMAP.md in Personal Repos" section of
-# CLAUDE.md owns the judgment call about whether this repo has earned one.
-# Deliberately does NOT tell the agent to create it unprompted.
-# Per-repo opt-out for repos that will never want one (tooling, dotfiles,
-# scratch). Mirrors the .nowrapup file the wrapup-repos skill honors; travels
-# with the repo. Never create or modify it — it's the user's toggle.
-if [ -f "$repo_root/.noroadmap" ]; then
-  roadmap="opted-out"
-else
-  roadmap=""
-  for f in ROADMAP.md docs/ROADMAP.md; do
-    [ -f "$repo_root/$f" ] && { roadmap="$repo_root/$f"; break; }
-  done
-fi
-
-if [ "$roadmap" = "opted-out" ]; then
-  : # .noroadmap present — stay silent
-elif [ -z "$roadmap" ]; then
-  notes+=("No ROADMAP.md found. If this session surfaces real directional signal (a stub, a half-wired integration, recurring \"we should eventually...\" threads), offer to start one per the ROADMAP.md convention in CLAUDE.md — model it on ~/Dropbox/code/dubsketch/ROADMAP.md. Skip it if there's no real signal.")
-else
-  # Substantive = non-blank, not a heading, not a rule/table-divider, not a
-  # bare link line. A title-plus-TBD stub scores 0-1 and reads as empty.
-  substantive=$(grep -vE '^\s*$|^\s*#|^\s*[-=_*]{3,}\s*$|^\s*\|' "$roadmap" 2>/dev/null \
-    | grep -vE '^\s*(TBD|TODO|WIP|Coming soon)\.?\s*$' \
-    | wc -l | tr -d ' ')
-  case "$substantive" in ''|*[!0-9]*) substantive=0 ;; esac
-  if [ "$substantive" -lt 3 ]; then
-    notes+=("${roadmap#"$repo_root"/} exists but looks like a stub ($substantive substantive lines). If this session clarified where the project is headed, offer to fill it in per the ROADMAP.md convention in CLAUDE.md.")
-  fi
-fi
-
-jq -n --arg t "$now_epoch" '{"last_nudged_at_epoch": ($t | tonumber)}' > "$state_file" 2>/dev/null || true
-
-[ "${#notes[@]}" -eq 0 ] && exit 0
-
-message="Repo hygiene check ($repo_root):"
-for n in "${notes[@]}"; do
-  message="$message
-- $n"
-done
-
+message="Repo hygiene ($repo_root):$notes"
 jq -n --arg ctx "$message" '{"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":$ctx}}'
