@@ -5,6 +5,8 @@
 #   2. if an ADR dir already exists, its entries follow the convention
 #   3. PRODUCT.md + DESIGN.md both missing -> suggest /impeccable
 #   4. .superset/config.json missing -> suggest /superset-config
+#   5. ROADMAP.md missing or a stub -> surface it (CLAUDE.md owns the call);
+#      opt out per-repo with a .noroadmap file at the repo root
 #
 # Never blocks a session: every failure mode is a silent no-op.
 #
@@ -113,6 +115,38 @@ fi
 # --- 4. superset-config -------------------------------------------------
 if [ ! -f "$repo_root/.superset/config.json" ]; then
   notes+=("No .superset/config.json found. Consider running /superset-config to set up setup/run/teardown scripts.")
+fi
+
+# --- 5. ROADMAP.md present and non-stub ------------------------------------
+# Surfaces the fact only; the "ROADMAP.md in Personal Repos" section of
+# CLAUDE.md owns the judgment call about whether this repo has earned one.
+# Deliberately does NOT tell the agent to create it unprompted.
+# Per-repo opt-out for repos that will never want one (tooling, dotfiles,
+# scratch). Mirrors the .nowrapup file the wrapup-repos skill honors; travels
+# with the repo. Never create or modify it — it's the user's toggle.
+if [ -f "$repo_root/.noroadmap" ]; then
+  roadmap="opted-out"
+else
+  roadmap=""
+  for f in ROADMAP.md docs/ROADMAP.md; do
+    [ -f "$repo_root/$f" ] && { roadmap="$repo_root/$f"; break; }
+  done
+fi
+
+if [ "$roadmap" = "opted-out" ]; then
+  : # .noroadmap present — stay silent
+elif [ -z "$roadmap" ]; then
+  notes+=("No ROADMAP.md found. If this session surfaces real directional signal (a stub, a half-wired integration, recurring \"we should eventually...\" threads), offer to start one per the ROADMAP.md convention in CLAUDE.md — model it on ~/Dropbox/code/dubsketch/ROADMAP.md. Skip it if there's no real signal.")
+else
+  # Substantive = non-blank, not a heading, not a rule/table-divider, not a
+  # bare link line. A title-plus-TBD stub scores 0-1 and reads as empty.
+  substantive=$(grep -vE '^\s*$|^\s*#|^\s*[-=_*]{3,}\s*$|^\s*\|' "$roadmap" 2>/dev/null \
+    | grep -vE '^\s*(TBD|TODO|WIP|Coming soon)\.?\s*$' \
+    | wc -l | tr -d ' ')
+  case "$substantive" in ''|*[!0-9]*) substantive=0 ;; esac
+  if [ "$substantive" -lt 3 ]; then
+    notes+=("${roadmap#"$repo_root"/} exists but looks like a stub ($substantive substantive lines). If this session clarified where the project is headed, offer to fill it in per the ROADMAP.md convention in CLAUDE.md.")
+  fi
 fi
 
 jq -n --arg t "$now_epoch" '{"last_nudged_at_epoch": ($t | tonumber)}' > "$state_file" 2>/dev/null || true
