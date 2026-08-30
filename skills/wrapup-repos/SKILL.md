@@ -28,8 +28,12 @@ Candidate repos are the direct children of `/Users/jake/Dropbox/code`.
   `build/`, `*.log`, caches). Respect `.gitignore`. If dirty files look like they should NOT be
   committed, leave them unstaged and note it in NEXT-STEPS.md.
 - Touch ONLY the single repo you select. Never modify files outside it.
-- SKIP any repo mid-operation: if `.git/MERGE_HEAD`, `.git/rebase-merge`, `.git/rebase-apply`, or
-  `.git/CHERRY_PICK_HEAD` exists, do not touch it — pick a different repo.
+- SKIP any repo that fails the shared preflight: run `~/dotfiles/bin/git-safe-to-autocommit <repo>`
+  and pick a different repo on a non-zero exit. It refuses repos mid-rebase/merge/cherry-pick/revert/
+  bisect and repos with a detached HEAD (committing there orphans the work onto no branch). This
+  script is the single source of truth, shared with the dotfiles auto-sync shell hook — don't
+  reimplement the check inline here; a divergent inlined copy is what let the hook commit on top of
+  a stuck rebase for two weeks unnoticed.
 - SKIP any repo with a **live** session doc: if any `.claude-sessions/*.md` at the repo root has
   `updated_at_epoch` within the last 15 minutes, someone is actively working there right now — do
   not touch it, pick a different repo. (These docs are written by this machine's session-doc hooks;

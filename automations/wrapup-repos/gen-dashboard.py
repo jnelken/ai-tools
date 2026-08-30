@@ -14,7 +14,7 @@ import subprocess
 from datetime import datetime, timezone
 
 HOME = os.path.expanduser("~")
-ROOT = os.path.join(HOME, ".claude/automations/worktree-wrapup")
+ROOT = os.path.join(HOME, ".claude/automations/wrapup-repos")
 LOGDIR = os.path.join(ROOT, "logs")
 CODE_DIR = os.path.join(HOME, "Dropbox/code")
 OUT = os.path.join(ROOT, "dashboard.html")

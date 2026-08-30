@@ -1,9 +1,9 @@
 #!/bin/zsh
-# Off-peak repo wrap-up — launched by launchd (com.jake.worktree-wrapup).
+# Off-peak repo wrap-up — launched by launchd (com.jake.wrapup-repos).
 # Runs claude headless over ~/Dropbox/code. Safe to run manually to test.
 set -u
 
-ROOT="/Users/jake/.claude/automations/worktree-wrapup"
+ROOT="/Users/jake/.claude/automations/wrapup-repos"
 CODE_DIR="/Users/jake/Dropbox/code"
 CLAUDE="/Users/jake/.local/bin/claude"
 MODEL="claude-sonnet-5"          # change to claude-opus-4-8 for max quality (higher quota cost)
@@ -20,7 +20,7 @@ LOG="$LOGDIR/run-$STAMP.log"
 find "$LOGDIR" -name 'run-*.log' -mtime +30 -delete 2>/dev/null
 
 {
-  echo "=== worktree-wrapup run $STAMP ($(date)) ==="
+  echo "=== wrapup-repos run $STAMP ($(date)) ==="
   echo "model=$MODEL  cwd=$CODE_DIR"
   cd "$CODE_DIR" || { echo "FATAL: cannot cd to $CODE_DIR"; exit 1; }
   [ -x "$CLAUDE" ] || { echo "FATAL: claude not found at $CLAUDE"; exit 1; }

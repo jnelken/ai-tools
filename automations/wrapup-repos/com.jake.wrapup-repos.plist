@@ -3,12 +3,12 @@
 <plist version="1.0">
 <dict>
 	<key>Label</key>
-	<string>com.jake.worktree-wrapup</string>
+	<string>com.jake.wrapup-repos</string>
 
 	<key>ProgramArguments</key>
 	<array>
 		<string>/bin/zsh</string>
-		<string>/Users/jake/.claude/automations/worktree-wrapup/run.sh</string>
+		<string>/Users/jake/.claude/automations/wrapup-repos/run.sh</string>
 	</array>
 
 	<!-- Off-peak, local time (handles DST automatically): 2:45am, 7:45am, 12:45pm, 5:45pm.
@@ -28,8 +28,8 @@
 	<string>Background</string>
 
 	<key>StandardOutPath</key>
-	<string>/Users/jake/.claude/automations/worktree-wrapup/logs/launchd.out.log</string>
+	<string>/Users/jake/.claude/automations/wrapup-repos/logs/launchd.out.log</string>
 	<key>StandardErrorPath</key>
-	<string>/Users/jake/.claude/automations/worktree-wrapup/logs/launchd.err.log</string>
+	<string>/Users/jake/.claude/automations/wrapup-repos/logs/launchd.err.log</string>
 </dict>
 </plist>

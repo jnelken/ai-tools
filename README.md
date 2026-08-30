@@ -53,7 +53,7 @@ Hooks need extra wiring in `~/.claude/settings.json` — see [`hooks/README.md`]
 
 | Automation | Schedule | Purpose |
 |---|---|---|
-| [`worktree-wrapup`](automations/worktree-wrapup) | 2:45am / 7:45am / 12:45pm / 5:45pm daily (launchd) | Headlessly wrap up in-progress work in one repo via the `wrapup-repos` skill |
+| [`wrapup-repos`](automations/wrapup-repos) | 2:45am / 7:45am / 12:45pm / 5:45pm daily (launchd) | Headlessly wrap up in-progress work in one repo via the `wrapup-repos` skill |
 
 Scheduling (the launchd plist) needs manual per-machine setup — see [`automations/README.md`](automations/README.md).
 
