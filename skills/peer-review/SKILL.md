@@ -9,7 +9,7 @@ description: Use when the user wants a Codex code review run against the current
 
 Run `codex review` against the current branch's diff, triage its findings, apply the mechanical fixes, and commit. Two modes, chosen by the optional `local` argument (step 1):
 
-- **Default (push mode):** once the review comes back clean (or the `/loop` ceiling is hit) with no unresolved P1/P2 findings, push the branch and — if a PR already exists for it — post a comment reporting how many local review rounds ran before this push, plus the model and reasoning effort that ran them. Gives human reviewers a signal for how much ground Codex already covered before they open the diff, so the GitHub Codex bot on the PR (and any human) has less to flag.
+- **Default (push mode):** once the review comes back clean (or the `/loop` ceiling is hit) with no unresolved P1/P2 findings, push the branch and — if a PR already exists for it — post a comment reporting how many local review rounds ran before this push, plus the model and reasoning effort for both sides: the Codex reviewer and the orchestrating reviewee that triaged/applied its findings. Gives human reviewers a signal for how much ground Codex already covered before they open the diff, so the GitHub Codex bot on the PR (and any human) has less to flag.
 - **`local` mode:** the original behavior — review → fix → commit, never push, never touch `gh`. Use this for a review pass with zero PR-side effects (e.g. reviewing someone else's branch, or you're not ready for this to be visible).
 
 Composes with `/loop` for iterative convergence in either mode.
@@ -105,10 +105,11 @@ Then run every round with the focus appended — remember `--base` and a prompt 
 
 ```bash
 FOCUS=$(cat "$GIT_DIR/peer-review-focus" 2>/dev/null)
+TRANSCRIPT="/tmp/peer-review-$$.txt"
 if [ -n "$FOCUS" ]; then
-  codex review "Review the changes on this branch relative to the merge-base with origin/$BASE. Focus especially on: $FOCUS. Also report anything else you find." 2>&1 | tee /tmp/peer-review-$$.txt
+  codex review "Review the changes on this branch relative to the merge-base with origin/$BASE. Focus especially on: $FOCUS. Also report anything else you find." 2>&1 | tee "$TRANSCRIPT"
 else
-  codex review --base "$BASE" 2>&1 | tee /tmp/peer-review-$$.txt
+  codex review --base "$BASE" 2>&1 | tee "$TRANSCRIPT"
 fi
 ```
 
@@ -119,10 +120,11 @@ fi
 ```bash
 # Same --base/[PROMPT] exclusivity applies here: with a focus prompt, name
 # the base inside the prompt; without one, use --base.
+TRANSCRIPT="/tmp/peer-review-$$.txt"
 if [ -n "$FOCUS" ]; then
-  nohup codex review "Review the changes on this branch relative to the merge-base with origin/$BASE. Focus especially on: $FOCUS. Also report anything else you find." > /tmp/peer-review-$$.txt 2>&1 &
+  nohup codex review "Review the changes on this branch relative to the merge-base with origin/$BASE. Focus especially on: $FOCUS. Also report anything else you find." > "$TRANSCRIPT" 2>&1 &
 else
-  nohup codex review --base "$BASE" > /tmp/peer-review-$$.txt 2>&1 &
+  nohup codex review --base "$BASE" > "$TRANSCRIPT" 2>&1 &
 fi
 CODEX_PID=$!
 ```
@@ -131,19 +133,39 @@ Then wait on it with the Monitor tool, not a blocking Bash polling loop — that
 ```bash
 until ! ps -p $CODEX_PID >/dev/null 2>&1; do sleep 5; done; echo done
 ```
-Once Monitor reports completion, read `/tmp/peer-review-$$.txt` for the review output and continue at step 3.
+Once Monitor reports completion, read `$TRANSCRIPT` for the review output and continue at step 3.
 
 **Optional — parallel lenses for unusually wide diffs.** If the matrix spans 3+ axes, round 1 may run 2–3 *concurrent* `codex review` invocations, each with a different lens prompt (e.g. markup/a11y; permission and masking leaks; formatting/display parity), then triage the **union** of findings in step 3. This still counts as one round — one lock, one triage, one apply pass, one commit, one increment of the rounds file. It trades tokens for wall-clock rounds; use it when the alternative is predictably serial rounds each finding a different lens's issues.
 
 If `codex` exits non-zero, release the lock (`rm -f "$LOCK"`), surface the stderr verbatim to the user, and stop. Common causes: not logged in (`codex login`), config error, network. Don't try to work around.
 
-On a successful run (regardless of finding count), record the round:
+On a successful run (regardless of finding count), record the round and both sides' model metadata:
 ```bash
 GIT_DIR=$(git rev-parse --git-dir)
 ROUNDS_FILE="$GIT_DIR/peer-review-rounds"
-echo $(( $(cat "$ROUNDS_FILE" 2>/dev/null || echo 0) + 1 )) > "$ROUNDS_FILE"
+ROUND=$(( $(cat "$ROUNDS_FILE" 2>/dev/null || echo 0) + 1 ))
+echo "$ROUND" > "$ROUNDS_FILE"
+
+# Read these from the transcript produced by this exact run. They are the
+# effective settings after config/profile/CLI overrides, unlike a later read
+# of config.toml.
+REVIEWER_MODEL=$(sed -n 's/^model: //p' "$TRANSCRIPT" | head -1)
+REVIEWER_EFFORT=$(sed -n 's/^reasoning effort: //p' "$TRANSCRIPT" | head -1)
+[ -n "$REVIEWER_MODEL" ] || REVIEWER_MODEL="unknown"
+[ -n "$REVIEWER_EFFORT" ] || REVIEWER_EFFORT="unknown"
+
+# Fill this from your own system context (for example, "Claude Sonnet 5").
+REVIEWEE_MODEL="<orchestrating model>"
+REVIEWEE_EFFORT="${CLAUDE_EFFORT:-default}"
+
+printf '%s\t%s\t%s\t%s\t%s\n' \
+  "$ROUND" "$REVIEWER_MODEL" "$REVIEWER_EFFORT" \
+  "$REVIEWEE_MODEL" "$REVIEWEE_EFFORT" \
+  >> "$GIT_DIR/peer-review-models.tsv"
 ```
-This file is scoped to the worktree the same way the lock is, but it is never deleted between iterations — it's a running total for step 8, not a per-round marker.
+`$TRANSCRIPT` means the `/tmp/peer-review-*.txt` path passed to `tee` or used as the detached process's output for this run; assign it when launching the review. The transcript header is the source of truth for the reviewer model/effort. Do **not** attribute the orchestrating agent's model or launch effort to Codex, and do not infer Codex's settings from a config file after the run. If either transcript header is unexpectedly absent, record `unknown` rather than guessing.
+
+Both files are scoped to the worktree the same way the lock and survive between iterations. The rounds file is the running total for step 8; the TSV is an append-only, one-row-per-completed-round ledger with columns `round`, `reviewer model`, `reviewer effort`, `reviewee model`, and `reviewee effort`.
 
 ### 3. Triage findings — DO NOT edit yet
 
@@ -254,15 +276,22 @@ Otherwise:
 3. Gather what to report:
    ```bash
    ROUNDS=$(cat "$GIT_DIR/peer-review-rounds" 2>/dev/null || echo 0)
-   EFFORT="${CLAUDE_EFFORT:-default}"
    ```
-   State the model you're running as from your own system context (there's no env var for it — e.g. "Claude Sonnet 5"). This line credits Codex with the review and you with triaging/applying the findings — don't collapse it into "reviewed with <model>", which misattributes the review itself to you.
+   Read `$GIT_DIR/peer-review-models.tsv` and build the two role summaries from its per-round rows:
+   - **Reviewer:** Codex model + reasoning effort captured from each review transcript.
+   - **Reviewee / triage:** orchestrating model + effort captured when that round was run.
+   - If every recorded round used the same settings for a role, show that model/effort once. If settings changed, list each distinct model/effort pair with its round number(s) or count in the same table cell.
+   - If `ROUNDS` is larger than the number of ledger rows (expected on a worktree with rounds from before this metadata existed), explicitly include `unknown for N earlier round(s)`. Never backfill old rounds with today's settings.
 
-4. Post one comment (a fresh comment each time this step runs — not an edit-in-place). The body is two parts, in this order: the round-count/model line, then a blank line, then a short prose **summary** — the same substance you'd give the user directly in chat, not the raw step-6 table. Reference the specific fix(es) (file:line or a one-line description of the bug) and the commit SHA(s); if a round found nothing, say so plainly ("No issues found."). If step 8 runs after multiple `/loop` rounds, the summary covers the cumulative set of fixes across *all* rounds since the last push/notify, not just the final one — synthesize from every round's step-6 report you generated this session, not only the last.
+4. Post one comment (a fresh comment each time this step runs — not an edit-in-place). The body is three parts, in this order: the round-count line, a two-column model table with the reviewer and reviewee side by side, then a short prose **summary** — the same substance you'd give the user directly in chat, not the raw step-6 table. Reference the specific fix(es) (file:line or a one-line description of the bug) and the commit SHA(s); if a round found nothing, say so plainly ("No issues found."). If step 8 runs after multiple `/loop` rounds, the summary covers the cumulative set of fixes across *all* rounds since the last push/notify, not just the final one — synthesize from every round's step-6 report you generated this session, not only the last.
 
    ```bash
    gh pr comment "$PR_NUM" --body "$(cat <<EOF
-Local peer review: $ROUNDS round(s) of \`codex review\` completed before this push (findings triaged and applied by <model>, reasoning effort: $EFFORT).
+Local peer review: $ROUNDS round(s) of \`codex review\` completed before this push.
+
+| Reviewer | Reviewee / triage |
+| --- | --- |
+| Codex \`<reviewer model>\` · <reviewer effort> effort | <reviewee model> · <reviewee effort> effort |
 
 <summary>
 EOF
@@ -271,7 +300,11 @@ EOF
 
    Example:
    ```
-   Local peer review: 1 round of `codex review` completed before this push (findings triaged and applied by Claude Sonnet 5, reasoning effort: high).
+   Local peer review: 1 round of `codex review` completed before this push.
+
+   | Reviewer | Reviewee / triage |
+   | --- | --- |
+   | Codex `gpt-5.6-sol` · high effort | Claude Sonnet 5 · high effort |
 
    Found one real bug: `groupKey` used `??`, which only falls back on null/undefined — so items with `label: ""` (rather than `null`) all collapsed into a single group and got hidden as spurious duplicates of one another. Fixed by falling back with `||` instead, added a regression test for the empty-string case, and re-ran the full suite clean (committed as `abc1234de`).
    ```
@@ -298,6 +331,8 @@ The round counter (`$GIT_DIR/peer-review-rounds`) is cumulative for the life of 
 - **Pushing (or notifying) with unresolved P1/P2 findings still outstanding** — step 8's first guard exists specifically to stop this. Skipped-but-unresolved findings need a human's eyes before reviewers get told "this is clean."
 - **Notifying a PR that doesn't exist** — `gh pr view` returning empty means there's genuinely nothing to notify yet; that's not an error, just report the push and stop. But don't forget about it permanently — if a PR opens later in the same session, go back and post the comment then.
 - **Posting the round-count line with no substance** — the comment must include a prose summary of what was actually found/fixed (or "No issues found"), not just the round/model/effort line. A bare round-count line makes reviewers ask "okay, but what did it find?"
+- **Calling the orchestrator the reviewer** — `codex review` is the reviewer; the Claude/Codex agent driving the skill is the reviewee and triage/apply side. Capture both independently and show them side by side.
+- **Reading reviewer settings from `config.toml` after the run** — that can miss project, profile, managed, or CLI overrides. Parse the effective `model:` and `reasoning effort:` headers from that round's transcript instead.
 - **Resetting the round counter** — it's cumulative on purpose. Don't zero `$GIT_DIR/peer-review-rounds` after a successful notify.
 - **Forgetting `local` when the user wants the old no-push, no-`gh` behavior** — default mode now pushes and comments; `local` is the opt-out, not the other way around.
 - **Skipping the summary** — even on a clean review, report it. The user invoked the skill expecting output.
@@ -306,4 +341,4 @@ The round counter (`$GIT_DIR/peer-review-rounds`) is cumulative for the life of 
 
 ## Why this exists
 
-Codex's GitHub bot review on a PR is the same engine as `codex review` locally. Running it pre-push collapses the feedback loop from "push → wait for bot → babysit-pr → push fixes → wait again" to "review locally → apply → push once." Pushing and notifying automatically (default mode) closes the loop further: human reviewers see up front how many local Codex rounds already ran and what ran them, so they can calibrate how much of their own scrutiny to spend re-checking mechanical stuff Codex already caught. `local` mode keeps the original zero-side-effects behavior for cases where auto-pushing isn't wanted.
+Codex's GitHub bot review on a PR is the same engine as `codex review` locally. Running it pre-push collapses the feedback loop from "push → wait for bot → babysit-pr → push fixes → wait again" to "review locally → apply → push once." Pushing and notifying automatically (default mode) closes the loop further: human reviewers see up front how many local Codex rounds already ran, which Codex model/effort reviewed them, and which orchestrator model/effort triaged the findings. They can then calibrate how much of their own scrutiny to spend re-checking mechanical stuff Codex already caught. `local` mode keeps the original zero-side-effects behavior for cases where auto-pushing isn't wanted.
