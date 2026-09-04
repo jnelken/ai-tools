@@ -14,7 +14,7 @@ This skill is the closing checklist. Five steps, in order: sweep the conversatio
 Two different outcomes call for two different responses, and conflating them is the bug this redesign fixes:
 
 - **Things this session left behind that it could still fix itself** — a background job it started, a temp script with a live secret, unpushed work in a worktree it touched. These are **dangerous, not just undecided**, and the skill must not paper over them. They still hard-block the banner.
-- **Things only the user can decide** — an unanswered question, a PR awaiting someone else's approval, a prod change awaiting authorization. Blocking the thread on these just to keep them visible was the wrong trade: the user loses nothing by closing as long as the decision is written somewhere durable. `IN_PROGRESS.md` is that durable place — a future session (or the user, next week) reads it and picks up exactly where this one left off.
+- **Things only the user can decide** — an unanswered question, a prod change awaiting authorization, a blocked thread with no ticket. Blocking the thread on these just to keep them visible was the wrong trade: the user loses nothing by closing as long as the decision is written somewhere durable. `IN_PROGRESS.md` is that durable place for the items **nothing else tracks** — a future session (or the user, next week) reads it and picks up exactly where this one left off. Anything Linear or GitHub already tracks stays there and out of the file, so the file stays short enough to actually read.
 
 The single worst outcome this skill can produce is a **false all-clear**: a banner that says "nothing orphaned" while a background job is still running, a finding is unfiled, a temp credential script is sitting in a repo, or a decision exists only in this transcript and nowhere else. Every gate in step 5 exists to make that impossible — when in doubt, print the NOT CLEAN block instead.
 
@@ -128,53 +128,66 @@ Create/update via `mcp__claude_ai_Linear__save_issue`. Record every identifier a
 
 ### 4. Write what still needs the human to IN_PROGRESS.md
 
-Collect what this skill **cannot** close out itself:
+`IN_PROGRESS.md` exists to hold **what nothing else tracks**. Its job is to minimise the cognitive load on the next session, so the test for every line is: *if this file didn't exist, would this item be lost?* If Linear, GitHub, or memory already carries it, the answer is no and the item does not go in.
+
+Collect what this skill **cannot** close out itself **and** that has no other durable home:
 
 - **Decisions only the user can make** — the unanswered questions from step 1, restated as decisions with the options.
-- **Prod changes awaiting authorisation** — anything you deliberately did not run.
-- **PRs awaiting approval** — open, reviewed or not, waiting on a human.
+- **Prod changes awaiting authorisation** — anything you deliberately did not run and did not ticket.
 - **Destructive cleanups you proposed but did not perform** — workspace deletions, temp-file removals, state-file edits.
-- **Blocked work and deferred promises from step 1's table.**
+- **Blocked work and deferred promises from step 1's table** — only the ones without a ticket.
+
+**Filter before writing:**
+
+- **Tracked in Linear → drop it.** A ticket is the durable copy; repeating it here is a second list to keep in sync. The one exception is an item that is *urgent or high-priority* and would be missed if the next session doesn't open Linear first — that gets a single line: `CON-1234 — <five words why it can't wait>`, nothing more.
+- **An open PR → drop it.** GitHub tracks open PRs; `gh pr list` is the source of truth. Mention a PR only if the human has to do something the PR itself doesn't show (e.g. "PR #1121 — merge order: must land after #1118").
+- **Resolved → delete it.** Never leave a `- [x]` line. Evidence that something got done belongs in the chat pointer ("resolved 2 items: … landed in a1b2c3d"), a Linear comment, or a commit — not as a permanent checked row in this file. A file full of checked boxes is exactly the overload this rule prevents.
+- **Investigation narrative → drop it.** Findings that were ticketed have their evidence in the ticket. The file's context section is two or three sentences of orientation, not a log.
 
 None of this blocks the close on its own anymore — it gets written to `.claude/IN_PROGRESS.md` instead, inside whichever repo it's about (usually just the current repo; if step 2's worktree sweep touched others with their own open items, each gets its own file, still under that repo's `.claude/`). Writing it down is what makes closing safe: nothing is lost, because a future session — or you, next week — opens the repo and finds exactly where things stood.
 
 **This file must never be committed.** It's local session-continuity state, not project documentation — a future *session*, not a teammate reading the repo, is the audience. Before writing it for the first time in a given repo, check whether `.gitignore` already excludes it (a broad `.claude/` or `.claude/*` entry covers it); if not, add a `.claude/IN_PROGRESS.md` line to `.gitignore` yourself. Never `git add` or commit the file itself, in any repo — same rule as the temp/scratch scripts in step 2b.
 
-**This is a running document, not a snapshot — reconcile, don't overwrite.** Before writing:
+**This is a running document, not a snapshot — reconcile, don't overwrite, and prune.** Before writing:
 1. Read the existing `.claude/IN_PROGRESS.md` if one is present, and note its `_Last updated:_` date — that becomes the "previous entry" date in the resolved-since line.
-2. Check off or remove anything it lists that got resolved this session (say so in the chat pointer — "resolved 2 items from a prior IN_PROGRESS.md").
-3. Keep anything still open that this session didn't touch — a previous session's unresolved item is not yours to drop just because you didn't get to it.
-4. Append this session's new items.
-5. Get today's actual date from the system clock (e.g. `date +%F`) — never reuse the file's previous date and never guess or infer it from conversation context. Set the `_Last updated:_` line to that date on every write, even if nothing else changed.
-6. Get this session's id from the `$CLAUDE_CODE_SESSION_ID` env var (e.g. `echo $CLAUDE_CODE_SESSION_ID`) and append a line to `## Close-out sessions` — date + session id. Append, never overwrite: this list is the full history of every session that has reconciled this file, and it's how a future session finds the `claude --resume <id>` (or Superset agent) that did the work described above.
-7. Create the `.claude/` directory first if it doesn't exist yet, then write the merged result to `.claude/IN_PROGRESS.md`.
+2. **Delete** anything it lists that got resolved this session — remove the line, don't check it off. Say so in the chat pointer ("resolved 2 items from the prior file: …").
+3. **Delete** anything it lists that is now tracked in Linear or as an open PR, unless it meets the urgent/high-priority exception above. Say so in the chat pointer ("dropped 3 items now tracked in CON-…").
+4. Keep anything still open **and untracked** that this session didn't touch — a previous session's unresolved item is not yours to drop just because you didn't get to it.
+5. Append this session's new items, after running them through the filter above.
+6. Get today's actual date from the system clock (e.g. `date +%F`) — never reuse the file's previous date and never guess or infer it from conversation context. Set the `_Last updated:_` line to that date on every write, even if nothing else changed.
+7. Get this session's id from the `$CLAUDE_CODE_SESSION_ID` env var (e.g. `echo $CLAUDE_CODE_SESSION_ID`) and append a line to `## Close-out sessions` — date + session id. Append, never overwrite: this list is the full history of every session that has reconciled this file, and it's how a future session finds the `claude --resume <id>` (or Superset agent) that did the work described above.
+8. Create the `.claude/` directory first if it doesn't exist yet, then write the merged result to `.claude/IN_PROGRESS.md`.
 
-Suggested shape:
+If the filter leaves nothing open, the file still gets written — a context line saying so plus the sessions list — so the next session knows the last close-out found nothing untracked, rather than wondering whether the file was ever reconciled.
+
+Suggested shape (note: no checked items, no ticketed items, no PR list — those live elsewhere):
 
 ```markdown
 # In Progress
 
 _Last updated: 2026-08-03 (close-out)_
 
+Context: two sentences on what the recent sessions were about, so the items below make
+sense cold. Tracked work lives in Linear/GitHub, not here.
+
 ## Decisions needed
 - [ ] Retention: keep 30-day default or match the customer's ask of 90? (asked 2026-08-01, still open)
 
-## Blocked
-- [ ] Sync script — blocked on a third-party credential rotation, see #1142
+## Blocked (untracked)
+- [ ] Sync script — blocked on a third-party credential rotation; no ticket because the vendor owns it
 
-## Awaiting external action
-- [ ] PR #1121 awaiting review approval — https://github.com/...
-- [ ] Prod migration for TICKET-1234 awaiting authorisation to run
+## Deferred (untracked)
+- [ ] Revisit the shared write-path guard once TICKET-1200 lands — not worth a ticket until then
 
-## Deferred
-- [ ] Revisit the shared write-path guard once TICKET-1200 lands
+## Urgent, tracked elsewhere
+- CON-1234 — prod write failures recur nightly; check first thing
 
 ## Close-out sessions
 - 2026-08-01 — 3f9a1c2e-...
 - 2026-08-03 — 939449f5-...
 ```
 
-In the chat, do **not** reprint this list — point at it: *"N items written to `.claude/IN_PROGRESS.md` — see the file for details."* Restating the full text in the transcript defeats the purpose; the file is the durable copy, the chat is not.
+In the chat, do **not** reprint this list — point at it: *"N open items in `.claude/IN_PROGRESS.md` (resolved X, dropped Y now tracked in Linear) — see the file for details."* Restating the full text in the transcript defeats the purpose; the file is the durable copy, the chat is not.
 
 ### 5. The confirmation banner
 
@@ -233,7 +246,10 @@ Never soften a partial result into the success banner, never print both, and nev
 
 - **Printing the banner because the sweep was tidy rather than because every gate condition holds.** Condition 3 (session-caused, still-dangerous debris) has no partial credit. Walk it literally.
 - **Dumping the full open-questions list into the chat instead of `IN_PROGRESS.md`.** That's the exact failure this redesign fixes — a list that only exists in the transcript is gone the moment the thread closes. Write it to the file; point at it in chat.
-- **Overwriting `IN_PROGRESS.md` wholesale.** It's a running document across sessions, not a snapshot from this one. Read it first, keep what's still open, note what got resolved, then merge in the new. Blind-overwriting silently drops another session's unresolved item.
+- **Overwriting `IN_PROGRESS.md` wholesale.** It's a running document across sessions, not a snapshot from this one. Read it first, keep what's still open and untracked, delete what got resolved, then merge in the new. Blind-overwriting silently drops another session's unresolved item.
+- **Leaving `- [x]` lines in `IN_PROGRESS.md`.** A resolved item is deleted, not checked off. Checked rows are noise the next session has to read past to find the live ones; the evidence of resolution belongs in chat, a Linear comment, or a commit.
+- **Mirroring Linear (or the PR list) into `IN_PROGRESS.md`.** A ticket or an open PR is already durable and already findable. Restating it here creates a second list that drifts. Only an urgent/high-priority ticket earns a one-line pointer.
+- **Turning the context section into an investigation log.** Ticketed findings carry their own evidence. Two or three orienting sentences is the ceiling.
 - **Committing `.claude/IN_PROGRESS.md`, or writing it to the repo root instead of `.claude/`.** It's local session-continuity state, not a project artifact — never `git add` it, and make sure `.gitignore` actually excludes it before or right after the first write in a given repo.
 - **Putting a pending decision or an awaiting-approval PR into the NOT CLEAN box.** Those aren't condition-3 material anymore — they belong in `IN_PROGRESS.md` regardless of which banner prints.
 - **Treating a long `IN_PROGRESS.md` as reason to hold the banner back.** The banner's job is to confirm the machine is safe and nothing's lost, not that there's nothing left to think about. A well-populated file with real, actionable entries is success, not partial credit.

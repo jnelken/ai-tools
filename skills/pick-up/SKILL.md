@@ -74,9 +74,10 @@ already be on disk. Step 5 applies them once the plan is approved.
   rather than quietly picking one. That's why those items were written down instead of
   executed.
 - Lists what you found already done or stale, and why.
-- States the edits step 5 will make to the handoff file — which items get checked off,
-  struck, or annotated. The user is approving those edits too, and this is their one
-  chance to say "no, that isn't done" before a wrong verdict is written down.
+- States the edits step 5 will make to the handoff file — which items get removed as
+  done, removed as stale, or dropped because a ticket/PR now tracks them. The user is
+  approving those removals too, and this is their one chance to say "no, that isn't
+  done" before a wrong verdict is applied.
 - Flags anything with real-world side effects (live account mutations, prod changes,
   outbound messages) before the step that causes it.
 
@@ -96,15 +97,18 @@ and that only holds if the reconciliation is the first thing that lands. Apply t
 verdicts the user approved, not the ones you arrived at — if they corrected one, theirs
 is the one that goes in the file.
 
-- Check off items verified done, each with a compressed note of the evidence
-  (`- [x] … — landed in a1b2c3d`). That evidence is what stops a later session
-  re-verifying the same thing.
-- Mark stale or invalidated items as such with a one-line why, rather than deleting them
-  silently. A dropped item reads as an item nobody ever wrote down.
+- **Remove** items verified done. The evidence (`landed in a1b2c3d`) goes in the plan
+  and the chat, not into the file as a `- [x]` row — the file holds live, untracked work
+  only, and checked rows are noise the next reader has to skip past. Same for items the
+  user confirmed as stale or invalid: delete them, and state why in the chat.
+- **Remove** items that are now tracked in Linear or as an open PR — the ticket/PR is the
+  durable copy. Keep at most a one-line `CON-1234 — <why it can't wait>` pointer, and
+  only when the item is urgent or high-priority.
 - Rewrite prose that a verdict falsified. A context section asserting something that is
   no longer true is worse than a stale checkbox, because nothing signals it as stale —
   if the file says "we decided not to build X" and X shipped, that sentence has to go.
-- Leave still-open items, and the reasoning behind them, exactly as they are.
+  Keep the context to a few orienting sentences; investigation detail belongs in tickets.
+- Leave still-open, untracked items, and the reasoning behind them, exactly as they are.
 - Update `_Last updated:_`, and append a `_Picked up:_` line with the date and session id
   so the provenance of the edit is visible next to close-out's own record.
 
