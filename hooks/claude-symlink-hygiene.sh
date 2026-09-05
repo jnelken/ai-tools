@@ -11,7 +11,7 @@ claude_dir="$HOME/.claude"
 
 # Allowlist of files that are OK to be local (not symlinked)
 allowlist=(
-  "block-push-to-main.allowlist"
+  "block-push-to-main.denylist"
   ".DS_Store"
 )
 

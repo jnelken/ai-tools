@@ -21,7 +21,7 @@ fi
 
 # Allowlist of local files that should NOT be symlinks (contain sensitive data or runtime state)
 allowlist=(
-  "block-push-to-main.allowlist"     # user-specific repo allowlist
+  "block-push-to-main.denylist"      # user-specific repo denylist (opt-in list)
   "settings.json"                     # may contain personal settings
   "settings.local.json"               # user-local overrides
   ".DS_Store"                         # macOS metadata
