@@ -32,6 +32,13 @@ live in the skill, not in `run.sh`. `run.sh` adds a single-instance lock so two 
 never fight over the same repo's `main`, and it runs on Opus rather than Sonnet because it
 writes and tests real features.
 
+Before invoking `claude`, `run.sh` checks `~/.claude/state/claude-usage.json` (written by the
+statusline for exactly this purpose) and **skips the run** if 7-day usage is at 80% or 5-hour usage
+at 70% — four Opus runs a day would otherwise eat a weekly budget quietly. Only interactive
+sessions refresh that file, so the gate ignores a percentage whose `reset_epoch` has passed (the
+window rolled over; the number is stale) and runs anyway if the file is missing or unreadable.
+Tune the two thresholds at the top of `run.sh`.
+
 The `:45` slots are all offset from `wrapup-repos`' own `:45` runs on purpose: that job
 commits WIP, and this one refuses to start on a dirty tree, so it must land after one rather
 than on top of it. Most runs will find nothing to do and exit early — that's expected and

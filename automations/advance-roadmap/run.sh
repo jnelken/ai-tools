@@ -12,6 +12,8 @@ ROOT="/Users/jake/.claude/automations/advance-roadmap"
 CODE_DIR="/Users/jake/Dropbox/code"
 CLAUDE="/Users/jake/.local/bin/claude"
 MODEL="claude-opus-5"            # this job writes and tests real features — worth the quota
+MAX_SEVEN_DAY_PCT=80             # skip the run above this weekly usage — the scarce budget
+MAX_FIVE_HOUR_PCT=70             # skip the run above this 5-hour usage
 
 # launchd gives a bare environment — set an explicit PATH so git/node/npm resolve.
 export PATH="/opt/homebrew/bin:/opt/homebrew/opt/node@22/bin:/usr/bin:/bin:/usr/sbin:/sbin:/Users/jake/.local/bin"
@@ -23,6 +25,41 @@ LOG="$LOGDIR/run-$STAMP.log"
 
 # Prune logs older than 30 days.
 find "$LOGDIR" -name 'run-*.log' -mtime +30 -delete 2>/dev/null
+
+# ── Quota gate ────────────────────────────────────────────────────────────────
+# ~/.claude/state/claude-usage.json is written by the statusline
+# (statusline/awesome-statusline.sh, "for agent access") from the official
+# rate_limits block Claude Code passes it. An Opus run every 6h can eat a weekly
+# budget quietly, so sit out when usage is already high.
+#
+# Staleness: only an INTERACTIVE session refreshes that file — a headless run
+# like this one never does. So don't trust the percentage on its own; each window
+# carries a reset_epoch, and once that's in the past the window has rolled over
+# and the cached number is meaningless. Treat those as 0 rather than guessing
+# from file mtime. Missing or unparseable file means run anyway: it goes stale
+# precisely when Claude ISN'T being used, which is when quota is most likely fine.
+USAGE_FILE="${ADVANCE_ROADMAP_USAGE_FILE:-$HOME/.claude/state/claude-usage.json}"
+skip_reason=""
+if [ -r "$USAGE_FILE" ] && command -v jq >/dev/null 2>&1; then
+  now=$(date +%s)
+  read -r f5 r5 f7 r7 <<<"$(jq -r '[
+      (.five_hour.used_percentage // 0), (.five_hour.reset_epoch // 0),
+      (.seven_day.used_percentage // 0), (.seven_day.reset_epoch // 0)
+    ] | @tsv' "$USAGE_FILE" 2>/dev/null | tr '\t' ' ')"
+  # A window past its reset has rolled over — its cached percentage is stale.
+  [ -n "${r5:-}" ] && [ "${r5:-0}" -gt 0 ] && [ "$r5" -lt "$now" ] && f5=0
+  [ -n "${r7:-}" ] && [ "${r7:-0}" -gt 0 ] && [ "$r7" -lt "$now" ] && f7=0
+  if [ "${f7:-0}" -ge "$MAX_SEVEN_DAY_PCT" ]; then
+    skip_reason="7-day usage ${f7}% >= ${MAX_SEVEN_DAY_PCT}%"
+  elif [ "${f5:-0}" -ge "$MAX_FIVE_HOUR_PCT" ]; then
+    skip_reason="5-hour usage ${f5}% >= ${MAX_FIVE_HOUR_PCT}%"
+  fi
+fi
+if [ -n "$skip_reason" ]; then
+  echo "=== advance-roadmap $STAMP: skipping — $skip_reason ===" >> "$LOG"
+  ln -sf "$LOG" "$LOGDIR/latest.log"
+  exit 0
+fi
 
 # Single-instance lock. A run that branches, builds and pushes must never overlap
 # another one — two concurrent runs would fight over the same repo's `main`.
