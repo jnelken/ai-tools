@@ -15,6 +15,25 @@ launchctl load ~/Library/LaunchAgents/<plist>.plist
 Each automation keeps its own `logs/` locally under `~/.claude/automations/<name>/logs/`
 — that's runtime output, not repo content, so it's `.gitignore`d and never committed.
 
+## `advance-roadmap`
+
+Daily at 4:45am local time, picks a personal repo under `~/Dropbox/code` whose `ROADMAP.md`
+has real planned work, ships exactly ONE item on a branch, verifies with the repo's own
+`npm test` / `npm run build`, moves the item to Shipped, then merges to `main` locally and
+**pushes**. No PR. Single source of truth for the workflow is the
+[`advance-roadmap`](../skills/advance-roadmap/SKILL.md) skill — `run.sh` just invokes
+`claude -p` headlessly against it, so editing the skill changes both the on-demand
+`/advance-roadmap` and this scheduled job.
+
+This is the one automation here that contacts a remote. Its guardrails (personal `jnelken`
+repos only, clean tree required, no force-anything, all-or-nothing on failed verification)
+live in the skill, not in `run.sh`. `run.sh` adds a single-instance lock so two runs can
+never fight over the same repo's `main`, and it runs on Opus rather than Sonnet because it
+writes and tests real features.
+
+The 4:45am slot sits two hours after `wrapup-repos` on purpose: that job commits WIP, and
+this one refuses to start on a dirty tree.
+
 ## `wrapup-repos`
 
 Off-peak (2:45am / 7:45am / 12:45pm / 5:45pm local time), picks the dirtiest/most-recently

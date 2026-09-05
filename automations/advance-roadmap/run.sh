@@ -1,0 +1,59 @@
+#!/bin/zsh
+# Nightly roadmap advance — launched by launchd (com.jake.advance-roadmap).
+# Runs claude headless over ~/Dropbox/code. Safe to run manually to test.
+#
+# Unlike the wrapup-repos sibling, this job PUSHES `main` on personal repos.
+# The guardrails that make that safe (jnelken-only origins, clean-tree
+# requirement, no-force rule, all-or-nothing verification) live in the skill,
+# not here — see skills/advance-roadmap/SKILL.md.
+set -u
+
+ROOT="/Users/jake/.claude/automations/advance-roadmap"
+CODE_DIR="/Users/jake/Dropbox/code"
+CLAUDE="/Users/jake/.local/bin/claude"
+MODEL="claude-opus-5"            # this job writes and tests real features — worth the quota
+
+# launchd gives a bare environment — set an explicit PATH so git/node/npm resolve.
+export PATH="/opt/homebrew/bin:/opt/homebrew/opt/node@22/bin:/usr/bin:/bin:/usr/sbin:/sbin:/Users/jake/.local/bin"
+
+LOGDIR="$ROOT/logs"
+mkdir -p "$LOGDIR"
+STAMP="$(date +%Y%m%d-%H%M%S)"
+LOG="$LOGDIR/run-$STAMP.log"
+
+# Prune logs older than 30 days.
+find "$LOGDIR" -name 'run-*.log' -mtime +30 -delete 2>/dev/null
+
+# Single-instance lock. A run that branches, builds and pushes must never overlap
+# another one — two concurrent runs would fight over the same repo's `main`.
+# mkdir is atomic; a lock older than 4h is assumed stale (crashed run) and reclaimed.
+LOCK="$ROOT/run.lock"
+if [ -d "$LOCK" ] && [ -z "$(find "$LOCK" -maxdepth 0 -mmin +240 2>/dev/null)" ]; then
+  echo "=== advance-roadmap $STAMP: another run holds $LOCK — skipping ===" >> "$LOG"
+  ln -sf "$LOG" "$LOGDIR/latest.log"
+  exit 0
+fi
+rm -rf "$LOCK" 2>/dev/null
+mkdir "$LOCK" 2>/dev/null || { echo "=== advance-roadmap $STAMP: could not take lock — skipping ===" >> "$LOG"; exit 0; }
+trap 'rm -rf "$LOCK"' EXIT INT TERM
+
+{
+  echo "=== advance-roadmap run $STAMP ($(date)) ==="
+  echo "model=$MODEL  cwd=$CODE_DIR"
+  cd "$CODE_DIR" || { echo "FATAL: cannot cd to $CODE_DIR"; exit 1; }
+  [ -x "$CLAUDE" ] || { echo "FATAL: claude not found at $CLAUDE"; exit 1; }
+
+  # Single source of truth = the advance-roadmap skill. Reference it explicitly so the
+  # headless run follows the exact same workflow as the on-demand /advance-roadmap.
+  "$CLAUDE" -p "Read and follow /Users/jake/.claude/skills/advance-roadmap/SKILL.md exactly. This is an unattended scheduled run: ship ONE roadmap item now per that workflow, then print your final summary. If no repo qualifies, say so and stop — do not substitute other work." \
+    --model "$MODEL" \
+    --dangerously-skip-permissions \
+    --add-dir "$CODE_DIR" \
+    --output-format text
+  rc=$?
+  echo ""
+  echo "=== claude exit=$rc  finished $(date) ==="
+} >> "$LOG" 2>&1
+
+# Keep a stable pointer to the latest log for easy checking.
+ln -sf "$LOG" "$LOGDIR/latest.log"
