@@ -170,10 +170,71 @@ scripts, so you're choosing against real project conventions.
 - depend on a **product/taste decision the user hasn't made** (an open question in `PRODUCT.md`, a
   "name TBD", two alternatives with no pick). Surface it, don't decide it for them.
 
-If every planned item is skippable, that's a legitimate outcome: report which items you considered
-and why each was skipped, record it in memory, and stop.
+If every planned item is skippable, that's a legitimate outcome — but not a silent one: write the
+blockers per Step 2b, report which items you considered and why each was skipped, record it in
+memory, and stop.
 
 **One item per run.** Don't chain a second one because the first went fast.
+
+## Step 2b — When nothing ships, write the blockers to `.claude/IN_PROGRESS.md`
+
+A run that picks nothing is only worth anything if it says **why**, somewhere the user will look.
+[[pick-up]] reads `.claude/IN_PROGRESS.md`, so that's where an open question goes — in the repo it
+belongs to, phrased so it can be answered in one pass at `/pick-up` time.
+
+**Write a note when:**
+- every candidate item was skipped at Step 2;
+- an item was picked but implementation stalled on a judgment call that is the user's to make
+  (a product decision, two viable designs, a `PRODUCT.md` open question) — see Steps 4 and 5;
+- a `docs/plans/` doc turned out to be already implemented. "Archive this?" is the user's call,
+  and leaving it unasked is what let `ai-tools`' plan doc sit there looking pending for months.
+
+**Don't write when** the run shipped cleanly, or when no repo qualified at all — there's no repo to
+write into, so that outcome lives in run memory (Step 8) only.
+
+### The `.gitignore` trap — check this first, it bites hard
+
+`.claude/IN_PROGRESS.md` is untracked local state. Writing it into a repo that doesn't ignore it
+makes `git status --porcelain` non-empty, which trips this skill's own clean-tree rule and locks
+that repo out of **every future run**. A note explaining why nothing shipped would thereby
+guarantee nothing ever ships again.
+
+Only `koan-master` and `jakenelken.com` currently ignore it. `ai-tools`, `lunchmoney`, `dubsketch`
+and `mailcruxh` do **not**. So:
+
+1. `git -C <repo> check-ignore -q .claude/IN_PROGRESS.md`
+2. If it is not ignored, add a `.claude/IN_PROGRESS.md` line to `.gitignore` and land that one-line
+   change through Step 7's flow (branch off fresh `origin/main` → commit → `--ff-only` merge →
+   push) **before** writing the note.
+3. Write the note.
+4. Confirm `git status --porcelain` is empty afterwards. Leaving the repo dirty is the failure.
+
+### What to write
+
+The file belongs to [[close-out]]; this skill only appends to it, under close-out's conventions:
+
+- Path is `.claude/IN_PROGRESS.md` (create `.claude/` if needed). Use a root `IN_PROGRESS.md` only
+  if one already exists there.
+- It is a **running document**: read it first, leave every open item another session put there,
+  append yours. Never overwrite, never leave a `- [x]` row, never `git add` it.
+- Set `_Last updated: <date> (advance-roadmap)` using the real clock (`date +%F`), so it's obvious
+  which writer touched it last.
+
+One item per skipped thing, each naming the item **and** the question — with the options where you
+can see them:
+
+```markdown
+## Decisions needed (advance-roadmap, 2026-09-05)
+- [ ] `docs/plans/blue-horizon-design.md` — can't implement: the doc's own Open Questions leave the
+      grading stop-condition and the copy-detection response unresolved. Which behaviour do you want?
+- [ ] ROADMAP P1 "Group by label" — needs a call: does acting in one label group act everywhere
+      (per-message), and do nested labels like `Work/Clients` flatten or nest?
+- [ ] `docs/plans/repo-hygiene-and-session-docs.md` — appears fully implemented already
+      (`hooks/personal-repo-hygiene-check.sh`, `hooks/session-doc-*.sh`). Archive it?
+```
+
+"Skipped — too ambiguous" is worthless. The test for every line: could the user answer it from the
+line alone, without reopening the plan doc?
 
 ## Step 3 — Branch off fresh `origin/main`
 
@@ -209,7 +270,9 @@ npm run build     # this repo family treats build as the typecheck
 
 Also run `npm run lint` if it exists and is fast. **Everything must pass.** If something fails and
 the fix isn't obvious and contained, stop per the all-or-nothing rule: leave the branch, don't
-merge, and report exactly what failed with the error output.
+merge, and report exactly what failed with the error output. If what stopped you was a question
+rather than a bug — the fix depends on a decision that's the user's to make — write it up per
+Step 2b and name the branch there, so `/pick-up` finds both the question and the work in flight.
 
 ## Step 6 — Update the roadmap (and friends)
 
@@ -271,5 +334,6 @@ the one-line pointer to `MEMORY.md` if it isn't there yet.
 ## Final output
 
 End with a 5-line plain-text summary: repo, item shipped (or why none), test/build result, merge
-commit hash, and anything left for the user to confirm by hand. In a scheduled run this is what the
+commit hash, and anything left for the user to confirm by hand. If Step 2b wrote blockers, say so
+with the path and the item count — that's the user's cue to run `/pick-up` in that repo. In a scheduled run this is what the
 user scans in the log.
