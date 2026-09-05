@@ -17,8 +17,9 @@ Each automation keeps its own `logs/` locally under `~/.claude/automations/<name
 
 ## `advance-roadmap`
 
-Daily at 4:45am local time, picks a personal repo under `~/Dropbox/code` whose `ROADMAP.md`
-has real planned work, ships exactly ONE item on a branch, verifies with the repo's own
+Every 6 hours (4:45am / 10:45am / 4:45pm / 10:45pm local time), picks a personal repo under
+`~/Dropbox/code` whose `ROADMAP.md` has real planned work, ships exactly ONE item on a
+branch, verifies with the repo's own
 `npm test` / `npm run build`, moves the item to Shipped, then merges to `main` locally and
 **pushes**. No PR. Single source of truth for the workflow is the
 [`advance-roadmap`](../skills/advance-roadmap/SKILL.md) skill — `run.sh` just invokes
@@ -31,8 +32,10 @@ live in the skill, not in `run.sh`. `run.sh` adds a single-instance lock so two 
 never fight over the same repo's `main`, and it runs on Opus rather than Sonnet because it
 writes and tests real features.
 
-The 4:45am slot sits two hours after `wrapup-repos` on purpose: that job commits WIP, and
-this one refuses to start on a dirty tree.
+The `:45` slots are all offset from `wrapup-repos`' own `:45` runs on purpose: that job
+commits WIP, and this one refuses to start on a dirty tree, so it must land after one rather
+than on top of it. Most runs will find nothing to do and exit early — that's expected and
+cheap; a repo only qualifies when its roadmap has real planned work and its tree is clean.
 
 ## `wrapup-repos`
 

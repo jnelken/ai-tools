@@ -11,13 +11,16 @@
 		<string>/Users/jake/.claude/automations/advance-roadmap/run.sh</string>
 	</array>
 
-	<!-- Once a day, 4:45am local time (handles DST automatically). Deliberately two
-	     hours after wrapup-repos' 2:45am slot: that job commits WIP, and this one
-	     requires a clean tree, so it wants to run after — never on top of it.
-	     If the Mac is asleep at the scheduled time, launchd runs the missed job on wake. -->
+	<!-- Every 6 hours, local time (handles DST automatically): 4:45am, 10:45am, 4:45pm, 10:45pm.
+	     The :45 offset keeps every slot clear of wrapup-repos' 2:45/7:45/12:45/17:45 runs —
+	     that job commits WIP, and this one requires a clean tree, so it must never land on top
+	     of it. If the Mac is asleep at a scheduled time, launchd runs the missed job on wake. -->
 	<key>StartCalendarInterval</key>
 	<array>
 		<dict><key>Hour</key><integer>4</integer><key>Minute</key><integer>45</integer></dict>
+		<dict><key>Hour</key><integer>10</integer><key>Minute</key><integer>45</integer></dict>
+		<dict><key>Hour</key><integer>16</integer><key>Minute</key><integer>45</integer></dict>
+		<dict><key>Hour</key><integer>22</integer><key>Minute</key><integer>45</integer></dict>
 	</array>
 
 	<key>RunAtLoad</key>
