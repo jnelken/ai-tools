@@ -8,9 +8,9 @@
 # not here — see skills/advance-roadmap/SKILL.md.
 set -u
 
-ROOT="/Users/jake/.claude/automations/advance-roadmap"
+ROOT="${ADVANCE_ROADMAP_ROOT:-/Users/jake/.claude/automations/advance-roadmap}"
 CODE_DIR="/Users/jake/Dropbox/code"
-CLAUDE="/Users/jake/.local/bin/claude"
+CLAUDE="${ADVANCE_ROADMAP_CLAUDE_BIN:-/Users/jake/.local/bin/claude}"
 MODEL="claude-opus-5"            # this job writes and tests real features — worth the quota
 MAX_SEVEN_DAY_PCT=80             # skip the run above this weekly usage — the scarce budget
 MAX_FIVE_HOUR_PCT=70             # skip the run above this 5-hour usage
@@ -19,6 +19,7 @@ MAX_FIVE_HOUR_PCT=70             # skip the run above this 5-hour usage
 export PATH="/opt/homebrew/bin:/opt/homebrew/opt/node@22/bin:/usr/bin:/bin:/usr/sbin:/sbin:/Users/jake/.local/bin"
 
 LOGDIR="$ROOT/logs"
+PROBE_FLAG="$ROOT/.dispatch-probe-done"   # rm to re-arm the one-time PushNotification test
 mkdir -p "$LOGDIR"
 STAMP="$(date +%Y%m%d-%H%M%S)"
 LOG="$LOGDIR/run-$STAMP.log"
@@ -82,12 +83,30 @@ trap 'rm -rf "$LOCK"' EXIT INT TERM
 
   # Single source of truth = the advance-roadmap skill. Reference it explicitly so the
   # headless run follows the exact same workflow as the on-demand /advance-roadmap.
-  "$CLAUDE" -p "Read and follow /Users/jake/.claude/skills/advance-roadmap/SKILL.md exactly. This is an unattended scheduled run: ship ONE roadmap item now per that workflow, then print your final summary. If no repo qualifies, say so and stop — do not substitute other work." \
+  PROMPT="Read and follow /Users/jake/.claude/skills/advance-roadmap/SKILL.md exactly. This is an unattended scheduled run: ship ONE roadmap item now per that workflow, then print your final summary. If no repo qualifies, say so and stop — do not substitute other work."
+
+  # One-time Dispatch connectivity probe. PushNotification is suppressed whenever an
+  # interactive Claude terminal is active, so it could never be proven from a hands-on
+  # test — only a real unattended run at 4:45am can. Step 2b already notifies on blocked
+  # runs, but that may not happen for days, so the first scheduled run attempts it
+  # regardless of outcome and records the verdict. Self-disabling: delete the flag file
+  # to re-arm it.
+  if [ ! -f "$PROBE_FLAG" ]; then
+    echo "(one-time Dispatch probe armed — flag absent: $PROBE_FLAG)"
+    PROMPT="$PROMPT
+
+ONE-TIME CONNECTIVITY PROBE, this run only: whatever the outcome above — shipped, blocked, archived, or nothing to do — call PushNotification exactly once with status \"proactive\" and a message under 200 characters summarising that outcome, prefixed 'advance-roadmap:'. If the workflow already sent a notification this run (Step 2b), do NOT send a second — reuse that result. Then print the tool's verbatim result on its own final line, prefixed 'PUSH_PROBE: '."
+  fi
+
+  "$CLAUDE" -p "$PROMPT" \
     --model "$MODEL" \
     --dangerously-skip-permissions \
     --add-dir "$CODE_DIR" \
     --output-format text
   rc=$?
+
+  # Burn the probe only once claude actually ran, so a failed launch keeps it armed.
+  [ -f "$PROBE_FLAG" ] || { touch "$PROBE_FLAG"; echo "(Dispatch probe fired — disarmed for future runs)"; }
   echo ""
   echo "=== claude exit=$rc  finished $(date) ==="
 } >> "$LOG" 2>&1
