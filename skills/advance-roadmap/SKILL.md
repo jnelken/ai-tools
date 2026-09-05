@@ -79,14 +79,22 @@ For each direct child of `/Users/jake/Dropbox/code` that is a git repo, in prior
 3. Skip it if its `.git` is a **file** rather than a directory — that's a linked worktree of a
    repo already in this list (e.g. `m2ailcruxh` → `mailcruxh`). Operating on `main` from a
    second checkout of the same repo tangles both.
-4. Find the roadmap. Check **all** of these, in order — don't stop at the first path that
-   happens to be missing:
-   - `ROADMAP.md` at the root
-   - `docs/ROADMAP.md`
-   - `docs/plans/ROADMAP.md` ← the global `CLAUDE.md` sends plan files to `docs/plans/`, so
-     this is a normal home, not an edge case. `mailcruxh` keeps its roadmap here.
+4. Find the roadmap **anywhere in the repo**. Its location is not a criterion — if a
+   `ROADMAP.md` exists, this repo is a candidate. Don't check a fixed list of directories;
+   search:
 
-   If unsure, `find <repo> -maxdepth 3 -iname '*roadmap*' -not -path '*/node_modules/*'`.
+   ```
+   find <repo> -iname 'ROADMAP.md' \
+     -not -path '*/node_modules/*' -not -path '*/.git/*' \
+     -not -path '*/dist/*' -not -path '*/build/*' -not -path '*/.next/*' \
+     -not -path '*/vendor/*'
+   ```
+
+   Known homes so far are the root (`dubsketch`) and `docs/plans/` (`mailcruxh`), but treat
+   those as examples, not as the set. A new repo putting one somewhere else must still be found.
+
+   If several turn up, prefer the shallowest path, and among equals the one with real planned
+   items per the next check. Note which file you used — Step 6 has to edit that same file.
 5. **Does it qualify?** It qualifies if it has at least one concrete unbuilt item under a
    forward-looking section. That section is **not always called `## Planned`** — these all
    count, and there are only a handful of repos so read the headings rather than pattern-matching:
@@ -178,7 +186,7 @@ merge, and report exactly what failed with the error output.
 
 ## Step 6 — Update the roadmap (and friends)
 
-In `ROADMAP.md`:
+In the roadmap file you located in Step 1 (not necessarily a root `ROADMAP.md`):
 - Move the completed item into the **Shipped (reference)** section, in that section's existing prose
   or list style — don't paste the full planned-item block in.
 - **Renumber the remaining planned items** so they stay sequential from 1.
