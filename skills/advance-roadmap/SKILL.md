@@ -76,21 +76,44 @@ For each direct child of `/Users/jake/Dropbox/code` that is a git repo, in prior
 
 1. Skip it if `.noroadmap` exists at the root.
 2. Skip it unless `origin` is a `jnelken/*` repo.
-3. Look for `ROADMAP.md` at the root, then `docs/ROADMAP.md`.
-4. **Does it qualify?** It qualifies only if it has at least one concrete item under a
-   `## Planned` section (or equivalent forward-looking section). A roadmap with only
-   `## Shipped (reference)`, or one whose planned items are all struck through / marked done,
-   does NOT qualify. Judge by whether a real unbuilt item is described — not by file length.
-5. Apply the clean-tree, preflight, and live-session checks from the safety rules.
+3. Skip it if its `.git` is a **file** rather than a directory — that's a linked worktree of a
+   repo already in this list (e.g. `m2ailcruxh` → `mailcruxh`). Operating on `main` from a
+   second checkout of the same repo tangles both.
+4. Find the roadmap. Check **all** of these, in order — don't stop at the first path that
+   happens to be missing:
+   - `ROADMAP.md` at the root
+   - `docs/ROADMAP.md`
+   - `docs/plans/ROADMAP.md` ← the global `CLAUDE.md` sends plan files to `docs/plans/`, so
+     this is a normal home, not an edge case. `mailcruxh` keeps its roadmap here.
+
+   If unsure, `find <repo> -maxdepth 3 -iname '*roadmap*' -not -path '*/node_modules/*'`.
+5. **Does it qualify?** It qualifies if it has at least one concrete unbuilt item under a
+   forward-looking section. That section is **not always called `## Planned`** — these all
+   count, and there are only a handful of repos so read the headings rather than pattern-matching:
+   - `## Planned` (dubsketch)
+   - priority tiers — `## P0 — Ship Blockers`, `## P1 — Next 4-6 Weeks`, `## P2`, `## P3` (mailcruxh)
+   - `## Upcoming Features`, `## Future Enhancements`, `## In Progress`
+
+   What does **not** count: `## Shipped (reference)`, `## Completed (for reference)`,
+   `## Current State`, or a section whose items are all struck through / marked done. Judge by
+   whether a real unbuilt item is described — not by file length or heading wording.
+6. Apply the clean-tree, preflight, and live-session checks from the safety rules.
 
 Take the first repo that passes everything. **If no repo qualifies, stop and report that no
 actionable roadmap was found** — record it in memory (Step 8) and do nothing else. Do not invent
 roadmap items, do not go looking for other work to do, do not fall back to `wrapup-repos` behavior.
 
-The exemplar roadmap format is [`dubsketch/ROADMAP.md`](/Users/jake/Dropbox/code/dubsketch/ROADMAP.md)
-— numbered `### N. Title` items each carrying `**Status:**`, `**What:**`, `**Why:**`, `**Scope:**`
-and `**Touchpoints:**`, plus a `## Priority` table and a `## Related docs` table. Other repos'
-roadmaps are looser; adapt rather than demanding this shape.
+Two roadmaps in this directory are well-formed enough to work from directly, and they look
+nothing alike — expect the shape to vary:
+
+- [`dubsketch/ROADMAP.md`](/Users/jake/Dropbox/code/dubsketch/ROADMAP.md) — the format exemplar:
+  numbered `### N. Title` items each carrying `**Status:**`, `**What:**`, `**Why:**`, `**Scope:**`
+  and `**Touchpoints:**`, plus a `## Priority` table and a `## Related docs` table.
+- [`mailcruxh/docs/plans/ROADMAP.md`](/Users/jake/Dropbox/code/mailcruxh/docs/plans/ROADMAP.md) —
+  priority-tiered (`P0`–`P3`) with prose-bullet items. Many carry a `Touchpoints:` bullet and are
+  perfectly actionable; the tier is the priority signal, so prefer a lower-numbered tier.
+
+Other repos' roadmaps are looser still; adapt rather than demanding either shape.
 
 ## Step 2 — Pick ONE item
 
