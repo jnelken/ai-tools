@@ -242,6 +242,36 @@ can see them:
 "Skipped — too ambiguous" is worthless. The test for every line: could the user answer it from the
 line alone, without reopening the plan doc?
 
+### Then try to reach the user — best effort, once
+
+The file is the durable channel; a notification is the nudge that makes it timely. After writing
+the note, call `PushNotification` **once** (not once per item):
+
+```
+PushNotification(status: "proactive",
+  message: "advance-roadmap: <N> blocker(s) in <repo> need your call — run /pick-up there")
+```
+
+Keep it under 200 characters and lead with the repo. The questions themselves stay in the file —
+a notification is a pointer, not a transcript.
+
+**Expect it to be a no-op sometimes, and don't treat that as failure.** The tool suppresses itself
+while an interactive Claude terminal is active ("Not sent — this terminal is active"), so a run
+that fires while the user is working will log a not-sent result. That's correct behaviour: they'd
+see the run in the log anyway. Record the tool's verdict in the run log either way, so it's visible
+whether the nudge actually went out.
+
+**What does NOT work from a scheduled run, verified — don't burn a turn retrying it:** the Dispatch
+conversation is a Remote Control peer, and a headless `claude -p` session cannot see or message
+Remote Control peers. `ListAgents` there lists only local interactive sessions, and `SendMessage`
+to Dispatch returns `No agent named '…' is reachable`. `PushNotification` (which reaches the phone
+when Remote Control is connected) is the only channel available to this job.
+
+**Notify only when the blockers changed.** This job runs every 6 hours; re-notifying about the same
+unanswered questions four times a day is how a useful signal becomes noise the user mutes. Compare
+against the blocker set recorded in run memory (Step 8) — if it's unchanged, write the file, skip
+the notification, and say so in the summary.
+
 ## Step 3 — Branch off fresh `origin/main`
 
 ```
@@ -346,6 +376,8 @@ Write `/Users/jake/.claude/projects/-Users-jake-Dropbox-code/memory/project_adva
 - the item picked, or why none was;
 - whether it shipped, and the merge commit hash;
 - any plan docs archived as already-implemented, so a later run doesn't go looking for them;
+- the blockers written to `.claude/IN_PROGRESS.md`, as a short list — this is what the next run
+  diffs against to decide whether a notification is warranted, so keep it comparable;
 - any item deliberately skipped and the reason — so the next run doesn't re-evaluate it from
   scratch.
 
