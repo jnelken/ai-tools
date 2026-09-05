@@ -8,6 +8,7 @@ Personal AI coding tools — Claude Code and Cursor skills, slash commands, hook
 
 | Skill | Purpose |
 |---|---|
+| [`advance-roadmap`](skills/advance-roadmap) | Ship one planned `ROADMAP.md` item in a personal repo end-to-end — branch, build, verify, mark shipped, merge + push `main` |
 | [`babysit-pr`](skills/babysit-pr) | Iteratively address automated reviewer threads (Codex, CodeRabbit, etc.) on the current PR |
 | [`logo-gestalt`](skills/logo-gestalt) | Gestalt logo design: symbol inventory, shared-vector matching, SVG + raster preview board, vision critique |
 | [`cleanup-local-branches`](skills/cleanup-local-branches) | Phased cross-repo cleanup of stale branches + worktrees with reflog-recovery log |
