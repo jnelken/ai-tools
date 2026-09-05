@@ -104,8 +104,15 @@ For each direct child of `/Users/jake/Dropbox/code` that is a git repo, in prior
      done. `ai-tools/docs/plans/repo-hygiene-and-session-docs.md` is fully implemented —
      `hooks/personal-repo-hygiene-check.sh` and `hooks/session-doc-*.sh` all exist and run — and
      the doc still sits there looking like pending work. Grep the repo for the files, hooks or
-     symbols the plan names; if they're there, the plan is history. **This check is mandatory**,
-     and it is the single most likely way this fallback wastes a run.
+     symbols the plan names. **This check is mandatory**, and it is the single most likely way
+     this fallback wastes a run.
+   - **A plan you find already implemented gets archived on the spot — don't ask.** Jake doesn't
+     do this bookkeeping himself, so an unarchived finished plan is the expected state, not a
+     signal. Archive it per Step 6 and keep looking for real work in the same run: archiving is
+     bookkeeping, not the one item this run is allowed to ship, so it doesn't spend the budget.
+     Archive **only on concrete evidence** — the files, hooks or symbols the plan names actually
+     exist. A plan that's *partly* built is a genuine decision (finish it? redesign it?) and goes
+     to Step 2b instead. The move is a `git mv` on a tracked file, so it's reversible either way.
    - **Skip ideation captures.** A doc that calls itself a brainstorm, or whose "Open Questions"
      section is load-bearing, is asking for taste decisions that are the user's to make — that's
      both `koan-master/docs/plans/*`. Surface it, don't resolve it.
@@ -170,9 +177,10 @@ scripts, so you're choosing against real project conventions.
 - depend on a **product/taste decision the user hasn't made** (an open question in `PRODUCT.md`, a
   "name TBD", two alternatives with no pick). Surface it, don't decide it for them.
 
-If every planned item is skippable, that's a legitimate outcome — but not a silent one: write the
-blockers per Step 2b, report which items you considered and why each was skipped, record it in
-memory, and stop.
+If every planned item is skippable, that's a legitimate outcome — but not a silent one. Before you
+stop: archive any finished plan docs you found (Step 6's archive rule, landed through Step 7 —
+that bookkeeping happens even when nothing ships), write the blockers per Step 2b, report which
+items you considered and why each was skipped, and record it in memory.
 
 **One item per run.** Don't chain a second one because the first went fast.
 
@@ -186,8 +194,6 @@ belongs to, phrased so it can be answered in one pass at `/pick-up` time.
 - every candidate item was skipped at Step 2;
 - an item was picked but implementation stalled on a judgment call that is the user's to make
   (a product decision, two viable designs, a `PRODUCT.md` open question) — see Steps 4 and 5;
-- a `docs/plans/` doc turned out to be already implemented. "Archive this?" is the user's call,
-  and leaving it unasked is what let `ai-tools`' plan doc sit there looking pending for months.
 
 **Don't write when** the run shipped cleanly, or when no repo qualified at all — there's no repo to
 write into, so that outcome lives in run memory (Step 8) only.
@@ -229,8 +235,8 @@ can see them:
       grading stop-condition and the copy-detection response unresolved. Which behaviour do you want?
 - [ ] ROADMAP P1 "Group by label" — needs a call: does acting in one label group act everywhere
       (per-message), and do nested labels like `Work/Clients` flatten or nest?
-- [ ] `docs/plans/repo-hygiene-and-session-docs.md` — appears fully implemented already
-      (`hooks/personal-repo-hygiene-check.sh`, `hooks/session-doc-*.sh`). Archive it?
+- [ ] `docs/plans/liquid-seam.md` — half built: the renderer landed, the resume section didn't.
+      Finish it as specced, or was it abandoned on purpose?
 ```
 
 "Skipped — too ambiguous" is worthless. The test for every line: could the user answer it from the
@@ -290,9 +296,23 @@ re-reads it as pending work. Instead:
 
 - Add a status line directly under the doc's title:
   `> **Shipped:** <YYYY-MM-DD> — <commit sha>.`
-- Move the file to `docs/plans/archive/`, creating that directory if needed. It stays under
+- `git mv` the file to `docs/plans/archive/`, creating that directory if needed. It stays under
   `docs/plans/`, so this doesn't trip the repo-hygiene check that plan docs live there.
 - Fix any link to the doc's old path.
+
+**Archive finished plans you merely found, too — always, without asking.** Step 1 flags plan docs
+that were implemented in some earlier session and never filed away. Same treatment, different
+status line, because this run didn't build it:
+
+`> **Status:** Implemented before <YYYY-MM-DD>; archived by advance-roadmap. Evidence: <the files or symbols that prove it>.`
+
+Naming the evidence is what makes the archive auditable — and `git mv` keeps it reversible if the
+call was wrong. Commit these as their own bookkeeping commit, separate from any feature work, and
+list every doc you archived in the final summary so the user sees what moved. Do this even on a run
+that ships nothing else: tidying finished plans out of the queue is a real outcome.
+
+The same rule applies to a **roadmap item whose work is already in the code** — move it to Shipped
+with a note of the evidence rather than leaving it in Planned for the next run to re-evaluate.
 
 Then, only when relevant:
 - **`PRODUCT.md`** — update if the shipped feature changes what the product claims or how it's
@@ -325,6 +345,7 @@ Write `/Users/jake/.claude/projects/-Users-jake-Dropbox-code/memory/project_adva
 - which repos had a qualifying roadmap and which were checked and didn't;
 - the item picked, or why none was;
 - whether it shipped, and the merge commit hash;
+- any plan docs archived as already-implemented, so a later run doesn't go looking for them;
 - any item deliberately skipped and the reason — so the next run doesn't re-evaluate it from
   scratch.
 
