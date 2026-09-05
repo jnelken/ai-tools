@@ -1,6 +1,6 @@
 ---
 name: advance-roadmap
-description: Ship ONE planned item from a personal repo's ROADMAP.md end-to-end — pick a qualifying repo under ~/Dropbox/code, implement the item on a branch, verify with the repo's test/build, move it to Shipped, then merge to main locally and push. No PR. Use on-demand ("/advance-roadmap", "work a roadmap item", "advance the roadmap", "ship something off the roadmap") or via an unattended scheduled run. Sibling of [[wrapup-repos]] but NOT the same: this one pushes.
+description: Ship ONE planned item end-to-end from a personal repo's ROADMAP.md, or from docs/plans/ when the repo has no roadmap — pick a qualifying repo under ~/Dropbox/code, implement the item on a branch, verify with the repo's test/build, move it to Shipped, then merge to main locally and push. No PR. Use on-demand ("/advance-roadmap", "work a roadmap item", "advance the roadmap", "ship something off the roadmap") or via an unattended scheduled run. Sibling of [[wrapup-repos]] but NOT the same: this one pushes.
 ---
 
 # Advance the roadmap
@@ -95,7 +95,34 @@ For each direct child of `/Users/jake/Dropbox/code` that is a git repo, in prior
 
    If several turn up, prefer the shallowest path, and among equals the one with real planned
    items per the next check. Note which file you used — Step 6 has to edit that same file.
-5. **Does it qualify?** It qualifies if it has at least one concrete unbuilt item under a
+5. **No `ROADMAP.md` anywhere? Fall back to `docs/plans/`.** A plan doc there is a legitimate
+   source of work — treat each `docs/plans/*.md` as a candidate item and pick one per Step 2.
+   This is what makes `ai-tools`, `koan-master` and `lunchmoney` candidates at all. But plan docs
+   are not roadmap items and rot differently, so gate them harder:
+
+   - **Verify the plan is actually unbuilt before picking it.** Nothing ever marks a plan doc
+     done. `ai-tools/docs/plans/repo-hygiene-and-session-docs.md` is fully implemented —
+     `hooks/personal-repo-hygiene-check.sh` and `hooks/session-doc-*.sh` all exist and run — and
+     the doc still sits there looking like pending work. Grep the repo for the files, hooks or
+     symbols the plan names; if they're there, the plan is history. **This check is mandatory**,
+     and it is the single most likely way this fallback wastes a run.
+   - **Skip ideation captures.** A doc that calls itself a brainstorm, or whose "Open Questions"
+     section is load-bearing, is asking for taste decisions that are the user's to make — that's
+     both `koan-master/docs/plans/*`. Surface it, don't resolve it.
+   - **Skip execution records.** A doc written as a log of work already performed ("Executed live
+     2026-08-18", "signed off") documents the past, not the future — that's two of the three in
+     `lunchmoney/docs/plans/`.
+   - **Step 2's skip list still applies in full**, external services and credentials especially:
+     `lunchmoney/docs/plans/email-to-lunchmoney-setup.md` needs a Cloudflare Worker and Gmail
+     OAuth, so it's out regardless of how well specified it is.
+   - A plan's own `> **Suggested execution:**` block names a model and effort. If it asks for
+     more than this run has, treat that as the author's warning that the work is too ambiguous
+     to do unattended, and prefer a different item.
+
+   A repo with a `ROADMAP.md` does **not** get this fallback — the roadmap is the source of
+   truth there, and `docs/plans/` holds its architecture write-ups rather than its queue.
+
+6. **Does it qualify?** It qualifies if it has at least one concrete unbuilt item under a
    forward-looking section. That section is **not always called `## Planned`** — these all
    count, and there are only a handful of repos so read the headings rather than pattern-matching:
    - `## Planned` (dubsketch)
@@ -105,7 +132,7 @@ For each direct child of `/Users/jake/Dropbox/code` that is a git repo, in prior
    What does **not** count: `## Shipped (reference)`, `## Completed (for reference)`,
    `## Current State`, or a section whose items are all struck through / marked done. Judge by
    whether a real unbuilt item is described — not by file length or heading wording.
-6. Apply the clean-tree, preflight, and live-session checks from the safety rules.
+7. Apply the clean-tree, preflight, and live-session checks from the safety rules.
 
 Take the first repo that passes everything. **If no repo qualifies, stop and report that no
 actionable roadmap was found** — record it in memory (Step 8) and do nothing else. Do not invent
@@ -193,6 +220,16 @@ In the roadmap file you located in Step 1 (not necessarily a root `ROADMAP.md`):
 - **Fix every cross-reference the renumber broke** — the `## Priority` table, any "depends on item
   N" notes, and links elsewhere in the repo pointing at the item. This is the step that quietly
   rots a roadmap if skipped.
+
+**If the item came from a `docs/plans/` doc** (the Step 1 fallback) there is no roadmap to update,
+and leaving the doc untouched is what created the `ai-tools` situation above — the next run
+re-reads it as pending work. Instead:
+
+- Add a status line directly under the doc's title:
+  `> **Shipped:** <YYYY-MM-DD> — <commit sha>.`
+- Move the file to `docs/plans/archive/`, creating that directory if needed. It stays under
+  `docs/plans/`, so this doesn't trip the repo-hygiene check that plan docs live there.
+- Fix any link to the doc's old path.
 
 Then, only when relevant:
 - **`PRODUCT.md`** — update if the shipped feature changes what the product claims or how it's
