@@ -108,7 +108,32 @@ can write a verb-first sentence describing what he'd *do* with it, it's actionab
 so this is safe. Expect per-domain permission prompts. If it needs a login, don't sign in: file it
 as Keep, flagged `not verified — needs your login`.
 
-## 4. Write the capture doc
+## 4. Show the breakdown, then wait for a go-ahead
+
+Before writing anything or touching ClickUp, print one line per tab — **all of them, including
+drops** — grouped under three headers (`## Actionable`, `## Keep`, `## Drop`), in this shape:
+
+```
+## Actionable (7)
+- Reply to One Medical message — app.onemedical.com/messages
+
+## Keep (9)
+- Nightly Reflection — tally.so/r/Y577X5
+
+## Drop (12)
+- CVS shop (affiliate ad landing) — www.cvs.com
+```
+
+One line = one tab's title (or a short paraphrase if the title is noise) plus the domain, not the
+full URL — this is a scan, not the capture doc. This is the review gate: it's where a bad call
+("that Reddit thread was actually a task, not a keeper") gets caught *before* it's baked into a
+committed doc or has already created a ClickUp task, not after.
+
+Then stop and ask him to confirm or correct the buckets. Only proceed to step 5 once he does —
+don't write the capture doc or spawn the triage subagent off an unconfirmed breakdown. If he
+moves items between buckets, use his corrected version for everything downstream.
+
+## 5. Write the capture doc
 
 `~/Dropbox/code/chrome-tab-org/docs/captures/<YYYY-MM-DD>-<slug>.md`. The slug comes from Jake's
 note, or the dominant group name, or just `flush`.
@@ -137,7 +162,7 @@ Dropped tabs are **collapsed to counts, never listed** — the JSON is the compl
 re-listing 60 junk URLs defeats the point of triaging. Commit the doc to `chrome-tab-org` on
 `main`; it's a personal tooling repo, so no PR (see [[personal-tooling-repos-skip-pr]]).
 
-## 5. Hand the actionable set to a triage subagent
+## 6. Hand the actionable set to a triage subagent
 
 Spawn one subagent with the actionable list. Its job: **dedupe first, then create.**
 
@@ -174,7 +199,7 @@ placement.
 **If the actionable set is large (20+), report the count and the proposed task titles before
 creating anything.** Task volume is Jake's call, not a surprise he discovers in ClickUp.
 
-## 6. Report
+## 7. Report
 
 - Counts per bucket, and the total in.
 - The capture doc path.
