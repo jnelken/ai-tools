@@ -1,11 +1,11 @@
 ---
 name: tab-triage
-description: Flush every open Chrome tab through the chrome-tab-org extension, then triage the resulting JSON log — drop the throwaways, capture the keepers as a committed markdown doc, and file ClickUp tasks for the tabs that still need work. Use when the user wants to clear out accumulated tabs, triage a tab dump, process a tab log, or asks "close all my tabs and tell me what was in them", "triage my tabs", "clean up my browser".
+description: Flush every open Chrome tab through the chrome-tab-org extension, then triage the resulting JSONL log — sort every tab into ToDos/Keep/Drop and write those buckets back into the log for the Tab Flush review page, capture the keepers as a committed markdown doc, and file ClickUp tasks for the tabs that still need work. Use when the user wants to clear out accumulated tabs, triage a tab dump, process a tab log, or asks "close all my tabs and tell me what was in them", "triage my tabs", "clean up my browser".
 ---
 
 # tab-triage
 
-The AI half of [[chrome-tab-org]]. The extension closes tabs and writes a JSON log; **this skill
+The AI half of [[chrome-tab-org]]. The extension closes tabs and writes a JSONL log; **this skill
 is the "separate, later AI pass" that log was always designed to feed** — see
 `~/Dropbox/code/chrome-tab-org/docs/plans/chrome-tab-organizer.md` for why the analysis
 deliberately lives out here instead of inside the extension (short version: doing it in-extension
@@ -17,8 +17,9 @@ The division of labour is the whole design:
 |---|---|
 | **The extension** | Enumerates and closes tabs. Only it can — it holds `tabs`/`tabGroups`. |
 | **Jake** | Clicks Close & Log. Only he can — no agent loads an unpacked extension or clicks a side panel. |
-| **This skill** | Reads the log, classifies, writes the capture doc. Never touches Chrome. |
-| **The triage subagent** | Turns the actionable slice into deduped ClickUp tasks. |
+| **This skill** | Reads the log, classifies, writes `bucket` and `clickupUrl` back into it, writes the capture doc. Never touches Chrome. |
+| **Tab Flush** | The extension's review page. Reads the log back: Reopen, ClickUp links, and × to dismiss. Jake's surface, not yours. |
+| **The triage subagent** | Turns the ToDo slice into deduped ClickUp tasks. |
 
 **This skill never closes a tab.** Every irreversible act is Jake's click. If you find yourself
 reaching for a browser tool to close something, you have misread this skill.
@@ -54,7 +55,7 @@ the panel default-checked and get closed with the batch. All browsing you do in 
 ## 2. Read the newest log
 
 ```bash
-ls -t ~/Downloads/tab-organizer-logs/*/tab-log-*.json | head -1
+ls -t ~/Downloads/tab-organizer-logs/*/tab-log-*.jsonl | head -1
 ```
 
 **The guard is idempotence, not recency.** Grep the capture-doc directory
@@ -69,12 +70,20 @@ If the download landed flat in `~/Downloads/` instead of the `tab-organizer-logs
 subfolder, or Chrome prompted for a save location, **that is a bug in the extension, not a
 formatting quirk** — record it and report it rather than working around it silently.
 
-The log's shape (`lib/log-writer.js`):
+The log is JSONL — one self-contained record per line, one line per tab (`lib/jsonl.js`):
 
 ```json
-{ "capturedAt": "ISO", "profile": "...", "note": "user's note or null",
-  "groups": [ { "name": "Mobile", "tabs": [ { "title": "...", "url": "...", "domain": "..." } ] } ] }
+{"id":"<stamp>#3","capturedAt":"ISO","profile":"...","note":null,"group":"Mobile",
+ "title":"...","url":"...","domain":"...","bucket":null,"dismissed":false,"clickupUrl":null}
 ```
+
+The last three fields are the ones you write. `bucket` is `null` until you classify (step 4),
+`clickupUrl` is `null` until a task is filed (step 6), and `dismissed` belongs to Jake — the Tab
+Flush page sets it when he clicks ×. **Never flip `dismissed` yourself**, and never drop a line:
+the file is the archive, and a dismissed tab has to stay revivable.
+
+Logs written before v0.3 are `.json` with tabs nested under `groups`. If that's all you find, say
+so — the current extension writes `.jsonl`, so a stale `.json` means the extension needs reloading.
 
 ## 3. Classify every tab
 
@@ -99,36 +108,33 @@ path is a Keep — he opened it for a reason.
 
 An article, a reference, a tool worth remembering. Preserved as a link in the capture doc.
 
-### Actionable — implies a task
+### ToDos — implies a task
 
 Finish reading this. Buy this. Reply to this. Sign up. Try this tool. Compare these three. If you
-can write a verb-first sentence describing what he'd *do* with it, it's actionable.
+can write a verb-first sentence describing what he'd *do* with it, it's a ToDo. (`bucket: "todo"`.)
 
 **When a URL is genuinely ambiguous**, open it in your own tab and look — the browser is empty now,
 so this is safe. Expect per-domain permission prompts. If it needs a login, don't sign in: file it
 as Keep, flagged `not verified — needs your login`.
 
-## 4. Show the breakdown as an artifact, then wait for a go-ahead
+## 4. Write the buckets back into the log, then wait for a go-ahead
 
-Before writing anything or touching ClickUp, publish an HTML artifact — **all 28 tabs, including
-drops** — grouped into three sections (Actionable / Keep / Drop), each row showing the tab's title
-and domain plus a **Reopen ↗** button (a plain `<a href="{url}" target="_blank" rel="noopener">` —
-no capability needed, it's just a normal link). Every tab was already closed by the extension, so
-Reopen is the undo: one click gets a misjudged tab back instead of him retyping the URL.
+Set `bucket` on every line of the log file — `"todo"`, `"keep"` or `"drop"`, no line left `null`.
+Edit the file in place, changing only that field: same line order, same records, nothing dropped.
+The file is the archive *and* the hand-off to Tab Flush, so a line you delete is a tab Jake can
+never revive.
 
-Load `artifact-design` before writing it — treat this as a utilitarian tool page (a review gate,
-not a showcase): real typographic hierarchy and a considered palette, but no hero, no flourish.
-Follow the design plan → build → publish flow that skill lays out. Give the page a real name (not
-"Tab Triage Report") and a one-sentence `description`; pick a stable-feeling favicon. This is a
-single-viewer, one-off artifact — no `capabilities` needed, don't load `artifact-capabilities`.
+Then print the breakdown in chat — one line per tab, **all of them, including drops** — grouped
+under `## ToDos`, `## Keep`, `## Drop`, as title plus domain (not the full URL). Point him at
+**Tab Flush** to review it properly: the ↗ button in the extension's side panel header, or
+`chrome-extension://<id>/review/review.html`. That page reads the log you just wrote, so the
+buckets show up there immediately — each row with Reopen, and × to dismiss anything he's done with.
 
-This is the review gate: it's where a bad call ("that Reddit thread was actually a task, not a
-keeper") gets caught *before* it's baked into a committed doc or has already created a ClickUp
-task, not after. Give him the artifact link and ask him to confirm the buckets or tell you what to
-move. Only proceed to step 5 once he does — don't write the capture doc or spawn the triage
-subagent off an unconfirmed breakdown. If he moves items between buckets, use his corrected
-version for everything downstream. Clicking Reopen doesn't change a tab's bucket by itself — that
-still happens through him telling you in chat.
+This is the review gate. Ask him to confirm the buckets or tell you what to move, and only proceed
+to step 5 once he does — don't write the capture doc or spawn the triage subagent off an
+unconfirmed breakdown. If he moves items between buckets, rewrite those lines' `bucket` values and
+use the corrected version for everything downstream. His × clicks in Tab Flush are his own; they
+set `dismissed`, never `bucket`, and never something you write for him.
 
 ## 5. Write the capture doc
 
@@ -138,7 +144,7 @@ note, or the dominant group name, or just `flush`.
 ```markdown
 # Tab capture — <date>
 
-_Source: `tab-organizer-logs/<profile>/tab-log-<ts>.json` · <N> tabs in · <K> kept · <D> dropped_
+_Source: `tab-organizer-logs/<profile>/tab-log-<ts>.jsonl` · <N> tabs in · <K> kept · <D> dropped_
 _Note: "<his note, if any>"_
 
 ## Keepers
@@ -155,13 +161,13 @@ Login/OAuth residue <n> · Bare roots <n> · Duplicates <n> · Dead ends <n>
 Full record of every tab, including dropped ones, is in the source log above.
 ```
 
-Dropped tabs are **collapsed to counts, never listed** — the JSON is the complete record, and
+Dropped tabs are **collapsed to counts, never listed** — the JSONL is the complete record, and
 re-listing 60 junk URLs defeats the point of triaging. Commit the doc to `chrome-tab-org` on
 `main`; it's a personal tooling repo, so no PR (see [[personal-tooling-repos-skip-pr]]).
 
-## 6. Hand the actionable set to a triage subagent
+## 6. Hand the ToDos to a triage subagent
 
-Spawn one subagent with the actionable list. Its job: **dedupe first, then create.**
+Spawn one subagent with the ToDo list. Its job: **dedupe first, then create.**
 
 **Dedupe is not optional.** Jake reopens the same tabs and re-flushes; without this, one bookmarked
 intention becomes five identical tasks. For each item, `clickup_search` the URL, then the title's
@@ -193,8 +199,15 @@ Topical routing is deliberately **not** done here. If he later wants these dispe
 lists, that's a sweep over the `chrome-tab` tag — which is why the tag matters more than the
 placement.
 
-**If the actionable set is large (20+), report the count and the proposed task titles before
+**If the ToDo set is large (20+), report the count and the proposed task titles before
 creating anything.** Task volume is Jake's call, not a surprise he discovers in ClickUp.
+
+### Write the task URLs back into the log
+
+Once the subagent reports back, set `clickupUrl` on each filed ToDo's line in the log file. That's
+what puts a **ClickUp ↗** link next to Reopen in Tab Flush — skip it and the tasks exist but the
+review page can't reach them. A ToDo that was skipped as a duplicate gets the *existing* task's URL,
+not `null`; it still has a task, just not a new one.
 
 ## 7. Report
 
@@ -210,6 +223,12 @@ creating anything.** Task volume is Jake's call, not a surprise he discovers in 
   it. That's the correct behaviour, not a failure.
 - The log accumulates. Older logs stay in `~/Downloads/tab-organizer-logs/` as the permanent record
   behind every capture doc; nothing prunes them, and nothing should without Jake asking.
+- **Tab Flush spans every dump, not just this batch.** Its left-most tab composites all logs, so a
+  ToDo you file today sits next to ones from weeks ago until he dismisses it. That's the point —
+  don't treat an old undismissed item as a bug or offer to clear it out.
+- The extension writes the capture fields, you write `bucket`/`clickupUrl`, Jake writes `dismissed`.
+  Three writers, one file, no locking: re-read the log immediately before editing it rather than
+  trusting a copy you read earlier in the session, or you'll clobber an × he clicked in between.
 - If he wants a *bounded* flush rather than the whole browser, he unticks sections in the panel
   before clicking. The skill reads whatever the log contains — it doesn't care whether the batch
   was one group or everything.
