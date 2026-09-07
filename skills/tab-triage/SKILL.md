@@ -108,30 +108,27 @@ can write a verb-first sentence describing what he'd *do* with it, it's actionab
 so this is safe. Expect per-domain permission prompts. If it needs a login, don't sign in: file it
 as Keep, flagged `not verified — needs your login`.
 
-## 4. Show the breakdown, then wait for a go-ahead
+## 4. Show the breakdown as an artifact, then wait for a go-ahead
 
-Before writing anything or touching ClickUp, print one line per tab — **all of them, including
-drops** — grouped under three headers (`## Actionable`, `## Keep`, `## Drop`), in this shape:
+Before writing anything or touching ClickUp, publish an HTML artifact — **all 28 tabs, including
+drops** — grouped into three sections (Actionable / Keep / Drop), each row showing the tab's title
+and domain plus a **Reopen ↗** button (a plain `<a href="{url}" target="_blank" rel="noopener">` —
+no capability needed, it's just a normal link). Every tab was already closed by the extension, so
+Reopen is the undo: one click gets a misjudged tab back instead of him retyping the URL.
 
-```
-## Actionable (7)
-- Reply to One Medical message — app.onemedical.com/messages
+Load `artifact-design` before writing it — treat this as a utilitarian tool page (a review gate,
+not a showcase): real typographic hierarchy and a considered palette, but no hero, no flourish.
+Follow the design plan → build → publish flow that skill lays out. Give the page a real name (not
+"Tab Triage Report") and a one-sentence `description`; pick a stable-feeling favicon. This is a
+single-viewer, one-off artifact — no `capabilities` needed, don't load `artifact-capabilities`.
 
-## Keep (9)
-- Nightly Reflection — tally.so/r/Y577X5
-
-## Drop (12)
-- CVS shop (affiliate ad landing) — www.cvs.com
-```
-
-One line = one tab's title (or a short paraphrase if the title is noise) plus the domain, not the
-full URL — this is a scan, not the capture doc. This is the review gate: it's where a bad call
-("that Reddit thread was actually a task, not a keeper") gets caught *before* it's baked into a
-committed doc or has already created a ClickUp task, not after.
-
-Then stop and ask him to confirm or correct the buckets. Only proceed to step 5 once he does —
-don't write the capture doc or spawn the triage subagent off an unconfirmed breakdown. If he
-moves items between buckets, use his corrected version for everything downstream.
+This is the review gate: it's where a bad call ("that Reddit thread was actually a task, not a
+keeper") gets caught *before* it's baked into a committed doc or has already created a ClickUp
+task, not after. Give him the artifact link and ask him to confirm the buckets or tell you what to
+move. Only proceed to step 5 once he does — don't write the capture doc or spawn the triage
+subagent off an unconfirmed breakdown. If he moves items between buckets, use his corrected
+version for everything downstream. Clicking Reopen doesn't change a tab's bucket by itself — that
+still happens through him telling you in chat.
 
 ## 5. Write the capture doc
 
