@@ -1,6 +1,6 @@
 ---
 name: advance-roadmap
-description: Ship ONE planned item end-to-end from a personal repo's ROADMAP.md, or from docs/plans/ when the repo has no roadmap — pick a qualifying repo under ~/Dropbox/code, implement the item on a branch, verify with the repo's test/build, move it to Shipped, then merge to main locally and push. No PR. Use on-demand ("/advance-roadmap", "work a roadmap item", "advance the roadmap", "ship something off the roadmap") or via an unattended scheduled run. Sibling of [[wrapup-repos]] but NOT the same: this one pushes.
+description: Ship ONE planned item end-to-end from a personal repo's ROADMAP.md, from docs/plans/ when the repo has no roadmap, or from a Linear issue that names the repo — pick a qualifying repo under ~/Dropbox/code, implement the item on a branch, verify with the repo's test/build, move it to Shipped, then merge to main locally and push. No PR. Use on-demand ("/advance-roadmap", "work a roadmap item", "advance the roadmap", "ship something off the roadmap") or via an unattended scheduled run. Sibling of [[wrapup-repos]] but NOT the same: this one pushes.
 ---
 
 # Advance the roadmap
@@ -39,6 +39,10 @@ Because this skill pushes, its safety rules are stricter, not looser.
   `jnelken`. `ROADMAP.md` is a personal-repo convention; Concentro repos (`woodrow`, `api`,
   `folio-platform`, anything under `Concentro-Inc`) track direction in Linear and must NEVER be
   touched by this skill. Pushing `main` on a work repo is the worst thing this skill could do.
+- **Never infer which repo a Linear issue belongs to.** Linear has no repo field. If the issue
+  doesn't name one in explicit evidence you can read, it is not actionable — see Step 2's *Also
+  check Linear*. Guessing from a project name that resembles a directory is the same failure mode
+  as the rule above: a feature pushed to `main` in the wrong repo.
 - **Clean tree or skip.** `git -C <repo> status --porcelain` must be empty. Uncommitted work means
   the user is mid-thought there; branching, merging and pushing around it tangles their diff. Pick
   a different repo — never stash, reset, or commit their WIP to get started.
@@ -60,7 +64,7 @@ Because this skill pushes, its safety rules are stricter, not looser.
   Leave the work on its branch, say so, and stop. A half-shipped roadmap item on `main` is worse
   than no run at all.
 
-## Step 0 — Read run memory
+## Step 0 — Read run memory, then reconcile the previous run
 
 Read `/Users/jake/.claude/projects/-Users-jake-Dropbox-code/memory/project_advance-roadmap-runs.md`
 if it exists. It records which repos had actionable roadmap content on prior runs, what was shipped,
@@ -69,6 +73,55 @@ It is a hint, not a constraint: if that repo no longer qualifies, move on withou
 
 (Headless runs use `/Users/jake/Dropbox/code` as cwd, which is why that memory directory is the
 right one. Don't guess a different path.)
+
+### Did the previous run finish?
+
+**An interrupted run gets finished before a new item is started.** This job fires every 6 hours
+under launchd and dies for reasons that have nothing to do with the work — a session limit hit
+mid-build (`run-20260907-104501.log`), the machine sleeping, launchd killing the process. What it
+leaves behind is a repo sitting on `roadmap/<slug>` with real commits nobody will ever merge, while
+the next run cheerfully starts something else.
+
+Classify the previous run from the logs in
+`/Users/jake/.claude/automations/advance-roadmap/logs/`. **Sort by filename and take the newest —
+do not use `latest.log`.** `run.sh` re-points that symlink as its final line, so it lags the run in
+flight, and the quota-skip path rewrites it immediately. The newest `run-*.log` is *this* run (no
+terminal `=== claude exit=` line yet); the one below it is the previous run.
+
+| Previous log | Meaning | Action |
+|---|---|---|
+| a `skipping — …` line only, no `=== advance-roadmap run` header | quota gate fired, claude never started | nothing to resume |
+| `=== claude exit=0` plus a final summary | completed | nothing to resume |
+| `=== claude exit=` non-zero, **or no `exit=` line at all** | killed mid-flight | reconcile, below |
+
+**Do not use "an unmerged `roadmap/*` branch exists" as the resume signal.** Step 5's
+all-or-nothing rule leaves exactly such a branch behind *on purpose* every time verification fails,
+and nothing about the branch itself distinguishes that from a crash. Re-attempting one every 6
+hours is how a run that correctly gave up becomes an infinite loop.
+
+The real discriminator is **whether Step 8 ran**. A run that stopped deliberately — shipped,
+blocked, or nothing qualified — wrote its memory entry before exiting. A run that was killed did
+not. So: the previous log shows claude started, **and** run memory holds no entry for that run's
+date → it was interrupted.
+
+### Reconciling an interrupted run
+
+If the interrupted log never names a repo, it died before Step 1 picked one — there's nothing to
+reconcile, so go to Step 1. Otherwise work only in the repo it names, and only while it still
+passes the safety rules:
+
+1. `git -C <repo> branch --show-current`. An interrupted run usually leaves the repo on
+   `roadmap/<slug>` rather than `main`. `git-safe-to-autocommit` won't flag that — it's neither a
+   detached HEAD nor a stuck rebase — and Step 3 assumes it starts from `main`, so check directly.
+2. **The clean-tree rule still applies, unchanged.** A dirty tree there could be the dead run's
+   scratch work or Jake's; you cannot tell, so don't guess. Leave it, report it, pick another repo.
+3. If the branch carries commits that aren't in `origin/main`, that half-finished item **is this
+   run's one item**. Resume at Step 4, finish what the item's scope calls for, then run Step 5's
+   verification in full — never inherit the dead run's results — and continue through Steps 6–8.
+   Don't start anything new; the one-item budget is spent.
+4. If verification fails and the fix isn't clean and contained, stop per the all-or-nothing rule and
+   record the outcome as `blocked-branch-left` in Step 8, naming the branch. That token is what
+   keeps the *next* run from resuming it: a branch parked on purpose is documented, not retried.
 
 ## Step 1 — Find a qualifying repo
 
@@ -139,7 +192,10 @@ For each direct child of `/Users/jake/Dropbox/code` that is a git repo, in prior
    What does **not** count: `## Shipped (reference)`, `## Completed (for reference)`,
    `## Current State`, or a section whose items are all struck through / marked done. Judge by
    whether a real unbuilt item is described — not by file length or heading wording.
-7. Apply the clean-tree, preflight, and live-session checks from the safety rules.
+7. **A Linear issue that explicitly names this repo also qualifies it**, even with no
+   `ROADMAP.md` and no `docs/plans/` — see Step 2's *Also check Linear*. Every other gate in this
+   list still applies unchanged.
+8. Apply the clean-tree, preflight, and live-session checks from the safety rules.
 
 Take the first repo that passes everything. **If no repo qualifies, stop and report that no
 actionable roadmap was found** — record it in memory (Step 8) and do nothing else. Do not invent
@@ -183,6 +239,35 @@ that bookkeeping happens even when nothing ships), write the blockers per Step 2
 items you considered and why each was skipped, and record it in memory.
 
 **One item per run.** Don't chain a second one because the first went fast.
+
+### Also check Linear
+
+Roadmap files aren't the only queue. Jake's personal Linear workspace is `jnelken` (team **Dev**,
+key `DEV`), and the global `CLAUDE.md` treats it as where a roadmap item goes *once it's ready to
+be picked up or automated* — so an issue sitting there is intent he has already committed to, and
+it belongs in the batch you triage.
+
+Linear is an **additional** source, not a replacement. A `ROADMAP.md` item is not demoted because
+an issue exists somewhere; read both, then pick one item by the prefer/skip rules above.
+
+- **Query it once**, at triage time. Take `Todo` and `In Progress` first — Jake moved those
+  deliberately — then `Backlog`. Ignore `Done`, `Canceled`, `Duplicate`, and `In Review`.
+- **An issue is actionable only if it names its repo.** As of 2026-09-08 **none** of the
+  `Knowledge Base MVP` issues (`DEV-12`–`DEV-17`) does, and neither does that project's
+  description. An issue whose repo you can't establish from explicit evidence — its own body, its
+  project description, a linked resource — is a Step 2b blocker, phrased so one line answers it:
+  "DEV-14 doesn't say which repo it lives in."
+- **Step 2's skip list applies in full.** Those same six issues need Postgres + pgvector, an LLM
+  API key, and an external Instagram ingestion provider, so on today's reading they're out on the
+  external-services rule regardless of the repo question. That's a verdict on the current issue
+  text, not a permanent denylist — re-read them rather than trusting this paragraph.
+- **Close the loop only after the push succeeds** (Step 7): comment the merge commit on the issue
+  and set it to `Done`. Don't set anything to `In Progress` on the way in — an unattended run that
+  fails verification would leave the board claiming work that isn't happening, with no way to put
+  it back.
+- **Never block a run on Linear.** If the MCP tools aren't authenticated — the tell is that only
+  `authenticate` / `complete_authentication` are exposed, with no `list_issues` — note it in the
+  log and carry on with the file-based sources. Never attempt OAuth from a headless run.
 
 ## Step 2b — When nothing ships, write the blockers to `.claude/IN_PROGRESS.md`
 
@@ -366,13 +451,23 @@ git -C <repo> push origin main
 - If `--ff-only` refuses because `origin/main` moved during the run, `git fetch` and rebase the
   branch onto the new `origin/main`, **re-run Step 5's verification**, then retry. Never force.
 - If the push is rejected, stop and report. Don't force, don't retry with a different flag.
+- **Once the push has succeeded**, and only then: if the item came from a Linear issue, comment the
+  merge commit on it and move it to `Done`.
 
 ## Step 8 — Update run memory
 
 Write `/Users/jake/.claude/projects/-Users-jake-Dropbox-code/memory/project_advance-roadmap-runs.md`
 (one file, updated in place — never one file per run), with `type: project` frontmatter, recording:
 - the date of this run;
+- an explicit **`**Outcome:**`** line — one of `shipped`, `blocked-branch-left`, or
+  `nothing-qualified`. Step 0 reads it, and its *absence* for a date whose log shows claude started
+  is the sole signal that a run was interrupted, so never skip writing it. When it's
+  `blocked-branch-left`, name the repo and branch: that record is what stops a later run from
+  resuming a branch that was parked deliberately;
+- whether this run resumed an interrupted previous run, and what state it found;
 - which repos had a qualifying roadmap and which were checked and didn't;
+- the Linear issues considered, the one shipped (with its `DEV-N` id), and any that were blocked on
+  not naming a repo;
 - the item picked, or why none was;
 - whether it shipped, and the merge commit hash;
 - any plan docs archived as already-implemented, so a later run doesn't go looking for them;
@@ -387,6 +482,8 @@ the one-line pointer to `MEMORY.md` if it isn't there yet.
 ## Final output
 
 End with a 5-line plain-text summary: repo, item shipped (or why none), test/build result, merge
-commit hash, and anything left for the user to confirm by hand. If Step 2b wrote blockers, say so
+commit hash, and anything left for the user to confirm by hand. Say up front whether this run
+finished an interrupted previous run or started fresh, and name the outcome token you recorded in
+Step 8. If Step 2b wrote blockers, say so
 with the path and the item count — that's the user's cue to run `/pick-up` in that repo. In a scheduled run this is what the
 user scans in the log.
