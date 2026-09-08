@@ -1,6 +1,6 @@
 ---
 name: advance-roadmap
-description: Ship ONE planned item end-to-end from a personal repo's ROADMAP.md, from docs/plans/ when the repo has no roadmap, or from a Linear issue that names the repo — pick a qualifying repo under ~/Dropbox/code, implement the item on a branch, verify with the repo's test/build, move it to Shipped, then merge to main locally and push. No PR. Use on-demand ("/advance-roadmap", "work a roadmap item", "advance the roadmap", "ship something off the roadmap") or via an unattended scheduled run. Sibling of [[wrapup-repos]] but NOT the same: this one pushes.
+description: Ship ONE planned item end-to-end from a personal repo's ROADMAP.md, from docs/plans/ when the repo has no roadmap, or from a Linear issue carrying a repo label — pick a qualifying repo under ~/Dropbox/code, implement the item on a branch, verify with the repo's test/build, move it to Shipped, then merge to main locally and push. No PR. Use on-demand ("/advance-roadmap", "work a roadmap item", "advance the roadmap", "ship something off the roadmap") or via an unattended scheduled run. Sibling of [[wrapup-repos]] but NOT the same: this one pushes.
 ---
 
 # Advance the roadmap
@@ -39,10 +39,11 @@ Because this skill pushes, its safety rules are stricter, not looser.
   `jnelken`. `ROADMAP.md` is a personal-repo convention; Concentro repos (`woodrow`, `api`,
   `folio-platform`, anything under `Concentro-Inc`) track direction in Linear and must NEVER be
   touched by this skill. Pushing `main` on a work repo is the worst thing this skill could do.
-- **Never infer which repo a Linear issue belongs to.** Linear has no repo field. If the issue
-  doesn't name one in explicit evidence you can read, it is not actionable — see Step 2's *Also
-  check Linear*. Guessing from a project name that resembles a directory is the same failure mode
-  as the rule above: a feature pushed to `main` in the wrong repo.
+- **A Linear issue's repo is its `repo/*` label, and nothing else.** No label, not actionable —
+  see Step 2's *Also check Linear*. Never read it out of the title, body, or project name instead:
+  a project called "Knowledge Base MVP" is not evidence for the `knowledge-graph` directory, and
+  guessing is the same failure mode as the rule above — a feature pushed to `main` in the wrong
+  repo.
 - **Clean tree or skip.** `git -C <repo> status --porcelain` must be empty. Uncommitted work means
   the user is mid-thought there; branching, merging and pushing around it tangles their diff. Pick
   a different repo — never stash, reset, or commit their WIP to get started.
@@ -263,11 +264,19 @@ an issue exists somewhere; read both, then pick one item by the prefer/skip rule
 
 - **Query it once**, at triage time. Take `Todo` and `In Progress` first — Jake moved those
   deliberately — then `Backlog`. Ignore `Done`, `Canceled`, `Duplicate`, and `In Review`.
-- **An issue is actionable only if it names its repo.** As of 2026-09-08 **none** of the
-  `Knowledge Base MVP` issues (`DEV-12`–`DEV-17`) does, and neither does that project's
-  description. An issue whose repo you can't establish from explicit evidence — its own body, its
-  project description, a linked resource — is a Step 2b blocker, phrased so one line answers it:
-  "DEV-14 doesn't say which repo it lives in."
+- **The repo comes from the `repo` label.** The workspace carries a `repo` label group with one
+  child per directory under `~/Dropbox/code` — `repo/mailcruxh`, `repo/typey.site`, and so on.
+  Being a group, it's single-select: one repo per issue.
+- **You are the enforcement.** Linear has no custom fields, and required fields are a Jira concept
+  Linear deliberately doesn't implement, so nothing stops an issue being filed without the label.
+  An issue with no `repo/*` label is a Step 2b blocker, phrased so one line answers it: "DEV-14 has
+  no repo label — which repo is it in?" Don't work around it by reading the repo out of prose.
+- Label names are **directory names**, because that's what this skill resolves against. Two don't
+  match their GitHub repo — `repo/openclaw-vps` is `jnelken/vena-vps`, and `repo/typebeat` has two
+  checkouts on disk. Each label's description records the discrepancy; read it before assuming.
+- **When you file the blocker, file it in Linear too**: add the missing label yourself if the
+  answer is unambiguous from the issue's own content, and otherwise leave it for Jake. Adding a
+  label is reversible in a way that pushing to the wrong repo is not.
 - **Step 2's skip list applies in full.** Those same six issues need Postgres + pgvector, an LLM
   API key, and an external Instagram ingestion provider, so on today's reading they're out on the
   external-services rule regardless of the repo question. That's a verdict on the current issue
