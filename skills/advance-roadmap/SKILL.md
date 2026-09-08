@@ -100,9 +100,18 @@ and nothing about the branch itself distinguishes that from a crash. Re-attempti
 hours is how a run that correctly gave up becomes an infinite loop.
 
 The real discriminator is **whether Step 8 ran**. A run that stopped deliberately — shipped,
-blocked, or nothing qualified — wrote its memory entry before exiting. A run that was killed did
-not. So: the previous log shows claude started, **and** run memory holds no entry for that run's
-date → it was interrupted.
+blocked, or nothing qualified — appended itself to run memory's `## Run ledger` before exiting. A
+run that was killed never got there. So take the previous log's stamp from its header
+(`=== advance-roadmap run 20260907-104501 …` → `20260907-104501`) and look that stamp up in the
+ledger. **No row → it was interrupted.**
+
+Match on the **stamp, not the date.** This job runs four times a day; a date alone can't tell this
+morning's run from last night's. And note what the ledger deliberately doesn't contain: a
+quota-gate skip never reached Step 8 either, but its log has no run header, so the table above
+already ruled it out before you get here.
+
+**A missing or empty ledger means no prior state, not an interruption.** Go to Step 1 and let this
+run write the first row.
 
 ### Reconciling an interrupted run
 
@@ -118,7 +127,9 @@ passes the safety rules:
 3. If the branch carries commits that aren't in `origin/main`, that half-finished item **is this
    run's one item**. Resume at Step 4, finish what the item's scope calls for, then run Step 5's
    verification in full — never inherit the dead run's results — and continue through Steps 6–8.
-   Don't start anything new; the one-item budget is spent.
+   Don't start anything new; the one-item budget is spent. The branch was cut from an `origin/main`
+   that has since moved on, so expect Step 7's `merge --ff-only` to refuse: that's the ordinary
+   fetch, rebase, re-verify path documented there, not a hard stop.
 4. If verification fails and the fix isn't clean and contained, stop per the all-or-nothing rule and
    record the outcome as `blocked-branch-left` in Step 8, naming the branch. That token is what
    keeps the *next* run from resuming it: a branch parked on purpose is documented, not retried.
@@ -459,11 +470,14 @@ git -C <repo> push origin main
 Write `/Users/jake/.claude/projects/-Users-jake-Dropbox-code/memory/project_advance-roadmap-runs.md`
 (one file, updated in place — never one file per run), with `type: project` frontmatter, recording:
 - the date of this run;
-- an explicit **`**Outcome:**`** line — one of `shipped`, `blocked-branch-left`, or
-  `nothing-qualified`. Step 0 reads it, and its *absence* for a date whose log shows claude started
-  is the sole signal that a run was interrupted, so never skip writing it. When it's
-  `blocked-branch-left`, name the repo and branch: that record is what stops a later run from
-  resuming a branch that was parked deliberately;
+- an **outcome token** for this run — exactly one of:
+  - `shipped` — an item went to `main`;
+  - `blocked-branch-left` — an item was picked and its work is parked on a branch (verification
+    failed, or a decision blocked it). **Name the repo and branch.** This is the record that stops
+    a later run from resuming a branch that was abandoned on purpose;
+  - `blocked-no-item` — repos qualified but every candidate was skipped at Step 2; blockers went to
+    `.claude/IN_PROGRESS.md`;
+  - `nothing-qualified` — no repo passed Step 1;
 - whether this run resumed an interrupted previous run, and what state it found;
 - which repos had a qualifying roadmap and which were checked and didn't;
 - the Linear issues considered, the one shipped (with its `DEV-N` id), and any that were blocked on
@@ -478,6 +492,21 @@ Write `/Users/jake/.claude/projects/-Users-jake-Dropbox-code/memory/project_adva
 
 Keep it short and current: replace stale run detail rather than appending an ever-growing log. Add
 the one-line pointer to `MEMORY.md` if it isn't there yet.
+
+### The run ledger — the one append-only part of that file
+
+Run memory carries a `## Run ledger` table. Append exactly one row for this run as part of this
+step, using the stamp from your own log header:
+
+| Stamp | Date | Repo | Outcome |
+|---|---|---|---|
+| `20260908-044500` | 2026-09-08 | mailcruxh | shipped |
+
+**This table is exempt from the replace-stale rule above** — it is the only thing in the file that
+accumulates, and Step 0 reads it to tell a run that stopped on purpose from one that was killed.
+Trim it to the last ~10 rows and no further: a row you delete is a run that looks interrupted
+forever. A run that never reaches this step correctly leaves no row; that gap is the signal, so
+never backfill a row for a run you didn't complete yourself.
 
 ## Final output
 
