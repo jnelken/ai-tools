@@ -11,7 +11,8 @@ claude_dir="$HOME/.claude"
 
 # Allowlist of files that are OK to be local (not symlinked)
 allowlist=(
-  "block-push-to-main.denylist"
+  "block-push-to-main.allowlist"     # user-specific repo skip-list (current name)
+  "block-push-to-main.denylist"  # legacy name, kept for older checkouts
   ".DS_Store"
 )
 

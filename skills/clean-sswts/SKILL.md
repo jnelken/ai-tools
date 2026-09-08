@@ -122,6 +122,32 @@ git -C <project-path> worktree prune -v
 
 Confirm the delete result rather than assuming: the JSON response carries `deleted[]` and `warnings[]` — report both.
 
+## Phase 3.5 — Rename workspaces whose names have drifted
+
+Deleting finished workspaces is half the tidy-up; the survivors accumulate wrong names. Same survey data, no extra queries.
+
+The naming convention is `#<pr> <TICKET-ID> <short-slug>`, with two documented fallbacks:
+
+| Situation | Name |
+|---|---|
+| PR open, ticket exists | `#412 PROJ-99 short-slug` |
+| Ticket exists, no PR yet | `PROJ-99 short-slug` |
+| PR open, **no ticket** | `#412 short-slug` |
+
+**Derive all three fields from evidence, never from the existing name** — the name is what you are correcting:
+
+- **PR number** — from the branch, via the bulk `gh pr list` join (Phase 1).
+- **Ticket** — from the PR title, then the PR body, then the branch name. If none of the three has one, **use the slug-only form**. Never invent a ticket ID or attach a plausible-looking neighbouring one.
+- **Slug** — from the branch name, not the old label.
+
+Renaming is a **metadata-only** operation: it does not touch the worktree. It is therefore safe on workspaces that are `held` or `dirty`, which are exactly the ones you must not delete. Rename them anyway.
+
+```bash
+superset workspaces update <id> --name "#<pr> <TICKET-ID> <slug>"
+```
+
+**Why this matters more than tidiness.** Workspaces get recycled: someone reuses a checkout for the next task, and only the branch changes. Seen in practice: a workspace still labelled with its original PR number, ticket and slug whose branch had moved on to an entirely different PR *and* a different ticket — every field stale at once. Any tooling (or human) keying off the name would have acted on the wrong PR. Correcting names is what keeps the Phase 2 Trap 1 hazard from recurring.
+
 ## Phase 4 — Surface what you didn't delete
 
 For each skipped workspace give the user one line of evidence, not just a name — what is in it and why it survived:
@@ -141,12 +167,15 @@ Then ask what to do with them. Do not loop back and delete on your own initiativ
 ## Report
 
 ```
-Workspaces: 27 surveyed -> 6 deleted, 9 kept (open PRs), 9 root, 3 surfaced
+Workspaces: 27 surveyed -> 6 deleted, 2 renamed, 9 kept (open PRs), 9 root, 3 surfaced
 
 Deleted (workspace + branch):
   <project>   #401 MERGED   some-finished-branch
   <project>   #405 MERGED   another-finished-branch
   ...
+
+Renamed (name had drifted from the branch's actual PR/ticket):
+  <project>   #380 PROJ-12 old-slug  ->  #412 PROJ-99 current-slug
 
 Surfaced - needs your call:
   <project>   saved-groupings    no PR, 2 commits, 547 insertions
