@@ -78,7 +78,13 @@ If the ticket is about a specific code change (not pure feedback/bug triage) and
 
 ## Apply a product-surface label
 
-Every issue gets **exactly one** product-surface label: a **Product Area** child (`f48ece26-7f45-4bbf-b3a6-dd5bbf3d5026`) for user-facing Folio work, or a **Management Portal Area** child (`8c1a378e-b164-4101-a143-ed7164e0e706`) for work in the internal admin app (`apps/management/` in woodrow, `src/routes/management/` in api). Resolve children by name via `issueLabel(id: "<group id>") { children { nodes { id name } } }` rather than hardcoding child ids, since the taxonomy grows. A ticket carries one child from each group only if it genuinely spans both surfaces — otherwise exactly one. If neither fits, ask rather than guessing or leaving it unlabeled.
+Every issue gets **exactly one** product-surface label from whichever of these three groups fits:
+
+- **Product Area** (`f48ece26-7f45-4bbf-b3a6-dd5bbf3d5026`) — user-facing Folio work.
+- **Management Portal Area** (`8c1a378e-b164-4101-a143-ed7164e0e706`) — work in the internal admin app (`apps/management/` in woodrow, `src/routes/management/` in api).
+- **Engineering Area** (`52ee0d95-71b0-47c5-93ac-b1a91f3f80ba`) — pure engineering/infra work with no product surface at all (CI, lint, cloud infra, observability, backend ops, internal DevX tooling, dependencies).
+
+Resolve children by name via `issueLabel(id: "<group id>") { children { nodes { id name } } }` rather than hardcoding child ids, since the taxonomy grows. A ticket carries one child from each of two groups only if it genuinely spans both — otherwise exactly one. If a ticket is real product/feature work but no existing child fits (a missing-taxonomy gap, not an infra ticket), don't force it into Engineering Area — ask instead. If nothing fits at all, ask rather than guessing or leaving it unlabeled.
 
 Full rules and the current child table: the Linear document ["Labeling: Product Area vs Management Portal Area"](https://linear.app/concentro/document/labeling-product-area-vs-management-portal-area-fb86578031d8) in the Management Portal project. Don't duplicate its table here — it's the source of truth and changes as pages ship.
 
