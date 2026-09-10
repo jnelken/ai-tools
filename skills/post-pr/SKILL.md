@@ -17,6 +17,8 @@ Every step gates the next. A PR that never comes back clean is never announced; 
 
 This skill owns the *only* place the badge and the undraft happen. Never add `📣 **Posted to Slack**` or run `gh pr ready` anywhere else, and never speculatively.
 
+**External announcement (steps 4-6: Slack, badge, undraft) is gated on the PR's base branch being the repo's default branch.** A PR based on anything else — a stacked PR onto another feature branch, a sub-PR into a shared `feature/*` integration branch — is internal-only: it still gets reviewed and CI-checked (steps 1-3 run exactly as normal), but it is never posted to `#pr-review`, badged, or undrafted by this skill. The point is to keep the number of PRs landing in front of a human reviewer proportional to the number of semantically distinct changes, not the number of branches used to build one: a stack of sub-PRs is one reviewable unit, and the *only* member of that stack a reviewer should ever see announced is the one whose base is the default branch — typically the last one, once the stack is flattened or the integration branch itself opens its PR into main. See step 3.5.
+
 ## Invocation
 
 ```
@@ -36,6 +38,7 @@ Targeting matters more than it looks: `/peer-review` resolves against the **curr
 - Work is mid-flight (dirty tree, task not finished). Announcing a WIP branch wastes reviewer attention and burns Codex rounds on an unfinished diff.
 - The user only wants a review pass with no PR-side effects — that's `/peer-review local`.
 - The user wants existing review threads addressed rather than a fresh pass — that's [[babysit-pr]].
+- The PR's base is not the repo's default branch — this skill still runs (review + CI), but see step 3.5: it will never post to Slack, badge, or undraft that PR. Don't route around this by manually posting/badging/undrafting a stacked PR yourself; wait for it to be retargeted onto the default branch, or announce the integration branch's own PR into main once that exists.
 
 ## Steps
 
@@ -75,6 +78,25 @@ Report every check: name, status, URL. Flag failures prominently with their URLs
 **Gate:** any failing check stops the workflow here. Announcing a red PR is worse than not announcing it.
 
 Checks reporting `NEUTRAL` or `SKIPPED` are not failures — Netlify's informational checks land this way routinely.
+
+A PR whose base is not the repo's default branch typically has *fewer* checks to watch, not zero — this repo's `unit-tests.yml` and `e2e-tests.yml` are both scoped to `pull_request: branches: [main]`, so a stacked PR only gets whatever workflows aren't main-restricted (e.g. a labeler). That's expected, not a red flag: don't wait for checks that structurally cannot run, and don't treat their absence as a gate failure. Rely on local verification (tests, typecheck) for the rest.
+
+### 3.5. Check whether this PR is externally announceable
+
+```bash
+gh pr view <PR_NUMBER> --repo <OWNER/REPO> --json baseRefName -q .baseRefName
+gh api <OWNER/REPO> --jq .default_branch   # or: git symbolic-ref refs/remotes/origin/HEAD --short
+```
+
+If `baseRefName` is **not** the repo's default branch, this PR is internal-only:
+
+- **Stop here.** Do not run steps 4-6 (Slack, badge, undraft) for this target.
+- Report it plainly (see step 7's format) — this is not a failure, it's a normal outcome for a stacked/sub-PR, but it must be visible so nobody assumes silence means the workflow didn't run.
+- Move on to the next target, if any.
+
+If `baseRefName` **is** the default branch, continue to step 4 as normal.
+
+This check is per-target and re-evaluated every time the skill runs — a PR that starts stacked and later gets retargeted onto the default branch (e.g. once its integration branch merges) becomes announceable the next time `/post-pr` runs against it, with no special-casing needed.
 
 ### 4. Post to Slack
 
@@ -152,7 +174,17 @@ Concentro-Inc/api#1271
 - Badge: appended    Draft: cleared
 ```
 
-If the run stopped at a gate, say which gate and what is outstanding — don't bury it.
+For a target that stopped at the 3.5 gate, say so explicitly rather than omitting the announcement steps silently:
+
+```
+Concentro-Inc/woodrow#1555
+- Review: clean after 2 rounds
+- CI: 1 check (label), pass — unit-tests/e2e-tests don't run against a non-main base
+- Base: con-3739-vde-input-vertical-inset (not the default branch) — internal-only, not announced
+- Slack / Badge / Draft: skipped (step 3.5 gate)
+```
+
+If the run stopped at a different gate (unconverged review, failing check), say which gate and what is outstanding — don't bury it.
 
 ## When it fires on its own
 
@@ -163,6 +195,8 @@ The global CLAUDE.md instructs this to run **automatically, without asking**, on
 - a PR exists for the branch
 
 Do not fire on intermediate pushes mid-task, and do not fire on a branch whose PR is deliberately parked. When several PRs finished together, run this for each of them.
+
+Firing automatically still runs the full skill, base-branch gate included: a finished task on a branch stacked onto something other than the default branch gets reviewed and CI-checked same as any other, but stays internal (see step 3.5) until it's part of a chain that reaches the default branch.
 
 Because it self-starts, it must also self-report: state plainly what it did to each PR, including anything a gate stopped.
 
