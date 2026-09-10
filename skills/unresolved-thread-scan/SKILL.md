@@ -1,6 +1,6 @@
 ---
 name: unresolved-thread-scan
-description: Claude Tag (Claude in Slack) routine — scans this channel's recent threads for work Claude already investigated that is either genuinely stuck waiting on a human decision, or still open with no Linear ticket recording it, and posts the findings back as a reply in its own routine thread (escalating PR-approval blockers to #pr-review instead). Runs automatically once attached as a plugin and triggered by a channel's scheduled routine; not something a user invokes by name mid-conversation. Applies whenever the routine fires, regardless of what else is happening in the channel that day.
+description: Claude Tag (Claude in Slack) routine — scans this channel's recent threads for work Claude already investigated that is either genuinely stuck waiting on a human decision or still open and at risk of getting lost, and posts the findings back as a reply in its own routine thread (escalating PR-approval blockers to #pr-review instead). Runs automatically once attached as a plugin and triggered by a channel's scheduled routine; not something a user invokes by name mid-conversation. Applies whenever the routine fires, regardless of what else is happening in the channel that day.
 ---
 
 # Unresolved Thread Scan
@@ -13,17 +13,36 @@ This skill is attached as a plugin to whichever channels want the sweep, so its 
 
 The sweep is **durably authorized**: once a channel's routine is set up, run it in full every time it fires. Don't ask for permission to scan, to post, or to write the log on each firing.
 
+## Runtime configuration
+
+The session configuration provides incoming webhooks for `#eng-claudio-chat` and
+`#pr-review`. Use the former for engineering-channel PR announcements and the latter for
+the approval queue. Webhook URLs are credentials: read them from the session configuration
+at run time rather than copying them into this tracked skill.
+
 ## Route it into a thread, don't run it in the channel
 
 Post one short top-level message — "Scanning for unresolved threads..." — then do all of the work below, findings included, as replies in the thread under that message. The scan reads 30 days of history, cross-checks Linear and GitHub, and reasons about each candidate — that's a lot of noise for the channel's main timeline, and the channel only ever needs the findings.
 
 **Never write anything inside the threads being scanned.** All output from this routine — questions, notes, findings — belongs in this routine's own thread, never appended to the original session you're reading.
 
+If a bugfix is blocked on a product call or clarification, the finding may tag the person who
+can unblock it directly. For a Linear bug report filed by an internal `@concentro.io` address,
+use the reporter's email to resolve their Slack identity; for example,
+`inigo@concentro.io` maps to `@Inigo`. Ask them the specific clarification needed.
+
 ## Steps
 
 ### 1. Find the threads worth surfacing
 
 Scan this channel's last 30 days of messages for threads where Claude posted analysis, an investigation writeup, or opened a PR. For each candidate, cross-check any referenced Linear ticket and/or GitHub PR (via their MCP tools) to see what actually happened next.
+
+For Datadog crash or error investigations, don't use `us5.datadoghq.com`: this environment
+has no web login session and redirects to `/account/login`. Use the Datadog connector or the
+REST API at `api.us5.datadoghq.com`, whose credential is injected automatically. Pull the
+reported event first, such as with `POST /api/v2/logs/events/search` using the ticket's query,
+and read its RUM `session.id`. Then use `POST /api/v2/rum/events/search` with
+`@type:error @session.id:<id>` around the event time to retrieve the actual stack trace.
 
 Surface a thread if **either** of these is true:
 
@@ -56,9 +75,33 @@ Keep each line to one sentence if possible, carrying:
 - a permalink to the original thread
 - the open question needing resolution, or what the undocumented work is
 
-Mention someone only if they actually need to act — use a real Slack mention for them; otherwise write their handle as `@.handle` so it doesn't ping. If someone was already working in the scanned thread, it's fine to mention them here.
+Format every Slack message using Slack `mrkdwn`, not Markdown. Links must use
+`<URL|label>` syntax; never emit `[label](URL)`. For a PR sent to `#pr-review`, use this
+two-line format:
+
+```text
+<PR_URL|[repo] PR title (TICKET-ID)>
+— Author
+```
+
+Before posting, verify that no Markdown-style links remain in the final message. When asked to
+compose rather than send a Slack post, return only the final Slack-ready message.
+
+Mention someone only if they actually need to act — use a real Slack mention for them; otherwise write their handle as `@.handle` so it doesn't ping. A person who can clear a product or bugfix blocker may be mentioned even if they weren't already participating in the scanned thread. Resolve internal Linear reporters from their `@concentro.io` email when that identifies the right person to ask.
 
 **Exception — PR blocked on human approval.** If a thread is simply waiting on someone to approve or merge a PR, don't resurface it in the channel at all — send it to `#pr-review` instead, via the webhook (see below). Don't write a line like "no channel action needed — tracked via PR, not resurfaced as stuck" for a PR already shared to `#pr-review`; just leave it out of the channel post entirely.
+
+The `#pr-review` message should contain only the linked PR title and Claudio's sign-off:
+
+```text
+<PR_URL|[repo] PR title (TICKET-ID)>
+— Claudio
+```
+
+Use `[api]` for `Concentro-Inc/api` and `[ui]` for `Concentro-Inc/woodrow`, with the entire
+title as the hyperlink. An optional description is allowed only when it adds necessary context:
+make it one sentence, hyperlink it to the originating thread, and put it on its own line before
+the required PR title/link. Do not add any other status prose.
 
 > **Delegating the `#pr-review` cross-post:** the incoming webhook URL lives in the session configuration under Webhooks. A sub-agent can't see that section — if you delegate the cross-post, paste the full webhook URL into the worker's prompt, or make the POST from the main session yourself. Otherwise the worker will incorrectly report that no `#pr-review` webhook exists.
 
@@ -98,12 +141,28 @@ Serialize memory writes — no parallel workers on the same file.
 
 If nothing new was found, say so in one line in this routine's own thread and end. A quiet run still gets a line — that's how the routine reads as alive rather than possibly broken, since findings are no longer silent by default.
 
+## PR workflow for implementation arising from a thread
+
+The scan itself reports work; it does not automatically implement findings. If work in the
+surrounding session does proceed to a PR, follow this workflow:
+
+1. Create a Linear ticket for the work. A single ticket may cover a related series of PRs under
+   one theme. Put its `CON-####` identifier in every relevant commit message and PR title.
+2. Open the PR as a draft.
+3. Comment `/codex-action-review`, wait for Codex's findings, address them, and request review
+   again. Repeat until Codex is clean or approves, with a maximum of five rounds. Resolve each
+   conversation after deciding whether to act; when declining a finding, leave a short comment.
+4. Only after Codex is clean or approves, mark the PR ready for review.
+5. Post the ready PR for review in its originating Slack channel and cross-post it to
+   `#pr-review` using the configured webhooks. Follow the Slack formatting and repository-prefix
+   rules above, and sign the message `— Claudio`.
+
 ## Deploying this skill
 
 This is a Claude Tag plugin skill, not a Claude Code slash-command skill — it isn't invoked by name, it's auto-loaded into every session in a channel it's attached to. To put it to work in a channel:
 
 1. An admin attaches this skill's plugin to the channel (or workspace-wide, if every channel should run the sweep).
-2. In that channel, set up (or replace) the routine by messaging `@Claude`: run the unresolved thread scan on the desired schedule, and include the real `#pr-review` webhook URL in that message so it's available at run time — that's the only place the live webhook value should ever be written down.
+2. In that channel, set up (or replace) the routine by messaging `@Claude`: run the unresolved thread scan on the desired schedule, and include the real `#eng-claudio-chat` and `#pr-review` webhook URLs in that message so they're available at run time — that's the only place the live webhook values should ever be written down.
 
 Replacing an existing routine (e.g. one that currently pastes the full instructions inline) works the same way: mention `@Claude` in the channel and describe the replacement, or run `@Claude !routines` first to see and edit what's there.
 
