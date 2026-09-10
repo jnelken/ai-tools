@@ -9,6 +9,17 @@ description: Generate a dead-simple PR title/body from the net diff vs base, bac
 
 Push the current branch, generate (or preserve) a minimal PR description, backfill a Linear ticket, and open the PR **as a draft**. New PRs start as drafts on purpose — the Post-PR Workflow (in the user's global CLAUDE.md) marks them ready and badges the description once the PR has actually been shared to Slack. Don't undraft or badge here; that's a different step's job.
 
+## Invocation
+
+```
+/create-pr                        # PR into the repo's default branch
+/create-pr base=feature/<slug>    # sub-PR into a trunk branch (stacked PR)
+```
+
+`base=<branch>` sets the PR's base for both the net diff and `gh pr create --base`. Without it, the base is the default branch unless step 1's auto-detection finds a trunk the branch was cut from.
+
+**Trunks.** When cutting a new `feature/<slug>` trunk for closely-knit work (see the Post-PR Workflow section of the global CLAUDE.md), open the trunk's own PR into the default branch right away as a draft — run this skill from the trunk branch with no `base=`. That PR is what eventually gets announced, and it is the only way the sub-work gets a Netlify deploy preview, since previews only build for PRs based on main.
+
 ## Gather context first
 
 Before anything else, collect:
@@ -19,7 +30,20 @@ Before anything else, collect:
 
 ## Steps
 
-1. Get the base branch: `git symbolic-ref refs/remotes/origin/HEAD | sed 's@^refs/remotes/origin/@@'`
+1. Get the base branch:
+   - If `base=<branch>` was passed, use it. Verify it exists on origin (`git ls-remote --heads origin <branch>`) and stop if it doesn't.
+   - Otherwise start from the default branch, `git symbolic-ref refs/remotes/origin/HEAD | sed 's@^refs/remotes/origin/@@'`, then check whether the branch was cut from a `feature/*` trunk rather than from the default branch:
+
+     ```bash
+     DEFAULT=$(git symbolic-ref refs/remotes/origin/HEAD | sed 's@^refs/remotes/origin/@@')
+     MB_DEFAULT=$(git merge-base "origin/$DEFAULT" HEAD)
+     for t in $(git for-each-ref --format='%(refname:short)' refs/remotes/origin/feature/); do
+       MB_T=$(git merge-base "$t" HEAD)
+       [ "$MB_T" != "$MB_DEFAULT" ] && git merge-base --is-ancestor "$MB_DEFAULT" "$MB_T" && echo "candidate trunk: $t"
+     done
+     ```
+
+     A candidate means the branch forked from that trunk after the trunk left the default branch. Propose it as the base and confirm once with the user — this is the only base-related question; don't ask when nothing matches.
 2. Get the **net diff vs base** using `git diff <base-branch>...HEAD` — the description must reflect this final state, not per-commit history.
 3. Get the commit log using `git log <base-branch>..HEAD --oneline` (only as a hint; never describe intermediate or reverted work).
 4. Check if a PR already exists for this branch using `gh pr view --json number,title,body 2>&1`.
@@ -29,11 +53,11 @@ Before anything else, collect:
    - **Body**: follow the **PR Descriptions** format in the user's global CLAUDE.md (`~/.claude/CLAUDE.md`) exactly — that doc is the single source of truth for section shape, skimmability rules, and what to omit. Don't duplicate that guidance here; read it fresh each time in case it's changed.
    - No `🤖 Generated with` footer.
 7. Push the branch to origin if not already pushed (`git push -u origin <branch>`). **Before pushing**, if the current branch equals the base branch (e.g. you're on `main`/`master` itself), STOP and confirm with the user — running a PR workflow from the base branch is almost certainly a mistake, and pushing could ship unintended work to production.
-8. If a PR exists with a non-empty body, only update the title: `gh pr edit --title "..."`. If a PR exists with an empty body, edit title and body. Otherwise create a new PR **as a draft**. `gh` rejects `--draft` combined with `--web` (`the --draft flag is not supported with --web`), so create it headless and open the browser as a separate step: `gh pr create --draft --title "..." --body "..."` then `gh pr view --web`.
+8. If a PR exists with a non-empty body, only update the title: `gh pr edit --title "..."`. If a PR exists with an empty body, edit title and body. Otherwise create a new PR **as a draft**, passing `--base <base-branch>` whenever the base resolved in step 1 is not the default branch. `gh` rejects `--draft` combined with `--web` (`the --draft flag is not supported with --web`), so create it headless and open the browser as a separate step: `gh pr create --draft [--base <base-branch>] --title "..." --body "..."` then `gh pr view --web`.
 9. Use a HEREDOC for the PR body to preserve formatting (body content per the global CLAUDE.md format resolved in step 6):
 
    ```bash
-   gh pr create --draft --title "Imperative title (CON-1234)" --body "$(cat <<'EOF'
+   gh pr create --draft [--base feature/<slug>] --title "Imperative title (CON-1234)" --body "$(cat <<'EOF'
    ...body per global CLAUDE.md PR Descriptions format...
    EOF
    )"
@@ -65,8 +89,11 @@ If the user says **use**: format the final title as `PR title (CON-123)` and ski
 
 If the user says **new**: create a new Linear issue using the steps below.
 
+### No ticket found — sub-PR into a trunk: reuse the trunk's ticket
+If no ticket is found and the base (step 1) is a `feature/*` trunk, look up the trunk's own PR (`gh pr list --head <trunk> --state open --json title`) and reuse the ticket in its title without asking. Sub-PRs share their trunk's ticket by default — ticket count no longer dictates PR count. Fall through to creating one only if the trunk PR carries no ticket either.
+
 ### No ticket found — create one automatically
-If no ticket is found, proceed directly to creating a Linear issue without asking.
+Otherwise, proceed directly to creating a Linear issue without asking.
 
 ### Creating a Linear issue
 Use `mcp__claude_ai_Linear__list_teams` to find the team:

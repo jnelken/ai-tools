@@ -40,9 +40,15 @@ a periodic/ad-hoc audit and needs a confirmation step every time.
 
 3. **Find each workspace's open PR.** For each (repo, branch) pair:
    ```
-   gh pr list --repo <repo> --head <branch> --state open --json number,title,url
+   gh pr list --repo <repo> --head <branch> --state open --json number,title,url,baseRefName
    ```
    No result → skip, that workspace has no open PR right now.
+
+   Drop any PR whose `baseRefName` is not the repo's default branch. A sub-PR into a
+   `feature/*` trunk is internal-only by design — `/post-pr` merges it into the trunk and never
+   announces it (see the Post-PR Workflow section of the global `CLAUDE.md`). Keep these in a
+   separate "internal (stacked) — not announceable" list for step 7 so they can't be picked in
+   step 8; the trunk's own PR into the default branch is the one that can be a gap.
 
 4. **Filter out held PRs.** Drop any candidate whose `(repo, number)` matches a line in
    `pr-review-holds.jsonl`.
@@ -66,7 +72,8 @@ a periodic/ad-hoc audit and needs a confirmation step every time.
    `pr-review-posted.jsonl` and drop the candidate from the gap list.
 
 7. **Report the gap list** to the user: repo, PR number, title, URL for everything that
-   survives steps 4–6.
+   survives steps 4–6. List the stacked PRs set aside in step 3 underneath, marked
+   "internal — not announceable", so the user sees them without being offered them.
 
 8. **Confirm before posting anything.** Ask the user which of the reported gaps to post now.
    Support "post all," "post none," a per-item choice, and a per-item "hold instead, because:
@@ -94,6 +101,8 @@ a periodic/ad-hoc audit and needs a confirmation step every time.
   entirely. Always include the repo short name in the query.
 - Relying on `slack_read_channel` bulk reads to decide "already posted" — no lookback
   guarantee. Always use `slack_search_public` per PR for the backfill check.
+- Treating a stacked PR (base ≠ default branch) as a gap — it is never announced by design;
+  its trunk's PR into the default branch is the announceable unit.
 - Posting without the Step 8 confirmation — this skill's whole point is a human-gated
   second look at PRs that a fully-automatic flow wouldn't have announced on its own.
 - Leaving a stale hold behind: when a workspace/branch backing a held PR is deleted (e.g. via
