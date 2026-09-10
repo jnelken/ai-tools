@@ -76,9 +76,18 @@ Known project IDs, team ID, and sizing rules (milestone = 1–2 cycle chunk of w
 
 If the ticket is about a specific code change (not pure feedback/bug triage) and you're working in a repo with `.github/linear-routing.json`, check it before asking the user or leaving `projectId`/`labelIds` unset. It maps changed-file globs to a Linear Project and/or Labels — the same config an automated ticket-creation script in that repo consults, so a hand-filed ticket ends up routed the same way an automated one would be. Match its `labels` values against the workspace's existing "Product Area" label taxonomy (already loaded via `list_issue_labels`) rather than inventing new label text, and only set a `project` when the config says to — it's deliberately sparse (durable app boundaries only, not every feature area) to avoid stale project references.
 
+## Apply a product-surface label
+
+Every issue gets **exactly one** product-surface label: a **Product Area** child (`f48ece26-7f45-4bbf-b3a6-dd5bbf3d5026`) for user-facing Folio work, or a **Management Portal Area** child (`8c1a378e-b164-4101-a143-ed7164e0e706`) for work in the internal admin app (`apps/management/` in woodrow, `src/routes/management/` in api). Resolve children by name via `issueLabel(id: "<group id>") { children { nodes { id name } } }` rather than hardcoding child ids, since the taxonomy grows. A ticket carries one child from each group only if it genuinely spans both surfaces — otherwise exactly one. If neither fits, ask rather than guessing or leaving it unlabeled.
+
+Full rules and the current child table: the Linear document ["Labeling: Product Area vs Management Portal Area"](https://linear.app/concentro/document/labeling-product-area-vs-management-portal-area-fb86578031d8) in the Management Portal project. Don't duplicate its table here — it's the source of truth and changes as pages ship.
+
+This doesn't change the overlap-check flow above — check for duplicates first, then label once you're creating or confirming the issue.
+
 ## Common mistakes
 
 - Querying `milestones` instead of `projectMilestones` on `Project`
 - Creating a ticket without checking for overlap both in-scope and workspace-wide
 - Trusting a pasted URL's slugId without verifying it resolves, or guessing between candidates when it doesn't
 - Setting cycle/milestone/assignee on tickets the user didn't ask to schedule
+- Leaving a ticket without a product-surface label, or applying more than one without it genuinely spanning both surfaces
