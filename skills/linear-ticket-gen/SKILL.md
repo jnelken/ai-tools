@@ -86,7 +86,15 @@ Every issue gets **exactly one** product-surface label from whichever of these t
 
 Resolve children by name via `issueLabel(id: "<group id>") { children { nodes { id name } } }` rather than hardcoding child ids, since the taxonomy grows. A ticket carries one child from each of two groups only if it genuinely spans both — otherwise exactly one. If a ticket is real product/feature work but no existing child fits (a missing-taxonomy gap, not an infra ticket), don't force it into Engineering Area — ask instead. If nothing fits at all, ask rather than guessing or leaving it unlabeled.
 
-Full rules and the current child table: the Linear document ["Labeling: Product Area vs Management Portal Area"](https://linear.app/concentro/document/labeling-product-area-vs-management-portal-area-fb86578031d8) in the Management Portal project. Don't duplicate its table here — it's the source of truth and changes as pages ship.
+### Engine labels — a second, optional axis
+
+Separately from the surface label, flat **ungrouped** labels record *what powers* the work: `ai`, `tiptap`, `extend`, `neon`, `pg-boss`, `merge`, `ag-grid`. Resolve them by name (they have no parent) and apply **any number, or none** — unlike the surface label, they are not mutually exclusive. A ticket can be both `ai` and `tiptap`.
+
+Apply one **only when the engine is the subject of the ticket**, not when the surface merely sits downstream of it. The test: *would this ticket change or disappear if we swapped that vendor?* A Document Studio access-scoping bug is `Document Editor` with no engine label — the work is Prisma, not ProseMirror. A Document Studio *highlight-mark* bug is `Document Editor` + `tiptap`.
+
+Never invent a new engine label — ask first. The set is deliberately small.
+
+Full rules and the current tables: the Linear document ["Labeling: surface areas and engine labels"](https://linear.app/concentro/document/labeling-product-area-vs-management-portal-area-fb86578031d8) in the Management Portal project. Don't duplicate its tables here — it's the source of truth and changes as pages ship.
 
 This doesn't change the overlap-check flow above — check for duplicates first, then label once you're creating or confirming the issue.
 
