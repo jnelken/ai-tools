@@ -360,9 +360,11 @@ PushNotification(status: "proactive",
 Keep it under 200 characters and lead with the repo. The questions themselves stay in the file —
 a notification is a pointer, not a transcript.
 
-**Expect it to be a no-op sometimes, and don't treat that as failure.** The tool suppresses itself
-while an interactive Claude terminal is active ("Not sent — this terminal is active"), so a run
-that fires while the user is working will log a not-sent result. That's correct behaviour: they'd
+**Expect it to be a no-op sometimes, and don't treat that as failure.** There are two distinct
+suppressions, both observed live: the tool skips itself while an interactive Claude terminal is
+active ("Not sent — this terminal is active"), and it cannot reach the phone when Remote Control
+is not connected ("Mobile push not sent (Remote Control inactive)" — what the 2026-09-05 probe
+returned). Neither is an error, and neither is worth retrying. That's correct behaviour: they'd
 see the run in the log anyway. Record the tool's verdict in the run log either way, so it's visible
 whether the nudge actually went out.
 

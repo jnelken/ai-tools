@@ -20,6 +20,14 @@ export PATH="/opt/homebrew/bin:/opt/homebrew/opt/node@22/bin:/usr/bin:/bin:/usr/
 
 LOGDIR="$ROOT/logs"
 PROBE_FLAG="$ROOT/.dispatch-probe-done"   # rm to re-arm the one-time PushNotification test
+
+# Regenerate the static dashboard. Called at EVERY exit path, not just the happy
+# one: quota and lock skips are the majority of what the dashboard should show,
+# and a trailing call after the main block would never run for them.
+regen_dashboard() {
+  [ -f "$ROOT/gen-dashboard.py" ] || return 0
+  python3 "$ROOT/gen-dashboard.py" >> "$LOG" 2>&1
+}
 mkdir -p "$LOGDIR"
 STAMP="$(date +%Y%m%d-%H%M%S)"
 LOG="$LOGDIR/run-$STAMP.log"
@@ -59,6 +67,7 @@ fi
 if [ -n "$skip_reason" ]; then
   echo "=== advance-roadmap $STAMP: skipping — $skip_reason ===" >> "$LOG"
   ln -sf "$LOG" "$LOGDIR/latest.log"
+  regen_dashboard
   exit 0
 fi
 
@@ -69,6 +78,7 @@ LOCK="$ROOT/run.lock"
 if [ -d "$LOCK" ] && [ -z "$(find "$LOCK" -maxdepth 0 -mmin +240 2>/dev/null)" ]; then
   echo "=== advance-roadmap $STAMP: another run holds $LOCK — skipping ===" >> "$LOG"
   ln -sf "$LOG" "$LOGDIR/latest.log"
+  regen_dashboard
   exit 0
 fi
 rm -rf "$LOCK" 2>/dev/null
@@ -113,3 +123,6 @@ ONE-TIME CONNECTIVITY PROBE, this run only: whatever the outcome above — shipp
 
 # Keep a stable pointer to the latest log for easy checking.
 ln -sf "$LOG" "$LOGDIR/latest.log"
+
+# Refresh the dashboard (run history, quota gate, candidate repos, open blockers).
+regen_dashboard

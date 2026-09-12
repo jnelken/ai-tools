@@ -39,6 +39,18 @@ sessions refresh that file, so the gate ignores a percentage whose `reset_epoch`
 window rolled over; the number is stale) and runs anyway if the file is missing or unreadable.
 Tune the two thresholds at the top of `run.sh`.
 
+`run.sh` regenerates `~/.claude/automations/advance-roadmap/dashboard.html` after **every** run,
+including skipped ones — open it directly in a browser for run history, the current quota gate,
+candidate-repo eligibility, and the blockers waiting on a `/pick-up`.
+
+Two data sources back it, and the page says which one each outcome came from. The **logs** are the
+spine — every run leaves one, and the lines `run.sh` itself writes (quota skip, lock skip, the exit
+footer) are deterministic. The model's prose summary is not, so nothing depends on parsing it. The
+**run ledger** in run memory carries authoritative outcome tokens, but the skill trims it to ~10
+rows, so `gen-dashboard.py` merges every row it ever sees into `ledger-cache.json` — outcomes
+survive the trim. Runs the ledger never covered are marked `inferred` rather than presented as
+fact.
+
 The `:45` slots are all offset from `wrapup-repos`' own `:45` runs on purpose: that job
 commits WIP, and this one refuses to start on a dirty tree, so it must land after one rather
 than on top of it. Most runs will find nothing to do and exit early — that's expected and
