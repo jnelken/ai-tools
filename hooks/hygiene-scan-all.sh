@@ -29,6 +29,15 @@ LIB="$(cd -P "$(dirname "$_src")" 2>/dev/null && pwd)/lib/hygiene-checks.sh"
 # shellcheck source=lib/hygiene-checks.sh
 . "$LIB" || exit 0
 
+# Personal machines only. ~/Dropbox/code syncs to the work laptop, so the
+# directory existing there says nothing — without this the full ~6s scan would
+# fire on every work session for repos the hygiene system doesn't govern.
+# Shared predicate with dotfiles/install.sh; absent guard = assume personal.
+GUARD="$HOME/dotfiles/bin/is-personal-machine"
+if [ -x "$GUARD" ] && ! "$GUARD"; then
+  exit 0
+fi
+
 [ -d "$CODE_DIR" ] || exit 0
 mkdir -p "$(dirname "$REPORT")" 2>/dev/null || exit 0
 
