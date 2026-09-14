@@ -60,6 +60,19 @@ class StateTests(unittest.TestCase):
         filtered = json.loads(self.run_state("filter-new", "--id", "101", "--id", "102").stdout)
         self.assertEqual(filtered, {"seen": ["101"], "unseen": ["102"]})
 
+    def test_scheduled_window_skips_without_creating_state(self):
+        result = json.loads(
+            self.run_state(
+                "begin",
+                "--now",
+                "2026-09-14T03:00:00Z",
+                "--enforce-window",
+            ).stdout
+        )
+        self.assertTrue(result["skip"])
+        self.assertEqual(result["reason"], "outside_run_window")
+        self.assertFalse(self.state.exists())
+
     def test_incomplete_scan_cannot_advance(self):
         run = self.begin()
         result = self.run_state(

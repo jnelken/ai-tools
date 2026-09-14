@@ -9,6 +9,7 @@ import sys
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 
 DEFAULT_STATE = Path("/Users/jake/code/scoutmail/.scoutmail/state.sqlite3")
@@ -137,6 +138,18 @@ def require_pending_run(connection, run_id):
 
 def cmd_begin(args):
     now = parse_time(args.now) if args.now else utc_now()
+    if args.enforce_window:
+        local_now = now.astimezone(ZoneInfo(args.timezone))
+        if local_now.hour < args.start_hour or local_now.hour > args.end_hour:
+            emit(
+                {
+                    "local_time": local_now.replace(microsecond=0).isoformat(),
+                    "reason": "outside_run_window",
+                    "skip": True,
+                    "timezone": args.timezone,
+                }
+            )
+            return
     connection = connect(args.state)
     with connection:
         connection.execute("DELETE FROM pending_messages")
@@ -368,6 +381,10 @@ def build_parser():
     begin = commands.add_parser("begin", help="Start a scan without advancing its cursor")
     begin.add_argument("--bootstrap-days", type=int, default=7)
     begin.add_argument("--now", help="Override current time for tests (ISO-8601)")
+    begin.add_argument("--enforce-window", action="store_true")
+    begin.add_argument("--timezone", default="America/New_York")
+    begin.add_argument("--start-hour", type=int, default=7)
+    begin.add_argument("--end-hour", type=int, default=22)
     begin.set_defaults(func=cmd_begin)
 
     filter_new = commands.add_parser("filter-new", help="Split candidate IDs into seen and unseen")

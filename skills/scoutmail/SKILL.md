@@ -5,7 +5,7 @@ description: >-
   that genuinely need the user's attention. Use for scheduled email attention
   checks and when the user marks a previously surfaced email issue resolved.
 metadata:
-  version: 1.0.0
+  version: 1.0.1
   requires:
     bins:
       - spark
@@ -36,12 +36,16 @@ database is `/Users/jake/code/scoutmail/.scoutmail/state.sqlite3`.
 Begin every scan:
 
 ```bash
-python3 <skill-dir>/scripts/scoutmail_state.py begin --bootstrap-days 7
+python3 <skill-dir>/scripts/scoutmail_state.py begin --bootstrap-days 7 --enforce-window
 ```
 
 The JSON result contains `run_id`, `scan_started_at`, `query_after`, and known
 issues. `query_after` deliberately includes a one-day overlap; unseen message
 IDs, not the coarse date filter, define what is new.
+
+When `begin` returns `"skip": true`, it is outside the 07:00 through 22:59
+America/New_York run window. Stop with no user-facing content; no run was opened
+and state was not advanced.
 
 After collecting candidate IDs, filter them before reading threads:
 
