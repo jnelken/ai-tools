@@ -46,6 +46,7 @@ CREATE TABLE IF NOT EXISTS messages (
 CREATE TABLE IF NOT EXISTS issues (
     issue_key TEXT PRIMARY KEY,
     conversation_key TEXT,
+    account TEXT,
     status TEXT NOT NULL CHECK (status IN ('open', 'resolved')),
     summary TEXT NOT NULL,
     action TEXT,
@@ -64,6 +65,7 @@ CREATE TABLE IF NOT EXISTS pending_messages (
     decision TEXT NOT NULL CHECK (decision IN ('ignore', 'surface')),
     issue_key TEXT,
     conversation_key TEXT,
+    account TEXT,
     summary TEXT,
     action TEXT,
     event_at TEXT,
@@ -106,7 +108,19 @@ def connect(path_value):
     connection = sqlite3.connect(str(path))
     connection.row_factory = sqlite3.Row
     connection.executescript(SCHEMA)
+    ensure_column(connection, "issues", "account", "TEXT")
+    ensure_column(connection, "pending_messages", "account", "TEXT")
     return connection
+
+
+def ensure_column(connection, table, column, definition):
+    columns = {
+        row["name"] for row in connection.execute("PRAGMA table_info({})".format(table))
+    }
+    if column not in columns:
+        connection.execute(
+            "ALTER TABLE {} ADD COLUMN {} {}".format(table, column, definition)
+        )
 
 
 def get_meta(connection, key):
@@ -124,7 +138,7 @@ def set_meta(connection, key, value):
 
 def issue_rows(connection):
     rows = connection.execute(
-        "SELECT issue_key, conversation_key, status, summary, action, event_at, "
+        "SELECT issue_key, conversation_key, account, status, summary, action, event_at, "
         "last_signature, last_message_id, last_alerted_at, last_reminder_signature, "
         "resolved_at, updated_at FROM issues ORDER BY updated_at DESC"
     ).fetchall()
@@ -234,13 +248,14 @@ def cmd_record(args):
         connection.execute(
             """
             INSERT INTO pending_messages(
-                run_id, message_id, decision, issue_key, conversation_key,
+                run_id, message_id, decision, issue_key, conversation_key, account,
                 summary, action, event_at, signature
-            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(run_id, message_id) DO UPDATE SET
                 decision = excluded.decision,
                 issue_key = excluded.issue_key,
                 conversation_key = excluded.conversation_key,
+                account = excluded.account,
                 summary = excluded.summary,
                 action = excluded.action,
                 event_at = excluded.event_at,
@@ -252,6 +267,7 @@ def cmd_record(args):
                 args.decision,
                 args.issue_key,
                 args.conversation_key,
+                args.account,
                 args.summary,
                 args.action,
                 args.event_at,
@@ -286,12 +302,13 @@ def cmd_finish(args):
                 connection.execute(
                     """
                     INSERT INTO issues(
-                        issue_key, conversation_key, status, summary, action,
+                        issue_key, conversation_key, account, status, summary, action,
                         event_at, last_signature, last_message_id,
                         last_alerted_at, resolved_at, updated_at
-                    ) VALUES(?, ?, 'open', ?, ?, ?, ?, ?, ?, NULL, ?)
+                    ) VALUES(?, ?, ?, 'open', ?, ?, ?, ?, ?, ?, NULL, ?)
                     ON CONFLICT(issue_key) DO UPDATE SET
                         conversation_key = COALESCE(excluded.conversation_key, issues.conversation_key),
+                        account = COALESCE(excluded.account, issues.account),
                         status = 'open',
                         summary = excluded.summary,
                         action = excluded.action,
@@ -305,6 +322,7 @@ def cmd_finish(args):
                     (
                         row["issue_key"],
                         row["conversation_key"],
+                        row["account"],
                         row["summary"],
                         row["action"],
                         row["event_at"],
@@ -376,6 +394,19 @@ def cmd_preference_delete(args):
     emit({"deleted": True, "key": args.key})
 
 
+def cmd_issue_account_set(args):
+    connection = connect(args.state)
+    now = isoformat(utc_now())
+    with connection:
+        cursor = connection.execute(
+            "UPDATE issues SET account = ?, updated_at = ? WHERE issue_key = ?",
+            (args.account, now, args.issue_key),
+        )
+    if cursor.rowcount != 1:
+        fail("unknown issue_key {}".format(args.issue_key))
+    emit({"account": args.account, "issue_key": args.issue_key, "updated_at": now})
+
+
 def cmd_resolve(args):
     connection = connect(args.state)
     now = isoformat(utc_now())
@@ -441,6 +472,7 @@ def build_parser():
     record.add_argument("--decision", choices=("ignore", "surface"), required=True)
     record.add_argument("--issue-key")
     record.add_argument("--conversation-key")
+    record.add_argument("--account")
     record.add_argument("--summary")
     record.add_argument("--action")
     record.add_argument("--event-at")
@@ -477,6 +509,13 @@ def build_parser():
     )
     preference_delete.add_argument("--key", required=True)
     preference_delete.set_defaults(func=cmd_preference_delete)
+
+    issue_account_set = commands.add_parser(
+        "issue-account-set", help="Set the recipient account for a known issue"
+    )
+    issue_account_set.add_argument("--issue-key", required=True)
+    issue_account_set.add_argument("--account", required=True)
+    issue_account_set.set_defaults(func=cmd_issue_account_set)
 
     resolve = commands.add_parser("resolve", help="Resolve an underlying issue")
     resolve.add_argument("--issue-key", required=True)

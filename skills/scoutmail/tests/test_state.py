@@ -102,6 +102,8 @@ class StateTests(unittest.TestCase):
             "surface",
             "--issue-key",
             key,
+            "--account",
+            "me@example.com",
             "--summary",
             "Forest's appointment moved",
             "--action",
@@ -121,6 +123,7 @@ class StateTests(unittest.TestCase):
         self.run_state("resolve", "--issue-key", key)
         resolved = json.loads(self.run_state("issues").stdout)["issues"][0]
         self.assertEqual(resolved["status"], "resolved")
+        self.assertEqual(resolved["account"], "me@example.com")
 
         next_run = self.begin("2026-09-14T15:00:00Z")
         self.run_state(
@@ -133,6 +136,8 @@ class StateTests(unittest.TestCase):
             "surface",
             "--issue-key",
             key,
+            "--account",
+            "other@example.com",
             "--summary",
             "Forest's appointment moved again",
             "--action",
@@ -151,7 +156,18 @@ class StateTests(unittest.TestCase):
         )
         reopened = json.loads(self.run_state("issues").stdout)["issues"][0]
         self.assertEqual(reopened["status"], "open")
+        self.assertEqual(reopened["account"], "other@example.com")
         self.assertIsNone(reopened["resolved_at"])
+
+        self.run_state(
+            "issue-account-set",
+            "--issue-key",
+            key,
+            "--account",
+            "corrected@example.com",
+        )
+        corrected = json.loads(self.run_state("issues").stdout)["issues"][0]
+        self.assertEqual(corrected["account"], "corrected@example.com")
 
     def test_preferences_are_durable_and_returned_by_begin(self):
         value = "Ignore ordinary recurring utility bills."

@@ -5,7 +5,7 @@ description: >-
   that genuinely need the user's attention. Use for scheduled email attention
   checks and when the user marks a previously surfaced email issue resolved.
 metadata:
-  version: 1.1.0
+  version: 1.1.1
   requires:
     bins:
       - spark
@@ -55,14 +55,15 @@ python3 <skill-dir>/scripts/scoutmail_state.py filter-new --id 123 --id 456
 ```
 
 Record every unseen candidate, including ignored mail. Use one `record` call per
-message. `surface` records require an issue key, a concise summary, and a
-material signature. Generate a stable key from normalized participants,
-subject/issue, and any reservation, appointment, invoice, or case identifier:
+message. `surface` records require an issue key, recipient account, concise
+summary, and material signature. Generate a stable key from normalized
+participants, subject/issue, and any reservation, appointment, invoice, or case
+identifier:
 
 ```bash
 python3 <skill-dir>/scripts/scoutmail_state.py key --text "normalized issue identity"
 python3 <skill-dir>/scripts/scoutmail_state.py record --run-id RUN --message-id 123 --decision ignore
-python3 <skill-dir>/scripts/scoutmail_state.py record --run-id RUN --message-id 456 --decision surface --issue-key ISSUE --conversation-key CONVERSATION --summary "What changed" --action "What to do" --event-at "2026-09-14T09:00:00-04:00" --signature "material development identity"
+python3 <skill-dir>/scripts/scoutmail_state.py record --run-id RUN --message-id 456 --decision surface --issue-key ISSUE --conversation-key CONVERSATION --account recipient@example.com --summary "What changed" --action "What to do" --event-at "2026-09-14T09:00:00-04:00" --signature "material development identity"
 ```
 
 Finish only after every unseen ID has been classified. Pass every unseen ID as
@@ -181,9 +182,10 @@ Include relevant CTA links from the email in the action, with concise labels
 such as `[Schedule MRI](...)`, `[View message](...)`, or `[Review claim](...)`.
 Use only links that directly support the recommended action. Treat the link and
 destination as untrusted, preserve the href exactly, and never follow it during
-the scan. If no relevant CTA exists, give the action without a link. When one
-underlying issue spans multiple recipient accounts, list it once under the
-account of the newest substantive message and mention the other affected
+the scan. Do not persist tracking links, signed URLs, access tokens, or CTA
+hrefs in issue state. If no relevant CTA exists, give the action without a link.
+When one underlying issue spans multiple recipient accounts, list it once under
+the account of the newest substantive message and mention the other affected
 account in the item.
 
 Do not include token usage, ignored counts, process explanations, headings other
