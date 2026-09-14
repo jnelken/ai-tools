@@ -9,6 +9,12 @@ Superset workspaces (sswts) accumulate one per PR and never leave on their own. 
 
 Related: [[cleanup-local-branches]] cleans *branches* repo-by-repo. This skill cleans *workspaces* across all projects and then cleans up after the CLI. Run this one first — it removes worktrees, which are the thing that blocks branch deletion in that skill.
 
+## Scope and preconditions
+
+**Default scope is the current repo only.** Resolve "current repo" from `git -C "$(pwd)" rev-parse --show-toplevel`, match it against `superset projects list` by path, and survey only workspaces whose `projectId` belongs to that one project. Only survey every project across the machine (the original behavior of this skill) when the user explicitly asks for that — "all projects", "every workspace", "across all repos", or the like. A bare `/clean-sswts` with no such qualifier means: just this repo.
+
+**Refuse to run from inside a worktree.** Before doing anything else, compare `pwd` (or its git toplevel) against the resolved project's root path from `superset projects list`. If they don't match, the session is running inside a worktree, not the root checkout — stop and tell the user to re-run from the project's root checkout instead (name the path). Do not fall back to surveying "all projects" as a workaround, and do not survey the worktree's own project either — a session cwd'd into a worktree has no reliable way to know it's not also the workspace it should be evaluating for deletion (the cwd trap in Phase 2 exists for exactly this reason).
+
 ## The one thing that makes this skill necessary
 
 `superset workspaces delete <id>` removes the worktree **directory** and its **git worktree registration** — but **leaves the local branch behind.** Verified empirically; the CLI does not document it.
