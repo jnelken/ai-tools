@@ -2,6 +2,54 @@
 
 Symlinked into `~/.claude/hooks/` by `install.sh`. Each hook needs to be **wired up** in `~/.claude/settings.json` to actually fire — symlinking the script alone does nothing.
 
+## ai-tools-sync.sh
+
+A **SessionStart hook** that keeps the deploy clone (`$AI_TOOLS_HOME`, default `~/.ai-tools`) in sync with `origin/main` on every machine, so a pushed change from `~/code/ai-tools` (the dev checkout) reaches `~/.claude/*` without waiting for someone to remember to re-run `install.sh` by hand. It's the runtime counterpart to `install.sh`'s one-time bootstrap.
+
+### Requirements
+
+- `git`, `jq` on `PATH`
+- `timeout`/`gtimeout` if present bound the network calls; otherwise git's own `http.lowSpeedLimit`/`http.lowSpeedTime` (10s) are used so a stalled fetch still can't hang session start.
+
+### settings.json wiring
+
+`install.sh` wires this in automatically (idempotently, via jq) — see its **hooks** section. If wiring it by hand:
+
+```json
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          { "type": "command", "command": "bash \"$HOME/.claude/hooks/ai-tools-sync.sh\"", "timeout": 30 }
+        ]
+      }
+    ]
+  }
+}
+```
+
+If you already have a `hooks.SessionStart` array, append the new entry rather than replacing.
+
+### Behavior
+
+Three independent checks, each best-effort and non-blocking:
+
+1. **Dirty deploy clone.** If `$AI_TOOLS_HOME` has uncommitted changes (`git status --porcelain`), it was edited in place — that's a mistake, since `install.sh` treats it as disposable and it isn't the source of truth. Nudges to move the edit to `~/code/ai-tools`, commit, and push there instead, and explicitly does **not** fetch/merge while dirty (so it never clobbers the local edit). Cooldown: 24h, keyed by a hash of the dirty status so a *changed* dirty state re-nudges immediately even mid-cooldown.
+2. **Sync (only when clean).** With a 1h cooldown, runs a `timeout`-guarded `git fetch` + `git merge --ff-only` against `origin/$AI_TOOLS_REF` (default `main`). If HEAD moved, re-runs `install.sh --no-update --quiet` so newly added skills/commands/hooks/agents get linked immediately, and emits a short context line (`ai-tools deployed: <old>..<new>, N files`). If the fast-forward fails (local history diverged), emits a warning instead. A plain fetch failure (offline, etc.) is silent — never worth nudging about.
+3. **Dev mode left on / stale link.** Scans every symlink under `~/.claude/{skills,commands,hooks,agents,automations}/` and `~/.claude/awesome-statusline.sh`, ignoring any link that resolves inside `$AI_TOOLS_HOME`. What's left is bucketed:
+   - A target that resolves into some *other* ai-tools checkout — detected by the checkout's shape (a parent directory containing both `install.sh` and `skills/`, so a Superset worktree of the repo counts even though its path never contains the literal string "ai-tools") — is **dev mode left on**: nudges to run `~/.ai-tools/install.sh` to flip back.
+   - A dangling target (the path no longer exists) that lies under `$AI_TOOLS_HOME` or contains `ai-tools` is a **stale link**: same fix, since `install.sh` now prunes those.
+   - Anything else (e.g. third-party skills linked from `~/.agents/skills`) is ignored.
+
+   Cooldown: 24h, same hash-based re-nudge-on-change pattern as the dirty check.
+
+Every failure mode — missing deps, `$AI_TOOLS_HOME` not existing or not a git repo, network errors — exits 0 silently; this hook must never block a session.
+
+### Disabling
+
+Remove the entry from `settings.json`.
+
 ## post-yesterdays-ccusage.sh
 
 Posts daily ccusage summaries (Claude + Codex token usage) to a Slack channel via incoming webhook. Triggered on every Claude Code session start; catches up any days missed since the last successful post.
@@ -68,9 +116,11 @@ See the script header for the full logic (handles `--all`, `--mirror`, explicit 
 
 ## enforce-claude-symlinks.sh
 
-A **pre-commit hook** (runs via `git hook-path` / `.git/hooks/pre-commit`) that enforces the symlink policy at commit time: all version-controlled files in `~/.claude/` must either be symlinks pointing to `ai-tools/`, or be on a sensitive-data allowlist.
+A **pre-commit hook** (runs via `git hook-path` / `.git/hooks/pre-commit`) that enforces the symlink policy at commit time: all version-controlled files in `~/.claude/` must either be symlinks pointing into the deploy clone (`~/.ai-tools/`, kept in sync with this repo's `origin/main`), or be on a sensitive-data allowlist.
 
 **Rationale:** `~/.claude/` should be a thin symlink layer into version-controlled content, not a source of truth. This keeps hooks, commands, and agent definitions in sync across devices while keeping sensitive local config (allowlists, tokens, session state) safely out of the repo.
+
+It only runs from the **dev checkout** — it skips entirely when the repo root it's invoked from is the deploy clone itself, since the deploy clone is disposable output, not somewhere commits are meant to happen.
 
 To activate:
 ```bash
@@ -79,7 +129,7 @@ mkdir -p .git/hooks
 ln -s ../../hooks/enforce-claude-symlinks.sh .git/hooks/pre-commit
 ```
 
-The hook will reject a commit from `ai-tools` if any regular files (not symlinks) exist under `~/.claude/hooks/`, `~/.claude/commands/`, or `~/.claude/agents/` **except** those on the sensitive allowlist (currently: `block-push-to-main.allowlist` and `*.json` settings files).
+The hook will reject a commit from `ai-tools` if any regular files (not symlinks) exist under `~/.claude/hooks/`, `~/.claude/commands/`, or `~/.claude/agents/` **except** those on the sensitive allowlist (currently: `block-push-to-main.allowlist` and `*.json` settings files). The fix: add/edit the file in `~/code/ai-tools` (the dev checkout), commit, push — then run `~/.ai-tools/install.sh` (or wait for the next session's `ai-tools-sync`) to symlink it into place from the deploy clone.
 
 ## pick-up-nudge.sh
 
@@ -125,7 +175,7 @@ Remove the entry from `settings.json`.
 
 A **SessionStart hook** (runs at the top of every Claude Code session) that nudges about unsymlinked files in `~/.claude/` before they become a blocker.
 
-When it detects new regular files in `~/.claude/{hooks,commands,agents}/`, it emits a friendly message with fix instructions. Uses a 24-hour cooldown per file-set so it only nudges once a day even if you open the same repo multiple times.
+When it detects new regular files in `~/.claude/{hooks,commands,agents}/`, it emits a friendly message explaining they should be symlinks into the deploy clone (`~/.ai-tools/`, kept in sync with `origin/main`) and pointing to the fix: add/edit the file in `~/code/ai-tools` (the dev checkout) and never edit `~/.ai-tools` directly, commit and push from `~/code/ai-tools` — that *is* the deploy step — then run `~/.ai-tools/install.sh` (or wait for the next session's `ai-tools-sync`) to symlink it into place. Uses a 24-hour cooldown per file-set so it only nudges once a day even if you open the same repo multiple times.
 
 ### settings.json wiring
 

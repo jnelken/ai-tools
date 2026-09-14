@@ -7,13 +7,14 @@ per machine, and you don't want a stray automation running immediately on a fres
 checkout. Wire it up manually per machine:
 
 ```bash
-cp automations/<name>/<plist>.plist ~/Library/LaunchAgents/
+cp ~/.ai-tools/automations/<name>/<plist>.plist ~/Library/LaunchAgents/
 # edit the plist if paths/username differ from this machine
 launchctl load ~/Library/LaunchAgents/<plist>.plist
 ```
 
 Each automation keeps its own `logs/` locally under `~/.claude/automations/<name>/logs/`
-— that's runtime output, not repo content, so it's `.gitignore`d and never committed.
+— a real directory outside the deploy clone, which is why it's runtime output and never
+makes the deploy clone dirty.
 
 ## `advance-roadmap`
 
@@ -58,7 +59,7 @@ cheap; a repo only qualifies when its roadmap has real planned work and its tree
 
 ## `wrapup-repos`
 
-Off-peak (2:45am / 7:45am / 12:45pm / 5:45pm local time), picks the dirtiest/most-recently
+Off-peak, weekly (Sunday 2:45am local time), picks the dirtiest/most-recently
 touched repo under `~/Dropbox/code`, finishes obvious low-risk loose ends, commits a WIP,
 and writes `NEXT-STEPS.md`. Single source of truth for the actual workflow is the
 [`wrapup-repos`](../skills/wrapup-repos/SKILL.md) skill — `run.sh` just invokes

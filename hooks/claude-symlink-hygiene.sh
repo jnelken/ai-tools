@@ -74,13 +74,16 @@ if [[ ${#offenders[@]} -gt 0 ]]; then
 
 $(printf '  - %s\n' "${offenders[@]}")
 
-These should be symlinks to /code/ai-tools/ so they stay in sync across devices.
+These should be symlinks into the deploy clone (~/.ai-tools/, kept in sync
+with origin/main) so they stay in sync across devices.
 
 Fix:
-1. \`cd /code/ai-tools\` and create the file there (hooks/, commands/, or agents/)
-2. \`rm ~/.claude/<subdir>/<file>\`
-3. \`ln -s /code/ai-tools/<subdir>/<file> ~/.claude/<subdir>/<file>\`
-4. \`cd /code/ai-tools && git add <files> && git commit\`
+1. \`cd ~/code/ai-tools\` (the DEV repo) and add/edit the file there
+   (hooks/, commands/, or agents/) — never edit ~/.ai-tools directly, it's
+   managed by install.sh
+2. Commit and push from ~/code/ai-tools — that IS the deploy step
+3. Run \`~/.ai-tools/install.sh\` (or wait for the next session's
+   ai-tools-sync) to symlink ~/.claude/<subdir>/<file> into the deploy clone
 
 Or, if the file is sensitive (secrets, local config), add its basename to
 the \`allowlist\` array in ~/.claude/hooks/claude-symlink-hygiene.sh and

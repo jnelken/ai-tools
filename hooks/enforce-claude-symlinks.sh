@@ -13,9 +13,15 @@
 
 set -e
 
-# Only run this hook in the ai-tools repo itself
+# Only run this hook in the ai-tools DEV repo itself — never in the deploy
+# clone (~/.ai-tools, or $AI_TOOLS_HOME), which install.sh manages and which
+# nobody should be committing from.
 repo_root=$(git rev-parse --show-toplevel 2>/dev/null || true)
 if [[ ! "$repo_root" =~ ai-tools ]]; then
+  exit 0
+fi
+deploy_root="${AI_TOOLS_HOME:-$HOME/.ai-tools}"
+if [[ -d "$deploy_root" ]] && [[ "$(cd -P "$repo_root" && pwd -P)" == "$(cd -P "$deploy_root" && pwd -P)" ]]; then
   exit 0
 fi
 
@@ -86,18 +92,22 @@ done
 
 if [[ ${#offenders[@]} -gt 0 ]]; then
   cat >&2 <<EOF
-❌ Pre-commit hook: version-tracked files must be symlinks to ai-tools
+❌ Pre-commit hook: version-tracked files must be symlinks to the deploy clone
 
 The following regular files exist in ~/.claude/ but should be symlinks
-to /code/ai-tools/ (or removed if they shouldn't be version-tracked):
+into the deploy clone (~/.ai-tools/, kept in sync with origin/main — or
+removed if they shouldn't be version-tracked):
 
 $(printf '  - %s\n' "${offenders[@]}")
 
 Fix:
-1. Move the file to ai-tools/hooks|commands|agents/ (or delete if temp)
-2. Create a symlink: ln -s /path/to/ai-tools/... ~/.claude/...
-3. Then run: git add <changed files in this commit>
-4. Re-attempt the commit
+1. Add/edit the file in the DEV repo (~/code/ai-tools/hooks|commands|agents/) —
+   never edit ~/.ai-tools directly, it's managed by install.sh
+2. Commit and push from ~/code/ai-tools
+3. Run ~/.ai-tools/install.sh (or wait for the next session's ai-tools-sync)
+   so ~/.claude/... gets (re)symlinked into the deploy clone
+4. Then run: git add <changed files in this commit>
+5. Re-attempt the commit
 
 If the file contains sensitive data (secrets, local config, allowlists),
 add its basename to the \`allowlist\` array in this hook instead, and
