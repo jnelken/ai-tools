@@ -43,6 +43,20 @@ CLAUDE_DIR="$HOME/.claude"
 SETTINGS="$CLAUDE_DIR/settings.json"
 SETTINGS_BACKED_UP=0
 
+# settings_target: the file settings.json writes must land in. If
+# ~/.claude/settings.json is itself a symlink (e.g. into a dotfiles repo),
+# write THROUGH it to the real file — a `jq > tmp && mv tmp settings.json`
+# would otherwise replace the symlink with a detached real file and silently
+# fork the config from its versioned source.
+settings_target() {
+  local p="$SETTINGS" t
+  while [ -L "$p" ]; do
+    t="$(readlink "$p")"
+    case "$t" in /*) p="$t" ;; *) p="$(dirname "$p")/$t" ;; esac
+  done
+  printf '%s\n' "$p"
+}
+
 DEV_MODE=0
 NO_UPDATE=0
 QUIET=0
@@ -332,10 +346,11 @@ wire_ai_tools_sync_hook() {
       return
     fi
     backup_settings_once
+    local real; real="$(settings_target)"
     jq --arg cmd "$cmd_str" '
       .hooks = (.hooks // {}) |
       .hooks.SessionStart = ((.hooks.SessionStart // []) + [{"hooks":[{"type":"command","command":$cmd,"timeout":30}]}])
-    ' "$SETTINGS" > "$SETTINGS.tmp" && mv "$SETTINGS.tmp" "$SETTINGS"
+    ' "$real" > "$real.tmp" && mv "$real.tmp" "$real"
     echo "  settings.json: wired ai-tools-sync.sh into hooks.SessionStart"
   else
     jq -n --arg cmd "$cmd_str" \
@@ -450,7 +465,8 @@ section_statusline() {
       local statusline_json='{"type":"command","command":"bash ~/.claude/awesome-statusline.sh"}'
       if [ -f "$SETTINGS" ]; then
         backup_settings_once
-        jq --argjson sl "$statusline_json" '.statusLine = $sl' "$SETTINGS" > "$SETTINGS.tmp" && mv "$SETTINGS.tmp" "$SETTINGS"
+        local real; real="$(settings_target)"
+        jq --argjson sl "$statusline_json" '.statusLine = $sl' "$real" > "$real.tmp" && mv "$real.tmp" "$real"
         echo "  settings.json: statusLine set"
       else
         jq -n --argjson sl "$statusline_json" '{statusLine: $sl}' > "$SETTINGS"
