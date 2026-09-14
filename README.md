@@ -25,6 +25,7 @@ Personal AI coding tools — Claude Code and Cursor skills, slash commands, hook
 | [`pr-review-gaps`](skills/pr-review-gaps) | Find sswt PRs never posted to `#pr-review`, with a hold-list for deliberately parked ones |
 | [`rebase-after-squash`](skills/rebase-after-squash) | Resolve rebase-after-squash-merge conflicts cleanly |
 | [`rum-review`](skills/rum-review) | Query Datadog RUM data, synthesize findings into categorized issues |
+| [`scoutmail`](skills/scoutmail) | Monitor all Spark email accounts and surface only new messages that genuinely require attention |
 | [`screenshot-pr`](skills/screenshot-pr) | Capture one signature screenshot from the deploy preview, embed in PR description |
 | [`slack-gif-creator`](skills/slack-gif-creator) | Build animated GIFs optimized for Slack |
 | [`superset-config`](skills/superset-config) | Configure superset.sh (agentic IDE) project scripts — setup/run/teardown |
