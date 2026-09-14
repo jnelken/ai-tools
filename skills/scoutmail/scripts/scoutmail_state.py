@@ -23,6 +23,12 @@ CREATE TABLE IF NOT EXISTS meta (
     value TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS preferences (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS runs (
     run_id TEXT PRIMARY KEY,
     started_at TEXT NOT NULL,
@@ -125,6 +131,13 @@ def issue_rows(connection):
     return [dict(row) for row in rows]
 
 
+def preference_rows(connection):
+    rows = connection.execute(
+        "SELECT key, value, updated_at FROM preferences ORDER BY key"
+    ).fetchall()
+    return [dict(row) for row in rows]
+
+
 def require_pending_run(connection, run_id):
     row = connection.execute(
         "SELECT run_id, started_at, status FROM runs WHERE run_id = ?", (run_id,)
@@ -176,6 +189,7 @@ def cmd_begin(args):
             "bootstrap": bootstrap,
             "issues": issue_rows(connection),
             "last_successful_at": last_success,
+            "preferences": preference_rows(connection),
             "query_after": query_after,
             "run_id": run_id,
             "scan_started_at": started_at,
@@ -336,6 +350,32 @@ def cmd_issues(args):
     emit({"issues": issue_rows(connection)})
 
 
+def cmd_preferences(args):
+    connection = connect(args.state)
+    emit({"preferences": preference_rows(connection)})
+
+
+def cmd_preference_set(args):
+    connection = connect(args.state)
+    now = isoformat(utc_now())
+    with connection:
+        connection.execute(
+            "INSERT INTO preferences(key, value, updated_at) VALUES(?, ?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+            (args.key, args.value, now),
+        )
+    emit({"key": args.key, "updated_at": now, "value": args.value})
+
+
+def cmd_preference_delete(args):
+    connection = connect(args.state)
+    with connection:
+        cursor = connection.execute("DELETE FROM preferences WHERE key = ?", (args.key,))
+    if cursor.rowcount != 1:
+        fail("unknown preference key {}".format(args.key))
+    emit({"deleted": True, "key": args.key})
+
+
 def cmd_resolve(args):
     connection = connect(args.state)
     now = isoformat(utc_now())
@@ -421,6 +461,22 @@ def build_parser():
 
     issues = commands.add_parser("issues", help="List known issue-level state")
     issues.set_defaults(func=cmd_issues)
+
+    preferences = commands.add_parser("preferences", help="List durable user preferences")
+    preferences.set_defaults(func=cmd_preferences)
+
+    preference_set = commands.add_parser(
+        "preference-set", help="Create or update a durable user preference"
+    )
+    preference_set.add_argument("--key", required=True)
+    preference_set.add_argument("--value", required=True)
+    preference_set.set_defaults(func=cmd_preference_set)
+
+    preference_delete = commands.add_parser(
+        "preference-delete", help="Delete a durable user preference"
+    )
+    preference_delete.add_argument("--key", required=True)
+    preference_delete.set_defaults(func=cmd_preference_delete)
 
     resolve = commands.add_parser("resolve", help="Resolve an underlying issue")
     resolve.add_argument("--issue-key", required=True)

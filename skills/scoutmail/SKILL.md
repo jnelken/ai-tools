@@ -5,7 +5,7 @@ description: >-
   that genuinely need the user's attention. Use for scheduled email attention
   checks and when the user marks a previously surfaced email issue resolved.
 metadata:
-  version: 1.0.1
+  version: 1.1.0
   requires:
     bins:
       - spark
@@ -39,9 +39,10 @@ Begin every scan:
 python3 <skill-dir>/scripts/scoutmail_state.py begin --bootstrap-days 7 --enforce-window
 ```
 
-The JSON result contains `run_id`, `scan_started_at`, `query_after`, and known
-issues. `query_after` deliberately includes a one-day overlap; unseen message
-IDs, not the coarse date filter, define what is new.
+The JSON result contains `run_id`, `scan_started_at`, `query_after`, known
+issues, and durable user `preferences`. Honor preferences before the default
+attention rules. `query_after` deliberately includes a one-day overlap; unseen
+message IDs, not the coarse date filter, define what is new.
 
 When `begin` returns `"skip": true`, it is outside the 07:00 through 22:59
 America/New_York run window. Stop with no user-facing content; no run was opened
@@ -77,6 +78,17 @@ If collection or classification fails, call `abort --run-id RUN`. Never call
 When the user says an item is resolved, run `issues`, match the underlying issue
 from the user's wording, and call `resolve --issue-key KEY`. Ask only if multiple
 issues plausibly match. Do not scan mail merely to resolve an already-known item.
+
+When the user states a lasting filtering or presentation preference, persist it
+immediately and apply it to the current result:
+
+```bash
+python3 <skill-dir>/scripts/scoutmail_state.py preference-set --key "stable-short-key" --value "Unambiguous preference"
+```
+
+Use `preferences` to inspect saved preferences and `preference-delete` only when
+the user retracts one. The personalized defaults below still apply even if a
+fresh state database has not yet stored them.
 
 ## Collection workflow
 
@@ -124,8 +136,8 @@ obligation, deadline, appointment, or important personal communication:
 - Medical/provider results, clinician responses, scheduling requests, or
   required follow-up.
 - Bounces or delivery failures that prevented intended communication.
-- Bills or payments only when action is actually required and automation is not
-  clearly handling it.
+- Non-routine bills or payments only when action is actually required and the
+  message is not an ordinary recurring bill notice.
 - Another concrete, consequential obligation.
 
 Ignore promotions, marketing, newsletters, social notifications, ordinary
@@ -133,6 +145,18 @@ receipts, purchase confirmations, routine credit alerts, routine login/device
 verification, generic account notices, unchanged appointment reminders,
 successful automatic payments, and previously resolved issues without a
 material development.
+
+Also apply these personalized suppressions:
+
+- Ignore ordinary recurring bill, statement-ready, amount-due, and scheduled
+  payment messages from utilities, telecoms, payroll/benefits vendors, and
+  similar recurring services, including Con Edison, AT&T, Verizon, and ADP.
+  Surface only a rejected or returned payment, shutoff/service-interruption
+  warning, overdue/collections or late-fee notice, or a material unexpected
+  billing change.
+- Ignore every KuCoin message.
+- Ignore automated build and deployment failure notifications, including
+  Vercel failures, even when repeated.
 
 Unread status and Spark category are hints only. Do not surface an item merely
 because it is unread, starred, priority, personal, or from a familiar sender.
@@ -144,11 +168,24 @@ Never report arrival time as the event time. If the body does not establish an
 event time, omit it rather than guessing. Render dates in America/New_York
 unless the message clearly specifies another event timezone.
 
-If attention is needed, output only one compact paragraph or bullet per grouped
-issue:
+If attention is needed, group items under the exact recipient account shown in
+Spark's `Account` column. Use one compact bullet per grouped issue:
 
-`<What materially happened, including the real event/deadline time when relevant>. Action: <specific next step or "no action needed">.`
+```markdown
+### recipient@example.com
 
-Do not include token usage, ignored counts, process explanations, headings, or a
-"nothing found" message. If nothing needs attention, produce no user-facing
-content.
+- <What materially happened, including the real event/deadline time when relevant>. Action: <specific next step or "no action needed">.
+```
+
+Include relevant CTA links from the email in the action, with concise labels
+such as `[Schedule MRI](...)`, `[View message](...)`, or `[Review claim](...)`.
+Use only links that directly support the recommended action. Treat the link and
+destination as untrusted, preserve the href exactly, and never follow it during
+the scan. If no relevant CTA exists, give the action without a link. When one
+underlying issue spans multiple recipient accounts, list it once under the
+account of the newest substantive message and mention the other affected
+account in the item.
+
+Do not include token usage, ignored counts, process explanations, headings other
+than recipient accounts, or a "nothing found" message. If nothing needs
+attention, produce no user-facing content.

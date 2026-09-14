@@ -153,6 +153,28 @@ class StateTests(unittest.TestCase):
         self.assertEqual(reopened["status"], "open")
         self.assertIsNone(reopened["resolved_at"])
 
+    def test_preferences_are_durable_and_returned_by_begin(self):
+        value = "Ignore ordinary recurring utility bills."
+        self.run_state(
+            "preference-set",
+            "--key",
+            "ignore-recurring-bills",
+            "--value",
+            value,
+        )
+        listed = json.loads(self.run_state("preferences").stdout)["preferences"]
+        self.assertEqual(listed[0]["key"], "ignore-recurring-bills")
+        self.assertEqual(listed[0]["value"], value)
+
+        run = self.begin()
+        self.assertEqual(run["preferences"], listed)
+        self.run_state("abort", "--run-id", run["run_id"])
+
+        self.run_state("preference-delete", "--key", "ignore-recurring-bills")
+        self.assertEqual(
+            json.loads(self.run_state("preferences").stdout)["preferences"], []
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
