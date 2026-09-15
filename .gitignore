@@ -11,3 +11,7 @@ node_modules/
 # wrapup-repos automation's own scratch note - untracked-forever was making
 # this repo look "recently touched" indefinitely to the recency heuristic.
 NEXT-STEPS.md
+
+# close-out's running cross-session handoff note - local continuity state,
+# never project documentation.
+.claude/IN_PROGRESS.md
