@@ -91,6 +91,28 @@ If both committed-branch-changes AND uncommitted changes exist, ask the user whi
 
 ### 2. Run the review
 
+**Select this round's reasoning effort before invoking Codex.** Rounds step down by default: 1–2 at **high**, 3–4 at **medium**, 5+ at **low** — early rounds catch the most substantive findings and benefit most from deeper reasoning; later rounds are normally just mopping up follow-ons, where high effort is wasted cost. This is a default decay, not a fixed schedule — step 3 can override it back to high when a later round surfaces genuinely new ground.
+
+```bash
+GIT_DIR=$(git rev-parse --git-dir)
+ROUNDS_FILE="$GIT_DIR/peer-review-rounds"
+ESCALATE_FILE="$GIT_DIR/peer-review-escalate"
+NEXT_ROUND=$(( $(cat "$ROUNDS_FILE" 2>/dev/null || echo 0) + 1 ))
+
+if [ -f "$ESCALATE_FILE" ]; then
+  EFFORT=high   # forced by a prior round's new-finding-class escalation (step 3)
+  rm -f "$ESCALATE_FILE"
+elif [ "$NEXT_ROUND" -le 2 ]; then
+  EFFORT=high
+elif [ "$NEXT_ROUND" -le 4 ]; then
+  EFFORT=medium
+else
+  EFFORT=low
+fi
+```
+
+Pass `-c model_reasoning_effort=$EFFORT` on every `codex review` invocation this round — both the first attempt below and the detach-and-poll retry use the same `$EFFORT`.
+
 **First round on a branch: build a focus prompt before invoking Codex.** A bare `codex review` reports its top-confidence findings, not an exhaustive sweep — each new diff re-rolls its attention, so on a cross-cutting change it peels one layer per round and a review that should converge in 1–2 rounds takes 5+. `codex review` accepts custom instructions as a positional `[PROMPT]` argument; use it. **Gotcha: `--base <branch>` cannot be combined with `[PROMPT]`** — despite the usage string advertising both, the CLI errors out (`the argument '--base <BRANCH>' cannot be used with '[PROMPT]'`, verified on codex 2026-07). When passing a focus prompt, drop the `--base` flag and state the diff scope inside the prompt instead ("Review the changes on this branch relative to the merge-base with origin/<base>. …") — verified to scope the diff identically to `--base`. `--uncommitted` composes with `[PROMPT]` normally. Before the first round:
 
 1. **Enumerate the change's interaction matrix from the diff.** Which axes does it cut across? Typical axes: data types / value formats (enum, array, date, percent…), component or editor variants that share the behavior, permission/visibility states (unauthorized, masked, loading, read-only), and host contexts (inside buttons, tables, dashboards). A change that mirrors display state or adds a new affordance to existing values usually spans several.
@@ -107,9 +129,9 @@ Then run every round with the focus appended — remember `--base` and a prompt 
 FOCUS=$(cat "$GIT_DIR/peer-review-focus" 2>/dev/null)
 TRANSCRIPT="/tmp/peer-review-$$.txt"
 if [ -n "$FOCUS" ]; then
-  codex review "Review the changes on this branch relative to the merge-base with origin/$BASE. Focus especially on: $FOCUS. Also report anything else you find." 2>&1 | tee "$TRANSCRIPT"
+  codex review -c model_reasoning_effort=$EFFORT "Review the changes on this branch relative to the merge-base with origin/$BASE. Focus especially on: $FOCUS. Also report anything else you find." 2>&1 | tee "$TRANSCRIPT"
 else
-  codex review --base "$BASE" 2>&1 | tee "$TRANSCRIPT"
+  codex review -c model_reasoning_effort=$EFFORT --base "$BASE" 2>&1 | tee "$TRANSCRIPT"
 fi
 ```
 
@@ -122,9 +144,9 @@ fi
 # the base inside the prompt; without one, use --base.
 TRANSCRIPT="/tmp/peer-review-$$.txt"
 if [ -n "$FOCUS" ]; then
-  nohup codex review "Review the changes on this branch relative to the merge-base with origin/$BASE. Focus especially on: $FOCUS. Also report anything else you find." > "$TRANSCRIPT" 2>&1 &
+  nohup codex review -c model_reasoning_effort=$EFFORT "Review the changes on this branch relative to the merge-base with origin/$BASE. Focus especially on: $FOCUS. Also report anything else you find." > "$TRANSCRIPT" 2>&1 &
 else
-  nohup codex review --base "$BASE" > "$TRANSCRIPT" 2>&1 &
+  nohup codex review -c model_reasoning_effort=$EFFORT --base "$BASE" > "$TRANSCRIPT" 2>&1 &
 fi
 CODEX_PID=$!
 ```
@@ -192,6 +214,14 @@ Codex's review output is free-form prose, usually structured as numbered finding
 | Finding is already fixed in the working tree (Codex reviewed a stale snapshot) | **skip**, note |
 
 Treat Codex's confidence as a hint, not gospel. Read the actual file before applying anything — Codex sometimes hallucinates line numbers, variable names, or "current behavior" that's already different from what's on disk. Compare current `git rev-parse HEAD` against the `head=` value you recorded in the lock file when you claimed it (step 0) — if it moved, someone else committed while the review ran; some findings are likely already fixed under the "already fixed" rule above, so re-check every finding against the live file, not just the ones that look suspicious.
+
+**Escalation check (skip on round 1 — nothing to compare against yet).** Round count is a proxy for convergence, not proof of it — the effort step-down (step 2) assumes each round is mostly follow-ons from the last, and that assumption can be wrong. Compare this round's findings against every prior round's step-6 report earlier in this session: if any finding here is a **genuinely new class** — a different subsystem or defect category the earlier round(s) plausibly should have caught but didn't — and this round ran at medium or low effort, force the *next* round back to high:
+
+```bash
+touch "$GIT_DIR/peer-review-escalate"
+```
+
+A follow-on or knock-on bug exposed by *this session's own fix* to an earlier finding does not count as new ground — only something that looks like it was already sitting undetected in the diff triggers this. Don't touch the flag for a round that already ran at high; there's nowhere higher to escalate to.
 
 ### 4. Apply the fixes
 
