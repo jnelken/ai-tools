@@ -36,6 +36,8 @@ Iterative until clean (recommended for non-trivial diffs) — **this is how you 
 
 Scope hints combine with the mode keyword in any order, e.g. `/peer-review local uncommitted` or `/peer-review base=develop`. Auto-detect scope otherwise (see step 1).
 
+Fan a round out across several concurrent Codex lenses with `lenses=N` (2–4), e.g. `/peer-review lenses=3` or `/loop /peer-review lenses=4`. Step 2 splits the focus prompt into N lens prompts and runs them at once; step 3 triages the union. Same round count, same lock, same commit — only the wall-clock per round changes. Defaults to 1; step 2 says when to reach for more.
+
 ## When NOT to use
 
 - Diff is empty (nothing changed vs base, no uncommitted work) — exit immediately, tell the user there's nothing to review.
@@ -76,6 +78,7 @@ fi
 Parse the invocation for two independent things — order doesn't matter, either/both/neither may be present:
 
 - **Mode:** `local` keyword present → local mode (never push, never call `gh`). Absent → default push mode. Carry this forward; it gates step 8.
+- **Lenses:** `lenses=N` present → run N concurrent Codex reviews per round (clamp to 2–4). Absent → 1, unless step 2's matrix rule promotes it. Carry this forward; it shapes step 2.
 - **Scope hint:** pick exactly one mode based on repo state (and any user hint):
 
 | State | Scope | Command |
@@ -157,7 +160,18 @@ until ! ps -p $CODEX_PID >/dev/null 2>&1; do sleep 5; done; echo done
 ```
 Once Monitor reports completion, read `$TRANSCRIPT` for the review output and continue at step 3.
 
-**Optional — parallel lenses for unusually wide diffs.** If the matrix spans 3+ axes, round 1 may run 2–3 *concurrent* `codex review` invocations, each with a different lens prompt (e.g. markup/a11y; permission and masking leaks; formatting/display parity), then triage the **union** of findings in step 3. This still counts as one round — one lock, one triage, one apply pass, one commit, one increment of the rounds file. It trades tokens for wall-clock rounds; use it when the alternative is predictably serial rounds each finding a different lens's issues.
+**Parallel lenses (`lenses=N`, or promoted automatically).** A single focus prompt spanning a dozen axes dilutes Codex's attention: one run peels one layer per round, and a review that should converge in 1–2 rounds takes 5+. When `lenses=N` was passed, **or** the matrix from the focus-prompt step spans 3+ axes and no `lenses=` was given, run N *concurrent* `codex review` invocations (default N=3 when promoted; clamp 2–4), each carrying one slice of the focus prompt, then triage the **union** in step 3. This still counts as one round — one lock, one triage, one apply pass, one commit, one increment of the rounds file, one TSV row (record the lens count in the reviewer-effort column, e.g. `high ×3`). It trades tokens for wall-clock rounds.
+
+Slice the focus prompt into lenses that a single reviewer would each hold in mind at once. The four that recur on UI/data changes, in order of value:
+
+1. **Permission and masking** — unauthorized/403, read-only, loading, masked or `disable*`-gated affordances; anything that could leak a hidden value.
+2. **Interaction and markup** — nested interactive elements, event propagation to host containers, focus and hover ownership, keyboard reachability, portal boundaries.
+3. **Data and formatting** — every data type / variant / status cell of the matrix, display-vs-copy parity, formatter edge cases (suffixes, rounding, empty, arrays).
+4. **Tests and docs** — assertions on removed text, forbidden type casts, mutation-resistant guards, reference docs the diff made stale.
+
+Fewer lenses than that: merge 4 into 3, then 2 into 1. Persist the slices to `$GIT_DIR/peer-review-lenses` (one lens prompt per line) alongside the focus file so every `/loop` round reuses the same partition. Each lens gets its own transcript (`/tmp/peer-review-$$-lens<N>.txt`) and its own detached process; wait for all of them with one Monitor that exits when the last PID is gone. Every lens prompt still states the diff scope ("the changes on this branch relative to the merge-base with origin/<base>") and ends with "Also report anything else you find" so nothing falls between the slices. Dedupe the union by `file:line + summary` before triage — two lenses will occasionally report the same finding.
+
+When *not* to fan out: a diff confined to one file or one concern, a round that is only verifying the previous round's fixes (drop to 1 lens — the prior round's report tells you which slice to keep), or a `low`-effort mop-up round.
 
 If `codex` exits non-zero, release the lock (`rm -f "$LOCK"`), surface the stderr verbatim to the user, and stop. Common causes: not logged in (`codex login`), config error, network. Don't try to work around.
 
@@ -226,6 +240,13 @@ A follow-on or knock-on bug exposed by *this session's own fix* to an earlier fi
 ### 4. Apply the fixes
 
 Apply every `apply` row from the working list, in file order (one file at a time, multiple edits per file batched). After each file, re-read it to confirm the edit landed cleanly. If an edit fails because the surrounding code doesn't match Codex's description, downgrade that row to `skip` and continue — don't force it.
+
+**Parallel apply for a wide round.** When the `apply` rows partition into groups touching **disjoint files** (typical after a multi-lens round: row components, an editor, an API type, a doc), dispatch each group to its own Sonnet subagent in a single message so they run concurrently, and keep the triage table as the contract each one reports against. Rules that make this safe:
+
+- A group owns every file it edits **and** the test file that covers it — mutation-checking a new test rewrites the source, so the source and its test must sit in the same group.
+- Two groups never share a file. If two findings touch one file, they are one group.
+- The orchestrator (you) does not edit while agents run; you re-read each touched file when they report, then run typecheck/lint/tests once over the union before step 5.
+- Skip the fan-out for ≤3 applies or when most findings land in one file — a subagent handoff costs more than the edits.
 
 **Do not** add comments referencing Codex, the review, or the finding number ("// per Codex review", "// addresses P1 #3"). The fix should be indistinguishable from any other commit; CLAUDE.md's no-noise-comments rule applies.
 
@@ -351,6 +372,9 @@ The round counter (`$GIT_DIR/peer-review-rounds`) is cumulative for the life of 
 ## Common mistakes
 
 - **Running bare generic rounds on a cross-cutting change** — without a focus prompt, Codex surfaces one layer per round and burns the loop ceiling on findings that were predictable cells of the change's interaction matrix (data type × variant × permission state). Enumerate the matrix, self-check the security-shaped cells, and seed every round with the focus prompt (step 2).
+- **One giant focus prompt on a 3+-axis matrix** — a single reviewer holding a dozen axes still peels one layer per round. Fan out with `lenses=N` (step 2) so each slice gets undivided attention; the cost is tokens, the saving is rounds.
+- **Fanning out lenses on a verification round** — the round after a fix pass only needs the slice the fixes touched. Multi-lens there is pure cost.
+- **Parallel apply agents sharing a file** — two agents editing one source (or one editing the source while another mutation-checks its test) clobber each other. Partition by file, source and test together (step 4).
 - **Auto-applying every finding** — Codex's job is to be thorough; yours is to be selective. Skipping is fine and often correct.
 - **Editing during step 3** — step 3 is planning only. Edits in step 4. Otherwise you'll forget which findings were applied vs. skipped when you write the summary.
 - **Trusting Codex's line numbers blindly** — read the file first. Codex reviews diffs and can be off by a few lines or refer to code that was moved/deleted.
