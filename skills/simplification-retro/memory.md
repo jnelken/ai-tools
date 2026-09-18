@@ -23,6 +23,16 @@ Residue found, by kind:
 - **Superseded store** — `~/.superset/local.db` holds project rows from an older data model, including dead entries for `w3oodrow` and `w4oodrow` that no longer exist on disk. **Open, deliberately untouched** — terminal and browser history still write to that file, so it is not purely dead.
 - **Stale index** — `~/.ai-tools/README.md`'s skills table is missing ~19 shipped skills. **Open, out of corpus** — it was already stale before this work. Recorded here only because it was observed; under the skill's scope rule a future run should not report it.
 
+## 2026-09-18 — detection validation (kind 3 only, not a full run)
+
+Ran the redundant-path recognition test alone, against the dotfiles work above, to check the criteria produce an evidence-backed finding rather than noise. They do, and the result sharpens the open item:
+
+- The job "push a stack of branches" has **four** entry points, not three. Besides the deleted `gpstack` and `/create-pr base=`, `~/.gitconfig` carries *two* aliases — `git push-stack` **and** `git stack` (the latter enumerates the stack; the former consumes it).
+- Shell history: `push-stack` 3 uses, `gpstack` 1. So the survivor is the one that was actually used — removing `gpstack` kept the right mechanism.
+- `branch.<name>.stackParent` is set on **zero** branches in woodrow. That was `gpstack`'s stack-inference mechanism and nothing else reads it; a future run should check whether any stale `stackParent` config entries remain elsewhere.
+
+Tier: **2**, correctly — the aliases have a human-invocable surface, so no reference count could have made them Tier 1. Not applied; still awaiting Jake's call on whether the alias pair earns its keep.
+
 Working correctly — do not change:
 - `main2`-style trunk mirrors are protected from `gdelm` by `git_trunks_re` in `30-git.zsh`. That protection is why they survived every routine `gp` and had to be removed by hand; it is not a bug.
 - `gdelm`'s second deletion criterion (0 commits ahead of main) was checked against the new `autoSetupMerge` setting and creates no new risk — a fresh branch off main was already `ahead == 0` regardless of upstream, and worktree-checked-out branches are skipped.
