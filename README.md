@@ -26,6 +26,7 @@ Personal AI coding tools — Claude Code and Cursor skills, slash commands, hook
 | [`rebase-after-squash`](skills/rebase-after-squash) | Resolve rebase-after-squash-merge conflicts cleanly |
 | [`rum-review`](skills/rum-review) | Query Datadog RUM data, synthesize findings into categorized issues |
 | [`scoutmail`](skills/scoutmail) | Monitor all Spark email accounts and surface only new messages that genuinely require attention |
+| [`simplification-retro`](skills/simplification-retro) | Sweep finished work for the complexity it made unnecessary — dead scaffolding, redundant paths, orphaned guards — across code, config, shell, git state and docs |
 | [`screenshot-pr`](skills/screenshot-pr) | Capture one signature screenshot from the deploy preview, embed in PR description |
 | [`slack-gif-creator`](skills/slack-gif-creator) | Build animated GIFs optimized for Slack |
 | [`superset-config`](skills/superset-config) | Configure superset.sh (agentic IDE) project scripts — setup/run/teardown |
@@ -85,6 +86,12 @@ Scheduling (the launchd plist) needs manual per-machine setup — see [`automati
 | [`awesome-statusline.sh`](statusline/awesome-statusline.sh) | Bash statusline for Claude Code — context/usage-limit bars with a momentum-based color gradient, blink at high-risk pace, cost/session time, Node.js version |
 
 Unlike the other categories, installing this also patches `~/.claude/settings.json` (`statusLine.command`, with a timestamped backup) so Claude Code actually runs it — see [Install](#install) below. Requires `jq` (auto-installed by `install.sh` if missing).
+
+### Docs (`docs/`)
+
+| Doc | Purpose |
+|---|---|
+| [`retrospectives.md`](docs/retrospectives.md) | The retrospective class — field schema, shared action tiers, and the registry of retros that live here or as `~/.claude/CLAUDE.md` sections |
 
 ## Install
 
