@@ -24,10 +24,10 @@ If any of these is false, stop and tell the user — don't try to work around th
 **Default to the Netlify deploy preview URL.** It's already built, already deployed, and matches what reviewers see when they click through. The URL pattern is predictable from the PR number and the Netlify site slug:
 
 ```
-https://deploy-preview-<PR_NUMBER>--<NETLIFY_SLUG>.netlify.app
+https://deploy-preview-<PR_NUMBER>.folio.concentro.io
 ```
 
-Extract the slug for your repo by parsing the Netlify check name from `gh pr checks <PR_NUMBER> --json name` — it's structured as `netlify/<slug>/deploy-preview`. Hold the slug in mind for subsequent navigation.
+The Netlify check (`netlify/partner-concentro/deploy-preview`) links to a `*.netlify.app` host; ignore that link and use the `folio.concentro.io` alias above — it is the only preview origin the stage API's CORS allowlist admits.
 
 **Wait for the deploy preview to be ready before capturing.** Run `gh pr checks <PR_NUMBER> --json name,state` and find the entry whose name starts with `netlify/`. If `state == "SUCCESS"`, capture immediately. If `PENDING` or `IN_PROGRESS`, tell the user "deploy preview building, polling for up to 5 min", then poll every 30 seconds. If `FAILURE`, stop and report — don't fall back to localhost silently.
 
@@ -70,7 +70,7 @@ Wait for confirmation. The user may correct the route, viewport, or setup steps.
 
 ### Phase 3 — Wait for the deploy preview (or start localhost)
 
-**Default path (deploy preview):** parse the Phase 1 `gh pr checks` output for the entry whose name starts with `netlify/`. Extract the slug (`netlify/<slug>/deploy-preview` → `<slug>`). Construct the URL: `https://deploy-preview-<PR_NUMBER>--<slug>.netlify.app`.
+**Default path (deploy preview):** confirm the Phase 1 `gh pr checks` output has a `netlify/partner-concentro/deploy-preview` entry in `SUCCESS`, then open `https://deploy-preview-<PR_NUMBER>.folio.concentro.io`. Never use the raw `deploy-preview-<N>--partner-concentro.netlify.app` host the check links to: the stage API's CORS allowlist admits only the `folio.concentro.io` alias, so sign-in there fails with "Login attempt timed out" (see the woodrow README, "Deploy Previews").
 
 - `SUCCESS` → continue to Phase 4 with that URL.
 - `PENDING` / `IN_PROGRESS` → tell the user "deploy preview building, polling up to 5 min", poll `gh pr checks` every 30s.
