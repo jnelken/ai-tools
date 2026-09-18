@@ -94,25 +94,38 @@ If both committed-branch-changes AND uncommitted changes exist, ask the user whi
 
 ### 2. Run the review
 
-**Select this round's reasoning effort before invoking Codex.** Rounds step down by default: 1–2 at **high**, 3–4 at **medium**, 5+ at **low** — early rounds catch the most substantive findings and benefit most from deeper reasoning; later rounds are normally just mopping up follow-ons, where high effort is wasted cost. This is a default decay, not a fixed schedule — step 3 can override it back to high when a later round surfaces genuinely new ground.
+**Select this round's reasoning effort before invoking Codex.** The step-down is driven by **what the last round found**, not by how many rounds have run — a round number is a proxy for convergence, while "the previous round surfaced no P1" is direct evidence of it.
+
+- **Rounds 1–2: always high.** Round 1 is the highest-yield pass, and a single clean look at a fresh diff is weak evidence. This floor is not overridable by the P1 signal.
+- **Round 3+: medium once the immediately preceding round found zero P1 findings**, high otherwise. A round that turned up a P1 means the diff is still yielding substantive defects and the next pass should reason just as hard.
+- **Never below medium.** A low-effort round that comes back quiet reads exactly like convergence, which is the one thing it cannot be trusted to establish — and the later rounds where it would apply are precisely where a trustworthy "it's quiet" matters most. Cheap silence is worse than no round at all.
+
+Step 3 can still override back to high when a round surfaces genuinely new ground.
 
 ```bash
 GIT_DIR=$(git rev-parse --git-dir)
 ROUNDS_FILE="$GIT_DIR/peer-review-rounds"
 ESCALATE_FILE="$GIT_DIR/peer-review-escalate"
+# Written by step 3 each round: how many P1s that round's triage found.
+LAST_P1_FILE="$GIT_DIR/peer-review-last-p1"
 NEXT_ROUND=$(( $(cat "$ROUNDS_FILE" 2>/dev/null || echo 0) + 1 ))
+LAST_P1=$(cat "$LAST_P1_FILE" 2>/dev/null || echo unknown)
 
 if [ -f "$ESCALATE_FILE" ]; then
   EFFORT=high   # forced by a prior round's new-finding-class escalation (step 3)
   rm -f "$ESCALATE_FILE"
 elif [ "$NEXT_ROUND" -le 2 ]; then
-  EFFORT=high
-elif [ "$NEXT_ROUND" -le 4 ]; then
-  EFFORT=medium
+  EFFORT=high   # floor: the first two rounds always reason hard
+elif [ "$LAST_P1" = "0" ]; then
+  EFFORT=medium # previous round found no P1 — the substantive defects are out
 else
-  EFFORT=low
+  EFFORT=high   # a P1 last round, or no record of one, so don't step down yet
 fi
 ```
+
+`unknown` (no `$LAST_P1_FILE` yet, e.g. a worktree with rounds from before this
+signal existed) deliberately keeps the round at high — absence of a record is
+not evidence of a clean round.
 
 Pass `-c model_reasoning_effort=$EFFORT` on every `codex review` invocation this round — both the first attempt below and the detach-and-poll retry use the same `$EFFORT`.
 
@@ -229,13 +242,21 @@ Codex's review output is free-form prose, usually structured as numbered finding
 
 Treat Codex's confidence as a hint, not gospel. Read the actual file before applying anything — Codex sometimes hallucinates line numbers, variable names, or "current behavior" that's already different from what's on disk. Compare current `git rev-parse HEAD` against the `head=` value you recorded in the lock file when you claimed it (step 0) — if it moved, someone else committed while the review ran; some findings are likely already fixed under the "already fixed" rule above, so re-check every finding against the live file, not just the ones that look suspicious.
 
-**Escalation check (skip on round 1 — nothing to compare against yet).** Round count is a proxy for convergence, not proof of it — the effort step-down (step 2) assumes each round is mostly follow-ons from the last, and that assumption can be wrong. Compare this round's findings against every prior round's step-6 report earlier in this session: if any finding here is a **genuinely new class** — a different subsystem or defect category the earlier round(s) plausibly should have caught but didn't — and this round ran at medium or low effort, force the *next* round back to high:
+**Escalation check (skip on round 1 — nothing to compare against yet).** A quiet P1 column is evidence the substantive defects are out, not proof — the effort step-down (step 2) reads it as a signal that this round is mostly follow-ons, and that reading can be wrong. Compare this round's findings against every prior round's step-6 report earlier in this session: if any finding here is a **genuinely new class** — a different subsystem or defect category the earlier round(s) plausibly should have caught but didn't — and this round ran at medium effort, force the *next* round back to high:
 
 ```bash
 touch "$GIT_DIR/peer-review-escalate"
 ```
 
 A follow-on or knock-on bug exposed by *this session's own fix* to an earlier finding does not count as new ground — only something that looks like it was already sitting undetected in the diff triggers this. Don't touch the flag for a round that already ran at high; there's nowhere higher to escalate to.
+
+**Record this round's P1 count**, which step 2 reads to pick the next round's effort. Write it from the triage table you just built — the count of rows you classified P1, whether you applied or skipped them, not the count Codex's own prose claimed:
+
+```bash
+echo "<number of P1 rows in this round's triage>" > "$GIT_DIR/peer-review-last-p1"
+```
+
+Write it on every completed round, including a round that found nothing (`0`). Skipping it leaves the previous round's number in place and picks the next effort off stale evidence.
 
 ### 4. Apply the fixes
 
