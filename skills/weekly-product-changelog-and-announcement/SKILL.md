@@ -1,3 +1,8 @@
+---
+name: weekly-product-changelog-and-announcement
+description: Produce two Slack deliverables from one week of woodrow, api, and folio-platform commits — a per-engineer internal changelog and a customer/PM-facing product announcement — using a Friday cutoff window that resumes from the last run. Use for the weekly product update, weekly changelog, Friday shipping summary, or the scheduled weekly Slack post.
+---
+
 # Weekly Product Changelog & Announcement
 
 This skill generates two Slack deliverables from the same weekly commit

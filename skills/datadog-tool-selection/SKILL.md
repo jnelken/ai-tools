@@ -1,3 +1,8 @@
+---
+name: datadog-tool-selection
+description: Choose between the pup CLI, the Datadog MCP connector, and the Datadog REST API for a given Datadog task — logs, metrics, monitors, traces, RUM, dashboards, incidents, notebooks. Use when starting a Datadog lookup or investigation and the access path is unclear, or when the chosen path does not expose a needed operation and you need the documented fallback order.
+---
+
 # Datadog Tool Selection Skill
 
 Use this skill to choose between Datadog MCP tools, direct Datadog REST API calls, and `pup` CLI.

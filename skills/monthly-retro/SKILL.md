@@ -1,3 +1,8 @@
+---
+name: monthly-retro
+description: Generate a monthly retrospective for one team member from woodrow and api commit history — group commits into named themes, weight each theme by lines changed, and write stakeholder-facing summaries under What Went Well, Not So Well, and What Could Have Gone Better. Use when asked for a monthly retro, a per-person month in review, or a themed write-up of what someone shipped. For the raw commit numbers instead, see monthly-retro-commits.
+---
+
 # Monthly Retrospective Skill
 
 Use this skill when asked to generate a monthly retrospective for a single team member.

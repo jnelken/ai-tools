@@ -1,3 +1,8 @@
+---
+name: monthly-retro-commits
+description: Export raw commit-level effort data as TSV (lines changed, repo, date, subject) for a given author and month via `fp retro:commits`, without summarizing or reformatting. Use when asked for the underlying commit numbers, line-change stats, or raw retro data. For the written retrospective built on top of this, see monthly-retro.
+---
+
 # Monthly Retro Commits Export Skill
 
 Use this skill when asked to export commit-level effort data for monthly retrospectives.
