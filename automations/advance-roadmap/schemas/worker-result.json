@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "AdvanceRoadmapWorkerResult",
+  "type": "object",
+  "required": ["outcome", "provider", "summary"],
+  "properties": {
+    "outcome": {
+      "type": "string",
+      "enum": ["shipped", "blocked-branch-left", "failed", "limit_hit", "archive-only", "bookkeeping"]
+    },
+    "provider": {
+      "type": "string",
+      "enum": ["cursor", "codex", "claude"]
+    },
+    "repo": { "type": ["string", "null"] },
+    "item": { "type": ["string", "null"] },
+    "branch": { "type": ["string", "null"] },
+    "merge_commit": { "type": ["string", "null"] },
+    "linear_id": { "type": ["string", "null"] },
+    "limit_text": { "type": ["string", "null"] },
+    "summary": { "type": "string" }
+  }
+}

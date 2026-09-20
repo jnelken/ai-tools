@@ -427,7 +427,7 @@ section_hooks() {
 # ── automations/ ──
 section_automations() {
   [ -d "$SRC_ROOT/automations" ] || return 0
-  local auto name script
+  local auto name script sub f
   for auto in "$SRC_ROOT/automations"/*/; do
     [ -d "$auto" ] || continue
     name="$(basename "${auto%/}")"
@@ -435,6 +435,16 @@ section_automations() {
     for script in "$auto"*.sh "$auto"*.py; do
       [ -e "$script" ] || continue
       link_one "$script" "$CLAUDE_DIR/automations/$name/$(basename "$script")" "automation script"
+    done
+    # Helper trees used by advance-roadmap (usage probe, JSON schemas).
+    for sub in lib schemas; do
+      [ -d "$auto$sub" ] || continue
+      mkdir -p "$CLAUDE_DIR/automations/$name/$sub"
+      for f in "$auto$sub"/*; do
+        [ -e "$f" ] || continue
+        [ -f "$f" ] || continue
+        link_one "$f" "$CLAUDE_DIR/automations/$name/$sub/$(basename "$f")" "automation $sub file"
+      done
     done
   done
   if [ "$QUIET" -eq 0 ]; then

@@ -33,17 +33,22 @@ OUT = os.path.join(ROOT, "dashboard.html")
 CODE_DIR = os.path.join(HOME, "Dropbox/code")
 MEMORY = os.path.join(HOME, ".claude/projects/-Users-jake-Dropbox-code/memory/project_advance-roadmap-runs.md")
 USAGE = os.path.join(HOME, ".claude/state/claude-usage.json")
+PROVIDERS_USAGE = os.path.join(ROOT, "providers-usage.json")
 
-# Thresholds mirror run.sh. Kept in sync by hand; shown so the page can say
+# Thresholds mirror lib/usage.py. Kept in sync by hand; shown so the page can say
 # whether the next run would be gated.
 MAX_SEVEN_DAY_PCT = 80
 MAX_FIVE_HOUR_PCT = 70
 SLOTS = [(4, 45), (10, 45), (16, 45), (22, 45)]
 
 QUOTA_RE = re.compile(r"skipping — (\S+) usage (\d+)% >= (\d+)%")
+NO_ORCH_RE = re.compile(r"skipping — no orchestrator available")
 LOCK_RE = re.compile(r"(another run holds|could not take lock)")
-EXIT_RE = re.compile(r"=== claude exit=(\d+)\s+finished (.*?) ===")
-MODEL_RE = re.compile(r"model=(\S+)")
+EXIT_RE = re.compile(
+    r"=== (?:claude exit=(\d+)\s+finished (.*?)|(?:advance-roadmap exit=(\d+)\s+finished (.*?))) ==="
+)
+# Legacy single-model line, or new orchestrator=… workers=… line.
+MODEL_RE = re.compile(r"(?:model|orchestrator)=(\S+)")
 LEDGER_ROW_RE = re.compile(r"^\|\s*`(\d{8}-\d{6})`\s*\|\s*([^|]*?)\s*\|\s*([^|]*?)\s*\|\s*([^|]*?)\s*\|")
 FIELD_RE = re.compile(r"^(Repo|Item|Test/build|Test|Merge|For you):\s*(.*)$", re.M)
 PUSH_RE = re.compile(r"(PUSH_PROBE:.*|[Pp]ush (?:nudge |notification )?(?:did not|not) (?:reach|sent).*)")
@@ -124,6 +129,8 @@ def classify(text, exit_code, has_header):
     qm = QUOTA_RE.search(text)
     if qm:
         return "skipped-quota", f"{qm.group(1)} usage {qm.group(2)}% ≥ {qm.group(3)}%"
+    if NO_ORCH_RE.search(text):
+        return "skipped-quota", "no orchestrator available (codex+claude hot)"
     if LOCK_RE.search(text):
         return "skipped-lock", "another run held the lock"
     if exit_code is None:
@@ -149,7 +156,12 @@ def parse_runs(ledger):
 
         em = EXIT_RE.search(text)
         mm = MODEL_RE.search(text)
-        exit_code = int(em.group(1)) if em else None
+        if em and em.group(1) is not None:
+            exit_code = int(em.group(1))
+        elif em and em.group(3) is not None:
+            exit_code = int(em.group(3))
+        else:
+            exit_code = None
         has_header = "advance-roadmap run" in text
 
         # Body = everything the model printed, minus run.sh's own framing.
@@ -159,7 +171,11 @@ def parse_runs(ledger):
             if nl != -1:
                 body = text[nl + 1:]
         if em:
-            body = body[: body.index("=== claude exit=")]
+            for marker in ("=== claude exit=", "=== advance-roadmap exit="):
+                idx = body.find(marker)
+                if idx != -1:
+                    body = body[:idx]
+                    break
         body = body.strip()
 
         outcome, detail = classify(text, exit_code, has_header)
@@ -303,19 +319,78 @@ def survey_repos():
 
 
 def quota():
+    """Prefer providers-usage.json; fall back to Claude statusline file."""
+    now = datetime.now().timestamp()
+    try:
+        p = json.load(open(PROVIDERS_USAGE, encoding="utf-8"))
+        providers = p.get("providers") or {}
+        claude = providers.get("claude") or {}
+        pools = claude.get("pools") or {}
+        # Support both new (pools) and legacy (five_hour at top level) shapes.
+        five_src = pools.get("five_hour") or claude.get("five_hour") or {}
+        seven_src = pools.get("seven_day") or claude.get("seven_day") or {}
+
+        def win_p(block, cap):
+            b = block or {}
+            pct = b.get("used_pct")
+            if pct is None:
+                pct = b.get("used_percentage", 0) or 0
+            reset_epoch = b.get("reset_epoch") or 0
+            if reset_epoch and reset_epoch < now:
+                pct = 0
+            return {"pct": pct, "cap": cap, "reset": b.get("reset_at") or "?", "gated": pct >= cap}
+
+        routing = p.get("routing") or {}
+        orch = routing.get("orchestrator") or "none"
+        workers = routing.get("worker_order") or []
+        # Fallback flags for legacy shape
+        if not routing:
+            flags = []
+            for name in ("codex", "claude"):
+                pr = providers.get(name) or {}
+                ok = pr.get("available")
+                if ok is None:
+                    ok = pr.get("available_for_orchestrator")
+                flags.append(f"{name}:{'ok' if ok else 'hot'}")
+            wflags = []
+            for name in ("cursor", "codex", "claude"):
+                pr = providers.get(name) or {}
+                ok = pr.get("available")
+                if ok is None:
+                    ok = pr.get("available_for_worker", True)
+                wflags.append(f"{name}:{'ok' if ok else 'hot'}")
+            routing_line = f"orch [{' '.join(flags)}] · workers [{' '.join(wflags)}]"
+        else:
+            routing_line = f"orch={orch} · workers=[{', '.join(workers) or 'none'}]"
+
+        updated = p.get("updated_at")
+        age = 0
+        if updated:
+            try:
+                age = int((now - datetime.fromisoformat(updated).timestamp()) / 60)
+            except ValueError:
+                age = 0
+        return {
+            "five": win_p(five_src, MAX_FIVE_HOUR_PCT),
+            "seven": win_p(seven_src, MAX_SEVEN_DAY_PCT),
+            "age": age,
+            "routing": routing_line,
+            "orch_ok": orch not in (None, "none", ""),
+        }
+    except (OSError, ValueError):
+        pass
     try:
         d = json.load(open(USAGE, encoding="utf-8"))
     except (OSError, ValueError):
         return None
-    now = datetime.now().timestamp()
     def win(k, cap):
         w = d.get(k) or {}
         pct = w.get("used_percentage", 0)
         if w.get("reset_epoch", 0) and w["reset_epoch"] < now:
-            pct = 0                      # window rolled over; cached value is stale
+            pct = 0
         return {"pct": pct, "cap": cap, "reset": w.get("reset_at", "?"), "gated": pct >= cap}
     return {"five": win("five_hour", MAX_FIVE_HOUR_PCT), "seven": win("seven_day", MAX_SEVEN_DAY_PCT),
-            "age": int((now - d.get("timestamp", now)) / 60)}
+            "age": int((now - d.get("timestamp", now)) / 60), "routing": None, "orch_ok": True}
 
 
 # ── render ────────────────────────────────────────────────────────────────────
@@ -402,12 +477,15 @@ def build():
                     f'<span class=qbar><i style="width:{min(w["pct"],100)}%;background:{colour}"></i></span>'
                     f'<span class=mono>{w["pct"]}% / {w["cap"]}%</span> '
                     f'<span class=dim>resets {esc(w["reset"])}</span></div>')
-        gated = q["five"]["gated"] or q["seven"]["gated"]
-        verdict = ('<span class="badge fail">next run would be SKIPPED</span>' if gated
+        gated = not q.get("orch_ok", True)
+        verdict = ('<span class="badge fail">next run would be SKIPPED (no orchestrator)</span>' if gated
                    else '<span class="badge ok">next run would proceed</span>')
-        quota_html = (f'<div class=card>{bar(q["five"], "5-hour")}{bar(q["seven"], "7-day")}'
+        routing = (f'<div class=dim style="margin-top:6px">{esc(q["routing"])}</div>'
+                   if q.get("routing") else "")
+        quota_html = (f'<div class=card>{bar(q["five"], "Claude 5-hour")}{bar(q["seven"], "Claude 7-day")}'
+                      f'{routing}'
                       f'<div style="margin-top:10px">{verdict} <span class=dim>· reading is '
-                      f'{q["age"]}m old; only interactive sessions refresh it</span></div></div>')
+                      f'{q["age"]}m old; providers-usage.json is refreshed by run.sh</span></div></div>')
     else:
         quota_html = '<p class=dim>No usage reading available — the gate would let a run proceed.</p>'
 

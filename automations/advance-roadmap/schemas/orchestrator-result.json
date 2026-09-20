@@ -1,0 +1,57 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "AdvanceRoadmapOrchestratorResult",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["action", "outcome_token", "summary"],
+  "properties": {
+    "action": {
+      "type": "string",
+      "enum": [
+        "dispatch_worker",
+        "blocked_no_item",
+        "nothing_qualified",
+        "resume_worker"
+      ]
+    },
+    "outcome_token": {
+      "type": "string",
+      "enum": [
+        "shipped",
+        "blocked-branch-left",
+        "blocked-no-item",
+        "nothing-qualified",
+        "pending-worker"
+      ]
+    },
+    "repo": { "type": ["string", "null"] },
+    "item": { "type": ["string", "null"] },
+    "branch": { "type": ["string", "null"] },
+    "roadmap_path": { "type": ["string", "null"] },
+    "linear_id": { "type": ["string", "null"] },
+    "directive_path": { "type": ["string", "null"] },
+    "worker_brief": { "type": ["string", "null"] },
+    "archives": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "blockers": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["repo", "detail"],
+        "properties": {
+          "repo": { "type": "string" },
+          "linear_id": { "type": ["string", "null"] },
+          "detail": { "type": "string" }
+        }
+      }
+    },
+    "considered": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "summary": { "type": "string" }
+  }
+}

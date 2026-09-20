@@ -20,42 +20,36 @@ makes the deploy clone dirty.
 
 Every 6 hours (4:45am / 10:45am / 4:45pm / 10:45pm local time), picks a personal repo under
 `~/Dropbox/code` whose `ROADMAP.md` has real planned work, ships exactly ONE item on a
-branch, verifies with the repo's own
-`npm test` / `npm run build`, moves the item to Shipped, then merges to `main` locally and
-**pushes**. No PR. Single source of truth for the workflow is the
-[`advance-roadmap`](../skills/advance-roadmap/SKILL.md) skill — `run.sh` just invokes
-`claude -p` headlessly against it, so editing the skill changes both the on-demand
-`/advance-roadmap` and this scheduled job.
+branch, verifies with the repo's own `npm test` / `npm run build`, moves the item to Shipped,
+then merges to `main` locally and **pushes**. No PR.
 
-This is the one automation here that contacts a remote. Its guardrails (personal `jnelken`
-repos only, clean tree required, no force-anything, all-or-nothing on failed verification)
-live in the skill, not in `run.sh`. `run.sh` adds a single-instance lock so two runs can
-never fight over the same repo's `main`, and it runs on Opus rather than Sonnet because it
-writes and tests real features.
+### Orchestrator / worker split
 
-Before invoking `claude`, `run.sh` checks `~/.claude/state/claude-usage.json` (written by the
-statusline for exactly this purpose) and **skips the run** if 7-day usage is at 80% or 5-hour usage
-at 70% — four Opus runs a day would otherwise eat a weekly budget quietly. Only interactive
-sessions refresh that file, so the gate ignores a percentage whose `reset_epoch` has passed (the
-window rolled over; the number is stale) and runs anyway if the file is missing or unreadable.
-Tune the two thresholds at the top of `run.sh`.
+`run.sh` no longer runs a single write-capable Claude Opus session. It:
 
-`run.sh` regenerates `~/.claude/automations/advance-roadmap/dashboard.html` after **every** run,
-including skipped ones — open it directly in a browser for run history, the current quota gate,
-candidate-repo eligibility, and the blockers waiting on a `/pick-up`.
+1. Refreshes `providers-usage.json` (`lib/usage.py` — Claude statusline probe ∪ prior limit hits).
+2. Launches a **read-only orchestrator**: **Codex Sol high** by default, Claude Opus high if Sol
+   is exhausted. Sandbox / tool deny-list — triage only, no edits.
+3. Parses `ORCHESTRATOR_RESULT_JSON`, then dispatches `worker.sh` along
+   **Cursor Auto → Codex Sol → Claude Opus**, failing over on `limit_hit` within the same tick.
+4. Records provider limits so the **next** run routes differently.
 
-Two data sources back it, and the page says which one each outcome came from. The **logs** are the
-spine — every run leaves one, and the lines `run.sh` itself writes (quota skip, lock skip, the exit
-footer) are deterministic. The model's prose summary is not, so nothing depends on parsing it. The
-**run ledger** in run memory carries authoritative outcome tokens, but the skill trims it to ~10
-rows, so `gen-dashboard.py` merges every row it ever sees into `ledger-cache.json` — outcomes
-survive the trim. Runs the ledger never covered are marked `inferred` rather than presented as
-fact.
+Skill sources of truth: [`SKILL.md`](../skills/advance-roadmap/SKILL.md) (router),
+[`ORCHESTRATOR.md`](../skills/advance-roadmap/ORCHESTRATOR.md),
+[`WORKER.md`](../skills/advance-roadmap/WORKER.md),
+[`SAFETY.md`](../skills/advance-roadmap/SAFETY.md).
 
-The `:45` slots are all offset from `wrapup-repos`' own `:45` runs on purpose: that job
-commits WIP, and this one refuses to start on a dirty tree, so it must land after one rather
-than on top of it. Most runs will find nothing to do and exit early — that's expected and
-cheap; a repo only qualifies when its roadmap has real planned work and its tree is clean.
+Skip the tick only when **no orchestrator** remains (both Codex and Claude hot). Worker
+exhaustion alone still lets the orchestrator report `blocked-no-item` / `nothing-qualified`.
+
+Guardrails (personal `jnelken` repos only, clean tree, no force, all-or-nothing verification)
+live in `SAFETY.md`. `run.sh` adds the single-instance lock.
+
+`run.sh` regenerates `dashboard.html` after every run (including skips). The quota card shows
+Claude windows plus the multi-provider routing line from `providers-usage.json`.
+
+The `:45` slots stay offset from `wrapup-repos` so this job never starts on a tree that job
+just dirtied.
 
 ## `wrapup-repos`
 
