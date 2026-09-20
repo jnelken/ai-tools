@@ -96,6 +96,14 @@ commit about Y" / "Discard all of it" / free-form as he actually said it>
   yet, wait for the next run">
 ```
 
+**Never name a `human-only` item in the go-ahead.** That label marks work `/advance-roadmap` is
+required to refuse — a GUI installer, a vendor sign-in, a purchase, a device in hand, a credential
+only Jake holds — so a `specifically implement: <item>` line pointing at one hands that skill an
+instruction it must ignore, and the repo sits blocked with nothing recording why. This skill never
+queries Linear, so the label won't be in front of you; it's the one thing worth checking by hand
+before writing that line. If Jake names such an item anyway, record it as a plain note under
+*Answered decisions* and leave the go-ahead on the normal Step 1/2 selection.
+
 The three checkboxes are `/advance-roadmap`'s own scratch space — it checks them off as it
 completes each, so a crash mid-directive leaves a clear resume point (folded into its own
 Step 0 interrupted-run reconciliation). Leave them unchecked when you write the file.

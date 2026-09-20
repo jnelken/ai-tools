@@ -16,6 +16,14 @@ commit, merge, or push (see WORKER.md).
   a project called "Knowledge Base MVP" is not evidence for the `knowledge-graph` directory, and
   guessing is the same failure mode as the rule above — a feature pushed to `main` in the wrong
   repo.
+- **A `human-only` label means this skill never implements it.** That label marks work no
+  unattended run can finish — a GUI installer or wizard, a vendor sign-in, a purchase, a physical
+  device, a credential only Jake holds. Drop those issues from the candidate batch entirely, and
+  do it **silently**: a `human-only` issue is not *blocked* on anything this skill could resolve,
+  it simply isn't this skill's work, so Step 2b does not apply and an `@jnelks` ping every six
+  hours is pure noise. Record it in run memory as `skipped-human-only` with its `DEV-N` id and
+  move on. It's a flat workspace label, not a child of the `repo` group, so an issue carries both
+  it and its own `repo/*` label.
 - **Clean tree or skip — unless a directive says otherwise.** `git -C <repo> status --porcelain`
   must be empty. Uncommitted work means the user is mid-thought there; branching, merging and
   pushing around it tangles their diff. Pick a different repo — never stash, reset, or commit

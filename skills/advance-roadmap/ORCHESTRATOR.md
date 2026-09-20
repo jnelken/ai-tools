@@ -223,7 +223,12 @@ For each direct child of `/Users/jake/Dropbox/code` that is a git repo, in prior
    whether a real unbuilt item is described — not by file length or heading wording.
 7. **A Linear issue that explicitly names this repo also qualifies it**, even with no
    `ROADMAP.md` and no `docs/plans/` — see Step 2's *Also check Linear*. Every other gate in this
-   list still applies unchanged.
+   list still applies unchanged. **Issues labeled `human-only` never qualify a repo**, so filter
+   them out *before* asking whether anything here is actionable — otherwise a repo whose every
+   ticket is human-only presents as a candidate on every run and then dead-ends in Step 2, which
+   reads as a near-miss worth investigating when it's actually working as designed. If that filter
+   empties the repo's queue and there's no roadmap or plan item either, the repo just doesn't
+   qualify.
 8. Resolve the ticket you would attempt before applying the clean-tree gate: use the linked ticket
    in the roadmap index, or the highest-priority eligible Linear issue for the repo. Then apply the
    clean-tree, preflight, and live-session checks from the safety rules. **Check for a directive
@@ -336,6 +341,14 @@ an issue exists somewhere; read both, then pick one item by the prefer/skip rule
 - Add a missing repo label yourself only when the issue's own content makes the answer unambiguous.
   Otherwise comment on that issue per Step 2b and leave the label for Jake; adding the wrong label
   could route implementation into the wrong repository.
+- **`human-only` is a hard exclusion, and a silent one.** Drop every issue carrying the
+  `human-only` label from the batch before you triage it. The label marks work that needs a human
+  at a keyboard — a GUI installer, a vendor sign-in, a purchase, a device in hand — so no worker
+  provider can finish it regardless of how well the ticket is specified. Unlike a missing repo
+  label, this is **not** a Step 2b blocker: don't comment on it, don't mention Jake, and don't
+  count it among the items you report as considered. Log `skipped-human-only` plus the `DEV-N` id
+  in run memory and move on. It's a flat workspace label that coexists with the issue's `repo/*`
+  label, so check labels for both independently.
 - **Step 2's skip list applies in full.** Those same six issues need Postgres + pgvector, an LLM
   API key, and an external Instagram ingestion provider, so on today's reading they're out on the
   external-services rule regardless of the repo question. That's a verdict on the current issue
