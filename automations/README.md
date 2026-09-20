@@ -18,10 +18,33 @@ makes the deploy clone dirty.
 
 ## `advance-roadmap`
 
-Every 6 hours (4:45am / 10:45am / 4:45pm / 10:45pm local time), picks a personal repo under
+Every 6 hours (4:45am / 10:45am / 4:45pm / 10:45pm local time — see **Cadence backoff** below),
+picks a personal repo under
 `~/Dropbox/code` whose `ROADMAP.md` has real planned work, ships exactly ONE item on a
 branch, verifies with the repo's own `npm test` / `npm run build`, moves the item to Shipped,
 then merges to `main` locally and **pushes**. No PR.
+
+### Cadence backoff
+
+launchd always fires four times a day; the effective cadence is enforced inside `run.sh`, so the
+schedule never has to be rewritten. `gen-dashboard.py` already classifies every run, so it owns
+the arithmetic and writes `cadence_hours` to `state.json`:
+
+| Consecutive blocked runs | Cadence | Slots that run |
+|---|---|---|
+| 0–3 | 6h | 04:45, 10:45, 16:45, 22:45 |
+| 4–7 | 12h | 04:45, 16:45 |
+| 8+ | 24h | 04:45 |
+
+Four blocked runs is a full day of finding nothing. **Any run that ships resets it.** Quota, lock
+and backoff skips don't count toward the streak — they're not evidence either way. A missing or
+corrupt `state.json` falls back to 6h, so a bad read can never wedge the job off.
+
+### Slack summary
+
+Each completed run posts one line — outcome · repo · duration, plus the cadence when backed off —
+to `$ADVANCE_ROADMAP_SLACK_WEBHOOK`, falling back to `$SLACK_CCUSAGE_WEBHOOK_URL`. With neither
+set the step is a silent no-op, and a failed post never fails the run.
 
 ### Orchestrator / worker split
 
