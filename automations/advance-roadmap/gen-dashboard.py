@@ -124,7 +124,7 @@ def infer(body):
     return "completed"
 
 
-def classify(text, exit_code, has_header):
+def classify(text, exit_code, has_header, fresh=False):
     """First match wins. Only deterministic signals decide; prose never does."""
     qm = QUOTA_RE.search(text)
     if qm:
@@ -134,6 +134,8 @@ def classify(text, exit_code, has_header):
     if LOCK_RE.search(text):
         return "skipped-lock", "another run held the lock"
     if exit_code is None:
+        if fresh:
+            return "running", "in flight — no exit line yet"
         return ("incomplete", "no exit line — killed mid-run") if has_header else ("incomplete", "no exit line")
     if exit_code != 0:
         return "error", f"exit {exit_code}"
@@ -178,7 +180,8 @@ def parse_runs(ledger):
                     break
         body = body.strip()
 
-        outcome, detail = classify(text, exit_code, has_header)
+        fresh = (datetime.now().timestamp() - mtime) < 90 * 60
+        outcome, detail = classify(text, exit_code, has_header, fresh)
         provenance = "run.sh"
         row = ledger.get(stamp)
         repo = ""
@@ -343,6 +346,7 @@ def quota():
         routing = p.get("routing") or {}
         orch = routing.get("orchestrator") or "none"
         workers = routing.get("worker_order") or []
+        orch_ok = orch not in (None, "none", "")
         # Fallback flags for legacy shape
         if not routing:
             flags = []
@@ -360,6 +364,12 @@ def quota():
                     ok = pr.get("available_for_worker", True)
                 wflags.append(f"{name}:{'ok' if ok else 'hot'}")
             routing_line = f"orch [{' '.join(flags)}] · workers [{' '.join(wflags)}]"
+            # No routing block means the file predates it — derive availability
+            # from the per-provider flags rather than reading "none" as "hot".
+            orch_ok = any(
+                (providers.get(n) or {}).get("available_for_orchestrator") or
+                (providers.get(n) or {}).get("available")
+                for n in ("codex", "claude"))
         else:
             routing_line = f"orch={orch} · workers=[{', '.join(workers) or 'none'}]"
 
@@ -375,7 +385,9 @@ def quota():
             "seven": win_p(seven_src, MAX_SEVEN_DAY_PCT),
             "age": age,
             "routing": routing_line,
-            "orch_ok": orch not in (None, "none", ""),
+            "orch_ok": orch_ok,
+            "updated": updated,
+            "providers": providers,
         }
     except (OSError, ValueError):
         pass
@@ -395,11 +407,57 @@ def quota():
 
 # ── render ────────────────────────────────────────────────────────────────────
 
+# A pool with no reading must not render as a measured 0% — "unknown" and
+# "measured zero" mean very different things when deciding whether to run.
+POOL_KEYS = ("five_hour", "seven_day", "weekly")
+
+
+def provider_rows(providers):
+    """One row per provider pool, plus availability and any recorded limit hit."""
+    rows = []
+    for name in ("claude", "codex", "cursor"):
+        pr = providers.get(name) or {}
+        pools = pr.get("pools") or pr
+        cells = []
+        for key in POOL_KEYS:
+            b = pools.get(key)
+            if not isinstance(b, dict):
+                continue
+            pct = b.get("used_pct")
+            if pct is None:
+                pct = b.get("used_percentage")
+            src = b.get("source") or "unknown"
+            label = key.replace("_", "-")
+            if pct is None:
+                cells.append(f'<span class=pool><b>{label}</b> <span class=dim>no reading '
+                             f'({esc(src)})</span></span>')
+            else:
+                cells.append(f'<span class=pool><b>{label}</b> <span class=mono>{pct}%</span> '
+                             f'<span class=dim>resets {esc(b.get("reset_at") or "?")} · {esc(src)}</span></span>')
+        if not cells:
+            src = pr.get("source") or "—"
+            cells.append(f'<span class=pool><span class=dim>no pools tracked ({esc(src)})</span></span>')
+        avail = []
+        for role, key in (("orchestrator", "available_for_orchestrator"), ("worker", "available_for_worker")):
+            v = pr.get(key)
+            if v is None:
+                continue
+            avail.append(f'<span class="badge {"ok" if v else "fail"}">{role}: {"ok" if v else "hot"}</span>')
+        hit = pr.get("last_limit_hit")
+        hit_html = (f'<div class=dim style="margin-top:3px">last limit hit: {esc(hit)}</div>'
+                    if hit else "")
+        rows.append(f'<div class=prow><div class=pname>{esc(name)}</div>'
+                    f'<div class=pcells>{"".join(cells)}{hit_html}</div>'
+                    f'<div class=pavail>{" ".join(avail)}</div></div>')
+    return "".join(rows)
+
+
 BADGE = {
     "shipped": ("ok", "✓ shipped"), "completed": ("ok", "✓ completed"),
     "blocked-no-item": ("unk", "◦ blocked"), "blocked": ("unk", "◦ blocked"),
     "skipped-quota": ("off", "⏸ quota skip"), "skipped-lock": ("off", "⏸ lock skip"),
     "error": ("fail", "✗ error"), "incomplete": ("fail", "⚠ incomplete"),
+    "running": ("unk", "● running"),
 }
 
 
@@ -482,7 +540,13 @@ def build():
                    else '<span class="badge ok">next run would proceed</span>')
         routing = (f'<div class=dim style="margin-top:6px">{esc(q["routing"])}</div>'
                    if q.get("routing") else "")
-        quota_html = (f'<div class=card>{bar(q["five"], "Claude 5-hour")}{bar(q["seven"], "Claude 7-day")}'
+        checked = q.get("updated") or "unknown"
+        prov_html = (f'<div class=provs>{provider_rows(q["providers"])}</div>'
+                     if q.get("providers") else "")
+        quota_html = (f'<div class=card><div class=checkline><strong>Last usage check:</strong> '
+                      f'<span class=mono>{esc(checked)}</span> <span class=dim>({q["age"]}m ago)</span></div>'
+                      f'{prov_html}'
+                      f'{bar(q["five"], "Claude 5-hour")}{bar(q["seven"], "Claude 7-day")}'
                       f'{routing}'
                       f'<div style="margin-top:10px">{verdict} <span class=dim>· reading is '
                       f'{q["age"]}m old; providers-usage.json is refreshed by run.sh</span></div></div>')
@@ -554,6 +618,14 @@ TEMPLATE = """<!doctype html>
   .kv {{ font-size:13px; padding:2px 0; }}
   .kv .k {{ display:inline-block; min-width:72px; color:var(--dim); font-size:11.5px; text-transform:uppercase; letter-spacing:.04em; }}
   .pushnote {{ font-size:12px; color:var(--unk); margin-top:4px; }}
+  .checkline {{ font-size:13px; padding-bottom:10px; margin-bottom:10px; border-bottom:1px solid var(--line); }}
+  .provs {{ margin-bottom:12px; }}
+  .prow {{ display:flex; gap:12px; align-items:flex-start; padding:7px 0; border-bottom:1px solid var(--line); font-size:13px; }}
+  .prow:last-child {{ border-bottom:0; }}
+  .pname {{ min-width:64px; font-weight:650; }}
+  .pcells {{ flex:1; display:flex; flex-direction:column; gap:2px; }}
+  .pool b {{ font-weight:600; font-size:11.5px; text-transform:uppercase; letter-spacing:.04em; color:var(--dim); margin-right:6px; }}
+  .pavail {{ display:flex; gap:4px; flex-wrap:wrap; }}
   .qrow {{ display:flex; align-items:center; gap:10px; font-size:13px; padding:4px 0; flex-wrap:wrap; }}
   .qbar {{ flex:1; min-width:120px; height:8px; background:var(--line); border-radius:6px; overflow:hidden; }}
   .qbar i {{ display:block; height:100%; }}

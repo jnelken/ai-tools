@@ -40,6 +40,7 @@ find "$LOGDIR" -name 'run-*.log' -mtime +30 -delete 2>/dev/null
 if [ ! -f "$USAGE_PY" ]; then
   echo "=== advance-roadmap $STAMP: FATAL missing $USAGE_PY ===" >> "$LOG"
   ln -sf "$LOG" "$LOGDIR/latest.log"
+  regen_dashboard
   exit 1
 fi
 
@@ -66,6 +67,8 @@ fi
 rm -rf "$LOCK" 2>/dev/null
 mkdir "$LOCK" 2>/dev/null || {
   echo "=== advance-roadmap $STAMP: could not take lock — skipping ===" >> "$LOG"
+  ln -sf "$LOG" "$LOGDIR/latest.log"
+  regen_dashboard
   exit 0
 }
 trap 'rm -rf "$LOCK"' EXIT INT TERM
