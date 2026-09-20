@@ -17,6 +17,10 @@
     "branch": { "type": ["string", "null"] },
     "merge_commit": { "type": ["string", "null"] },
     "linear_id": { "type": ["string", "null"] },
+    "worker_mode": {
+      "type": "string",
+      "enum": ["standard", "goal"]
+    },
     "limit_text": { "type": ["string", "null"] },
     "summary": { "type": "string" }
   }

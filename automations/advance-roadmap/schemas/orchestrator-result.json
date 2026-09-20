@@ -29,6 +29,11 @@
     "branch": { "type": ["string", "null"] },
     "roadmap_path": { "type": ["string", "null"] },
     "linear_id": { "type": ["string", "null"] },
+    "worker_mode": {
+      "type": "string",
+      "enum": ["standard", "goal"],
+      "default": "standard"
+    },
     "directive_path": { "type": ["string", "null"] },
     "worker_brief": { "type": ["string", "null"] },
     "archives": {

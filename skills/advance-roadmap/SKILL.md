@@ -35,6 +35,13 @@ Candidate repos: direct children of `/Users/jake/Dropbox/code`. Check
 4. Dispatch `worker.sh` (Cursor → Codex → Claude) with same-run failover on limits.
 5. Persist usage for the next tick. Skip only when **no orchestrator** remains.
 
+Linear routing labels:
+
+- `do-next` puts an eligible ticket ahead of all fresh work on the next run, but never ahead of
+  Step 0's interrupted-run reconciliation.
+- `/goal` launches the selected worker through that provider's native durable goal command
+  (`$goal` for Codex; `/goal` for Cursor and Claude).
+
 Interactive `/advance-roadmap`: you are the orchestrator — follow `ORCHESTRATOR.md`, emit the
 JSON fence, then run:
 

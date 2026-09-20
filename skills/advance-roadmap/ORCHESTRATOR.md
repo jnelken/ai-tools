@@ -38,6 +38,7 @@ Schema: `~/.claude/automations/advance-roadmap/schemas/orchestrator-result.json`
   "branch": "roadmap/triage-analytics",
   "roadmap_path": "docs/plans/ROADMAP.md",
   "linear_id": "DEV-35",
+  "worker_mode": "standard",
   "directive_path": null,
   "worker_brief": "Self-contained brief: scope, touchpoints, acceptance, risks.",
   "archives": [],
@@ -61,6 +62,7 @@ Use `"action": "resume_worker"` when Step 0 requires finishing an interrupted ru
   "branch": null,
   "roadmap_path": null,
   "linear_id": null,
+  "worker_mode": "standard",
   "directive_path": null,
   "worker_brief": null,
   "archives": ["ai-tools/docs/plans/foo.md"],
@@ -154,7 +156,19 @@ passes the safety rules:
 
 ## Step 1 — Find a qualifying repo
 
-For each direct child of `/Users/jake/Dropbox/code` that is a git repo, in prior-run-first order:
+Before walking repos, query active Linear issues once as described in Step 2. After removing
+`human-only` issues, collect those carrying `do-next`. Put their explicitly labeled `repo/*`
+directories at the front of the repo walk, preserving Linear's status/priority order; then use the
+normal prior-run-first order for everything else. A `do-next` issue without a repo label is still a
+Step 2b blocker, not permission to infer a repo.
+
+This override applies only to **new selection**. Step 0 always reconciles an interrupted prior run
+first, including its existing branch and dirty work, before any `do-next` item may dispatch. The
+label changes queue order, not eligibility: every repo safety gate and Step 2 skip rule still
+applies. If the first `do-next` item is blocked, record/comment the blocker normally and continue
+to the next `do-next` item, then the ordinary queue.
+
+For each direct child of `/Users/jake/Dropbox/code` that is a git repo, in that order:
 
 1. Skip it if `.noroadmap` exists at the root.
 2. Skip it unless `origin` is a `jnelken/*` repo.
@@ -294,6 +308,11 @@ that exists instead of requiring one format.
 Read the whole roadmap, plus the repo's `CLAUDE.md`, `README*`, `PRODUCT.md`, and `package.json`
 scripts, so you're choosing against real project conventions.
 
+Within a qualifying repo, an eligible Linear issue labeled `do-next` outranks every fresh roadmap,
+plan, or unlabeled Linear candidate. When several carry it, use Linear state (`Todo` / `In
+Progress` before `Backlog`), then Linear priority, then the query's stable order. Do not let the
+label bypass dependencies, safety checks, or the skip rules below.
+
 **Prefer** items that:
 - list concrete touchpoints in the ticket or source plan — an item without them is usually
   underspecified for an unattended run;
@@ -349,6 +368,14 @@ an issue exists somewhere; read both, then pick one item by the prefer/skip rule
   count it among the items you report as considered. Log `skipped-human-only` plus the `DEV-N` id
   in run memory and move on. It's a flat workspace label that coexists with the issue's `repo/*`
   label, so check labels for both independently.
+- **`do-next` is a next-run queue override.** It moves an otherwise eligible issue ahead of all
+  fresh work after Step 0 has reconciled any interrupted prior run. It does not override
+  `human-only`, repo safety, dependencies, or the Step 2 skip list. A completed issue naturally
+  leaves the active queue when Step 7 moves it to `Done`; do not remove the label on the way in.
+- **`/goal` selects durable goal execution.** For an issue carrying this label, emit
+  `"worker_mode": "goal"`; otherwise emit `"worker_mode": "standard"`. The worker launcher owns
+  the provider-specific command syntax. Preserve this mode when resuming an interrupted run by
+  re-reading the ticket labels when `linear_id` is present.
 - **Step 2's skip list applies in full.** Those same six issues need Postgres + pgvector, an LLM
   API key, and an external Instagram ingestion provider, so on today's reading they're out on the
   external-services rule regardless of the repo question. That's a verdict on the current issue
@@ -403,4 +430,3 @@ blocker channel for ticket-backed work. If Linear is unavailable, do not attempt
 headless run and do not mutate the repository to create a fallback note. Record the blocker and
 the failed comment attempt in run memory and the final summary, then continue evaluating other
 repos when safe.
-

@@ -16,7 +16,9 @@ Hard constraints:
 The prompt names a request JSON file. Modes:
 
 - **implement / resume** — fields from the orchestrator result (`repo`, `item`, `branch`,
-  `worker_brief`, …). Do Steps 3–8 (resume uses the existing branch).
+  `worker_brief`, `worker_mode`, …). Do Steps 3–8 (resume uses the existing branch). The launcher
+  has already invoked the provider's native goal command when `worker_mode` is `goal`; do not
+  create a second goal.
 - **bookkeeping** — full orchestrator result with `blocked_no_item` / `nothing_qualified`
   (request field `orchestrator`). Post Step 2b comments, perform `archives`, write Step 8;
   do not start a feature branch unless an archive needs the Step 7 flow.

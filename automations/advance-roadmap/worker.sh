@@ -39,6 +39,21 @@ done
 [ -f "$SKILL_DIR/WORKER.md" ] || { echo "FATAL: missing WORKER.md" >&2; exit 2; }
 [ -f "$SKILL_DIR/SAFETY.md" ] || { echo "FATAL: missing SAFETY.md" >&2; exit 2; }
 
+WORKER_MODE="$(python3 - "$REQUEST_FILE" <<'PY'
+import json, sys
+try:
+    request = json.load(open(sys.argv[1], encoding="utf-8"))
+    mode = (request.get("orchestrator") or {}).get("worker_mode", "standard")
+except (OSError, json.JSONDecodeError):
+    mode = "invalid"
+print(mode)
+PY
+)"
+case "$WORKER_MODE" in
+  standard|goal) ;;
+  *) echo "FATAL: invalid worker_mode: $WORKER_MODE" >&2; exit 2 ;;
+esac
+
 if [ -z "$PROVIDERS_STR" ]; then
   PROVIDERS_STR="$(python3 "$USAGE_PY" --root "$ROOT" pick-worker-chain 2>/dev/null || true)"
 fi
@@ -51,7 +66,7 @@ if [ ${#providers[@]} -eq 0 ]; then
   echo "(worker chain empty — falling back to claude for bookkeeping attempt)"
 fi
 
-PROMPT="$(cat <<EOF
+BASE_PROMPT="$(cat <<EOF
 Read and follow $SKILL_DIR/WORKER.md and $SKILL_DIR/SAFETY.md exactly.
 
 This is an unattended scheduled worker run (stamp=$STAMP). You are write-capable.
@@ -62,17 +77,34 @@ Print a \`\`\`WORKER_RESULT_JSON fence at the end per WORKER.md, plus the plain 
 EOF
 )"
 
+prompt_for_provider() {
+  local provider="$1"
+  if [ "$WORKER_MODE" != "goal" ]; then
+    print -r -- "$BASE_PROMPT"
+    return
+  fi
+  case "$provider" in
+    codex)  print -r -- "\$goal $BASE_PROMPT" ;;
+    cursor|claude) print -r -- "/goal $BASE_PROMPT" ;;
+    *) return 2 ;;
+  esac
+}
+
 run_cursor() {
   local out="$1"
+  local prompt
+  prompt="$(prompt_for_provider cursor)" || return 2
   [ -x "$AGENT" ] || return 127
   "$AGENT" -p --force --trust --model "$CURSOR_WORKER_MODEL" \
     --workspace "$CODE_DIR" \
     --output-format text \
-    "$PROMPT" >"$out" 2>&1
+    "$prompt" >"$out" 2>&1
 }
 
 run_codex() {
   local out="$1"
+  local prompt
+  prompt="$(prompt_for_provider codex)" || return 2
   command -v "$CODEX" >/dev/null 2>&1 || return 127
   # CODE_DIR is a multi-repo parent, not a git checkout — skip the repo check.
   "$CODEX" exec \
@@ -82,13 +114,15 @@ run_codex() {
     --add-dir "$CODE_DIR" \
     --skip-git-repo-check \
     --dangerously-bypass-approvals-and-sandbox \
-    "$PROMPT" >"$out" 2>&1
+    "$prompt" >"$out" 2>&1
 }
 
 run_claude() {
   local out="$1"
+  local prompt
+  prompt="$(prompt_for_provider claude)" || return 2
   [ -x "$CLAUDE" ] || return 127
-  "$CLAUDE" -p "$PROMPT" \
+  "$CLAUDE" -p "$prompt" \
     --model "$CLAUDE_WORKER_MODEL" \
     --effort high \
     --dangerously-skip-permissions \
@@ -103,7 +137,7 @@ final_rc=1
 used=""
 for provider in "${providers[@]}"; do
   out="$tmpdir/$provider.log"
-  echo "=== worker try provider=$provider stamp=$STAMP ($(date)) ==="
+  echo "=== worker try provider=$provider mode=$WORKER_MODE stamp=$STAMP ($(date)) ==="
   rc=0
   case "$provider" in
     cursor) run_cursor "$out" || rc=$? ;;
