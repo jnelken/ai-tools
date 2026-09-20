@@ -127,11 +127,14 @@ PY
 
 record_limit_from_log() {
   local provider="$1" logfile="$2"
-  python3 "$USAGE_PY" --root "$ROOT" detect-limit --file "$logfile"
-  [ $? -eq 0 ] || return 1
+  # Only treat as a live CLI limit if the message looks like a banner, not prose
+  # inside ORCHESTRATOR.md / prior logs the model may have read (those contain
+  # the phrase "session limit" and were falsely tripping same-run failover).
   local text
-  text="$(rg -m1 -i 'session limit|usage limit|rate.?limit|hit your limit|quota exceeded|out of (usage|credits|quota)' "$logfile" || true)"
-  [ -n "$text" ] || text="limit detected in $provider output"
+  text="$(rg -m1 -i \
+    '^(you.?ve hit your (session |usage )?limit|hit your session limit|rate limit exceeded|quota exceeded|out of (usage|credits|quota)\b)' \
+    "$logfile" || true)"
+  [ -n "$text" ] || return 1
   python3 "$USAGE_PY" --root "$ROOT" record-limit --provider "$provider" --text "$text" || true
   return 0
 }
@@ -200,7 +203,17 @@ If a PushNotification probe would have been useful, set a note in summary; the w
   echo ""
   echo "=== orchestrator provider=$ORCH exit=$orch_rc ==="
 
-  if record_limit_from_log "$ORCH" "$orch_out"; then
+  # Limit failover only when the orchestrator failed to produce a result JSON.
+  # Successful triage dumps skill text that mentions "session limit" historically
+  # and must not burn a second orchestrator turn.
+  result="$(mktemp "${TMPDIR:-/tmp}/advance-roadmap-result.XXXXXX")"
+  req="$(mktemp "${TMPDIR:-/tmp}/advance-roadmap-req.XXXXXX")"
+  had_json=0
+  if extract_json_fence ORCHESTRATOR_RESULT_JSON "$orch_out" "$result"; then
+    had_json=1
+  fi
+
+  if [ "$had_json" -eq 0 ] && record_limit_from_log "$ORCH" "$orch_out"; then
     echo "(orchestrator limit recorded — attempting one same-run failover)"
     alt=""
     case "$ORCH" in codex) alt=claude ;; claude) alt=codex ;; esac
@@ -214,14 +227,15 @@ If a PushNotification probe would have been useful, set a note in summary; the w
       esac
       cat "$orch_out"
       echo "=== orchestrator provider=$ORCH exit=$orch_rc ==="
-      record_limit_from_log "$ORCH" "$orch_out" || true
+      if extract_json_fence ORCHESTRATOR_RESULT_JSON "$orch_out" "$result"; then
+        had_json=1
+      else
+        record_limit_from_log "$ORCH" "$orch_out" || true
+      fi
     fi
   fi
 
-  result="$(mktemp "${TMPDIR:-/tmp}/advance-roadmap-result.XXXXXX")"
-  req="$(mktemp "${TMPDIR:-/tmp}/advance-roadmap-req.XXXXXX")"
-
-  if ! extract_json_fence ORCHESTRATOR_RESULT_JSON "$orch_out" "$result"; then
+  if [ "$had_json" -eq 0 ]; then
     echo "WARNING: missing ORCHESTRATOR_RESULT_JSON — wrapping stdout as blocked_no_item"
     python3 - "$orch_out" "$result" <<'PY'
 import json, sys

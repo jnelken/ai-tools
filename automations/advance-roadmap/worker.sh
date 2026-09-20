@@ -114,9 +114,9 @@ for provider in "${providers[@]}"; do
   cat "$out"
   echo "=== worker provider=$provider exit=$rc ==="
 
-  if python3 "$USAGE_PY" --root "$ROOT" detect-limit --file "$out"; then
-    text="$(rg -m1 -i 'session limit|usage limit|rate.?limit|hit your limit|quota exceeded|out of (usage|credits|quota)' "$out" || true)"
-    [ -n "$text" ] || text="limit detected for $provider"
+  if text="$(rg -m1 -i \
+      '^(you.?ve hit your (session |usage )?limit|hit your session limit|rate limit exceeded|quota exceeded|out of (usage|credits|quota)\b)' \
+      "$out" || true)" && [ -n "$text" ]; then
     echo "(limit for $provider — recording and failing over)"
     python3 "$USAGE_PY" --root "$ROOT" record-limit --provider "$provider" --text "$text" || true
     continue
