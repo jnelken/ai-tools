@@ -30,13 +30,15 @@ launchd always fires four times a day; the effective cadence is enforced inside 
 schedule never has to be rewritten. `gen-dashboard.py` already classifies every run, so it owns
 the arithmetic and writes `cadence_hours` to `state.json`:
 
-| Consecutive blocked runs | Cadence | Slots that run |
+| Consecutive unproductive runs | Cadence | Slots that run |
 |---|---|---|
 | 0–3 | 6h | 04:45, 10:45, 16:45, 22:45 |
 | 4–7 | 12h | 04:45, 16:45 |
 | 8+ | 24h | 04:45 |
 
-Four blocked runs is a full day of finding nothing. **Any run that ships resets it.** Quota, lock
+"Unproductive" means `blocked-no-item` **or** `nothing-qualified` — a run that found no qualifying
+repo at all counts too, since an empty queue is exactly when backing off is worth the most. Four
+of them is a full day of finding nothing. **Any run that ships resets it.** Quota, lock
 and backoff skips don't count toward the streak — they're not evidence either way. A missing or
 corrupt `state.json` falls back to 6h, so a bad read can never wedge the job off.
 
