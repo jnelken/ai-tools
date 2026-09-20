@@ -26,6 +26,9 @@ export PATH="/opt/homebrew/bin:/opt/homebrew/opt/node@22/bin:/usr/bin:/bin:/usr/
 
 LOGDIR="$ROOT/logs"
 PROBE_FLAG="$ROOT/.dispatch-probe-done"
+STATE_FILE="$ROOT/state.json"
+# Incoming webhook for the per-run summary. Unset = feature off, silently.
+SLACK_WEBHOOK="${ADVANCE_ROADMAP_SLACK_WEBHOOK:-${SLACK_CCUSAGE_WEBHOOK_URL:-}}"
 
 regen_dashboard() {
   [ -f "$ROOT/gen-dashboard.py" ] || return 0
@@ -36,6 +39,34 @@ mkdir -p "$LOGDIR"
 STAMP="$(date +%Y%m%d-%H%M%S)"
 LOG="$LOGDIR/run-$STAMP.log"
 find "$LOGDIR" -name 'run-*.log' -mtime +30 -delete 2>/dev/null
+
+# ── Cadence backoff ───────────────────────────────────────────────────────────
+# launchd always fires four times a day; backoff is enforced here instead, so the
+# schedule never has to be rewritten. gen-dashboard.py owns the classification
+# and writes cadence_hours to state.json: 6h normally, 12h after 4 consecutive
+# blocked runs, 24h after 8. Any run that ships resets it.
+#   6h  → every slot          (04:45 10:45 16:45 22:45)
+#   12h → 04:45 and 16:45
+#   24h → 04:45 only
+CADENCE=6
+if [ -r "$STATE_FILE" ] && command -v jq >/dev/null 2>&1; then
+  CADENCE="$(jq -r '.cadence_hours // 6' "$STATE_FILE" 2>/dev/null || echo 6)"
+fi
+case "$CADENCE" in ''|*[!0-9]*) CADENCE=6 ;; esac
+HOUR_NOW=$(date +%H)
+run_this_tick=1
+if [ "$CADENCE" -ge 24 ]; then
+  [ "$HOUR_NOW" = "04" ] || run_this_tick=0
+elif [ "$CADENCE" -ge 12 ]; then
+  case "$HOUR_NOW" in 04|16) ;; *) run_this_tick=0 ;; esac
+fi
+if [ "$run_this_tick" -eq 0 ]; then
+  streak="$(jq -r '.blocked_streak // 0' "$STATE_FILE" 2>/dev/null || echo '?')"
+  echo "=== advance-roadmap $STAMP: skipping — backed off to every ${CADENCE}h after ${streak} blocked runs ===" >> "$LOG"
+  ln -sf "$LOG" "$LOGDIR/latest.log"
+  regen_dashboard
+  exit 0
+fi
 
 if [ ! -f "$USAGE_PY" ]; then
   echo "=== advance-roadmap $STAMP: FATAL missing $USAGE_PY ===" >> "$LOG"
@@ -265,3 +296,21 @@ PY
 
 ln -sf "$LOG" "$LOGDIR/latest.log"
 regen_dashboard
+
+# ── Slack summary ─────────────────────────────────────────────────────────────
+# One short line per run. state.json was just rewritten by regen_dashboard, so it
+# describes THIS run. No webhook configured = no-op, not an error.
+if [ -n "$SLACK_WEBHOOK" ] && [ -r "$STATE_FILE" ] && command -v jq >/dev/null 2>&1; then
+  summary="$(jq -r '.last_summary // ""' "$STATE_FILE" 2>/dev/null)"
+  cadence="$(jq -r '.cadence_hours // 6' "$STATE_FILE" 2>/dev/null)"
+  [ -n "$summary" ] && {
+    text="*advance-roadmap* $(date '+%a %H:%M') — ${summary}"
+    [ "$cadence" != "6" ] && text="$text  _(backed off to every ${cadence}h)_"
+    payload="$(jq -n --arg t "$text" '{text:$t}')"
+    if curl -sf -m 15 -X POST -H 'Content-Type: application/json' -d "$payload" "$SLACK_WEBHOOK" >/dev/null; then
+      echo "=== slack: summary posted ===" >> "$LOG"
+    else
+      echo "=== slack: post failed (non-fatal) ===" >> "$LOG"
+    fi
+  }
+fi

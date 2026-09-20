@@ -43,6 +43,7 @@ SLOTS = [(4, 45), (10, 45), (16, 45), (22, 45)]
 
 QUOTA_RE = re.compile(r"skipping — (\S+) usage (\d+)% >= (\d+)%")
 NO_ORCH_RE = re.compile(r"skipping — no orchestrator available")
+BACKOFF_RE = re.compile(r"skipping — backed off to every (\d+)h after (\S+) blocked runs")
 LOCK_RE = re.compile(r"(another run holds|could not take lock)")
 EXIT_RE = re.compile(
     r"=== (?:claude exit=(\d+)\s+finished (.*?)|(?:advance-roadmap exit=(\d+)\s+finished (.*?))) ==="
@@ -131,6 +132,9 @@ def classify(text, exit_code, has_header, fresh=False):
         return "skipped-quota", f"{qm.group(1)} usage {qm.group(2)}% ≥ {qm.group(3)}%"
     if NO_ORCH_RE.search(text):
         return "skipped-quota", "no orchestrator available (codex+claude hot)"
+    bm = BACKOFF_RE.search(text)
+    if bm:
+        return "skipped-backoff", f"cadence {bm.group(1)}h — {bm.group(2)} blocked runs in a row"
     if LOCK_RE.search(text):
         return "skipped-lock", "another run held the lock"
     if exit_code is None:
@@ -405,6 +409,61 @@ def quota():
             "age": int((now - d.get("timestamp", now)) / 60), "routing": None, "orch_ok": True}
 
 
+
+# ── run state (backoff + Slack summary) ───────────────────────────────────────
+# This module already classifies every run, so it is the one place that knows
+# the outcome history. run.sh reads what we write here rather than re-deriving
+# it from prose — two classifiers would drift.
+STATE = os.path.join(ROOT, "state.json")
+BLOCKED_OUTCOMES = ("blocked-no-item", "blocked", "nothing-qualified")
+# Consecutive blocked runs before each step down. At 4 runs/day, 4 is one full
+# day of finding nothing, 8 is two.
+BACKOFF_STEPS = ((8, 24), (4, 12))
+
+
+def write_state(runs):
+    """Consecutive-blocked count → cadence, plus a one-line summary for Slack."""
+    streak = 0
+    for r in runs:                      # newest first
+        if r["outcome"] in ("skipped-quota", "skipped-lock", "skipped-backoff", "running"):
+            continue                    # a skipped tick is not evidence either way
+        if r["outcome"] in BLOCKED_OUTCOMES:
+            streak += 1
+            continue
+        break                           # shipped / completed / error ends the streak
+
+    hours = 6
+    for need, h in BACKOFF_STEPS:
+        if streak >= need:
+            hours = h
+            break
+
+    last = next((r for r in runs if r["outcome"] != "running"), None)
+    summary = ""
+    if last:
+        bits = [last["outcome"]]
+        if last["repo"]:
+            bits.append(last["repo"][:80])
+        if last["duration"]:
+            bits.append(f"took {last['duration']}")
+        summary = " · ".join(bits)
+
+    state = {
+        "updated_at": datetime.now().isoformat(timespec="seconds"),
+        "blocked_streak": streak,
+        "cadence_hours": hours,
+        "last_stamp": last["stamp"] if last else "",
+        "last_outcome": last["outcome"] if last else "",
+        "last_repo": last["repo"] if last else "",
+        "last_summary": summary,
+    }
+    try:
+        json.dump(state, open(STATE, "w", encoding="utf-8"), indent=1)
+    except OSError:
+        pass
+    return state
+
+
 # ── render ────────────────────────────────────────────────────────────────────
 
 # A pool with no reading must not render as a measured 0% — "unknown" and
@@ -456,6 +515,7 @@ BADGE = {
     "shipped": ("ok", "✓ shipped"), "completed": ("ok", "✓ completed"),
     "blocked-no-item": ("unk", "◦ blocked"), "blocked": ("unk", "◦ blocked"),
     "skipped-quota": ("off", "⏸ quota skip"), "skipped-lock": ("off", "⏸ lock skip"),
+    "skipped-backoff": ("off", "⏸ backoff skip"),
     "error": ("fail", "✗ error"), "incomplete": ("fail", "⚠ incomplete"),
     "running": ("unk", "● running"),
 }
@@ -472,6 +532,7 @@ def build():
     repos = survey_repos()
     missed = missed_slots(runs)
     q = quota()
+    run_state = write_state(runs)
 
     n = len(runs)
     shipped = sum(1 for r in runs if r["outcome"] == "shipped")
@@ -541,6 +602,12 @@ def build():
         routing = (f'<div class=dim style="margin-top:6px">{esc(q["routing"])}</div>'
                    if q.get("routing") else "")
         checked = q.get("updated") or "unknown"
+        cad = run_state["cadence_hours"]
+        cad_html = (f'<div class=checkline style="border-bottom:0;padding-bottom:0;margin-bottom:0">'
+                    f'<strong>Cadence:</strong> every {cad}h'
+                    + (f' <span class=dim>— backed off from 6h after {run_state["blocked_streak"]} '
+                       f'consecutive blocked runs; resets on the next ship</span>' if cad > 6
+                       else ' <span class=dim>— normal</span>') + '</div>')
         prov_html = (f'<div class=provs>{provider_rows(q["providers"])}</div>'
                      if q.get("providers") else "")
         quota_html = (f'<div class=card><div class=checkline><strong>Last usage check:</strong> '
@@ -549,7 +616,8 @@ def build():
                       f'{bar(q["five"], "Claude 5-hour")}{bar(q["seven"], "Claude 7-day")}'
                       f'{routing}'
                       f'<div style="margin-top:10px">{verdict} <span class=dim>· reading is '
-                      f'{q["age"]}m old; providers-usage.json is refreshed by run.sh</span></div></div>')
+                      f'{q["age"]}m old; providers-usage.json is refreshed by run.sh</span></div>'
+                      f'{cad_html}</div>')
     else:
         quota_html = '<p class=dim>No usage reading available — the gate would let a run proceed.</p>'
 
