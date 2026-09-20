@@ -48,6 +48,19 @@ Each completed run posts one line — outcome · repo · duration, plus the cade
 to `$ADVANCE_ROADMAP_SLACK_WEBHOOK`, falling back to `$SLACK_CCUSAGE_WEBHOOK_URL`. With neither
 set the step is a silent no-op, and a failed post never fails the run.
 
+**Where the webhook goes:** `~/.claude/automations/secrets.env`, sourced by `run.sh`.
+
+```bash
+install -m 600 /dev/null ~/.claude/automations/secrets.env
+echo 'export ADVANCE_ROADMAP_SLACK_WEBHOOK="https://hooks.slack.com/services/..."' \
+  >> ~/.claude/automations/secrets.env
+```
+
+Not the plist — that's committed to this repo, and a webhook URL is a credential. Not `~/.zshrc`
+either: launchd hands a scheduled job a bare environment and never reads a login shell's rc files,
+which is why this file exists at all. It sits outside the repo, so there's nothing to gitignore.
+Skipped runs never reach the Slack step, so only completed runs post.
+
 ### Orchestrator / worker split
 
 `run.sh` no longer runs a single write-capable Claude Opus session. It:

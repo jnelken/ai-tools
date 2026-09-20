@@ -27,6 +27,13 @@ export PATH="/opt/homebrew/bin:/opt/homebrew/opt/node@22/bin:/usr/bin:/bin:/usr/
 LOGDIR="$ROOT/logs"
 PROBE_FLAG="$ROOT/.dispatch-probe-done"
 STATE_FILE="$ROOT/state.json"
+
+# Secrets live outside this repo — the plist is committed, so a webhook URL must
+# never go in it. launchd gives a bare environment, so ~/.zshrc is never read
+# either; this file is the only thing that reaches a scheduled run.
+SECRETS="${ADVANCE_ROADMAP_SECRETS:-$HOME/.claude/automations/secrets.env}"
+[ -r "$SECRETS" ] && . "$SECRETS"
+
 # Incoming webhook for the per-run summary. Unset = feature off, silently.
 SLACK_WEBHOOK="${ADVANCE_ROADMAP_SLACK_WEBHOOK:-${SLACK_CCUSAGE_WEBHOOK_URL:-}}"
 
