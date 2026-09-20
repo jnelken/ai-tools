@@ -104,12 +104,14 @@ record_limit_from_log() {
 
 run_orchestrator_codex() {
   local out="$1" prompt="$2"
+  # CODE_DIR is a multi-repo parent, not a git checkout — skip the repo check.
   "$CODEX" exec \
     -m "$ORCH_CODEX_MODEL" \
     -c model_reasoning_effort=high \
     -s read-only \
     -C "$CODE_DIR" \
     --add-dir "$CODE_DIR" \
+    --skip-git-repo-check \
     "$prompt" >"$out" 2>&1
 }
 

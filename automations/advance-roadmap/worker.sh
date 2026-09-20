@@ -74,10 +74,13 @@ run_cursor() {
 run_codex() {
   local out="$1"
   command -v "$CODEX" >/dev/null 2>&1 || return 127
+  # CODE_DIR is a multi-repo parent, not a git checkout — skip the repo check.
   "$CODEX" exec \
     -m "$CODEX_WORKER_MODEL" \
     -c model_reasoning_effort=high \
     -C "$CODE_DIR" \
+    --add-dir "$CODE_DIR" \
+    --skip-git-repo-check \
     --dangerously-bypass-approvals-and-sandbox \
     "$PROMPT" >"$out" 2>&1
 }
