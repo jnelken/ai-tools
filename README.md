@@ -92,7 +92,7 @@ Unlike the other categories, installing this also patches `~/.claude/settings.js
 
 | Doc | Purpose |
 |---|---|
-| [`retrospectives.md`](docs/retrospectives.md) | The retrospective class — field schema, shared action tiers, and the registry of retros that live here or as `~/.claude/CLAUDE.md` sections |
+| [`session-retrospectives.md`](docs/session-retrospectives.md) | The session-retrospective class — field schema, action tiers, self-start rules, and the registry of retros that live here or as `~/.claude/CLAUDE.md` sections |
 
 ## Install
 

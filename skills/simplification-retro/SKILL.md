@@ -1,6 +1,6 @@
 ---
 name: simplification-retro
-description: Sweep finished work for the complexity it made unnecessary — dead scaffolding, compensating mechanisms, redundant paths, orphaned guards, per-instance patches with a root-cause fix available, and indexes the work staled. Covers everything the work touched, not just code: config, shell functions, git refs and worktrees, generated manifests, instruction files and agent memory. Applies only provably-dead, trivially-reversible, non-invocable findings on its own; everything else is a numbered offer. Trigger phrases include "simplification retro", "what did this make unnecessary", "what can we delete now", "sweep for leftovers", "retro this work", "clean up after this change".
+description: Session retrospective (not monthly-retro). Sweep finished work for the complexity it made unnecessary — dead scaffolding, compensating mechanisms, redundant paths, orphaned guards, per-instance patches with a root-cause fix available, and indexes the work staled. Covers everything the work touched, not just code: config, shell functions, git refs and worktrees, generated manifests, instruction files and agent memory. Report-only when self-started by the CLAUDE.md trigger; when invoked by name it also applies provably-dead, trivially-reversible, non-invocable findings, with everything else a numbered offer. Trigger phrases include "simplification retro", "what did this make unnecessary", "what can we delete now", "sweep for leftovers", "retro this work", "clean up after this change".
 ---
 
 # Simplification Retrospective
@@ -9,14 +9,14 @@ You are sweeping **finished** work for the complexity it rendered unnecessary.
 
 The question is **"what does this work now make deletable?"** — not "is this code clean?" That distinction is the whole reason this skill exists, and it is what keeps it from degenerating into a worse `/simplify`. You are looking *away* from the diff, at what the change orphaned elsewhere.
 
-A member of the retrospective class — see [`docs/retrospectives.md`](../../docs/retrospectives.md) for the field schema and the shared action tiers. This skill's fields:
+A member of the session-retrospective class — see [`docs/session-retrospectives.md`](../../docs/session-retrospectives.md) for the field schema, the action tiers and the self-start rules. This skill's fields:
 
-- **Trigger** — work completed: a merged or review-ready PR, a finished task, a named branch or date range.
+- **Trigger** — the work removed or replaced a mechanism: a deleted function, file, flag, branch or worktree; a changed default; two paths consolidated into one; a root cause fixed that per-instance patches were compensating for.
 - **Corpus** — everything the work touched, plus what it orphaned elsewhere.
 - **Detection** — the six residue kinds below, each with a recognition test and an evidence bar.
-- **Action** — tiered per finding.
-- **Destination** — applied Tier 1 changes, a numbered offer list for Tiers 2–3, and an appended `memory.md` entry.
-- **Skip when** — the work was a one-file change that added nothing and retired nothing; or the sweep was already run against this same work.
+- **Action** — report-only when self-started; tiered per finding when invoked by name.
+- **Destination** — a findings note and an appended `memory.md` entry always; applied Tier 1 changes and a numbered Tier 2–3 offer list on invocation only.
+- **Skip when** — the work only added things, it was trivial (a typo, a version bump), or the sweep already ran against this same work.
 
 ## Invocation
 
@@ -25,6 +25,8 @@ A member of the retrospective class — see [`docs/retrospectives.md`](../../doc
 ```
 
 No argument: the current branch versus its base.
+
+**Invoked vs self-started.** The `## Session Retrospectives` section of `~/.claude/CLAUDE.md` self-starts the *note* — after any session whose work removed or replaced a mechanism, the findings get written up without anyone asking. That self-started note is **report-only**: it never applies a Tier 1 change, because deletion is licensed by explicit invocation, not by a standing trigger. Reaching this skill by name is what unlocks steps 5–7. If you arrived here from the CLAUDE.md trigger rather than a `/simplification-retro` call, run steps 1–4, emit the findings, and stop.
 
 ## When NOT to use
 
@@ -93,10 +95,10 @@ Prior runs tell you whether a finding is new, persisted, or resolved. Don't pres
 Six kinds, in order. Record the exact command or search that produced each finding — it goes in the report as evidence and it is what determines the tier.
 
 ### 4. Tier every finding
-Per the table in [`docs/retrospectives.md`](../../docs/retrospectives.md). Incomplete evidence moves a finding **up** a tier, never down. Anything with a human-invocable surface — alias, function, command, skill — is Tier 2 at best regardless of reference count.
+Per the table in [`docs/session-retrospectives.md`](../../docs/session-retrospectives.md). Incomplete evidence moves a finding **up** a tier, never down. Anything with a human-invocable surface — alias, function, command, skill — is Tier 2 at best regardless of reference count.
 
 ### 5. Apply Tier 1, then report
-Make the Tier 1 changes and say what you did. Record a recovery handle for each (SHA, file path, the command that restores it).
+**Invoked runs only** — a self-started note stops after step 4. Make the Tier 1 changes and say what you did. Record a recovery handle for each (SHA, file path, the command that restores it).
 
 ### 6. Offer Tiers 2 and 3
 Numbered, with the house prompt. Wait. A report is not approval.
