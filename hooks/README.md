@@ -110,7 +110,7 @@ Full setup, optional MCP/Codex coverage, and gotchas: [`named-node-processes.md`
 
 ## block-push-to-main.sh
 
-Prevents accidental `git push` to `main` from Claude Code without breaking terminal-driven pushes. Wired into `.claude/settings.json` as a `PreToolUse` hook on Bash, it blocks any `git push` command that would target the main branch. Repos can be allowlisted (one per line) in `~/.claude/hooks/block-push-to-main.allowlist` to skip the check — `ai-tools` is included by default since agents may push to main there freely.
+Prevents an accidental Claude-issued `git push` to `main` without breaking terminal-driven pushes. Wired into `.claude/settings.json` as a `PreToolUse` hook on Bash, it reads the arguments of each push segment (not the whole command string) and denies when the destination resolves to `main`. It is opt-in per repo: only repos named (one per line) in `~/.claude/hooks/block-push-to-main.denylist` are guarded, so personal repos where agents may push `main` freely are simply not listed. This is the canonical copy — `woodrow`, `api` and `folio-platform` vendor it byte-identically under `.claude/hooks/`, and `tests/block-push-to-main.test.sh` beside it builds its own fixtures (run it after any change).
 
 See the script header for the full logic (handles `--all`, `--mirror`, explicit refspecs, and implicit main-branch pushes from the current branch).
 
