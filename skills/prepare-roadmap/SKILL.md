@@ -273,19 +273,20 @@ For each direct child of `/Users/jake/Dropbox/code`:
 3. Skip if `.noroadmap` exists at the repo root.
 4. Run `git -C <repo> status --porcelain`.
    - **Non-empty → dirty-tree blocked.** Capture the full output.
-   - **Empty →** check for decisions-needed blockers (next step). A clean repo with no
-     open decisions is not a candidate for this skill at all — that's `/advance-roadmap`'s
-     normal territory, leave it alone.
-5. On a clean tree, look for `.claude/IN_PROGRESS.md` (root `IN_PROGRESS.md` too, same
+   - **Empty →** not dirty-tree blocked. A clean repo with no open decisions (next step)
+     is not a candidate for this skill at all — that's `/advance-roadmap`'s normal
+     territory, leave it alone.
+5. On **every** repo, dirty or clean, look for `.claude/IN_PROGRESS.md` (root `IN_PROGRESS.md` too, same
    fallback order [[pick-up]] uses) and read it directly — it's gitignored in most repos
    that have one, so `git status` won't surface it. Parse its `- [ ]` lines under any
    "Decisions needed" heading. Any unchecked line → decisions-needed blocked. An
    all-checked or missing file is not blocked.
 
-A repo can be **only** dirty-tree blocked, **only** decisions-needed blocked (rare —
-`.claude/IN_PROGRESS.md` implies a prior `/advance-roadmap` run that itself required a
-clean tree to get there), or neither. Build the candidate list from every repo that's at
-least one of the two.
+A repo can be dirty-tree blocked, decisions-needed blocked, both, or neither. Both is
+common: [[wrapup-repos]] writes its roadmap and judgment-call decisions into this same
+`Decisions needed` heading, and the repos it works are usually the dirty ones — so read the
+file on dirty repos too, and ask about the tree and the decisions in the same pass. Build
+the candidate list from every repo that's at least one of the two.
 
 **Sanity-check your own sweep before asking anything**: the repos it finds dirty should
 line up with what `project_advance-roadmap-runs.md`'s prose separately names as dirty

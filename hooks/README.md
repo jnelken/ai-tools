@@ -307,13 +307,12 @@ Add to `~/.claude/settings.json` (alongside any existing `SessionStart` entries 
 - The narrative body is only as good as the assistant keeping it updated — nothing mechanically enforces that beyond the frontmatter timestamps.
 - The `ended_cleanly` semantics rest on an unverified assumption: that a `superset workspaces delete` kill doesn't also fire `SessionEnd` cleanly for terminals it kills. If it turns out `SessionEnd` *does* fire reliably there, global docs would end up marked `ended_cleanly: true` (and eventually swept) even for teardown-interrupted work — worth confirming empirically before relying on this for anything high-stakes.
 
-### Relationship to NEXT-STEPS.md and IN_PROGRESS.md
+### Relationship to IN_PROGRESS.md
 
-Three different repo-root files can legitimately coexist under `~/Dropbox/code`, each owned by a different mechanism with different update semantics — don't merge them:
+Two different handoff files can legitimately coexist in a repo under `~/Dropbox/code`, with different update semantics — don't merge them:
 
 - **`.claude-sessions/<id>.md`** (this hook family) — live, per-session, ephemeral. Gone the moment a session exits cleanly; only lingers past that if the session crashed, until the next staleness sweep. Its global mirror at `~/.claude/state/repo-sessions/<repo_key>/<id>.md` survives worktree teardown and clean exit alike (marked `ended_cleanly: true` rather than deleted), so it's the one to check via [[move-session]] after a worktree that had in-progress work is gone.
-- **`NEXT-STEPS.md`** ([[wrapup-repos]]) — one wrap-up run's snapshot, overwritten wholesale each time it runs. `wrapup-repos` also **reads** `.claude-sessions/*.md` as one of its signal sources: a live doc makes it skip that repo entirely (same tier as a mid-rebase repo); a crashed session's doc feeds its "understand the direction" step, since it's the only record of what that session was doing.
-- **`IN_PROGRESS.md`** ([[close-out]]) — a durable, reconciled log of open questions across many sessions, appended-to rather than overwritten.
+- **`.claude/IN_PROGRESS.md`** ([[close-out]] and [[wrapup-repos]]) — a durable, reconciled log of open items across many sessions, appended-to rather than overwritten. Both skills follow close-out's reconcile rules; wrapup-repos adds decisions, ticket candidates, and code-state notes from its unattended runs (its old `NEXT-STEPS.md` snapshot is retired). `wrapup-repos` also **reads** `.claude-sessions/*.md` as one of its signal sources: a live doc makes it skip that repo entirely (same tier as a mid-rebase repo); a crashed session's doc feeds its "understand the direction" step, since it's the only record of what that session was doing.
 
 ### Disabling
 

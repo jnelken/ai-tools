@@ -35,11 +35,13 @@ Look in this order, take the first that exists:
 1. `.claude/IN_PROGRESS.md` — close-out's convention, the normal case.
 2. `IN_PROGRESS.md` at the repo root.
 
-If neither exists, say so plainly and stop. Do **not** substitute `NEXT-STEPS.md` —
-that's `wrapup-repos`' snapshot of one run, with different ownership and update
-semantics, and close-out documents merging the two as an anti-pattern. Do not
-reconstruct a to-do list from `git log` either. No file means no handoff; offer to
-survey the repo instead, and let the user decide.
+If neither exists, say so plainly and stop. Do not reconstruct a to-do list from
+`git log` either. No file means no handoff; offer to survey the repo instead, and let the
+user decide.
+
+Both [[close-out]] and [[wrapup-repos]] write this file. Items under `## Ticket candidates`
+are work to *file* in Linear, not to execute — offer to file them rather than planning
+their implementation. `## Code state notes` are context about the tree, not tasks.
 
 Read the whole file, including its context section — not just the checkboxes. Then
 **follow every pointer it makes**: a named commit, a source file's header comment, a

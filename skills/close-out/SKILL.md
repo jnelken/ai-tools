@@ -30,7 +30,7 @@ Everything from step 1 through step 3 — every path, PID, SHA, ticket id, exact
 
 ## When NOT to use
 
-- The user wants in-progress *code* tidied, committed, and a NEXT-STEPS file written across repos under `~/Dropbox/code` — that's [[wrapup-repos]]. This skill closes out a *conversation*; it does not finish anyone's half-written feature. (If both skills have run against the same repo, you may find both `NEXT-STEPS.md` at its root and `.claude/IN_PROGRESS.md` — `NEXT-STEPS.md` is one wrapup-repos run's snapshot of what it did and the decisions it skipped, and it does get committed; `IN_PROGRESS.md` is close-out's running log of open questions across sessions, and it does **not** get committed — see step 4. Don't merge them into one file without the user asking — they're owned by different skills with different update semantics.)
+- The user wants in-progress *code* tidied and committed across repos under `~/Dropbox/code` — that's [[wrapup-repos]]. This skill closes out a *conversation*; it does not finish anyone's half-written feature. Both skills write into the same `.claude/IN_PROGRESS.md` with the same reconcile rules (step 4): wrapup-repos adds `Decisions needed`, `Ticket candidates`, and `Code state notes` entries, and its lines are as much yours to reconcile as a previous close-out's. (Its old `NEXT-STEPS.md` snapshot file is retired; if you find one, fold anything still live into `IN_PROGRESS.md` and delete it.)
 - The user only wants to know which PRs haven't been announced in `#pr-review` — that's [[pr-review-gaps]], much cheaper.
 - The user only wants stray dev servers killed — that's [[reap-dev-servers]].
 - The session was short and single-purpose (one file edited, one question answered). Say so and skip; a five-step sweep on a ten-message session is noise.
@@ -137,6 +137,8 @@ Collect what this skill **cannot** close out itself **and** that has no other du
 - **Destructive cleanups you proposed but did not perform** — workspace deletions, temp-file removals, state-file edits.
 - **Blocked work and deferred promises from step 1's table** — only the ones without a ticket.
 
+**`## Ticket candidates` are a to-file queue, not a resting place.** [[wrapup-repos]] writes them there because it runs headless and never contacts Linear. When you reconcile a file that has any, file each through step 3 (duplicate check first, `repo/*` label from the candidate) and then delete it from the file — once filed it's tracked, so the filter below drops it. If you can't file one (no Linear access), leave it in place and say so in the chat pointer.
+
 **Filter before writing:**
 
 - **Tracked in Linear → drop it.** A ticket is the durable copy; repeating it here is a second list to keep in sync. The one exception is an item that is *urgent or high-priority* and would be missed if the next session doesn't open Linear first — that gets a single line: `CON-1234 — <five words why it can't wait>`, nothing more.
@@ -178,6 +180,12 @@ sense cold. Tracked work lives in Linear/GitHub, not here.
 
 ## Deferred (untracked)
 - [ ] Revisit the shared write-path guard once TICKET-1200 lands — not worth a ticket until then
+
+## Ticket candidates
+- [ ] Offline mode for the editor — service worker + IndexedDB queue; `repo/typey.site`; see `src/sync.ts`
+
+## Code state notes
+- `npm run build` fails on `src/legacy/*.ts` (TS2307) — left for the migration, not a quick fix
 
 ## Urgent, tracked elsewhere
 - CON-1234 — prod write failures recur nightly; check first thing

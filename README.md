@@ -34,7 +34,7 @@ Personal AI coding tools — Claude Code and Cursor skills, slash commands, hook
 | [`tab-triage`](skills/tab-triage) | Flush open Chrome tabs through chrome-tab-org, then triage the JSON log into vault notes and ClickUp tasks |
 | [`use-spark`](skills/use-spark) | Query the Spark email client CLI — emails, calendar, contacts, scheduling |
 | [`weekly-product-changelog-and-announcement`](skills/weekly-product-changelog-and-announcement) | Generate + post a weekly per-engineer changelog (internal) and a customer-facing product announcement (external) from cross-repo git history |
-| [`wrapup-repos`](skills/wrapup-repos) | Wrap up in-progress work in one repo unattended — commit + write a decision list |
+| [`wrapup-repos`](skills/wrapup-repos) | Wrap up in-progress work in one repo unattended — commit + record decisions in `.claude/IN_PROGRESS.md` |
 
 Each skill is a directory with a `SKILL.md` (required) plus optional `scripts/`, `references/`, `assets/`.
 

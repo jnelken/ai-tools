@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Generate a self-contained dashboard.html for the wrapup-repos automation.
 
-Scans run logs, (auto) commits across ~/Dropbox/code, and NEXT-STEPS.md files,
+Scans run logs, (auto) commits across ~/Dropbox/code, and .claude/IN_PROGRESS.md files,
 and writes a single static HTML file (data baked in — safe to open via file://).
 Run manually or let run.sh call it after each run.
 """
@@ -136,15 +136,15 @@ def auto_commits():
     return out
 
 
-def next_steps():
+def in_progress():
     out = []
-    for p in glob.glob(os.path.join(CODE_DIR, "*/NEXT-STEPS.md")):
+    for p in glob.glob(os.path.join(CODE_DIR, "*/.claude/IN_PROGRESS.md")):
         try:
             content = open(p, encoding="utf-8", errors="replace").read()
             mtime = datetime.fromtimestamp(os.path.getmtime(p)).strftime("%Y-%m-%d %H:%M")
         except OSError:
             continue
-        out.append({"repo": os.path.basename(os.path.dirname(p)), "mtime": mtime, "content": content})
+        out.append({"repo": os.path.basename(os.path.dirname(os.path.dirname(p))), "mtime": mtime, "content": content})
     out.sort(key=lambda x: x["mtime"], reverse=True)
     return out
 
@@ -161,7 +161,7 @@ def build():
     runs = parse_runs(repo_names())
     idle = parse_idle()
     commits = auto_commits()
-    steps = next_steps()
+    steps = in_progress()
 
     total = len(runs)
     ok = sum(1 for r in runs if r["exit"] == 0)
@@ -188,8 +188,8 @@ def build():
 
     steps_html = ""
     for s in steps:
-        steps_html += f'<div class=card><h3>{esc(s["repo"])} <span class="dim mono">{esc(s["mtime"])}</span></h3><details><summary>Show NEXT-STEPS.md</summary><pre>{esc(s["content"])}</pre></details></div>'
-    steps_html = steps_html or '<p class=dim>No NEXT-STEPS.md files found yet.</p>'
+        steps_html += f'<div class=card><h3>{esc(s["repo"])} <span class="dim mono">{esc(s["mtime"])}</span></h3><details><summary>Show IN_PROGRESS.md</summary><pre>{esc(s["content"])}</pre></details></div>'
+    steps_html = steps_html or '<p class=dim>No .claude/IN_PROGRESS.md files found.</p>'
 
     idle_html = ("<pre>" + esc("\n".join(idle)) + "</pre>") if idle else '<p class=dim>None — every scheduled run has found work.</p>'
 
@@ -284,7 +284,7 @@ TEMPLATE = """<!doctype html>
     </table>
   </div>
 
-  <h2>NEXT-STEPS decision lists</h2>
+  <h2>Open items (IN_PROGRESS.md)</h2>
   <div class=cards>{steps_html}</div>
 
   <h2>Automated commits</h2>

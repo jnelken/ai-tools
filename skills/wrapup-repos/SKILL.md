@@ -1,6 +1,6 @@
 ---
 name: wrapup-repos
-description: Wrap up in-progress work in one local repo under ~/Dropbox/code — pick the dirtiest/most-recently-touched repo, finish obvious low-risk loose ends, run the quick verify, commit on the current branch, and write a NEXT-STEPS.md decision list. Use on-demand ("/wrapup-repos", "wrap up my repos", "tidy my in-progress work") or via the scheduled off-peak launchd job. Safe by design: never pushes, never force/destructive, never commits secrets or build junk.
+description: Wrap up in-progress work in one local repo under ~/Dropbox/code — pick the dirtiest/most-recently-touched repo, finish obvious low-risk loose ends, run the quick verify, commit on the current branch, and record decisions, ticket candidates, and code-state notes in the repo's `.claude/IN_PROGRESS.md`. Use on-demand ("/wrapup-repos", "wrap up my repos", "tidy my in-progress work") or via the scheduled off-peak launchd job. Safe by design: never pushes, never force/destructive, never commits secrets or build junk.
 ---
 
 # Wrap up in-progress repo work
@@ -20,13 +20,17 @@ Candidate repos are the direct children of `/Users/jake/Dropbox/code`.
 
 ## Hard safety rules (never violate)
 
-- NEVER `git push`, open a PR, or contact any remote. All work stays local.
+- NEVER `git push`, open a PR, or contact any remote — Linear included. All work stays local;
+  larger work is written down as a ticket candidate for a later interactive session to file.
 - NEVER use `--force`, `git reset --hard`, `git clean -fd`, or `git checkout -- <file>` to discard
   the user's uncommitted work, or delete branches/worktrees/files the user created.
 - NEVER commit secrets or junk: skip anything that looks like credentials (`.env`, `*.pem`,
   tokens, API keys) or build output / large generated files (`node_modules/`, `.next/`, `dist/`,
   `build/`, `*.log`, caches). Respect `.gitignore`. If dirty files look like they should NOT be
-  committed, leave them unstaged and note it in NEXT-STEPS.md.
+  committed, leave them unstaged and note it under `## Code state notes` in `.claude/IN_PROGRESS.md`.
+- NEVER `git add` or commit `.claude/IN_PROGRESS.md` — it's local session-continuity state. If the
+  repo's `.gitignore` doesn't already exclude it (a `.claude/` or `.claude/*` entry also counts),
+  add a `.claude/IN_PROGRESS.md` line; that `.gitignore` edit may ride in the Step 4 commit.
 - Touch ONLY the single repo you select. Never modify files outside it.
 - SKIP any repo that fails the shared preflight: run `~/dotfiles/bin/git-safe-to-autocommit <repo>`
   and pick a different repo on a non-zero exit. It refuses repos mid-rebase/merge/cherry-pick/revert/
@@ -57,8 +61,10 @@ commit `.wrapup-ignore` or `.nowrapup` files — they are the user's toggles.
 Then, for each ELIGIBLE repo:
 1. `dirty` = line count of `git -C <repo> status --porcelain`.
 2. `recency` = the most recent of: last commit time (`git -C <repo> log -1 --format=%ct`) and the
-   newest modification time among working-tree files (ignore `.git`, `node_modules`, and other
-   ignored paths). NOTE: a repo can have an old last-commit date but very recent file edits — the
+   newest modification time among working-tree files (ignore `.git`, `node_modules`, other
+   ignored paths, and — always, even where not gitignored — `.claude/IN_PROGRESS.md` and
+   `.claude-sessions/`: this skill and the session hooks write those, so counting them would make
+   every repo it touched look "recently worked on" forever). NOTE: a repo can have an old last-commit date but very recent file edits — the
    file mtimes are what matter for "recently worked on."
 
 Candidate set = repos whose `recency` is within the last **14 days**. Among candidates:
@@ -73,8 +79,8 @@ one-line timestamped note to `/Users/jake/Dropbox/code/.wrapup-idle.log` and sto
 ## Step 2 — Understand the in-progress work AND the direction
 
 In the selected repo:
-- Read its own `CLAUDE.md`, `README*`, `package.json` scripts, and any existing `NEXT-STEPS.md`
-  to load project-local conventions and intent. Project-local instructions OVERRIDE this skill's
+- Read its own `CLAUDE.md`, `README*`, `package.json` scripts, and any existing
+  `.claude/IN_PROGRESS.md` to load project-local conventions, intent, and what's already open. Project-local instructions OVERRIDE this skill's
   general guidance.
 - Run `git log -n 20 --oneline`, `git status`, `git diff`, and `git diff --staged` to understand
   what was left mid-flight.
@@ -90,6 +96,9 @@ In the selected repo:
   that session was actually trying to do; a cleanly-closed session's doc is deleted immediately and
   leaves nothing to find. Read its body as directional signal, same tier as `ROADMAP.md`/`PLAN.md`,
   and note its `session_id` (from the frontmatter) if it meaningfully shaped Step 5's decisions.
+- If a legacy `NEXT-STEPS.md` (this skill's old output) is still at the repo root, fold whatever
+  in it is still live into Step 5's reconcile, then delete it (`git rm` it in the Step 4 commit if
+  it's tracked). The file is retired — nothing reads it.
 - This scan feeds Step 5's decisions section — the goal is to leave the user forward-looking
   choices, not only a list of what stalled.
 
@@ -116,34 +125,51 @@ If you made changes and there is anything sensible to commit:
   `chore(auto): <summary>`.
 - One focused commit is fine; split into a few if logically distinct. Do NOT push.
 
-## Step 5 — Write NEXT-STEPS.md (the deliverable)
+## Step 5 — Reconcile into `.claude/IN_PROGRESS.md` (the deliverable)
 
-Create or overwrite `NEXT-STEPS.md` at the selected repo's root. This is the FIRST thing the user
-reads when they return — keep it tight, scannable, and decision-focused:
+Write into the selected repo's `.claude/IN_PROGRESS.md` — the same running file [[close-out]]
+owns, [[pick-up]] resumes from, the `pick-up-nudge` SessionStart hook surfaces, and
+[[prepare-roadmap]] sweeps for open decisions. That is how this run's output reaches the user:
+there is no separate report file.
 
-1. **Header** — repo picked, why (dirty count / recency), timestamp, branch. If a candidate repo
-   was skipped this run for a live session doc, or a crashed session's `.claude-sessions/*.md`
-   informed this pick, say so here and cite the `session_id` (so the user can `claude --resume
-   <id>` to inspect it directly).
-2. **What I did this run** — bullets of concrete changes + commit hash(es), or "no changes".
-3. **Build/verify state** — which command ran and its result (pass/fail + key errors).
-4. **Decisions for you** — the most important section. Do not limit this to decisions that were
-   *necessary* to unblock what stalled — the point is to advance the project's thinking, not just
-   report what stopped you. Each item is a concrete choice framed with options, never an open
-   question, e.g. "Storage: (a) keep localStorage, or (b) move to cookie — left as (a)." Order it:
-   - **Architectural / roadmap decisions first.** If Step 2 found a roadmap, plan doc, or a
-     "Future work" section, formalize its loose bullets here as sequenced, concrete next steps —
-     each with the actual choice to make and its tradeoffs spelled out, not a restated TODO. If no
-     doc exists but the diff implies a direction (new abstraction, stub, half-wired integration),
-     surface the architectural choice that direction is heading toward. If a repo has no
-     roadmap/plan doc and the diff shows no directional signal, say so plainly rather than
-     inventing one.
-   - **Then judgment calls skipped this run** — anything you deliberately did not do because it
-     needed judgment, plus any dirty files left uncommitted (and why).
-5. **Suggested next actions** — a short ordered list of what to tackle next, sequenced to match
-   the decisions above (architectural first).
+**Follow close-out's step 4 procedure for the reconcile — don't reinvent it:** read the existing
+file first; delete items that are resolved (remove the line, never leave `- [x]`); drop anything
+now tracked in Linear or an open PR; keep every other session's still-open item; set
+`_Last updated: <date +%F> (wrapup-repos)_` from the system clock; append
+`- <date> — $CLAUDE_CODE_SESSION_ID (wrapup-repos)` to `## Close-out sessions`; create `.claude/`
+if needed. Never overwrite the file wholesale.
+
+What this skill contributes, by section:
+
+- **`## Decisions needed`** — the most important section, and the heading [[prepare-roadmap]]
+  parses, so keep it spelled exactly so. Each item is an unchecked `- [ ]` line framed as a
+  concrete choice with options, never an open question, e.g. "Storage: (a) keep localStorage, or
+  (b) move to cookie — left as (a)." Don't limit it to what was *necessary* to unblock what
+  stalled; the point is to advance the project's thinking. Order:
+  - **Architectural / roadmap decisions first.** If Step 2 found a roadmap, plan doc, or "Future
+    work" section, formalize its loose bullets as sequenced, concrete choices with tradeoffs, not
+    restated TODOs. When an item is about a specific `ROADMAP.md` / `docs/plans/` item, name that
+    item so prepare-roadmap can record the answer (`**Decided:**`) in the right place. If no doc
+    exists but the diff implies a direction (new abstraction, stub, half-wired integration),
+    surface the choice that direction is heading toward. If there's no directional signal, add
+    nothing — don't invent one.
+  - **Then judgment calls skipped this run** — anything you deliberately didn't do because it
+    needed judgment.
+- **`## Ticket candidates`** — larger work that deserves a Linear ticket but isn't a decision.
+  One item each: a title, a line or two of what/why, the suggested `repo/<dir>` label, and file
+  pointers. Never file it yourself (see the safety rules); [[close-out]] files these and removes
+  them from the file.
+- **`## Code state notes`** — ad-hoc, temporary notes about the tree: dirty files left unstaged
+  and why, a failing verify command with its key error, something half-wired you left alone.
+  Free-form; prune any that are no longer true.
+
+The run's own report — what you changed, commit hash(es), build result, why this repo was picked
+(including any live-session skip or crashed session's `session_id` that informed the pick) —
+goes in the final output below and the commit messages, **not** in the file. The one exception is
+a failing verify, which stays visible as a code-state note until it's fixed.
 
 ## Final output
 
-End with a 3–5 line plain-text summary: which repo you picked, what you changed, the commit hash
-(if any), and build status. In a scheduled run this goes to the run log the user scans later.
+End with a 3–6 line plain-text summary: which repo you picked and why, what you changed, the commit
+hash (if any), build status, and a pointer to `.claude/IN_PROGRESS.md` with item counts per
+section (e.g. "2 decisions, 1 ticket candidate, 1 code-state note"). In a scheduled run this goes to the run log the user scans later.

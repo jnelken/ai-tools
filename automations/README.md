@@ -139,12 +139,13 @@ Limitations:
 
 Off-peak, weekly (Sunday 2:45am local time), picks the dirtiest/most-recently
 touched repo under `~/Dropbox/code`, finishes obvious low-risk loose ends, commits a WIP,
-and writes `NEXT-STEPS.md`. Single source of truth for the actual workflow is the
+and reconciles its decisions, ticket candidates, and code-state notes into that repo's
+`.claude/IN_PROGRESS.md`. Single source of truth for the actual workflow is the
 [`wrapup-repos`](../skills/wrapup-repos/SKILL.md) skill — `run.sh` just invokes
 `claude -p` headlessly against it, so editing the skill changes both the on-demand
 `/wrapup-repos` and this scheduled job.
 
 After each run, `run.sh` also regenerates `~/.claude/automations/wrapup-repos/dashboard.html`
 via `gen-dashboard.py` — a self-contained (file://-safe) status page covering run history,
-`NEXT-STEPS.md` decision lists, `(auto)` commits, and disabled repos across `~/Dropbox/code`.
+open `.claude/IN_PROGRESS.md` items, `(auto)` commits, and disabled repos across `~/Dropbox/code`.
 Open it directly in a browser to check the automation's state without digging through logs.
