@@ -11,3 +11,6 @@ node_modules/
 # close-out's running cross-session handoff note - local continuity state,
 # never project documentation.
 .claude/IN_PROGRESS.md
+
+# simplification-retro's run log - local per-machine memory, not committed.
+skills/simplification-retro/memory.md
