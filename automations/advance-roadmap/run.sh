@@ -251,7 +251,7 @@ json.dump({
   "action": "blocked_no_item",
   "outcome_token": "blocked-no-item",
   "repo": None, "item": None, "branch": None,
-  "roadmap_path": None, "linear_id": None, "directive_path": None,
+  "roadmap_path": None, "linear_id": None, "directive_ticket": None,
   "worker_brief": None, "archives": [], "blockers": [],
   "considered": [], "summary": summary,
   "parse_error": "missing ORCHESTRATOR_RESULT_JSON",

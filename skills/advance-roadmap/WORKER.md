@@ -18,7 +18,8 @@ The prompt names a request JSON file. Modes:
 - **implement / resume** — fields from the orchestrator result (`repo`, `item`, `branch`,
   `worker_brief`, `worker_mode`, …). Do Steps 3–8 (resume uses the existing branch). The launcher
   has already invoked the provider's native goal command when `worker_mode` is `goal`; do not
-  create a second goal.
+  create a second goal. When `directive_ticket` is set, do **Step 2c first** — it clears the dirty
+  tree that would otherwise block Step 3.
 - **bookkeeping** — full orchestrator result with `blocked_no_item` / `nothing_qualified`
   (request field `orchestrator`). Post Step 2b comments, perform `archives`, write Step 8;
   do not start a feature branch unless an archive needs the Step 7 flow.
@@ -46,6 +47,53 @@ The prompt names a request JSON file. Modes:
 ---
 
 # Steps (worker owns these)
+
+## Step 2c — Consume the directive (before branching)
+
+Only when the request carries a `directive_ticket`. This is the dirty-tree exception in
+[`SAFETY.md`](SAFETY.md); the orchestrator decided it applies, and **you** are the one that acts.
+
+1. **Re-read the `## Directive` section** from that ticket's description in Linear, and re-parse
+   live `git status --porcelain`. Do not trust the orchestrator's reading: minutes have passed and
+   the tree may have moved. You are the authoritative check.
+2. **Re-run the staleness check for the instruction's kind** (Step 1a has the reasoning in full):
+   - **Commit-shaped** — only the paths the instruction names need to still exist and still be
+     dirty. `git add` exactly those paths, nothing else. Every other dirty path in the repo stays
+     untouched; folding in unrelated WIP is the "commit their work without asking" failure the
+     clean-tree rule exists to prevent.
+   - **Destructive** — parse live porcelain into canonical `XY | path` entries (each unset slot of
+     the two-char status field written as `-`) and require **set-equality** with the recorded
+     snapshot: order-independent, whitespace-independent, never a raw string or substring compare.
+     On any mismatch, discard nothing, stop, and report `failed` with the mismatch — the next
+     `/prepare-roadmap` sweep re-asks against current state.
+   - **No-op** — a commit-shaped instruction whose named paths are already clean means Jake handled
+     it himself. Do the bookkeeping in step 4 and carry on; this is not an error.
+3. **Write commit messages in the repo's own convention** (`git log -5`), using the intent Jake
+   described rather than his words as a literal subject line. This commit lands on `main` through
+   Step 7's flow like any other.
+4. **Retire the directive, but never destroy it.** Two operations on the ticket, both required:
+   - `removeLabels: ["roadmap-directive"]` — the label is the state, so removing it is what makes
+     the directive no longer pending. Use `removeLabels`, never `labels`, which would replace the
+     ticket's whole label set and drop its `repo/*` label.
+   - `patch` the description so the section header records the outcome in place —
+     `## Directive` becomes `## Directive (consumed <date>)`, or
+     `## Directive (archived unconsumed <date> — tree changed)` when you stopped. Anchor the patch
+     on that repo's marker comment (`<!-- advance-roadmap:directive:<repo> -->`), which is unique;
+     `## Directive` alone may not be.
+
+   **Leave the snapshot and Jake's verbatim instruction in place.** Linear description edits have no
+   recoverable history through this path, and an authorization to discard someone's work must not
+   vanish in the same operation that acts on it. If the description genuinely has to end up clean,
+   copy the whole section verbatim into your outcome comment *first*.
+5. **Fold in the answered decisions** the brief names — into the ticket description for a
+   ticket-backed item, or into that item's own roadmap text for an older file-only one. Keep
+   acceptance criteria and blockers current; this is the bookkeeping `/prepare-roadmap` deliberately
+   refuses to do inside a repo.
+6. **Comment the outcome** on the ticket, saying what was committed or discarded and that the
+   directive is now consumed (or archived unconsumed, and why).
+7. **The tree must be clean before Step 3.** Confirm `git status --porcelain` is empty for the paths
+   the directive covered. If the go-ahead was "just clean up", stop here: land the resolution through
+   Step 7, write Step 8, and report `archive-only` — do not start a feature branch.
 
 ## Step 3 — Branch off fresh `origin/main`
 

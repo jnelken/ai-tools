@@ -1,6 +1,6 @@
 ---
 name: prepare-roadmap
-description: Interactive-only sweep across every personal repo under ~/Dropbox/code that is currently blocked from advance-roadmap — a dirty working tree, or open "decisions needed" questions — and asks Jake how to resolve each one, one repo at a time. Never touches a repo itself: it persists each answer immediately as a directive file that a later /advance-roadmap run reads and acts on. Use on-demand ("/prepare-roadmap", "unblock the roadmap repos", "clear the roadmap blockers", "sweep the blocked repos"). Complementary to [[advance-roadmap]], never a replacement — this skill only asks and records; that one is the only thing that ever writes code, commits, or pushes.
+description: Interactive-only sweep across every personal repo under ~/Dropbox/code that is currently blocked from advance-roadmap — a dirty working tree, or open "decisions needed" questions — and asks Jake how to resolve each one, one repo at a time. Never touches a repo itself: it persists each answer immediately as a `## Directive` section on that repo's Linear ticket, which a later /advance-roadmap run reads and acts on. Use on-demand ("/prepare-roadmap", "unblock the roadmap repos", "clear the roadmap blockers", "sweep the blocked repos"). Complementary to [[advance-roadmap]], never a replacement — this skill only asks and records; that one is the only thing that ever writes code, commits, or pushes.
 ---
 
 # Prepare the roadmap
@@ -20,8 +20,8 @@ it has no scheduled/unattended mode. If invoked headlessly, say so and stop.
 `/prepare-roadmap` reads. It runs `git status`, `git diff --stat`, and reads files — never
 `git add`, `git commit`, `git checkout --`, `git stash`, `git reset`, or any edit to a file
 *inside* a target repo. It doesn't implement anything, doesn't run tests or builds, and
-doesn't decide which roadmap item to build. Everything it produces is a plain-text
-directive written **outside** every repo, for `/advance-roadmap` to carry out later.
+doesn't decide which roadmap item to build. Everything it produces is a directive recorded
+**in Linear**, for `/advance-roadmap` to carry out later.
 
 This is deliberate, not a limitation to work around: `/advance-roadmap` is the one skill
 hardened (allowlists, preflight, ff-only merges, all-or-nothing verification) to safely
@@ -33,68 +33,94 @@ Corollary: **never write anything under a target repo's `.claude/`**, including
 `.claude/IN_PROGRESS.md`. That file is owned by [[close-out]] and read by [[pick-up]]; a
 third writer racing those two is exactly the kind of divergent-copy bug the ecosystem
 here works hard to avoid. An answered "decisions needed" question is instead recorded in
-this skill's own directive file, and `/advance-roadmap` folds it into `ROADMAP.md`'s prose
-as part of the bookkeeping commit it already makes (its Step 6) — the same place Jake
-himself resolves these by hand today (see `project_advance-roadmap-runs.md`'s
+the directive, and `/advance-roadmap` folds it into the ticket (or, for an older file-only
+item, into `ROADMAP.md`'s own prose) as part of the bookkeeping it already does — the same
+place Jake himself resolves these by hand today (see `project_advance-roadmap-runs.md`'s
 "mailcruxh suddenly qualified" case: he answered nine open decisions by editing the
 roadmap item text directly, not `.claude/IN_PROGRESS.md`).
 
-## Where directives live
+## Where directives live: on the repo's own Linear ticket
 
-One file per repo, named for it, in a directory next to `/advance-roadmap`'s own logs —
-deliberately **outside every target repo** so writing one never makes a repo's tree dirty
-and never needs a `.gitignore` negotiation:
+A directive is a `## Directive` section appended to the **description of the Linear work
+ticket `/advance-roadmap` would resolve for that repo** — the ticket linked from the repo's
+roadmap index, or the highest-priority eligible issue carrying that repo's `repo/*` label
+(team **Dev**, workspace `jnelken`). Nothing is written to disk anywhere: Linear is the
+persisted state, not merely the place the conversation happened.
+
+Two mechanics make that findable and safe, and they are separate on purpose:
+
+- **The `roadmap-directive` label on that same ticket is the marker.** Apply it whenever
+  you write a directive. `/advance-roadmap` finds every pending directive in a single
+  `list_issues(team: "Dev", label: "roadmap-directive")` call per run, and clears the label
+  once it has acted. The label means *a directive here is pending* — nothing more.
+- **The label is not an authorization.** It sits on an ordinary work ticket that Jake edits
+  by hand, so it can go stale in ways a purpose-built object couldn't. What actually
+  authorizes a destructive instruction is the recorded `git status` snapshot matching the
+  live tree exactly, checked by `/advance-roadmap` at execution time. Write the snapshot
+  carefully; it's the real safety mechanism.
+
+Because the directive rides on a real work ticket, there is no risk of `/advance-roadmap`
+mistaking a directive for an item to implement — the ticket *is* legitimate work, and the
+directive only changes whether that work can start.
+
+### When a blocked repo has no eligible ticket
+
+This is the one case the design can't cover, and it must be surfaced rather than worked
+around. A repo whose roadmap is file-only (`ROADMAP.md` or `docs/plans/` with no mirrored
+Linear issue) has nowhere to carry a directive: writing into the repo is forbidden by the
+hard rule above, and **filing a ticket is not this skill's job** — it only asks and records.
+
+So: record nothing, and say so plainly in the Step 3 summary —
+
+> `<repo>` is dirty but has no Linear ticket to carry a directive. File one (or mirror the
+> roadmap item into Linear) and re-run `/prepare-roadmap`.
+
+Never invent a ticket to have somewhere to write. An abandoned sweep that left fabricated
+tickets behind would defeat the persist-immediately property this skill is built around.
+
+### Directive format
+
+Append this as the **last** section of the ticket description. The marker comment is the
+first line and carries the repo name, so it is a unique anchor for a later `patch` edit —
+`## Directive` alone is not reliably unique in a description that accumulates history.
+
+~~~markdown
+<!-- advance-roadmap:directive:apt-sqft -->
+## Directive
+
+**Recorded:** 2026-09-23 by /prepare-roadmap · **Repo:** `apt-sqft`
+
+### Dirty-tree resolution
+
+<Omit this whole subsection if the repo's tree was already clean.>
+
+Snapshot of `git status --porcelain` at the time Jake gave this instruction, in canonical
+form — one entry per line as `XY | path`, where each unset slot of the two-character status
+field is written as `-`:
 
 ```
-/Users/jake/.claude/automations/advance-roadmap/directives/<repo>.md
-/Users/jake/.claude/automations/advance-roadmap/directives/archive/<repo>-<stamp>.md   (consumed ones, kept for audit)
+-M | src/App.tsx
+?? | notes.md
+A- | src/staged.ts
 ```
 
-Create the `directives/` directory if it doesn't exist yet. Never write into any other
-location, and never write inside the repo itself.
+**Instruction (verbatim):** Commit it all as one commit
 
-### Directive file format
+### Answered decisions
 
-```markdown
----
-repo: mailcruxh
-recorded_at: 2026-09-13T14:22:00-04:00
-recorded_by: prepare-roadmap
----
-
-## Dirty-tree resolution
-<Omit this whole section if the repo's tree was already clean.>
-
-Recorded `git status --porcelain` at the time Jake gave this instruction — advance-roadmap
-scopes its authorization to exactly these paths, and must re-check live status against
-this list before acting (see the staleness rule below):
-
-```
- M src/foo.ts
- M src/bar.ts
-?? src/newfile.ts
-```
-
-Jake's instruction, verbatim: <e.g. "Commit it all as one commit" / "Split into two:
-(1) src/foo.ts and src/bar.ts as one commit about X, (2) src/newfile.ts as a second
-commit about Y" / "Discard all of it" / free-form as he actually said it>
-
-## Answered decisions
 <Omit if none. One block per item that had an open "decisions needed" question.>
 
 - **Item:** <the roadmap item name / heading, or the exact `.claude/IN_PROGRESS.md` line>
   **Question:** <the open question, as originally posed>
   **Answer:** <Jake's literal answer>
-  **Carry into ROADMAP.md:** yes — fold this into the item's own text (a `**Decided:**`
-  line and/or an `**Unattended-ready**` marker) as part of the Step 6 bookkeeping commit.
 
-## Go-ahead
-- [ ] Resolve the dirty-tree section above exactly as instructed (skip if none).
-- [ ] Fold every answered decision above into `ROADMAP.md` (skip if none).
-- [ ] Then: <"proceed through the normal Step 1/2 selection now that this repo qualifies"
-  | "specifically implement: <item name>" | "just clean up — don't implement anything
-  yet, wait for the next run">
-```
+### Go-ahead
+
+<one of:>
+Proceed through the normal Step 1/2 selection now that this repo qualifies.
+Specifically implement: <item name>.
+Just clean up the tree — don't implement anything yet, wait for the next run.
+~~~
 
 **Never name a `human-only` item in the go-ahead.** That label marks work `/advance-roadmap` is
 required to refuse — a GUI installer, a vendor sign-in, a purchase, a device in hand, a credential
@@ -104,27 +130,36 @@ queries Linear, so the label won't be in front of you; it's the one thing worth 
 before writing that line. If Jake names such an item anyway, record it as a plain note under
 *Answered decisions* and leave the go-ahead on the normal Step 1/2 selection.
 
-The three checkboxes are `/advance-roadmap`'s own scratch space — it checks them off as it
-completes each, so a crash mid-directive leaves a clear resume point (folded into its own
-Step 0 interrupted-run reconciliation). Leave them unchecked when you write the file.
+**Why the canonical snapshot form, and don't "simplify" it away.** In raw
+`git status --porcelain` the leading two characters *are* the meaning — ` M foo.ts` and
+`?? foo.ts` differ only in leading whitespace. That text now round-trips through Linear's
+editor, and while the API path preserves it byte-for-byte (verified 2026-09-23), a human
+editing the ticket in Linear's web rich-text editor is exactly what this skill invites.
+Writing `-M` / `A-` instead of leaning on spaces removes the entire class of problem:
+`/advance-roadmap` parses live porcelain into the same `(status, path)` pairs and compares
+them as an unordered **set**, so "matches exactly" never depends on whitespace or line
+order surviving a round trip.
 
-**Staleness rule, and it differs by instruction type** (this is the part most likely to
-be gotten wrong — read it twice):
+Record the path exactly as porcelain prints it, including any quoting git applies to paths
+with spaces or special characters, and record a rename (`R  old -> new`) verbatim in the
+path field.
 
-- A **commit-shaped instruction** ("commit it as one", "split it into A/B") only needs the
-  paths it names to still exist and still be dirty at execution time. New, unrelated dirty
-  paths that appeared since the sweep are left alone, untouched — they're not what this
-  directive is about, and treating their mere presence as "drift" would silently block a
-  directive forever the next time Jake made an unrelated edit in the same repo.
-- A **destructive instruction** ("discard it") requires the live `git status --porcelain`
-  to match the recorded snapshot **exactly** before proceeding. Any difference — Jake
-  changed something since — means abort the directive, archive it, and let the next
-  `/prepare-roadmap` sweep re-ask with current state. Never discard something the
-  recorded snapshot didn't literally describe.
+### Updating a directive rather than filing a second
 
-That split is `/advance-roadmap`'s job to enforce, not this skill's — but get the
-directive's content right here, because a vague instruction ("clean it up") gives that
-skill nothing safe to execute and it will (correctly) refuse and re-block the repo.
+If a ticket for this repo already carries the `roadmap-directive` label, a directive is
+already pending and `/advance-roadmap` hasn't consumed it yet:
+
+- Don't write a second one. **Edit the existing section** (`save_issue` with a `patch`
+  anchored on that repo's marker comment) — adding an answered decision to a directive that
+  already holds a dirty-tree resolution, for instance.
+- Don't re-ask about that repo in the same sweep. Mention in passing that it's already
+  queued, and move on.
+- If Jake explicitly wants to change a pending directive, read the current one back to him
+  first and confirm before overwriting any part of it.
+
+That keeps "one pending directive per repo" true by construction, which is what lets
+`/advance-roadmap` treat two pending directives for one repo as a live ambiguity to refuse
+rather than a stale leftover to guess at.
 
 ## Step 1 — Discover blocked repos, live
 
@@ -168,12 +203,35 @@ whichever of the actively-tracked four — typey.site, mailcruxh, jakenelken.com
 happen to be dirty right now). If your sweep misses names memory calls out, the discovery
 logic above is wrong; fix it before proceeding, don't just note the discrepancy.
 
-**Also check for a directive already waiting.** If
-`/Users/jake/.claude/automations/advance-roadmap/directives/<repo>.md` already exists for
-a candidate, `/advance-roadmap` hasn't consumed it yet — don't ask about that repo again
-this sweep. Say so in passing (so Jake knows it's already queued) and move on. If he
-explicitly wants to change a pending directive, read it back to him first and confirm
-before overwriting.
+**Also resolve each candidate's ticket now**, in the same pass: query Linear once for the
+repo labels in play, and for each candidate find the ticket a directive would attach to
+(the roadmap index's linked ticket, or the highest-priority eligible `repo/*` issue). A
+candidate with no eligible ticket is reported, not asked about — see *When a blocked repo
+has no eligible ticket* above. Note which candidates already carry `roadmap-directive`;
+those are already queued and get skipped this sweep.
+
+### No shell available? Fall back to Linear, and say that you did
+
+The live sweep above is the complete view and is always preferred. When this skill runs
+somewhere without a shell — a chat surface with Linear access but no `git` — discover from
+`/advance-roadmap`'s own blocker comments instead:
+
+1. `list_issues` for team **Dev** filtered to issues updated recently (say `-P14D`) that
+   carry a `repo/*` label.
+2. Read each one's comments and take the newest containing
+   `<!-- advance-roadmap:blocker -->`. Those comments carry the repo, the blocker type, and
+   the dirty paths — which is enough to ask Jake about.
+
+**This mode's coverage is partial by construction, and that must be stated, not implied.**
+`/advance-roadmap` stops at the first repo that qualifies, so it only ever posts blocker
+comments for repos it actually got far enough to evaluate; a repo further down the list has
+no comment and is invisible here. Say plainly in the Step 3 summary which mode ran, and in
+fallback mode recommend a terminal sweep for the complete picture.
+
+A blocker comment's dirty-path list is prose written for Jake to read, not the canonical
+snapshot. In fallback mode you cannot produce a verified snapshot at all, so **only record
+commit-shaped instructions** — never a destructive one. A "discard it" answer needs a live
+tree to snapshot against; tell Jake it has to wait for a terminal sweep, and record nothing.
 
 ## Step 2 — Work the list, one repo at a time
 
@@ -188,9 +246,16 @@ show Jake enough to decide:
   remember what he left uncommitted three days ago.
 - **Decisions-needed blocker:** the repo name and each unresolved question line verbatim.
 
-### Asking the dirty-tree question
+Also name the ticket the directive will land on, so Jake can object before it's written.
 
-One `AskUserQuestion` call, two questions:
+### Asking the questions
+
+In a Claude Code terminal that's one `AskUserQuestion` call; on a chat surface it's
+whatever that host's native question mechanism is, and plain numbered questions in the
+message if it has none. The turn-taking is always **synchronous, in one live session** —
+never file a question and wait for a Linear reply later.
+
+For the dirty tree, two questions:
 
 1. *"How should the uncommitted work in `<repo>` be handled?"* — options:
    - `Commit it all as one commit`
@@ -206,10 +271,8 @@ One `AskUserQuestion` call, two questions:
    Skip this second question if the answer to the first was "Leave it" — there's nothing
    to build on top of a tree that's staying dirty.
 
-### Asking a decisions-needed question
-
-One question per unresolved line (batch up to 4 per `AskUserQuestion` call when a repo
-has several — they're independent). For the options:
+For a decisions-needed blocker, one question per unresolved line (batch up to 4 per call
+when a repo has several — they're independent). For the options:
 
 - If the line's own text already names two or three concrete alternatives (many do — the
   Step 2b format asks "does X or Y?"), offer those as the options.
@@ -222,27 +285,39 @@ has several — they're independent). For the options:
 ### Persist immediately — before moving to the next repo or the next question
 
 The moment a repo's questions (or as many as Jake chose to answer — "Skip" is a valid,
-complete answer) resolve, write or update that repo's directive file right then. Do not
-batch writes until the end of the sweep. If Jake stops the session after repo 2 of 5, the
-first two directive files must already be sitting there, complete and correct — that's
-the entire point of the "doesn't need to be complete" requirement.
+complete answer) resolve, write the directive to Linear right then. Do not batch writes
+until the end of the sweep. If Jake stops the session after repo 2 of 5, the first two
+directives must already be live on their tickets, complete and correct — that's the entire
+point of the "doesn't need to be complete" requirement.
 
-Concretely:
-- If a directive file for this repo doesn't exist yet, create it with the frontmatter and
-  whichever sections apply.
-- If one already exists from earlier in *this same sweep* (e.g. you're adding a second
-  answered decision to a repo you already wrote a dirty-tree resolution for), append to
-  the existing sections rather than overwriting the file.
-- A "Skip" answer writes nothing for that item — it simply isn't recorded, so the next
-  sweep asks again naturally (there's no partial-answer state to track).
+Concretely, per repo:
+
+1. Re-run `git -C <repo> status --porcelain` and build the canonical snapshot from **that**
+   output, not from what you showed Jake earlier in the sweep. The snapshot's whole job is
+   to describe the tree at the moment the instruction was given.
+2. `save_issue` on the resolved ticket, appending the `## Directive` section (or `patch`ing
+   the existing one, per *Updating a directive* above).
+3. `save_issue` again — or in the same call — to add the `roadmap-directive` label
+   (`addLabels`, never `labels`, which would replace the ticket's whole label set and drop
+   its `repo/*` label).
+4. A "Skip" answer writes nothing for that item — it simply isn't recorded, so the next
+   sweep asks again naturally. There's no partial-answer state to track.
+
+If a repo's only answers were "Leave it" / "Skip", write no directive and apply no label.
 
 ## Step 3 — Final summary
 
-List, per repo: what was recorded (dirty-tree resolution / N answered decisions / both),
-and what was skipped. Say plainly which repos now have a directive waiting in
-`/Users/jake/.claude/automations/advance-roadmap/directives/` and that the next
-`/advance-roadmap` run (scheduled, four times a day) will pick each one up automatically
-— or that Jake can run `/advance-roadmap` right now if he wants one acted on immediately.
+Say up front **which discovery mode ran** — full live sweep, or the partial Linear
+fallback (and if the latter, that a terminal sweep is needed for the complete picture).
+
+Then list, per repo: what was recorded (dirty-tree resolution / N answered decisions /
+both), which ticket now carries it, and what was skipped. Call out separately every repo
+that was blocked but had **no eligible ticket** to carry a directive, since those are the
+ones needing an action from Jake before they can ever be unblocked.
+
+Close by saying that the next `/advance-roadmap` run (scheduled, four times a day) picks
+up each pending directive automatically — or that Jake can run `/advance-roadmap` right now
+if he wants one acted on immediately.
 
 Do not offer to run `/advance-roadmap` yourself as part of this skill. That's a separate,
 explicit invocation — keeping "decide" and "do" as two distinct steps the user chooses to

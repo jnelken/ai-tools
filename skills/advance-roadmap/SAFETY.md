@@ -27,10 +27,14 @@ commit, merge, or push (see WORKER.md).
 - **Clean tree or skip — unless a directive says otherwise.** `git -C <repo> status --porcelain`
   must be empty. Uncommitted work means the user is mid-thought there; branching, merging and
   pushing around it tangles their diff. Pick a different repo — never stash, reset, or commit
-  their WIP to get started **on your own initiative**. The one exception: a directive file from
-  [[prepare-roadmap]] at `/Users/jake/.claude/automations/advance-roadmap/directives/<repo>.md`,
-  which means Jake was already asked and already answered. See Step 1a for exactly how far that
-  authorization extends and no further. Resolve the ticket you intended to attempt before this
+  their WIP to get started **on your own initiative**. The one exception: a pending directive from
+  [[prepare-roadmap]] — a `## Directive` section in the description of a ticket labelled
+  `roadmap-directive` for this repo, which means Jake was already asked and already answered. See
+  Step 1a (orchestrator, decides) and Step 2c (worker, acts) for exactly how far that authorization
+  extends and no further. **The label only marks a directive as pending; it authorizes nothing by
+  itself.** What authorizes a destructive instruction is the recorded `git status` snapshot matching
+  the live tree as an exact set — re-checked by the worker at execution time, never assumed from
+  triage. Resolve the ticket you intended to attempt before this
   check; when the tree blocks it, comment on that ticket per Step 2b before moving on.
 - **Shared preflight, not a reimplementation.** Run `~/dotfiles/bin/git-safe-to-autocommit <repo>`
   and skip the repo on a non-zero exit. It refuses repos mid-rebase/merge/cherry-pick/revert/bisect

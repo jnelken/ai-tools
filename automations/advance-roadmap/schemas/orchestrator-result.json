@@ -34,7 +34,7 @@
       "enum": ["standard", "goal"],
       "default": "standard"
     },
-    "directive_path": { "type": ["string", "null"] },
+    "directive_ticket": { "type": ["string", "null"] },
     "worker_brief": { "type": ["string", "null"] },
     "archives": {
       "type": "array",

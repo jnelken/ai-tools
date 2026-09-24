@@ -13,7 +13,8 @@ Hard constraints:
 - Consume `/Users/jake/.claude/automations/advance-roadmap/providers-usage.json` if useful;
   never rewrite it.
 
-Also read allowlist / directives paths noted in [`SKILL.md`](SKILL.md).
+Also read the allowlist path noted in [`SKILL.md`](SKILL.md), and run the pending-directive Linear
+query there once, up front, holding the result as a repo -> directive map for Step 1.
 
 ## Output protocol
 
@@ -39,7 +40,7 @@ Schema: `~/.claude/automations/advance-roadmap/schemas/orchestrator-result.json`
   "roadmap_path": "docs/plans/ROADMAP.md",
   "linear_id": "DEV-35",
   "worker_mode": "standard",
-  "directive_path": null,
+  "directive_ticket": null,
   "worker_brief": "Self-contained brief: scope, touchpoints, acceptance, risks.",
   "archives": [],
   "blockers": [],
@@ -63,7 +64,7 @@ Use `"action": "resume_worker"` when Step 0 requires finishing an interrupted ru
   "roadmap_path": null,
   "linear_id": null,
   "worker_mode": "standard",
-  "directive_path": null,
+  "directive_ticket": null,
   "worker_brief": null,
   "archives": ["ai-tools/docs/plans/foo.md"],
   "blockers": [
@@ -245,7 +246,7 @@ For each direct child of `/Users/jake/Dropbox/code` that is a git repo, in that 
    qualify.
 8. Resolve the ticket you would attempt before applying the clean-tree gate: use the linked ticket
    in the roadmap index, or the highest-priority eligible Linear issue for the repo. Then apply the
-   clean-tree, preflight, and live-session checks from the safety rules. **Check for a directive
+   clean-tree, preflight, and live-session checks from the safety rules. **Check the directive map
    first** if the tree is dirty; see Step 1a before skipping outright. If no directive applies,
    report the dirty-state blocker on the resolved ticket per Step 2b before moving on.
 
@@ -257,43 +258,55 @@ summary and point at `/prepare-roadmap` — that's the one thing that ever unblo
 
 ## Step 1a — A directive is a bounded exception to clean-tree, nothing more
 
-Before skipping a dirty repo, check for
-`/Users/jake/.claude/automations/advance-roadmap/directives/<repo>.md`. Its existence is the
-*only* thing that ever lets this skill touch a dirty tree — nothing else does, ever, and its
-absence means the clean-tree rule is exactly as absolute as it reads above.
+Before skipping a dirty repo, look it up in the pending-directive map from the
+`list_issues(team: "Dev", label: "roadmap-directive")` query. A pending directive is the *only*
+thing that ever lets this skill touch a dirty tree — nothing else does, ever, and its absence
+means the clean-tree rule is exactly as absolute as it reads in [`SAFETY.md`](SAFETY.md).
 
-If one exists, read it in full — it has up to three parts (a dirty-tree resolution with the
-`git status --porcelain` snapshot recorded when Jake gave the instruction, answered decisions to
-fold into `ROADMAP.md`, and a go-ahead checklist) — then:
+**You decide; you never act.** You are read-only: do not commit, discard, restore, relabel, or edit
+anything here. Your job is to establish that a directive plausibly authorizes this repo, put its
+ticket id in `directive_ticket`, and let the worker execute it (Step 2c). The worker re-reads the
+directive and re-checks it against the live tree itself — time passes between triage and execution,
+and only the process about to change a tree can meaningfully check it.
 
-1. **Resolve the dirty tree exactly as instructed, nothing more.**
-   - A commit-shaped instruction ("commit it as one", "split into A and B") only needs its named
-     paths to still exist and still be dirty. Leave every other dirty path in the repo untouched —
-     new, unrelated WIP that appeared since the directive was written is not what this
-     authorization covers, and folding it in anyway is exactly the "commit their WIP without
-     asking" failure the clean-tree rule exists to prevent.
-   - A destructive instruction ("discard it") requires the **live** `git status --porcelain` to
-     match the recorded snapshot *exactly*, byte for byte. Any difference at all: stop, don't
-     discard anything, archive the directive unconsumed (move it to `directives/archive/` with
-     today's date, so `/prepare-roadmap`'s next sweep re-asks against current state), and skip
-     this repo this run.
-   - Write commit messages in the repo's own convention (recent `git log`), same as any other
-     commit this skill makes, using the intent Jake described rather than a verbatim label.
-2. **Archive the directive** — move it to `directives/archive/<repo>-<stamp>.md` — as soon as the
-   tree is clean and *before* anything is merged or pushed. It is handoff metadata, never repo
-   content: it must never be `git add`ed, and living outside every repo means it never needs a
-   `.gitignore` entry to stay that way.
-3. **Fold every answered decision into the ticket description** when the item is ticket-backed,
-   keeping its acceptance criteria and blockers current. For an older file-only item, record the
-   decision on that item's roadmap text. This can unblock an item Step 2 would otherwise still
-   skip in the same run.
-4. **Continue into this repo's remaining Step 1 checks** (preflight, live sessions) and Step 2
+1. **Exactly one pending directive per repo, or none.** Two tickets labelled `roadmap-directive`
+   for the same repo is a live ambiguity, not a stale leftover: `/prepare-roadmap` edits an
+   existing directive rather than filing a second, so duplicates mean a human intervened. Refuse
+   the repo, record a blocker naming both tickets, and move on. Never pick one and guess.
+2. **Read the `## Directive` section** in that ticket's description. It has up to three parts: a
+   dirty-tree resolution (the canonical `git status` snapshot plus Jake's verbatim instruction),
+   answered decisions, and a go-ahead. A ticket carrying the label with no parsable section is a
+   blocker, not an authorization — report it and skip.
+3. **Classify the instruction, and sanity-check the snapshot against live `git status`:**
+   - A **commit-shaped** instruction ("commit it as one", "split into A and B") only needs the
+     paths it names to still exist and still be dirty. Unrelated dirty paths that appeared since
+     are *not* drift — they're out of scope, and treating their presence as staleness would block
+     the directive forever the next time Jake edited anything else in that repo.
+   - A **destructive** instruction ("discard it") requires the live tree to match the recorded
+     snapshot as an **exact set** of `(status, path)` entries. Parse live `git status --porcelain`
+     into the same canonical `XY | path` form the snapshot uses — each unset slot of the two-char
+     status field written as `-` — and compare **sets**: order-independent, whitespace-independent.
+     "Exactly" means set-equality of parsed entries, never string equality of raw text. A raw-text
+     comparison would break on any round-trip through Linear's editor and invite a later session to
+     "fix" it by loosening to a substring match, which is precisely how you discard work the
+     snapshot never described.
+   - Any set mismatch on a destructive instruction: do **not** dispatch it. Record a blocker saying
+     the tree changed since the directive was recorded, so `/prepare-roadmap`'s next sweep re-asks
+     against current state, and skip this repo this run.
+   - A commit-shaped instruction whose named paths are no longer dirty is a **no-op, not an
+     error** — Jake resolved it himself. Dispatch the bookkeeping-only clear (the worker retires
+     the label and stamps the section) and treat the repo as clean for the rest of triage.
+4. **Carry the rest of the directive into `worker_brief`.** Name the answered decisions the worker
+   must fold into the ticket — or, for an older file-only item, into that item's roadmap text — and
+   quote the go-ahead verbatim. A directive's answered decisions can unblock an item Step 2 would
+   otherwise still skip in this same run, so apply them while judging the item, not after.
+5. **Continue into this repo's remaining Step 1 checks** (preflight, live sessions) and Step 2
    selection as usual. The directive clears the clean-tree gate specifically — it doesn't exempt
    anything else, doesn't skip verification, and doesn't guarantee this repo is the one item this
    run ships.
-5. If the directive's go-ahead says **"just clean up, don't implement anything yet"**: stop once
-   the tree is clean and the resolution commit(s) are pushed. Record the outcome (Step 8) and do
-   not proceed to Step 2 for this repo this run.
+6. If the go-ahead says **"just clean up, don't implement anything yet"**: dispatch the worker for
+   the tree resolution only. Set `item` to null, say so in `worker_brief`, and the worker stops
+   after Step 2c and its Step 7/8 bookkeeping.
 
 Never write a directive yourself, and never treat a dirty tree as license to guess at Jake's
 intent by any other means — a directive is the only voice this skill listens to here.
@@ -368,6 +381,11 @@ an issue exists somewhere; read both, then pick one item by the prefer/skip rule
   count it among the items you report as considered. Log `skipped-human-only` plus the `DEV-N` id
   in run memory and move on. It's a flat workspace label that coexists with the issue's `repo/*`
   label, so check labels for both independently.
+- **`roadmap-directive` marks a pending directive.** The ticket's description carries a
+  `## Directive` section from [[prepare-roadmap]] — Jake's recorded answer to what blocked this
+  repo. It is the only dirty-tree exception (Step 1a), it is a *pending* marker and not an
+  authorization, and the worker retires the label once it has acted. Like `human-only`, it is a
+  flat workspace label that coexists with the issue's `repo/*` label.
 - **`do-next` is a next-run queue override.** It moves an otherwise eligible issue ahead of all
   fresh work after Step 0 has reconciled any interrupted prior run. It does not override
   `human-only`, repo safety, dependencies, or the Step 2 skip list. A completed issue naturally
