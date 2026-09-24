@@ -296,9 +296,11 @@ and only the process about to change a tree can meaningfully check it.
    - A commit-shaped instruction whose named paths are no longer dirty is a **no-op, not an
      error** — Jake resolved it himself. Dispatch the bookkeeping-only clear (the worker retires
      the label and stamps the section) and treat the repo as clean for the rest of triage.
-4. **Carry the rest of the directive into `worker_brief`.** Name the answered decisions the worker
-   must fold into the ticket — or, for an older file-only item, into that item's roadmap text — and
-   quote the go-ahead verbatim. A directive's answered decisions can unblock an item Step 2 would
+4. **Carry the rest of the directive into `worker_brief`.** Name the answered decisions and each
+   one's `**Recorded in:**` field, so the worker knows which are already written into the repo's
+   markdown (commit them) and which it must still write itself (`not yet`). A dirty-tree snapshot
+   may legitimately include a `.md` file `/prepare-roadmap` edited when recording an answer — that
+   is a normal commit-shaped path, not drift. Quote the go-ahead verbatim. A directive's answered decisions can unblock an item Step 2 would
    otherwise still skip in this same run, so apply them while judging the item, not after.
 5. **Continue into this repo's remaining Step 1 checks** (preflight, live sessions) and Step 2
    selection as usual. The directive clears the clean-tree gate specifically — it doesn't exempt

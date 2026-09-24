@@ -85,10 +85,13 @@ Only when the request carries a `directive_ticket`. This is the dirty-tree excep
    recoverable history through this path, and an authorization to discard someone's work must not
    vanish in the same operation that acts on it. If the description genuinely has to end up clean,
    copy the whole section verbatim into your outcome comment *first*.
-5. **Fold in the answered decisions** the brief names — into the ticket description for a
-   ticket-backed item, or into that item's own roadmap text for an older file-only one. Keep
-   acceptance criteria and blockers current; this is the bookkeeping `/prepare-roadmap` deliberately
-   refuses to do inside a repo.
+5. **Fold in the answered decisions** the brief names — but check each one's `**Recorded in:**`
+   field first. `/prepare-roadmap` may already have written the decision into the repo's own
+   markdown, in which case your job is to **commit that edit, not to write it again**; a second
+   copy in the ticket description or a duplicated `**Decided:**` line is the failure here. Only
+   where the field says `not yet` do you write the prose yourself — into the ticket description
+   for a ticket-backed item, or that item's own roadmap text for an older file-only one. Either
+   way keep acceptance criteria and blockers current.
 6. **Comment the outcome** on the ticket, saying what was committed or discarded and that the
    directive is now consumed (or archived unconsumed, and why).
 7. **The tree must be clean before Step 3.** Confirm `git status --porcelain` is empty for the paths
