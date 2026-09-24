@@ -4,13 +4,16 @@
 # unaffected — this only fires when Claude initiates the bash call.
 # Opt-in per repo via a denylist (see step 0) — off everywhere else.
 #
-# CANONICAL COPY — vendored byte-identically in:
-#   Concentro-Inc/woodrow        .claude/hooks/block-push-to-main.sh
-#   Concentro-Inc/api            .claude/hooks/block-push-to-main.sh
-#   Concentro-Inc/folio-platform .claude/hooks/block-push-to-main.sh
-#   jnelken/ai-tools             hooks/block-push-to-main.sh  (global install)
-# Changing one means changing all four. Verify with tests/block-push-to-main.test.sh,
-# which sits beside this file in every home and builds its own fixture.
+# CANONICAL COPY. The source of truth lives in Concentro-Inc/folio-platform at
+#   .claude/hooks/block-push-to-main.sh
+# api, woodrow, and the ai-tools global install receive it through
+#   fp hooks:install --repo <path>
+# (run from a folio-platform checkout) and carry a block-push-to-main.installed
+# stamp recording the source commit and this file's sha256. Never edit an
+# installed copy directly — change it here, run
+#   bash .claude/hooks/tests/block-push-to-main.test.sh
+# land it, then re-run the installer in each consumer. `fp hooks:check --repo
+# <path>` reports drift between an installed copy and this canonical one.
 #
 # WHAT THIS IS. A guardrail against an agent pushing to `main` by accident,
 # not a sandbox against one trying to evade it. It reads the command text it
