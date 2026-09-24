@@ -265,6 +265,36 @@ git -C "$F" config remote.origin.push 'HEAD:refs/heads/main'
 check DENY  "$F" 'git push origin' 'configured remote.push maps HEAD to main from a feature branch'
 git -C "$F" config --unset remote.origin.push
 
+echo "-- segments split AFTER tokenizing, not before (quoted separators are not commands)"
+check ALLOW "$W" "git commit -m 'release; git push origin main'" 'quoted separator inside a commit message'
+check ALLOW "$W" 'echo "git push origin main"' 'quoted push text is not executed'
+check DENY  "$W" 'git status; git push origin main' 'unquoted separator still splits'
+check DENY  "$W" $'git status  # don\'t worry\ngit push origin main' 'comment apostrophe does not swallow the following push'
+
+echo "-- same-name refspec: empty destination with a non-empty source"
+check ALLOW "$F" 'git push origin feature:' 'same-name push via empty destination'
+check ALLOW "$F" 'git push origin HEAD:' 'HEAD-colon-empty resolves to the current branch, feature'
+check DENY  "$W" 'git push origin HEAD:' 'HEAD-colon-empty resolves to the current branch, main'
+check DENY  "$F" 'git push origin main:' 'main as source with an empty (same-name) destination'
+
+echo "-- refspec-less push with no explicit remote, resolved via @{push}"
+git -C "$F" update-ref refs/remotes/origin/main refs/heads/main
+git -C "$F" config branch.feature/thing.remote origin
+git -C "$F" config remote.origin.push 'refs/heads/feature/thing:refs/heads/main'
+check DENY "$F" 'git push' '@{push} resolves through branch.remote + remote.push to main'
+git -C "$F" config --unset branch.feature/thing.remote
+git -C "$F" config --unset remote.origin.push
+git -C "$F" update-ref -d refs/remotes/origin/main
+
+git -C "$F" config push.default matching
+check DENY "$F" 'git push' 'push.default=matching is denied outright, even from a feature branch'
+git -C "$F" config --unset push.default
+
+echo "-- refspec-less push WITH an explicit remote: configured remote.push wins over the branch fallback"
+git -C "$W" config remote.origin.push 'HEAD:release'
+check ALLOW "$W" 'git push origin' 'configured remote.push redirects away from main even though branch is main'
+git -C "$W" config --unset remote.origin.push
+
 echo
 echo "pass=$pass fail=$fail"
 [[ $fail -eq 0 ]]

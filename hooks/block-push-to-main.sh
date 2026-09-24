@@ -24,10 +24,16 @@
 # a false pass in practice:
 #
 #   * It never scans the whole command string for the word `main`. A commit
-#     message, a trailing `#` comment, or an unrelated chained command is not
-#     a push target. Only the arguments of a push segment are read.
+#     message (quoted, even one containing a literal `;`/`&`/`|`), an echoed
+#     example, a trailing `#` comment, or an unrelated chained command is not
+#     a push target. Only the arguments of a push segment are read, and a
+#     segment boundary is only ever an UNQUOTED `;`/`&`/`&&`/`||`/`|`/newline.
 #   * It never treats `main` on the SOURCE side of a refspec as a push to
-#     main: `origin main:release` writes to `release`.
+#     main: `origin main:release` writes to `release`. A same-name refspec
+#     with an empty destination (`origin feature:`) is likewise read as
+#     pushing to a branch named `feature`, not to `main` — `origin HEAD:`
+#     resolves to the CURRENT branch's name, so it only denies when that
+#     branch is `main`.
 #   * It does not assume the subcommand is the second word, so global options
 #     (`-C <dir>`, `-c k=v`) do not hide the verb.
 #   * It does not assume the push targets the repo the shell happens to sit
@@ -44,10 +50,18 @@
 #     only relocates the working files, never which repo a push targets.
 #   * It does not treat every refspec-less push as a branch push: `--tags`
 #     ships tags only, and `--help`/`--dry-run` write nothing at all. A
-#     refspec-less push is also checked against the remote's configured
-#     `remote.<name>.push` refspecs, since git applies those in place of the
-#     current branch when one is set. Only that key is modeled — not
-#     `push.default` or upstream-tracking defaults more generally.
+#     refspec-less push with NO explicit remote is resolved via
+#     `git rev-parse @{push}` — the same lookup git itself uses, folding
+#     together `push.default`, `branch.<b>.remote`/`pushRemote`,
+#     `remote.pushDefault` and `remote.<r>.push` with no network access —
+#     falling back to "deny iff the current branch is main" when no upstream
+#     is configured. `push.default=matching` is checked first and denied
+#     outright, since `@{push}` errors on it and it can push every
+#     same-named branch (main included) regardless of the current one. A
+#     refspec-less push WITH an explicit remote instead checks that remote's
+#     configured `remote.<name>.push` refspecs directly, which wins over the
+#     current-branch fallback (e.g. `remote.origin.push = HEAD:release` from
+#     `main` pushes `release`, not `main`).
 #   * A `!`-shell alias's own arguments are not modeled — it is detected as a
 #     push (so a bare push on `main` is still caught), but what it actually
 #     pushes is opaque to us.
@@ -117,14 +131,25 @@ strip_shell_punct() {
   printf '%s' "$s"
 }
 
-# Quote-aware tokenizer: splits $1 on unquoted whitespace, keeping a
-# `'…'` or `"…"` run — or a backslash-escaped character — inside one token
-# instead of letting its embedded whitespace end the token early. Populates
-# the global `raw_tokens` array directly (rather than handing back a value to
-# copy in) so an empty result stays a zero-element array without ever passing
-# through a `"${arr[@]}"` expansion — bash 3.2 (macOS's default `/bin/bash`)
-# raises "unbound variable" under `set -u` for that expansion on an empty
-# array, even though `${#arr[@]}` is fine. Tokens keep their quote/backslash
+# Quote-aware tokenizer: splits $1 on unquoted whitespace AND on an unquoted
+# `;`, `&`, `&&`, `||`, `|` or newline — each of those emitted as its own
+# operator token, even when glued directly onto a word (`foo;bar`, `a&&b`) —
+# keeping a `'…'` or `"…"` run — or a backslash-escaped character — inside
+# one token instead of letting its embedded whitespace or punctuation end the
+# token early. An unquoted `#` starting a word (not glued onto a preceding
+# character) opens a comment that is skipped up to but not including the
+# next real newline, so the newline itself still becomes its own operator
+# token; this keeps an apostrophe inside a comment (`# don't`) from being
+# misread as opening a quote that swallows the rest of the command. Callers
+# that want segment boundaries (`inspect_command`) walk the resulting token
+# list for those operator tokens; callers that just want one segment's words
+# (everywhere else) never see one, since a segment is tokenized only after
+# it has already been split at its operators. Populates the global
+# `raw_tokens` array directly (rather than handing back a value to copy in)
+# so an empty result stays a zero-element array without ever passing through
+# a `"${arr[@]}"` expansion — bash 3.2 (macOS's default `/bin/bash`) raises
+# "unbound variable" under `set -u` for that expansion on an empty array,
+# even though `${#arr[@]}` is fine. Tokens keep their quote/backslash
 # characters intact, so the existing two-array split (raw_tokens for the
 # `#`-comment test, `unquote` producing tokens) keeps working unchanged. An
 # unterminated quote just runs to the end of the string rather than erroring.
@@ -163,6 +188,41 @@ tokenize() {
         if (( i < n )); then
           token+="${s:i:1}"
           i=$((i + 1))
+        fi
+        ;;
+      ';' | '&' | '|' | $'\n')
+        (( started )) && raw_tokens+=("$token")
+        token=""
+        started=0
+        case "$c" in
+          '&')
+            if [[ "${s:i+1:1}" == '&' ]]; then
+              raw_tokens+=("&&"); i=$((i + 2))
+            else
+              raw_tokens+=("&"); i=$((i + 1))
+            fi
+            ;;
+          '|')
+            if [[ "${s:i+1:1}" == '|' ]]; then
+              raw_tokens+=("||"); i=$((i + 2))
+            else
+              raw_tokens+=("|"); i=$((i + 1))
+            fi
+            ;;
+          *)
+            raw_tokens+=("$c")
+            i=$((i + 1))
+            ;;
+        esac
+        ;;
+      '#')
+        if (( started )); then
+          token+="$c"
+          i=$((i + 1))
+        else
+          while (( i < n )) && [[ "${s:i:1}" != $'\n' ]]; do
+            i=$((i + 1))
+          done
         fi
         ;;
       *)
@@ -308,14 +368,28 @@ alias_is_push() {
 # Is this refspec's DESTINATION the main branch?
 # $2 is the current branch of the segment's effective directory.
 targets_main() {
-  local spec="$1" branch="$2" dst
+  local spec="$1" branch="$2" dst src
   spec="${spec#+}"                       # leading + is force, not part of the ref
   if [[ "$spec" == *:* ]]; then
+    src="${spec%%:*}"                    # everything before the first colon
     dst="${spec##*:}"                    # everything after the last colon
-    # An empty destination on a refspec with a colon is the "matching
-    # branches" form (`:` or, force-prefixed, `+:`) — it pushes every local
-    # branch that also exists on the remote, main included.
-    [[ -z "$dst" ]] && return 0
+    if [[ -z "$dst" ]]; then
+      # An empty destination on a refspec with a colon is one of two
+      # things. Empty on BOTH sides (`:` or, force-prefixed, `+:`) is the
+      # "matching branches" form — it pushes every local branch that also
+      # exists on the remote, main included. Empty destination with a
+      # non-empty SOURCE (`<src>:`) is instead a same-name push: <src> goes
+      # to a remote branch of the same name, exactly as if the colon were
+      # omitted — `HEAD:` resolves to the CURRENT branch's name, the same
+      # way a bare `git push origin HEAD` does below.
+      if [[ -z "$src" ]]; then
+        return 0
+      elif [[ "$src" == "HEAD" ]]; then
+        dst="$branch"
+      else
+        dst="$src"
+      fi
+    fi
   else
     dst="$spec"                          # no colon: src and dst are the same
   fi
@@ -595,23 +669,55 @@ inspect_segment() {
     # No refspec: the push follows the current branch's upstream — unless it
     # is a tags-only push, which never updates a branch.
     (( tags_only )) && return 0
+
+    if (( remote_seen == 0 )); then
+      # No refspec AND no explicit remote: resolve this exactly the way git
+      # itself would, in one lookup. `@{push}` folds together push.default,
+      # branch.<b>.remote/pushRemote, remote.pushDefault and remote.<r>.push
+      # with no network access — the only case it can't answer is
+      # push.default=matching, which it errors on, so that one is checked
+      # first and denied outright (it can push every same-named branch,
+      # main included, regardless of the current branch).
+      push_default=$(git -C "$work_dir" config --get push.default 2>/dev/null || true)
+      if [[ "$push_default" == "matching" ]]; then
+        deny "\`push.default\` is \`matching\`, which can push every same-named branch including main. Pushes to main are reserved for the user to run from the terminal."
+      fi
+      push_upstream=$(git -C "$work_dir" rev-parse --abbrev-ref --symbolic-full-name '@{push}' 2>/dev/null || true)
+      if [[ -n "$push_upstream" ]]; then
+        push_branch="${push_upstream##*/}"
+        if [[ "$push_branch" == "main" ]]; then
+          deny "Refspec-less push resolves (\`@{push}\`) to \`$push_upstream\`. Pushes to main are reserved for the user to run from the terminal."
+        fi
+        return 0
+      fi
+      # `@{push}` has nothing to resolve — no upstream is configured (and,
+      # in practice, no remote-tracking ref exists yet for it to point at
+      # either). Fall back to git's default `simple` behaviour: push the
+      # current branch to a remote branch of the same name.
+      if [[ "$current_branch" == "main" ]]; then
+        deny "Current branch is main and this push has no refspec. Pushes to main are reserved for the user to run from the terminal."
+      fi
+      return 0
+    fi
+
+    # An explicit remote but no refspec: a configured `remote.<name>.push`
+    # redirects the push in place of the current branch — check that FIRST,
+    # since it can send a non-main branch to main, or redirect what would
+    # otherwise be main away from it. Only fall back to "deny iff on main"
+    # when nothing is configured there.
+    configured_push=""
+    [[ -n "$remote_name" ]] && configured_push=$(git -C "$work_dir" config --get-all "remote.$remote_name.push" 2>/dev/null || true)
+    if [[ -n "$configured_push" ]]; then
+      while IFS= read -r cfg_spec || [[ -n "$cfg_spec" ]]; do
+        [[ -z "$cfg_spec" ]] && continue
+        if targets_main "$cfg_spec" "$current_branch"; then
+          deny "Configured \`remote.$remote_name.push\` (\`$cfg_spec\`) targets main for this refspec-less push. Pushes to main are reserved for the user to run from the terminal."
+        fi
+      done <<<"$configured_push"
+      return 0
+    fi
     if [[ "$current_branch" == "main" ]]; then
       deny "Current branch is main and this push has no refspec. Pushes to main are reserved for the user to run from the terminal."
-    fi
-    # Git also applies any configured `remote.<name>.push` refspecs in place
-    # of the current branch when one is set — that can target main even from
-    # a non-main branch (e.g. `remote.origin.push = HEAD:refs/heads/main`).
-    # Only this one key is modeled; `push.default`/upstream defaults are not.
-    if [[ -n "$remote_name" ]]; then
-      configured_push=$(git -C "$work_dir" config --get-all "remote.$remote_name.push" 2>/dev/null || true)
-      if [[ -n "$configured_push" ]]; then
-        while IFS= read -r cfg_spec || [[ -n "$cfg_spec" ]]; do
-          [[ -z "$cfg_spec" ]] && continue
-          if targets_main "$cfg_spec" "$current_branch"; then
-            deny "Configured \`remote.$remote_name.push\` (\`$cfg_spec\`) targets main for this refspec-less push. Pushes to main are reserved for the user to run from the terminal."
-          fi
-        done <<<"$configured_push"
-      fi
     fi
     return 0
   fi
@@ -623,19 +729,44 @@ inspect_segment() {
   done
 }
 
-# 2. Inspect each segment on its own. Splitting first is what keeps a commit
-# message or an unrelated command on the same line out of the argument list.
-# A backslash immediately before a newline is a shell line continuation, not
-# a command separator — join_continuations folds it into a single space
-# before the split below, so a push spread across escaped newlines is still
-# read as one command instead of getting cut at the line break.
+# 2. Inspect each segment on its own. Splitting happens AFTER tokenizing, not
+# on the raw text, so a `;`/`&`/`|`/newline sitting inside a quoted string —
+# a commit message, an echoed example — is just part of that word's token
+# and never creates a false segment boundary; only an UNQUOTED occurrence
+# (including one glued directly onto a word, `foo;bar`) starts a new
+# segment. Each segment is reassembled by rejoining its own tokens with a
+# single space, which `inspect_segment` then re-tokenizes itself — lossless
+# for our purposes, since two tokens are only ever adjacent without an
+# original space between them when an operator token used to sit there, and
+# that operator is exactly what got consumed to create the split. A
+# backslash immediately before a newline is a shell line continuation, not a
+# command separator — join_continuations folds it into a single space before
+# tokenizing, so a push spread across escaped newlines is still read as one
+# command instead of getting cut at the line break.
 inspect_command() {
   local text; text="$(join_continuations "$1")"
-  local cmd_segments; cmd_segments=$(printf '%s' "$text" | tr '\n;|&' '\n\n\n\n')
-  local segment
-  while IFS= read -r segment; do
-    inspect_segment "$segment"
-  done <<<"$cmd_segments"
+  tokenize "$text"
+  local seg=() rt joined
+  if (( ${#raw_tokens[@]} )); then
+    for rt in "${raw_tokens[@]}"; do
+      case "$rt" in
+        ';' | '&' | '&&' | '||' | '|' | $'\n')
+          if (( ${#seg[@]} )); then
+            joined="$(IFS=' '; printf '%s' "${seg[*]}")"
+            inspect_segment "$joined"
+          fi
+          seg=()
+          ;;
+        *)
+          seg+=("$rt")
+          ;;
+      esac
+    done
+  fi
+  if (( ${#seg[@]} )); then
+    joined="$(IFS=' '; printf '%s' "${seg[*]}")"
+    inspect_segment "$joined"
+  fi
 }
 
 running_dir="$default_dir"
@@ -646,10 +777,15 @@ exit 0
 # KNOWN LIMITS — deliberate, given the threat model at the top.
 #
 #   * It matches on literal text, so a command that merely *contains* a
-#     push-to-main pattern is blocked: a heredoc writing a script, a quoted
-#     example, an editor payload, a commit message pairing the words. That is
-#     the safe direction; write such files with the Write tool instead.
-#     Narrowing it would open `bash <<'EOF' … EOF` as a real bypass.
+#     push-to-main pattern is blocked when that text is unquoted and reads
+#     like a real invocation: a heredoc writing a script, or an editor
+#     payload, still gets denied even though nothing is actually about to
+#     run. That is the safe direction; write such files with the Write tool
+#     instead. Narrowing it would open `bash <<'EOF' … EOF` as a real bypass.
+#     A quoted example or a commit message that merely *mentions* `push`/
+#     `main` — including one containing a literal `;`/`&`/`|` — is correctly
+#     read as inert text, since segment splitting happens after tokenizing
+#     (see `inspect_command`), not on the raw string.
 #   * It does not expand variables or command substitution, so a push whose
 #     ref only exists after expansion (`git push origin "$B"`) is not seen.
 #     Closing this would require executing the command to find out what it
@@ -664,3 +800,10 @@ exit 0
 #     whitespace-only splitter happened to see into those (and DENY them) by
 #     accident of not respecting quoting at all; the quote-aware tokenizer
 #     that replaced it deliberately narrows that to the two named cases.
+#   * Directory tracking follows every `cd` linearly, with no model of
+#     subshell scope or command success: `(cd /tmp); git push origin main`
+#     and `cd /missing || git push origin main` are both judged against the
+#     wrong repo — a `cd` inside a subshell that has already closed, or one
+#     that failed, is still treated as having taken effect. Modelling that
+#     would mean modelling shell control flow, which is the same "disguised
+#     push" territory this list already excludes.
