@@ -310,8 +310,10 @@ def parse_codex_rate_limits(obj: Any) -> dict[str, Any] | None:
 def parse_cursor_usage(obj: Any) -> dict[str, Any] | None:
     """Normalize a GetCurrentPeriodUsage response to whitelisted numbers.
 
-    `displayMessage` and the dollar pool are deliberately not used for gating:
-    they report "limit hit" while requests still succeed on bonus usage.
+    Only the subscription-quota percentages are read. The dollar fields
+    (includedSpend/limit, displayMessage "You've hit your usage limit") describe
+    the separate extra-usage budget, which is set to $0 on purpose and never
+    funds these runs, so they are ignored.
     """
     if not isinstance(obj, dict) or not isinstance(obj.get("planUsage"), dict):
         return None
@@ -322,9 +324,6 @@ def parse_cursor_usage(obj: Any) -> dict[str, Any] | None:
         "auto_pct": _num(pu.get("autoPercentUsed")),
         "api_pct": _num(pu.get("apiPercentUsed")),
         "total_pct": _num(pu.get("totalPercentUsed")),
-        "included_spend_cents": _num(pu.get("includedSpend")),
-        "limit_cents": _num(pu.get("limit")),
-        "bonus_spend_cents": _num(pu.get("bonusSpend")),
         "reset_epoch": reset_epoch,
         "reset_at": epoch_to_iso(reset_epoch),
     }
@@ -531,8 +530,7 @@ def apply_cursor(state: dict[str, Any], parsed: dict[str, Any] | None) -> bool:
         return False
     prov = state["providers"]["cursor"]
     inc = {k: parsed.get(k) for k in (
-        "auto_pct", "api_pct", "total_pct", "included_spend_cents",
-        "limit_cents", "bonus_spend_cents", "reset_at", "reset_epoch")}
+        "auto_pct", "api_pct", "total_pct", "reset_at", "reset_epoch")}
     inc["source"] = parsed["source"]
     inc["observed_at"] = epoch_to_iso(parsed["observed_epoch"])
     prov["included"] = inc

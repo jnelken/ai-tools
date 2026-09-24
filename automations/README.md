@@ -126,11 +126,10 @@ Limitations:
 
 - **The Cursor RPC is internal and undocumented.** It can change with any Agent CLI update; the
   probe then returns nothing and routing falls back to limit hits.
-- **Cursor's dollar pool is unresolved.** On a Pro plan the response reported
-  `includedSpend == limit`, `remainingBonus: false`, `noUsageBasedAllowed: true` and a
-  `displayMessage` of "You've hit your usage limit" while all three percentages read ~10% and
-  requests kept succeeding on bonus usage. Those fields are stored but deliberately not gated on
-  until a real Cursor limit hit shows which signal predicts refusal.
+- **Ignore Cursor's dollar fields.** `includedSpend`/`limit`, `noUsageBasedAllowed` and a
+  `displayMessage` of "You've hit your usage limit" describe the extra-usage (on-demand) budget,
+  which is deliberately set to $0 with no balance. These runs live only on the subscription quota,
+  which is what the `*PercentUsed` fields measure. The dollar fields are neither stored nor gated on.
 - **Keychain under launchd.** The `security` lookup has a 5s timeout, so an access prompt can't
   hang a scheduled run; it just skips the Cursor probe.
 - The Keychain token is the Agent CLI's; if it expires the probe gets a 401 until the next `agent`

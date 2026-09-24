@@ -112,6 +112,7 @@ class ParseTests(unittest.TestCase):
         self.assertAlmostEqual(got["auto_pct"], 10.2)
         self.assertNotIn("email", json.dumps(got))
         self.assertNotIn("displayMessage", json.dumps(got))
+        self.assertFalse(any("spend" in k or "limit" in k for k in got))
 
 
 class RoutingTests(unittest.TestCase):
@@ -180,8 +181,9 @@ class RoutingTests(unittest.TestCase):
         usage.apply_cursor(self.state, probed(usage.parse_cursor_usage(cursor_response(auto=99, end_ms=PAST * 1000)), "dashboard_api"))
         self.assertTrue(self.flags()["cursor"]["available_for_worker"])
 
-    def test_dollar_pool_and_display_message_do_not_gate(self):
-        # includedSpend == limit and "You've hit your usage limit" while pools are ~10%.
+    def test_extra_usage_budget_does_not_gate(self):
+        # $0 extra-usage budget reads as includedSpend == limit and "You've hit
+        # your usage limit" while the subscription quota is ~10%.
         usage.apply_cursor(self.state, probed(usage.parse_cursor_usage(cursor_response()), "dashboard_api"))
         self.assertTrue(self.flags()["cursor"]["available_for_worker"])
 
