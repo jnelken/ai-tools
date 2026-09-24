@@ -114,21 +114,27 @@ trap 'rm -rf "$LOCK"' EXIT INT TERM
 extract_json_fence() {
   # extract_json_fence LABEL infile outfile
   python3 - "$1" "$2" "$3" <<'PY'
-import sys
+import json, sys
 label, infile, outfile = sys.argv[1], sys.argv[2], sys.argv[3]
 text = open(infile, encoding="utf-8", errors="replace").read()
 start = f"```{label}"
-i = text.find(start)
-if i < 0:
-    sys.exit(1)
-i = text.find("\n", i)
-if i < 0:
-    sys.exit(1)
-j = text.find("```", i + 1)
-if j < 0:
-    sys.exit(1)
-body = text[i + 1:j].strip()
-open(outfile, "w", encoding="utf-8").write(body + "\n")
+# Codex echoes the prompt and the ORCHESTRATOR.md it reads into stdout, and both
+# contain this label — so take the last fence whose body actually parses.
+end = len(text)
+while (i := text.rfind(start, 0, end)) >= 0:
+    end = i
+    nl = text.find("\n", i)
+    j = text.find("```", nl + 1) if nl >= 0 else -1
+    if j < 0:
+        continue
+    body = text[nl + 1:j].strip()
+    try:
+        json.loads(body)
+    except ValueError:
+        continue
+    open(outfile, "w", encoding="utf-8").write(body + "\n")
+    sys.exit(0)
+sys.exit(1)
 PY
 }
 
