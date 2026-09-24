@@ -385,7 +385,10 @@ an issue exists somewhere; read both, then pick one item by the prefer/skip rule
   `## Directive` section from [[prepare-roadmap]] — Jake's recorded answer to what blocked this
   repo. It is the only dirty-tree exception (Step 1a), it is a *pending* marker and not an
   authorization, and the worker retires the label once it has acted. Like `human-only`, it is a
-  flat workspace label that coexists with the issue's `repo/*` label.
+  flat workspace label that coexists with the issue's `repo/*` label — but **unlike `human-only`,
+  it does not make the issue ineligible.** It gates the repo's *tree*, not the item: a
+  directive-bearing ticket is ordinary work that triages by the normal Step 2 rules, and the
+  directive only decides whether the run may start on it at all.
 - **`do-next` is a next-run queue override.** It moves an otherwise eligible issue ahead of all
   fresh work after Step 0 has reconciled any interrupted prior run. It does not override
   `human-only`, repo safety, dependencies, or the Step 2 skip list. A completed issue naturally
