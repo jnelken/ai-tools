@@ -2,7 +2,7 @@
 # Scheduled roadmap advance — launched by launchd (com.jake.advance-roadmap).
 #
 # Architecture:
-#   1. Refresh providers-usage.json (lib/usage.py — Claude probe ∪ prior limits).
+#   1. Refresh providers-usage.json (lib/usage.py — Claude/Codex/Cursor quota probes ∪ prior limits).
 #   2. Read-only orchestrator: Codex Sol (high) default; Claude Opus (high) fallback.
 #   3. Parse ORCHESTRATOR_RESULT_JSON; dispatch worker.sh (Cursor → Codex → Claude).
 #   4. Record limit hits for the next tick.

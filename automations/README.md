@@ -65,7 +65,8 @@ Skipped runs never reach the Slack step, so only completed runs post.
 
 `run.sh` no longer runs a single write-capable Claude Opus session. It:
 
-1. Refreshes `providers-usage.json` (`lib/usage.py` — Claude statusline probe ∪ prior limit hits).
+1. Refreshes `providers-usage.json` (`lib/usage.py` — Claude, Codex and Cursor quota probes ∪
+   prior limit hits; see [Provider usage sources](#provider-usage-sources)).
 2. Launches a **read-only orchestrator**: **Codex Sol high** by default, Claude Opus high if Sol
    is exhausted. Sandbox / tool deny-list — triage only, no edits.
 3. Parses `ORCHESTRATOR_RESULT_JSON`, then dispatches `worker.sh` along
@@ -88,6 +89,52 @@ Claude windows plus the multi-provider routing line from `providers-usage.json`.
 
 The `:45` slots stay offset from `wrapup-repos` so this job never starts on a tree that job
 just dirtied.
+
+### Provider usage sources
+
+`lib/usage.py refresh` reads live quota for every provider before routing, so a hot provider is
+skipped *before* a run hits its limit. Every probe is best-effort and returns nothing on failure;
+the observed-limit-hit path (`record-limit`, parsed from CLI output) stays as the fallback, and a
+provider with no reading at all is assumed available until it hits a limit.
+
+| Provider | Source (in order) | Gate |
+| --- | --- | --- |
+| Claude | `~/.claude/state/claude-usage.json` (statusline) | 5h ≥ 70% or 7d ≥ 80% |
+| Codex | 1. short-lived `codex app-server` → `account/rateLimits/read` (fresh, ~1s) · 2. newest `token_count.rate_limits` in `~/.codex/sessions/**/rollout-*.jsonl` (as fresh as the last Codex turn; never overwrites a newer stored reading) | 5h ≥ 70%, 7d ≥ 80%, or `rateLimitReachedType` set while a window is unexpired |
+| Cursor | `POST api2.cursor.sh/aiserver.v1.DashboardService/GetCurrentPeriodUsage` with the Agent CLI's Keychain token (`cursor-access-token` / `cursor-user`) — the RPC behind the CLI's own `/usage` | the pool the worker draws from ≥ 95%: `autoPercentUsed` when `ADVANCE_ROADMAP_CURSOR_WORKER_MODEL` is `auto` (default), `apiPercentUsed` otherwise; clears at `billingCycleEnd` |
+
+Only the `codex` limit id is read (the separate `base_model_inference` / gpt-reserve pool is
+ignored). A window whose reset time has passed counts as 0% even without a fresh probe.
+
+Reproduce (read-only, writes nothing, exit 1 if any provider returned no data):
+
+```sh
+python3 ~/.claude/automations/advance-roadmap/lib/usage.py probe --provider all
+python3 ~/.claude/automations/advance-roadmap/lib/usage.py show   # stored state + history
+ADVANCE_ROADMAP_USAGE_PROBES=0 …/usage.py refresh                 # limit-hit fallback only
+```
+
+Tests: `python3 -m unittest discover -s automations/advance-roadmap/tests`.
+
+Nothing sensitive is persisted: the Cursor token lives only in memory for one request, and only
+whitelisted numeric/timestamp fields reach `providers-usage.json` (no email, no reset-credit ids).
+
+Tried and rejected: `codex /status` (interactive TUI only); `agent about|status --format json`
+(plan tier and auth state, no usage).
+
+Limitations:
+
+- **The Cursor RPC is internal and undocumented.** It can change with any Agent CLI update; the
+  probe then returns nothing and routing falls back to limit hits.
+- **Cursor's dollar pool is unresolved.** On a Pro plan the response reported
+  `includedSpend == limit`, `remainingBonus: false`, `noUsageBasedAllowed: true` and a
+  `displayMessage` of "You've hit your usage limit" while all three percentages read ~10% and
+  requests kept succeeding on bonus usage. Those fields are stored but deliberately not gated on
+  until a real Cursor limit hit shows which signal predicts refusal.
+- **Keychain under launchd.** The `security` lookup has a 5s timeout, so an access prompt can't
+  hang a scheduled run; it just skips the Cursor probe.
+- The Keychain token is the Agent CLI's; if it expires the probe gets a 401 until the next `agent`
+  run refreshes it.
 
 ## `wrapup-repos`
 

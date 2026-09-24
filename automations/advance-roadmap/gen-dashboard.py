@@ -493,6 +493,15 @@ def provider_rows(providers):
             else:
                 cells.append(f'<span class=pool><b>{label}</b> <span class=mono>{pct}%</span> '
                              f'<span class=dim>resets {esc(b.get("reset_at") or "?")} · {esc(src)}</span></span>')
+        # Cursor's monthly included pool: Auto and named-model (API) usage.
+        inc = pr.get("included")
+        if isinstance(inc, dict) and (inc.get("auto_pct") is not None or inc.get("api_pct") is not None):
+            for label, key in (("auto", "auto_pct"), ("api", "api_pct")):
+                if inc.get(key) is None:
+                    continue
+                cells.append(f'<span class=pool><b>{label}</b> <span class=mono>{round(inc[key])}%</span> '
+                             f'<span class=dim>resets {esc(inc.get("reset_at") or "?")} · '
+                             f'{esc(inc.get("source") or "unknown")}</span></span>')
         if not cells:
             src = pr.get("source") or "—"
             cells.append(f'<span class=pool><span class=dim>no pools tracked ({esc(src)})</span></span>')

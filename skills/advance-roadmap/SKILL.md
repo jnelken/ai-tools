@@ -29,7 +29,7 @@ Candidate repos: direct children of `/Users/jake/Dropbox/code`. Check
 
 `run.sh` owns routing and `providers-usage.json` (`lib/usage.py`):
 
-1. Refresh usage (Claude probe ∪ prior limit hits).
+1. Refresh usage (Claude statusline, Codex app-server/session log, Cursor dashboard API ∪ prior limit hits).
 2. Launch read-only orchestrator (**Sol first**).
 3. Parse the `ORCHESTRATOR_RESULT_JSON` fence.
 4. Dispatch `worker.sh` (Cursor → Codex → Claude) with same-run failover on limits.
