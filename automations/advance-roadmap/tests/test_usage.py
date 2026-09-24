@@ -147,6 +147,12 @@ class RoutingTests(unittest.TestCase):
         usage.apply_codex(self.state, probed(parsed, "app_server"))
         self.assertFalse(self.flags()["codex"]["available_for_worker"])
 
+    def test_codex_reached_clears_at_earliest_reset(self):
+        parsed = usage.parse_codex_rate_limits(
+            app_server_result(five=10, weekly=10, reached="primary", five_reset=PAST, weekly_reset=FUTURE))
+        usage.apply_codex(self.state, probed(parsed, "app_server"))
+        self.assertTrue(self.flags()["codex"]["available_for_worker"])
+
     def test_older_session_log_does_not_overwrite_fresher_reading(self):
         usage.apply_codex(self.state, probed(usage.parse_codex_rate_limits(app_server_result(weekly=72)), "app_server"))
         stale = usage.parse_codex_rate_limits(app_server_result(weekly=10))

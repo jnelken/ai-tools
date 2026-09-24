@@ -552,9 +552,11 @@ def codex_quota_ok(prov: dict[str, Any], now: float) -> bool:
     if window_exhausted(weekly.get("used_pct"), weekly.get("reset_epoch"), MAX_SEVEN_DAY_PCT, now):
         return False
     if prov.get("rate_limit_reached"):
-        # Only meaningful until the windows it was observed against roll over.
-        resets = [_num(w.get("reset_epoch")) for w in (five, weekly)]
-        if any(r and r > now for r in resets):
+        # Holds only until the next window rolls over; a still-full weekly
+        # window is caught by its threshold above. Waiting for every reset
+        # would gate Codex for days while no fresh reading can arrive.
+        resets = [r for r in (_num(w.get("reset_epoch")) for w in (five, weekly)) if r]
+        if resets and min(resets) > now:
             return False
     return True
 
