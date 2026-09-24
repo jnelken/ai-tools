@@ -1,0 +1,9 @@
+# Repos where block-push-to-main.sh enforces the guardrail. One repo name per
+# line, matched against the `origin` remote's repo name — so it applies across
+# worktrees and Superset workspaces, which live at unrelated paths.
+# Every repo NOT listed here is unaffected; `#` comments and blanks ignored.
+#
+# Concentro repos keep the PR flow (see the Git section of ~/.claude/CLAUDE.md):
+# main moves only through a reviewed PR, never a direct push.
+woodrow
+api
