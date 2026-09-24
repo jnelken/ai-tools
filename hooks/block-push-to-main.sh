@@ -424,7 +424,12 @@ join_continuations() {
     if [[ -z "$out" ]]; then
       out="$line"
     elif [[ "$out" == *\\ ]]; then
-      out="${out%\\} $line"
+      # A backslash immediately before the newline is deleted along with the
+      # newline itself, per shell line-continuation semantics — `ma\` +
+      # newline + `in` is the single word `main`, not `ma in`. Whitespace
+      # before the backslash (`HEAD \` + newline + `main`) already separates
+      # the two words on its own, so no space needs to be added back here.
+      out="${out%\\}$line"
     else
       out="$out"$'\n'"$line"
     fi
@@ -644,7 +649,19 @@ inspect_segment() {
         # attached `=` form has no extra token to skip.
         opt_name="$tok"
         [[ "$tok" == *=* ]] && opt_name="${tok%%=*}"
-        if push_opt_takes_value "$opt_name" && [[ "$tok" != *=* ]]; then
+        if [[ "$opt_name" == "--repo" ]]; then
+          # `--repo <remote>` (or `--repo=<remote>`) names the remote
+          # explicitly, the same as a bare leading token would — without
+          # this, its value is merely skipped and the NEXT bare token (the
+          # real refspec) is misread as the remote instead.
+          if [[ "$tok" == *=* ]]; then
+            remote_name="${tok#*=}"
+          else
+            remote_name="${tokens[i]:-}"
+            i=$((i + 1))
+          fi
+          remote_seen=1
+        elif push_opt_takes_value "$opt_name" && [[ "$tok" != *=* ]]; then
           i=$((i + 1))
         fi
         ;;
@@ -684,7 +701,11 @@ inspect_segment() {
       fi
       push_upstream=$(git -C "$work_dir" rev-parse --abbrev-ref --symbolic-full-name '@{push}' 2>/dev/null || true)
       if [[ -n "$push_upstream" ]]; then
-        push_branch="${push_upstream##*/}"
+        # Strip only the remote name (the segment up to the first `/`), not
+        # the last path component — `origin/release/main` is the branch
+        # `release/main`, not `main`, and comparing on the last component
+        # alone would misread it as a push to main.
+        push_branch="${push_upstream#*/}"
         if [[ "$push_branch" == "main" ]]; then
           deny "Refspec-less push resolves (\`@{push}\`) to \`$push_upstream\`. Pushes to main are reserved for the user to run from the terminal."
         fi
@@ -807,3 +828,11 @@ exit 0
 #     that failed, is still treated as having taken effect. Modelling that
 #     would mean modelling shell control flow, which is the same "disguised
 #     push" territory this list already excludes.
+#   * A refspec-less push is resolved through `@{push}` (no explicit remote)
+#     or `remote.<name>.push` (explicit remote) — see the WHAT THIS IS notes
+#     above. The hook does not model `push.default=upstream`/`matching` for
+#     an explicitly named remote, nor a `branch.<b>.merge` upstream whose
+#     remote-tracking ref has never been fetched; both fall back to "deny
+#     iff the current branch is main". Same accident-versus-disguise
+#     boundary as the rest of this list — the server-side ruleset is the
+#     backstop for it.

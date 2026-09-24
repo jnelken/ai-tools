@@ -257,8 +257,14 @@ echo "-- --recurse-submodules takes a value"
 check DENY  "$W" 'git push --recurse-submodules on-demand origin' 'recurse-submodules value not misread as the refspec'
 check ALLOW "$W" 'git push --recurse-submodules on-demand origin feature' 'recurse-submodules with an explicit non-main refspec'
 
+echo "-- --repo names the remote explicitly"
+check DENY  "$F" 'git push --repo origin main' '--repo (separate form) names the remote, main refspec follows'
+check DENY  "$F" 'git push --repo=origin main' '--repo=origin (attached form) names the remote, main refspec follows'
+check ALLOW "$F" 'git push --repo origin feature' '--repo names the remote, non-main refspec follows'
+
 echo "-- line continuations are joined before splitting"
 check DENY  "$F" $'git push origin HEAD \\\nmain' 'push split across an escaped newline'
+check DENY  "$F" $'git push origin ma\\\nin' 'backslash-newline pair is deleted, not replaced with a space (ma\\+nl+in = main)'
 
 echo "-- configured remote.<name>.push refspecs on a refspec-less push"
 git -C "$F" config remote.origin.push 'HEAD:refs/heads/main'
@@ -289,6 +295,17 @@ git -C "$F" update-ref -d refs/remotes/origin/main
 git -C "$F" config push.default matching
 check DENY "$F" 'git push' 'push.default=matching is denied outright, even from a feature branch'
 git -C "$F" config --unset push.default
+
+echo "-- @{push} comparison uses the whole branch name, not just its last path component"
+git -C "$F" update-ref refs/remotes/origin/release/main refs/heads/feature/thing
+git -C "$F" config branch.feature/thing.remote origin
+git -C "$F" config branch.feature/thing.merge refs/heads/release/main
+git -C "$F" config push.default upstream
+check ALLOW "$F" 'git push' '@{push} resolves to origin/release/main, which is not main'
+git -C "$F" config --unset branch.feature/thing.remote
+git -C "$F" config --unset branch.feature/thing.merge
+git -C "$F" config --unset push.default
+git -C "$F" update-ref -d refs/remotes/origin/release/main
 
 echo "-- refspec-less push WITH an explicit remote: configured remote.push wins over the branch fallback"
 git -C "$W" config remote.origin.push 'HEAD:release'
