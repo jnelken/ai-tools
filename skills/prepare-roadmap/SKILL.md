@@ -20,8 +20,12 @@ it has no scheduled/unattended mode. If invoked headlessly, say so and stop.
 `/prepare-roadmap` reads. It runs `git status`, `git diff --stat`, and reads files — never
 `git add`, `git commit`, `git checkout --`, `git stash`, `git reset`, or any edit to a file
 *inside* a target repo. It doesn't implement anything, doesn't run tests or builds, and
-doesn't decide which roadmap item to build. Everything it produces is a directive recorded
-**in Linear**, for `/advance-roadmap` to carry out later.
+doesn't decide which roadmap item to build. Everything it produces lives **in Linear** — a
+directive, and where a blocked repo has no ticket to carry one, that ticket — for
+`/advance-roadmap` to carry out later.
+
+"Never touches a repo" is about the working tree and the filesystem, not about Linear. It
+may freely create and update Linear issues; that's the medium the hand-off is written in.
 
 This is deliberate, not a limitation to work around: `/advance-roadmap` is the one skill
 hardened (allowlists, preflight, ff-only merges, all-or-nothing verification) to safely
@@ -63,20 +67,51 @@ Because the directive rides on a real work ticket, there is no risk of `/advance
 mistaking a directive for an item to implement — the ticket *is* legitimate work, and the
 directive only changes whether that work can start.
 
-### When a blocked repo has no eligible ticket
+### When a blocked repo has no eligible ticket, file one
 
-This is the one case the design can't cover, and it must be surfaced rather than worked
-around. A repo whose roadmap is file-only (`ROADMAP.md` or `docs/plans/` with no mirrored
-Linear issue) has nowhere to carry a directive: writing into the repo is forbidden by the
-hard rule above, and **filing a ticket is not this skill's job** — it only asks and records.
+A repo whose roadmap is file-only (`ROADMAP.md` or `docs/plans/` with no mirrored Linear
+issue), or that has no roadmap at all and only a dirty tree, has nothing to carry a
+directive. Writing inside the repo is forbidden by the hard rule above, so **create the
+ticket** — that is allowed, and it is the only way such a repo ever gets unblocked.
 
-So: record nothing, and say so plainly in the Step 3 summary —
+Four constraints keep that from becoming a mess:
 
-> `<repo>` is dirty but has no Linear ticket to carry a directive. File one (or mirror the
-> roadmap item into Linear) and re-run `/prepare-roadmap`.
+1. **Only ever after Jake has answered — never during discovery or triage.** The ticket is
+   created as part of persisting an answer, in the same breath as the directive itself. So a
+   sweep Jake abandons halfway leaves no fabricated tickets behind: no answer, no ticket.
+   This ordering is the whole safety property; don't pre-create tickets for candidates you
+   haven't asked about yet.
+2. **Invoke [[linear-ticket-gen]] first.** The global `CLAUDE.md` requires it for any Linear
+   issue you create, and it owns the parts this skill shouldn't re-derive: resolving the
+   team, and the two-pass overlap check (scoped, then workspace-wide). **If an existing issue
+   already covers the work, attach the directive to that one instead of filing a new
+   ticket** — that check is what stops this from slowly duplicating the board.
+3. **Mirror what exists; never invent scope.** Two shapes, depending on what's actually there:
+   - **A roadmap item the directive unblocks** — title is the item's own name, description is
+     its scope and touchpoints as the roadmap states them, plus a pointer to the source file
+     and section so the roadmap stays the origin. This is exactly the "mirror individual
+     actionable items as lean issues when they're ready to be picked up or automated" path the
+     global `CLAUDE.md` already describes, and a directive is precisely that readiness signal.
+     Don't restate the whole roadmap, don't add acceptance criteria Jake didn't state, and
+     don't promote an item he didn't just green-light.
+   - **Nothing but a dirty tree** — title `Resolve uncommitted work in <repo>`, description is
+     what the tree contains plus Jake's verbatim instruction. Cleaning the tree is real work,
+     so this is an honest ticket rather than a container invented for the occasion.
 
-Never invent a ticket to have somewhere to write. An abandoned sweep that left fabricated
-tickets behind would defeat the persist-immediately property this skill is built around.
+     **Pair a cleanup-only ticket with the "just clean up" go-ahead.** By existing it newly
+     qualifies the repo for `/advance-roadmap` at all (its Step 1: a Linear issue naming a
+     repo qualifies it), and a bare go-ahead would invite that run to pick an item and build
+     it — which is not what Jake agreed to when he answered a question about uncommitted work.
+4. **Label it the way the workspace requires.** `repo/<directory>` is mandatory and
+   single-select, and the label name is the **directory** name rather than the GitHub repo —
+   `repo/openclaw-vps` is `jnelken/vena-vps`, and each label's description records its own
+   mismatch, so read it when the two differ. Add `roadmap-directive`. Leave
+   `Bug`/`Improvement`/`Feature` alone unless Jake said which it is; a guessed type label is
+   worse than none. File it in state **Todo** — a directive means "this is ready to pick up",
+   which is what distinguishes it from the Backlog.
+
+Name every ticket you filed in the Step 3 summary. It's a new object Jake didn't ask for by
+identifier, so he should leave the sweep knowing it exists.
 
 ### Directive format
 
@@ -206,9 +241,10 @@ logic above is wrong; fix it before proceeding, don't just note the discrepancy.
 **Also resolve each candidate's ticket now**, in the same pass: query Linear once for the
 repo labels in play, and for each candidate find the ticket a directive would attach to
 (the roadmap index's linked ticket, or the highest-priority eligible `repo/*` issue). A
-candidate with no eligible ticket is reported, not asked about — see *When a blocked repo
-has no eligible ticket* above. Note which candidates already carry `roadmap-directive`;
-those are already queued and get skipped this sweep.
+candidate with no eligible ticket still gets asked about — you file its ticket once he
+answers, per *When a blocked repo has no eligible ticket, file one* above. Note which
+candidates already carry `roadmap-directive`; those are already queued and get skipped this
+sweep.
 
 ### No shell available? Fall back to Linear, and say that you did
 
@@ -295,13 +331,20 @@ Concretely, per repo:
 1. Re-run `git -C <repo> status --porcelain` and build the canonical snapshot from **that**
    output, not from what you showed Jake earlier in the sweep. The snapshot's whole job is
    to describe the tree at the moment the instruction was given.
-2. `save_issue` on the resolved ticket, appending the `## Directive` section (or `patch`ing
-   the existing one, per *Updating a directive* above).
-3. `save_issue` again — or in the same call — to add the `roadmap-directive` label
-   (`addLabels`, never `labels`, which would replace the ticket's whole label set and drop
-   its `repo/*` label).
-4. A "Skip" answer writes nothing for that item — it simply isn't recorded, so the next
-   sweep asks again naturally. There's no partial-answer state to track.
+2. **If this repo had no eligible ticket, create it now** — per *When a blocked repo has no
+   eligible ticket, file one*, via [[linear-ticket-gen]], with its `repo/*` label and in state
+   `Todo`. This is the one point in the sweep where a ticket gets created: after the answer,
+   never before.
+3. `save_issue` on that ticket, appending the `## Directive` section (or `patch`ing the
+   existing one, per *Updating a directive* above).
+4. `save_issue` again — or in the same call — to add the `roadmap-directive` label. On a
+   ticket that already existed use `addLabels`, never `labels`, which would replace the whole
+   label set and drop its `repo/*` label. (On a ticket you just created you can pass both
+   labels at creation.)
+5. A "Skip" answer writes nothing for that item — it simply isn't recorded, so the next
+   sweep asks again naturally. There's no partial-answer state to track. **A skipped repo
+   gets no ticket either** — if every answer for a repo was "Leave it" / "Skip", nothing at
+   all is created for it.
 
 If a repo's only answers were "Leave it" / "Skip", write no directive and apply no label.
 
@@ -311,9 +354,9 @@ Say up front **which discovery mode ran** — full live sweep, or the partial Li
 fallback (and if the latter, that a terminal sweep is needed for the complete picture).
 
 Then list, per repo: what was recorded (dirty-tree resolution / N answered decisions /
-both), which ticket now carries it, and what was skipped. Call out separately every repo
-that was blocked but had **no eligible ticket** to carry a directive, since those are the
-ones needing an action from Jake before they can ever be unblocked.
+both), which ticket now carries it, and what was skipped. **Name every ticket you had to
+create**, and say which are cleanup-only — those are the ones whose go-ahead deliberately
+stops short of implementing anything.
 
 Close by saying that the next `/advance-roadmap` run (scheduled, four times a day) picks
 up each pending directive automatically — or that Jake can run `/advance-roadmap` right now
