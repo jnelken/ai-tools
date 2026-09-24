@@ -24,11 +24,23 @@ HOOK_DENYLIST="$SHIM/block-push-to-main.sh"
 # Run the hook the way Claude Code does: from the directory it reports as cwd,
 # so a relative `-C .` resolves against the fixture and not the checkout that
 # happens to be running the tests.
-run() { # run <hook> <cwd> <cmd> -> prints "DENY" or "ALLOW"
-  local out
+#
+# Classification is strict: DENY only on exit 0 with a `deny` decision in
+# stdout, ALLOW only on exit 0 with empty stdout. Anything else (a non-zero
+# exit — e.g. a crash like an unbound-variable error — or exit 0 with
+# unexpected stdout) is ERROR(status=N) and never silently counted as ALLOW.
+run() { # run <hook> <cwd> <cmd> -> prints "DENY", "ALLOW", or "ERROR(status=N)"
+  local out status
   out=$( cd "$2" 2>/dev/null && jq -n --arg c "$3" --arg d "$2" \
            '{tool_input:{command:$c},cwd:$d}' | bash "$1" )
-  if printf '%s' "$out" | grep -q '"deny"'; then echo DENY; else echo ALLOW; fi
+  status=$?
+  if (( status == 0 )) && [[ -z "$out" ]]; then
+    echo ALLOW
+  elif (( status == 0 )) && printf '%s' "$out" | jq -e '.hookSpecificOutput.permissionDecision == "deny"' >/dev/null 2>&1; then
+    echo DENY
+  else
+    echo "ERROR(status=$status)"
+  fi
 }
 
 check() { # check <expected> <cwd> <cmd> <label>
@@ -56,6 +68,8 @@ trap 'rm -rf "$FIXTURE" "$SHIM"' EXIT
 for r in woodrow api personal-thing; do
   mkdir -p "$FIXTURE/$r"
   git -C "$FIXTURE/$r" init -q -b main
+  git -C "$FIXTURE/$r" config user.name test
+  git -C "$FIXTURE/$r" config user.email test@example.com
   git -C "$FIXTURE/$r" remote add origin "git@github.com:Concentro-Inc/$r.git"
   git -C "$FIXTURE/$r" commit -q --allow-empty -m init
   git -C "$FIXTURE/$r" branch feature/thing
@@ -78,6 +92,8 @@ VENDORED="$W/.claude/hooks/block-push-to-main.sh"
 NR="$FIXTURE/noremote"
 mkdir -p "$NR/.claude/hooks"
 git -C "$NR" init -q -b main
+git -C "$NR" config user.name test
+git -C "$NR" config user.email test@example.com
 git -C "$NR" commit -q --allow-empty -m init
 git -C "$NR" branch feature/thing
 git -C "$NR" worktree add -q "$FIXTURE/nr-wt" feature/thing
@@ -90,6 +106,13 @@ NRW="$FIXTURE/nr-wt"
 BARE="$FIXTURE/woodrow.git"
 git clone -q --bare "$W" "$BARE"
 git -C "$BARE" config remote.origin.url git@github.com:Concentro-Inc/woodrow.git
+
+# A guarded repo whose path itself has a space, for exercising the
+# quote-aware tokenizer against `-C`/`--git-dir` values that need it.
+mkdir -p "$FIXTURE/with space"
+git clone -q "$W" "$FIXTURE/with space/woodrow"
+git -C "$FIXTURE/with space/woodrow" config remote.origin.url git@github.com:Concentro-Inc/woodrow.git
+SPACED="$FIXTURE/with space/woodrow"
 
 # An alias that expands to push, in the woodrow fixture only.
 git -C "$W" config alias.p push
@@ -219,6 +242,28 @@ check ALLOW "$F" 'git pubfeat' 'alias with args: pubfeat = push origin HEAD, fea
 echo "-- cd hidden inside a nested shell"
 check DENY  "$OUT" "bash -c 'cd $W && git push origin main'" 'cd inside bash -c reaches a guarded repo'
 check ALLOW "$W"   "bash -c 'cd $P && git push origin main'" 'cd inside bash -c reaches an unguarded repo'
+
+echo "-- quote-aware tokenizer: a repo path containing a space"
+check DENY  "$OUT" "git -C '$SPACED' push origin main" 'quoted -C value with an embedded space'
+check DENY  "$OUT" "git --git-dir='$SPACED/.git' push origin main" 'quoted --git-dir value with an embedded space'
+check DENY  "$OUT" "cd '$SPACED' && git push origin main" 'cd into a quoted path with an embedded space'
+
+echo "-- --work-tree/GIT_WORK_TREE never select the repo"
+check DENY  "$OUT" "git -C $W --work-tree=/tmp push origin main" '-C selects the repo; --work-tree is ignored'
+check DENY  "$OUT" "git -C $FIXTURE -C woodrow push origin main" 'chained relative -C resolves against the previous one'
+check DENY  "$P"   "git -C $FIXTURE -C woodrow push origin main" 'chained relative -C, cwd different from the first -C target'
+
+echo "-- --recurse-submodules takes a value"
+check DENY  "$W" 'git push --recurse-submodules on-demand origin' 'recurse-submodules value not misread as the refspec'
+check ALLOW "$W" 'git push --recurse-submodules on-demand origin feature' 'recurse-submodules with an explicit non-main refspec'
+
+echo "-- line continuations are joined before splitting"
+check DENY  "$F" $'git push origin HEAD \\\nmain' 'push split across an escaped newline'
+
+echo "-- configured remote.<name>.push refspecs on a refspec-less push"
+git -C "$F" config remote.origin.push 'HEAD:refs/heads/main'
+check DENY  "$F" 'git push origin' 'configured remote.push maps HEAD to main from a feature branch'
+git -C "$F" config --unset remote.origin.push
 
 echo
 echo "pass=$pass fail=$fail"

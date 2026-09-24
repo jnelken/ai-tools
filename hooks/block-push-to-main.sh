@@ -31,14 +31,23 @@
 #   * It does not assume the subcommand is the second word, so global options
 #     (`-C <dir>`, `-c k=v`) do not hide the verb.
 #   * It does not assume the push targets the repo the shell happens to sit
-#     in. `git -C <dir> push`, `--git-dir`/`--work-tree`, `GIT_DIR=`, and a
-#     `cd` in an earlier segment all move the target, and the denylist match
-#     and branch lookup follow. Without this, `git -C <repo> push origin main`
-#     run from /tmp bypassed the guard completely. A `--git-dir`/`GIT_DIR=`
-#     path — bare repo included — identifies the repo by the git dir itself
-#     and wins over `--work-tree`, which only relocates the working files.
+#     in. `git -C <dir> push`, `--git-dir`/`GIT_DIR=`, and a `cd` in an
+#     earlier segment all move the target, and the denylist match and branch
+#     lookup follow. Without this, `git -C <repo> push origin main` run from
+#     /tmp bypassed the guard completely. Precedence: a `--git-dir`/`GIT_DIR=`
+#     path (bare repo included) identifies the repo by the git dir itself and
+#     wins outright; otherwise `-C` selects it, resolved cumulatively (each
+#     `-C` relative to the previous one, and the first relative to the
+#     segment's running cwd); otherwise the running cwd. `--work-tree`/
+#     `GIT_WORK_TREE=` play no part in that precedence at all — git selects
+#     the repo from the git dir, or from `-C`/cwd discovery, and a work-tree
+#     only relocates the working files, never which repo a push targets.
 #   * It does not treat every refspec-less push as a branch push: `--tags`
-#     ships tags only, and `--help`/`--dry-run` write nothing at all.
+#     ships tags only, and `--help`/`--dry-run` write nothing at all. A
+#     refspec-less push is also checked against the remote's configured
+#     `remote.<name>.push` refspecs, since git applies those in place of the
+#     current branch when one is set. Only that key is modeled — not
+#     `push.default` or upstream-tracking defaults more generally.
 #   * A `!`-shell alias's own arguments are not modeled — it is detected as a
 #     push (so a bare push on `main` is still caught), but what it actually
 #     pushes is opaque to us.
@@ -106,6 +115,64 @@ strip_shell_punct() {
     esac
   done
   printf '%s' "$s"
+}
+
+# Quote-aware tokenizer: splits $1 on unquoted whitespace, keeping a
+# `'…'` or `"…"` run — or a backslash-escaped character — inside one token
+# instead of letting its embedded whitespace end the token early. Populates
+# the global `raw_tokens` array directly (rather than handing back a value to
+# copy in) so an empty result stays a zero-element array without ever passing
+# through a `"${arr[@]}"` expansion — bash 3.2 (macOS's default `/bin/bash`)
+# raises "unbound variable" under `set -u` for that expansion on an empty
+# array, even though `${#arr[@]}` is fine. Tokens keep their quote/backslash
+# characters intact, so the existing two-array split (raw_tokens for the
+# `#`-comment test, `unquote` producing tokens) keeps working unchanged. An
+# unterminated quote just runs to the end of the string rather than erroring.
+# This replaces plain whitespace-splitting (`read -a`), which is why a value
+# like `-o "ci skip"` no longer needs to be re-merged after the fact — the
+# tokenizer already keeps it as one token.
+tokenize() {
+  local s="$1" i=0 n=${#1} c token="" started=0
+  raw_tokens=()
+  while (( i < n )); do
+    c="${s:i:1}"
+    case "$c" in
+      ' ' | $'\t')
+        (( started )) && raw_tokens+=("$token")
+        token=""
+        started=0
+        i=$((i + 1))
+        ;;
+      '"' | "'")
+        started=1
+        token+="$c"
+        i=$((i + 1))
+        while (( i < n )) && [[ "${s:i:1}" != "$c" ]]; do
+          token+="${s:i:1}"
+          i=$((i + 1))
+        done
+        if (( i < n )); then
+          token+="$c"
+          i=$((i + 1))
+        fi
+        ;;
+      \\)
+        started=1
+        token+="$c"
+        i=$((i + 1))
+        if (( i < n )); then
+          token+="${s:i:1}"
+          i=$((i + 1))
+        fi
+        ;;
+      *)
+        started=1
+        token+="$c"
+        i=$((i + 1))
+        ;;
+    esac
+  done
+  (( started )) && raw_tokens+=("$token")
 }
 
 # 0. Only enforce in repos listed in the denylist. The denylist is a sibling of
@@ -193,10 +260,14 @@ git_opt_takes_value() {
 
 # Push options that consume the NEXT token. Without these the value is misread
 # as the remote, which shifts the real remote into the refspec slot and hides
-# a no-refspec push to main.
+# a no-refspec push to main. Per `git push -h`: `--force-with-lease` and
+# `--signed` take a value only in their attached `=` form (bare, they're
+# flags) so they are deliberately not listed here — only the always-separate
+# (or attached-or-separate) options are.
 push_opt_takes_value() {
   case "$1" in
-    -o | --push-option | --receive-pack | --exec | --repo | --upload-pack) return 0 ;;
+    -o | --push-option | --receive-pack | --exec | --repo | --upload-pack | \
+    --recurse-submodules) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -267,20 +338,91 @@ targets_main() {
   [[ "$dst" == "main" ]]
 }
 
-# 2. Inspect each segment on its own. Splitting first is what keeps a commit
-# message or an unrelated command on the same line out of the argument list.
-segments=$(printf '%s' "$cmd" | tr '\n;|&' '\n\n\n\n')
-running_dir="$default_dir"
-while IFS= read -r segment; do
-  read -r -a raw_tokens <<<"$segment"
-  (( ${#raw_tokens[@]} )) || continue
+# A backslash immediately before a newline is a shell line continuation, not a
+# command separator — join it into a single space before splitting on real
+# newlines below, so `git push origin HEAD \` / `main` on two lines is read as
+# one push with two refspecs instead of getting cut at the line break. A
+# newline NOT preceded by a backslash is left alone; it already behaves like
+# `;` in the segment split that follows.
+join_continuations() {
+  local out="" line
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    if [[ -z "$out" ]]; then
+      out="$line"
+    elif [[ "$out" == *\\ ]]; then
+      out="${out%\\} $line"
+    else
+      out="$out"$'\n'"$line"
+    fi
+  done <<<"$1"
+  printf '%s' "$out"
+}
+
+# inspect_segment judges one segment. A token that is a command-substitution
+# or backtick wrapper, or an argument handed to a shell/eval invocation, can
+# hide an entire nested command from the scan below (`"$(git push origin
+# main)"`, `sh -c 'git push origin main'`) — including a `cd` that would
+# otherwise only be visible as this segment's own first token. Before parsing
+# this segment's own verb, inspect_segment finds any such payload and recurses
+# into it through inspect_command, so a nested `cd` still updates
+# `running_dir` and a nested push is still judged (and, via `deny`'s own
+# `exit`, still stops the whole hook). Recursion reuses the shared
+# raw_tokens/tokens/i, so this segment's own tokens are rebuilt afterward.
+inspect_segment() {
+  local segment="$1"
+  tokenize "$segment"
+  (( ${#raw_tokens[@]} )) || return 0
 
   # Normalize: drop quoting and any leading shell punctuation, so `(git`,
   # `$(git`, `'git` and `` `git `` are all recognized as the git token.
   tokens=()
+  local t
   for t in "${raw_tokens[@]}"; do
     tokens+=("$(strip_shell_punct "$(unquote "$t")")")
   done
+
+  # Rule 1: a token whose RAW (quote-stripped-only) form starts with `$(` or a
+  # backtick is a command substitution — checked on the raw token, before
+  # strip_shell_punct peels the wrapper off, so a plain quoted multi-word
+  # value (e.g. a commit message) is never mistaken for one; the
+  # already-peeled `tokens[k]` is what gets recursed into. Rule 2: once a
+  # `sh`/`bash`/`zsh`/`eval` token is seen anywhere in the segment, every
+  # later argument that isn't itself a flag is treated as its script/command —
+  # covers `-c`, `-lc`, and `sudo sh -c` alike without parsing which flag
+  # takes a value.
+  local payloads=() is_shell_launcher=0 k
+  for (( k = 0; k < ${#tokens[@]}; k++ )); do
+    case "${tokens[k]}" in
+      bash | sh | zsh | */bash | */sh | */zsh | eval) is_shell_launcher=1 ;;
+    esac
+    # Cheap pre-check before the subshell+unquote below: only a raw token
+    # that could possibly start with `$(` or a backtick once its own quoting
+    # is stripped is worth checking properly.
+    if [[ "${raw_tokens[k]:-}" == *'$('* || "${raw_tokens[k]:-}" == *'`'* ]]; then
+      case "$(unquote "${raw_tokens[k]}")" in
+        '$('* | '`'*) payloads+=("${tokens[k]}") ;;
+      esac
+    fi
+    if (( is_shell_launcher )) && (( k > 0 )); then
+      case "${tokens[k]}" in
+        -* | bash | sh | zsh | */bash | */sh | */zsh | eval) : ;;
+        *) payloads+=("${tokens[k]}") ;;
+      esac
+    fi
+  done
+  if (( ${#payloads[@]} )); then
+    local payload
+    for payload in "${payloads[@]}"; do
+      inspect_command "$payload"
+    done
+    # Recursing clobbered the shared raw_tokens/tokens/i; rebuild this
+    # segment's own tokens before continuing.
+    tokenize "$segment"
+    tokens=()
+    for t in "${raw_tokens[@]}"; do
+      tokens+=("$(strip_shell_punct "$(unquote "$t")")")
+    done
+  fi
 
   # `cd <dir> && git push …` splits into two segments; carry the directory
   # forward so the second one is judged against the repo it actually enters.
@@ -292,57 +434,46 @@ while IFS= read -r segment; do
     esac
   fi
 
-  # `bash -c 'cd /guarded && git push origin main'` hides the `cd` inside a
-  # nested shell rather than as this segment's own first token — but the `&&`
-  # inside that quoted string still splits the segment (the splitter has no
-  # notion of quoting), so the `cd` and its target are tokens of THIS segment,
-  # just not at position 0.
-  case "${tokens[0]}" in
-    bash | sh | zsh | */bash | */sh | */zsh)
-      for (( j = 1; j < ${#tokens[@]}; j++ )); do
-        if [[ "${tokens[j]}" == "cd" && -n "${tokens[j+1]:-}" ]]; then
-          case "${tokens[j+1]}" in
-            /*) running_dir="${tokens[j+1]}" ;;
-            -|'~'*) : ;;
-            *) running_dir="$running_dir/${tokens[j+1]}" ;;
-          esac
-          break
-        fi
-      done
-      ;;
-  esac
-
-  [[ "$segment" == *git* ]] || continue
+  [[ "$segment" == *git* ]] || return 0
 
   # Walk to the subcommand. Environment assignments may precede `git`; capture
-  # the two that relocate the repo.
+  # the one that relocates the repo (`GIT_WORK_TREE=` is consumed by the loop
+  # below like any other token but otherwise ignored — see the -C/--git-dir
+  # block's comment for why).
   env_gitdir=""
-  env_worktree=""
   i=0
   while (( i < ${#tokens[@]} )) && [[ "${tokens[i]}" != "git" && "${tokens[i]}" != */git ]]; do
     case "${tokens[i]}" in
-      GIT_WORK_TREE=*) env_worktree="${tokens[i]#GIT_WORK_TREE=}" ;;
       GIT_DIR=*) env_gitdir="${tokens[i]#GIT_DIR=}" ;;
     esac
     i=$((i + 1))
   done
-  (( i < ${#tokens[@]} )) || continue
+  (( i < ${#tokens[@]} )) || return 0
   i=$((i + 1))
 
   # Skip git's own options, capturing the ones that name a different repo.
   # `--git-dir` (or `GIT_DIR=`) identifies the repo by the git dir path
   # itself — unlike the old `dirname` reduction, this also works for a bare
-  # repo (where the git dir IS the repo) and for a plain `.git` directory —
-  # and it wins over `--work-tree` regardless of which comes first on the
-  # line, since `--work-tree` only relocates the working files git-dir found.
+  # repo (where the git dir IS the repo) and for a plain `.git` directory.
+  # `-C` is resolved as we go, cumulatively: an absolute value replaces
+  # whatever came before, a relative one is joined onto it — matching git's
+  # own "each -C is relative to the previous one" behavior, so `-C a -C b`
+  # reaches `a/b`. `--work-tree`/`GIT_WORK_TREE=` are consumed (so their value
+  # doesn't get misread as the subcommand) but otherwise ignored — a
+  # work-tree only relocates the working files, it never selects the repo.
   opt_gitdir=""
-  opt_worktree=""
-  opt_c=""
+  c_dir=""
   while (( i < ${#tokens[@]} )); do
     case "${tokens[i]}" in
-      -C)            opt_c="${tokens[i+1]:-}"; i=$((i + 1)) ;;
-      --work-tree)   opt_worktree="${tokens[i+1]:-}"; i=$((i + 1)) ;;
-      --work-tree=*) opt_worktree="${tokens[i]#--work-tree=}" ;;
+      -C)
+        case "${tokens[i+1]:-}" in
+          /*) c_dir="${tokens[i+1]}" ;;
+          *)  c_dir="${c_dir:-$running_dir}/${tokens[i+1]:-}" ;;
+        esac
+        i=$((i + 1))
+        ;;
+      --work-tree)   i=$((i + 1)) ;;
+      --work-tree=*) : ;;
       --git-dir)     opt_gitdir="${tokens[i+1]:-}"; i=$((i + 1)) ;;
       --git-dir=*)   opt_gitdir="${tokens[i]#--git-dir=}" ;;
       -*) git_opt_takes_value "${tokens[i]}" && i=$((i + 1)) ;;
@@ -352,17 +483,19 @@ while IFS= read -r segment; do
   done
 
   verb="${tokens[i]:-}"
-  [[ -n "$verb" ]] || continue
+  [[ -n "$verb" ]] || return 0
 
   # Which repo does THIS segment write to? Precedence: --git-dir option, then
-  # GIT_DIR=, then --work-tree option, then GIT_WORK_TREE=, then -C, then the
-  # running cwd. Resolve a relative override against the running cwd.
-  work_dir="${opt_gitdir:-${env_gitdir:-${opt_worktree:-${env_worktree:-${opt_c:-$running_dir}}}}}"
-  case "$work_dir" in /*) : ;; *) work_dir="$running_dir/$work_dir" ;; esac
+  # GIT_DIR=, then the cumulative -C result, then the running cwd. A relative
+  # override resolves against `-C`'s own result when one was given (matching
+  # git: `-C` changes the effective directory before a relative --git-dir is
+  # read), else against the running cwd.
+  work_dir="${opt_gitdir:-${env_gitdir:-${c_dir:-$running_dir}}}"
+  case "$work_dir" in /*) : ;; *) work_dir="${c_dir:-$running_dir}/$work_dir" ;; esac
 
   if [[ "$verb" != "push" ]]; then
-    is_common_verb "$verb" && continue
-    alias_is_push "$verb" "$work_dir" || continue
+    is_common_verb "$verb" && return 0
+    alias_is_push "$verb" "$work_dir" || return 0
     case "$ALIAS_EXPANSION" in
       push | push\ *)
         # Plain alias: splice its own arguments in front of whatever
@@ -395,10 +528,11 @@ while IFS= read -r segment; do
   fi
   i=$((i + 1))
 
-  is_guarded "$work_dir" || continue
+  is_guarded "$work_dir" || return 0
   current_branch=$(git -C "$work_dir" symbolic-ref --short HEAD 2>/dev/null || true)
 
   remote_seen=0
+  remote_name=""
   refspecs=()
   all_branches=0
   all_branches_tok=""
@@ -429,41 +563,21 @@ while IFS= read -r segment; do
         tags_only=1
         ;;
       -*)
-        # An option that takes a value, quoted with a space in it, splits
-        # across several raw tokens on our whitespace-only tokenizer
-        # (`-o "ci skip"` -> `-o`, `"ci`, `skip"`; `--push-option="a b"` ->
-        # `--push-option="a`, `b"`). Left unmerged, the tail is misread as
-        # the remote or a refspec. Merge by tracking the opening quote and
-        # consuming tokens until one closes it.
+        # An option that takes a value: skip the value so it isn't misread as
+        # the remote or a refspec. The tokenizer already keeps a quoted value
+        # (attached via `=`, or as its own separate token) as one token, so no
+        # re-merging is needed here — just skip the separate-token form; an
+        # attached `=` form has no extra token to skip.
         opt_name="$tok"
-        attached_val_raw=""
-        if [[ "$tok" == *=* ]]; then
-          opt_name="${tok%%=*}"
-          attached_val_raw="${raw#*=}"
-        fi
-        if push_opt_takes_value "$opt_name"; then
-          if [[ "$tok" == *=* ]]; then
-            merge_val="$attached_val_raw"
-          else
-            merge_val="${raw_tokens[i]:-}"
-            i=$((i + 1))          # separate form: consume the value token
-          fi
-          qchar=""
-          case "$merge_val" in
-            '"'*) qchar='"' ;;
-            "'"*) qchar="'" ;;
-          esac
-          if [[ -n "$qchar" ]]; then
-            while [[ ( ${#merge_val} -le 1 || "${merge_val: -1}" != "$qchar" ) && $i -lt ${#tokens[@]} ]]; do
-              merge_val="$merge_val ${raw_tokens[i]}"
-              i=$((i + 1))
-            done
-          fi
+        [[ "$tok" == *=* ]] && opt_name="${tok%%=*}"
+        if push_opt_takes_value "$opt_name" && [[ "$tok" != *=* ]]; then
+          i=$((i + 1))
         fi
         ;;
       *)
         if (( remote_seen == 0 )); then
           remote_seen=1          # first bare token is the remote
+          remote_name="$tok"
         else
           refspecs+=("$tok")
         fi
@@ -471,7 +585,7 @@ while IFS= read -r segment; do
     esac
   done
 
-  (( inert )) && continue
+  (( inert )) && return 0
 
   if (( all_branches )); then
     deny "\`git push $all_branches_tok\` pushes every branch, including main. Run this from your terminal yourself."
@@ -480,11 +594,26 @@ while IFS= read -r segment; do
   if (( ${#refspecs[@]} == 0 )); then
     # No refspec: the push follows the current branch's upstream — unless it
     # is a tags-only push, which never updates a branch.
-    (( tags_only )) && continue
+    (( tags_only )) && return 0
     if [[ "$current_branch" == "main" ]]; then
       deny "Current branch is main and this push has no refspec. Pushes to main are reserved for the user to run from the terminal."
     fi
-    continue
+    # Git also applies any configured `remote.<name>.push` refspecs in place
+    # of the current branch when one is set — that can target main even from
+    # a non-main branch (e.g. `remote.origin.push = HEAD:refs/heads/main`).
+    # Only this one key is modeled; `push.default`/upstream defaults are not.
+    if [[ -n "$remote_name" ]]; then
+      configured_push=$(git -C "$work_dir" config --get-all "remote.$remote_name.push" 2>/dev/null || true)
+      if [[ -n "$configured_push" ]]; then
+        while IFS= read -r cfg_spec || [[ -n "$cfg_spec" ]]; do
+          [[ -z "$cfg_spec" ]] && continue
+          if targets_main "$cfg_spec" "$current_branch"; then
+            deny "Configured \`remote.$remote_name.push\` (\`$cfg_spec\`) targets main for this refspec-less push. Pushes to main are reserved for the user to run from the terminal."
+          fi
+        done <<<"$configured_push"
+      fi
+    fi
+    return 0
   fi
 
   for spec in "${refspecs[@]}"; do
@@ -492,7 +621,25 @@ while IFS= read -r segment; do
       deny "Detected a push targeting the main branch (\`$spec\`). Pushes to main are reserved for the user to run from the terminal."
     fi
   done
-done <<<"$segments"
+}
+
+# 2. Inspect each segment on its own. Splitting first is what keeps a commit
+# message or an unrelated command on the same line out of the argument list.
+# A backslash immediately before a newline is a shell line continuation, not
+# a command separator — join_continuations folds it into a single space
+# before the split below, so a push spread across escaped newlines is still
+# read as one command instead of getting cut at the line break.
+inspect_command() {
+  local text; text="$(join_continuations "$1")"
+  local cmd_segments; cmd_segments=$(printf '%s' "$text" | tr '\n;|&' '\n\n\n\n')
+  local segment
+  while IFS= read -r segment; do
+    inspect_segment "$segment"
+  done <<<"$cmd_segments"
+}
+
+running_dir="$default_dir"
+inspect_command "$cmd"
 
 exit 0
 
@@ -507,5 +654,13 @@ exit 0
 #     ref only exists after expansion (`git push origin "$B"`) is not seen.
 #     Closing this would require executing the command to find out what it
 #     does, which is the thing a PreToolUse hook exists to avoid.
-#   * Quote characters are stripped rather than parsed, so a branch whose name
+#   * Quotes are tokenized (grouped into one word on unquoted whitespace) and
+#     then stripped for comparison, not fully parsed, so a branch whose name
 #     genuinely contains a quote or backslash is compared without it.
+#   * A quoted argument is only re-inspected for a nested command when it's a
+#     `$(…)`/backtick substitution, or an argument following `sh`/`bash`/
+#     `zsh`/`eval`. Any other quoted argument is opaque, including
+#     `echo '…' | bash`, `ssh host '…'`, and `su -c '…'` — the old
+#     whitespace-only splitter happened to see into those (and DENY them) by
+#     accident of not respecting quoting at all; the quote-aware tokenizer
+#     that replaced it deliberately narrows that to the two named cases.
