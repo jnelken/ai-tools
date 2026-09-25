@@ -17,6 +17,7 @@ Personal AI coding tools — Claude Code and Cursor skills, slash commands, hook
 | [`deploy-koyeb`](skills/deploy-koyeb) | Deploy a local service directory to a Koyeb app/service from a worktree or branch |
 | [`handoff`](skills/handoff) | Close out the session, then spawn a successor agent in the right Superset workspace with state, not transcript |
 | [`kosha-triage`](skills/kosha-triage) | Migrate stale ClickUp captures into the markdown vault, then delete the originals |
+| [`linear-cli`](skills/linear-cli) | Read/write Linear from the shell with the `linear` CLI — the fallback when MCP is logged out or expired, plus the default filters that make `issue list` hide issues that exist |
 | [`monthly-retro`](skills/monthly-retro) | Generate a stakeholder-readable monthly retrospective from commit history |
 | [`monthly-retro-commits`](skills/monthly-retro-commits) | Export commit-level effort data (TSV, lines-changed sorted) for the retro skill |
 | [`move-diff`](skills/move-diff) | Relocate uncommitted changes to a different branch/worktree |

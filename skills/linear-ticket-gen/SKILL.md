@@ -17,18 +17,16 @@ Turning feedback or a feature list into well-placed Linear issues: resolve the t
 
 ## Access
 
-Prefer MCP (`mcp__claude_ai_Linear__*` or `mcp__plugin_linear_linear__*`) if real issue tools are loaded. Otherwise:
+Prefer MCP (`mcp__claude_ai_Linear__*` or `mcp__plugin_linear_linear__*`) if real issue tools are loaded. **Otherwise use the `linear` CLI — see [[linear-cli]], which owns the mechanics, the verified commands, and the silent-empty-result traps.** Don't hand-roll `curl`; `linear api '<graphql>'` already carries the auth.
 
 ```bash
-printenv | grep -i linear   # check first — don't assume
-curl -sS -X POST https://api.linear.app/graphql \
-  -H "Authorization: $LINEAR_API_KEY" -H "Content-Type: application/json" \
-  -d '{"query": "...", "variables": {...}}'
+printenv | grep -i LINEAR            # check first — don't assume
+linear api '{ viewer { name } organization { name urlKey } }'   # sanity-check key + workspace
 ```
 
-`LINEAR_API_KEY` lives in the user's personal zsh shell profile, not a project or CI env var — it's there in an interactive shell for that user, but don't assume it's set in a non-interactive script, CI, or another user's shell. If it's missing, say so rather than guessing at a workaround.
+The variable that is actually set on this machine is **`LINEAR_API_TOKEN`** (a `lin_api_…` key). `LINEAR_API_KEY`, which earlier versions of this skill referenced, is **unset** — a `curl` built on it sends an empty `Authorization` header and fails confusingly. Its source is not established: it is not in `~/.zshrc`, `~/.zshenv`, `~/.zprofile`, or `~/.claude/settings*.json`, so don't tell the user where it comes from, and don't assume it's present in a non-interactive script, CI, or another user's shell. If it's missing, say so rather than guessing at a workaround.
 
-No `Bearer` prefix — Linear takes the raw key. Sanity-check the key/workspace once per session with `{ viewer{name} organization{name urlKey} }`.
+If you do fall back to raw HTTP, note there is no `Bearer` prefix — Linear takes the raw key.
 
 ## Resolve IDs before creating anything
 
