@@ -13,6 +13,7 @@ knowingly rather than guessing why Linear is silent.
     linearsnap.py --out FILE
 """
 import argparse
+import hashlib
 import json
 import subprocess
 import sys
@@ -26,6 +27,7 @@ FIELDS = """
       labels { nodes { name parent { name } } }
       relations { nodes { type relatedIssue { identifier } } }
       inverseRelations { nodes { type issue { identifier } } }
+      comments(first: 100) { nodes { body } }
       description
     }"""
 # Active work, plus every pending directive whatever its ticket's state: a directive on a
@@ -48,6 +50,16 @@ def label_name(label):
     return f"{parent}/{label['name']}" if parent else label["name"]
 
 
+BOT_MARKER = "<!-- advance-roadmap:blocker -->"
+
+
+def human_comments_sha(node):
+    # This skill's own blocker comments are excluded, so posting one doesn't read as a change;
+    # a reply from Jake does, and must re-open triage for that issue.
+    bodies = sorted(c["body"] for c in node["comments"]["nodes"] if BOT_MARKER not in c["body"])
+    return hashlib.sha1("\x00".join(bodies).encode()).hexdigest()[:16]
+
+
 def flatten(node):
     return {
         "id": node["identifier"],
@@ -61,6 +73,7 @@ def flatten(node):
         "labels": sorted(label_name(l) for l in node["labels"]["nodes"]),
         "blocks": [r["relatedIssue"]["identifier"] for r in node["relations"]["nodes"] if r["type"] == "blocks"],
         "blocked_by": [r["issue"]["identifier"] for r in node["inverseRelations"]["nodes"] if r["type"] == "blocks"],
+        "human_comments_sha": human_comments_sha(node),
         "description": node.get("description") or "",
     }
 

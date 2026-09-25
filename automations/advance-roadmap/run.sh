@@ -20,6 +20,8 @@ USAGE_PY="$ROOT/lib/usage.py"
 RECORD_PY="$ROOT/lib/runrecord.py"
 PLAN_PY="$ROOT/lib/pendingplan.py"
 LINEAR_SNAP_PY="$ROOT/lib/linearsnap.py"
+VERDICT_PY="$ROOT/lib/verdict.py"
+LAST_VERDICT="${ADVANCE_ROADMAP_LAST_VERDICT:-$CODE_DIR/.advance-roadmap/last-verdict.json}"
 # Provider-neutral: the plan belongs to the repos, not to whichever CLI orchestrates.
 PENDING_PLAN="${ADVANCE_ROADMAP_PENDING_PLAN:-$CODE_DIR/.advance-roadmap/pending-plan.json}"
 WORKER_SH="$ROOT/worker.sh"
@@ -229,8 +231,29 @@ run_orchestrator_claude() {
     --output-format text >"$out" 2>&1
 }
 
+# ── Unchanged-world gate ──────────────────────────────────────────────────────
+# Linear goes through the `linear` CLI only. Its key is in the keychain, which the
+# read-only Codex sandbox can't read — so snapshot the queue here and hand over the file.
+LINEAR_SNAPSHOT="$RUN_DIR/linear-snapshot.json"
+FINGERPRINT="$RUN_DIR/fingerprint.json"
+VERDICT_CHANGES="$RUN_DIR/verdict-changes.json"
+python3 "$LINEAR_SNAP_PY" --out "$LINEAR_SNAPSHOT" >> "$LOG" 2>&1
+python3 "$VERDICT_PY" fingerprint --snapshot "$LINEAR_SNAPSHOT" --out "$FINGERPRINT" >> "$LOG" 2>&1
+# The last run found no work and its bookkeeping landed. If no repo, issue, allowlist or skill
+# doc has moved since, this run would re-derive the same verdict — skip planning and worker both.
+# A pending plan always runs: it is work, not a verdict.
+if [ ! -f "$PENDING_PLAN" ] && python3 "$VERDICT_PY" check --file "$LAST_VERDICT" \
+     --fingerprint "$FINGERPRINT" --changes "$VERDICT_CHANGES" > "$RUN_DIR/verdict-check.txt" 2>&1; then
+  echo "=== advance-roadmap $STAMP: skipping — $(cat "$RUN_DIR/verdict-check.txt") ===" >> "$LOG"
+  record skipped-unchanged "$(cat "$RUN_DIR/verdict-check.txt")"
+  ln -sf "$LOG" "$LOGDIR/latest.log"
+  regen_dashboard
+  exit 0
+fi
+
 {
   echo "=== advance-roadmap run $STAMP ($(date)) ==="
+  cat "$RUN_DIR/verdict-check.txt" 2>/dev/null
   echo "orchestrator=$ORCH  workers=${WORKERS:-none}  cwd=$CODE_DIR"
   cd "$CODE_DIR" || { echo "FATAL: cannot cd to $CODE_DIR"; exit 1; }
   [ -f "$SKILL_DIR/ORCHESTRATOR.md" ] || { echo "FATAL: missing ORCHESTRATOR.md"; exit 1; }
@@ -260,13 +283,13 @@ If a PushNotification probe would have been useful, set a note in summary; the w
     ORCH=pending-plan  # the run record shows no planning pass ran
   else
     orch_out="$RUN_DIR/orchestrator-stdout.txt"  # kept, so a killed planning pass leaves a trace
-    # Linear goes through the `linear` CLI only. Its key is in the keychain, which the
-    # read-only Codex sandbox can't read — so snapshot the queue here and hand over the file.
-    LINEAR_SNAPSHOT="$RUN_DIR/linear-snapshot.json"
-    python3 "$LINEAR_SNAP_PY" --out "$LINEAR_SNAPSHOT"
     ORCH_PROMPT="$ORCH_PROMPT
 
 Linear snapshot (read this; never call Linear yourself): $LINEAR_SNAPSHOT"
+    if [ -s "$VERDICT_CHANGES" ]; then
+      ORCH_PROMPT="$ORCH_PROMPT
+Previous no-work verdict and what changed since (carry unchanged verdicts forward): $VERDICT_CHANGES"
+    fi
     orch_rc=0
     case "$ORCH" in
       codex)
@@ -387,6 +410,8 @@ PY
     --result-file "$WORKER_RESULT" --status-file "$WORKER_STATUS" || worker_rc=$?
   echo "=== worker exit=$worker_rc ==="
   python3 "$PLAN_PY" --file "$PENDING_PLAN" settle --worker-result "$WORKER_RESULT" --worker-rc "$worker_rc"
+  python3 "$VERDICT_PY" save --file "$LAST_VERDICT" --fingerprint "$FINGERPRINT" \
+    --orch-result "$ORCH_RESULT" --worker-result "$WORKER_RESULT" --stamp "$STAMP"
 
   [ -f "$PROBE_FLAG" ] || { touch "$PROBE_FLAG"; echo "(Dispatch probe flag set)"; }
 

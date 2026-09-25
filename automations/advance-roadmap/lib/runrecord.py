@@ -6,7 +6,7 @@ an EXIT trap for aborts — so runs.jsonl has a row even when an agent crashed o
 was killed before reporting. Outcomes come from exit codes run.sh observed and
 from result files the agents wrote; nothing here reads the run log.
 
-  runrecord.py --root R append --stamp S --status ran|skipped-backoff|skipped-quota|skipped-lock|aborted
+  runrecord.py --root R append --stamp S --status ran|skipped-backoff|skipped-quota|skipped-lock|skipped-unchanged|aborted
                [--detail TEXT] [--orch-provider P] [--orch-exit N] [--orch-result FILE]
                [--worker-status FILE] [--worker-result FILE] [--exit N]
   runrecord.py --root R alert        # prints a Slack line when the error streak warrants one
@@ -19,7 +19,7 @@ import time
 from datetime import datetime
 
 ERROR_OUTCOMES = ("error", "failed", "incomplete")
-SKIP_OUTCOMES = ("skipped-backoff", "skipped-quota", "skipped-lock")
+SKIP_OUTCOMES = ("skipped-backoff", "skipped-quota", "skipped-lock", "skipped-unchanged")
 # Alert on the 2nd consecutive error, then again every 4 more (~daily at 6h cadence).
 ALERT_FIRST, ALERT_EVERY = 2, 4
 

@@ -56,6 +56,7 @@ QUOTA_RE = re.compile(r"skipping — (\S+) usage (\d+)% >= (\d+)%")
 NO_ORCH_RE = re.compile(r"skipping — no orchestrator available")
 BACKOFF_RE = re.compile(r"skipping — backed off to every (\d+)h after (\S+) blocked runs")
 LOCK_RE = re.compile(r"(another run holds|could not take lock)")
+UNCHANGED_RE = re.compile(r"skipping — verdict: nothing changed since (\S+)")
 EXIT_RE = re.compile(
     r"=== (?:claude exit=(\d+)\s+finished (.*?)|(?:advance-roadmap exit=(\d+)\s+finished (.*?))) ==="
 )
@@ -148,6 +149,9 @@ def classify(text, exit_code, has_header, fresh=False):
         return "skipped-backoff", f"cadence {bm.group(1)}h — {bm.group(2)} blocked runs in a row"
     if LOCK_RE.search(text):
         return "skipped-lock", "another run held the lock"
+    um = UNCHANGED_RE.search(text)
+    if um:
+        return "skipped-unchanged", f"nothing changed since {um.group(1)}"
     if exit_code is None:
         if fresh:
             return "running", "in flight — no exit line yet"
@@ -438,7 +442,7 @@ def write_state(runs):
     """Consecutive-blocked count → cadence, plus a one-line summary for Slack."""
     streak = 0
     for r in runs:                      # newest first
-        if r["outcome"] in ("skipped-quota", "skipped-lock", "skipped-backoff", "running"):
+        if r["outcome"] in ("skipped-quota", "skipped-lock", "skipped-backoff", "skipped-unchanged", "running"):
             continue                    # a skipped tick is not evidence either way
         if r["outcome"] in BLOCKED_OUTCOMES:
             streak += 1
@@ -612,6 +616,7 @@ BADGE = {
     "blocked-no-item": ("unk", "◦ blocked"), "blocked": ("unk", "◦ blocked"),
     "skipped-quota": ("off", "⏸ quota skip"), "skipped-lock": ("off", "⏸ lock skip"),
     "skipped-backoff": ("off", "⏸ backoff skip"),
+    "skipped-unchanged": ("off", "⏸ unchanged skip"),
     "error": ("fail", "✗ error"), "failed": ("fail", "✗ failed"), "incomplete": ("fail", "⚠ incomplete"),
     "archive-only": ("ok", "✓ archive-only"),
     "running": ("unk", "● running"),
@@ -822,7 +827,7 @@ TEMPLATE = """<!doctype html>
     <div class=stat><div class=n>{total}</div><div class=l>runs logged</div></div>
     <div class=stat><div class=n style="color:var(--ok)">{shipped}</div><div class=l>shipped</div></div>
     <div class=stat><div class=n style="color:var(--unk)">{blocked}</div><div class=l>blocked</div></div>
-    <div class=stat><div class=n class=dim>{skipped}</div><div class=l>quota / lock skips</div></div>
+    <div class=stat><div class=n class=dim>{skipped}</div><div class=l>quota / lock / unchanged skips</div></div>
     <div class=stat><div class=n style="color:var(--fail)">{errored}</div><div class=l>errors</div></div>
   </div>
   <div class=last><strong>Latest:</strong> {last_line}</div>

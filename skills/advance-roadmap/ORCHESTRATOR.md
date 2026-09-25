@@ -105,6 +105,22 @@ and the file exists, `run.sh` declined it; the log line `pending plan: not reusi
 Read it as the previous plan: re-check what made it stale, and prefer the same item if it still
 qualifies rather than re-deriving triage from scratch. Never edit or delete it — `run.sh` owns it.
 
+### A carried no-work verdict exists
+
+When the last run found no work and its bookkeeping landed, `run.sh` stores that verdict with a
+fingerprint of everything it was derived from (each repo's HEAD, branches, working tree and
+`.claude-sessions`; the Linear snapshot; the allowlist; these skill docs) in
+`/Users/jake/Dropbox/code/.advance-roadmap/last-verdict.json`. If nothing moved, the run is skipped
+before you start (`skipping — verdict: nothing changed since …`, no run header — a gate skip, not
+an interruption). The verdict is re-derived in full at least every 24h regardless.
+
+If you are running and your prompt names a `verdict-changes.json`, something moved: its `changed`
+list names each `repo:<dir>`, `issue:DEV-N`, `linear_ok`, `allowlist` or `skill` entry that differs,
+and `previous` holds the old verdict's `blockers` and `considered`. **Re-triage only what changed.**
+Carry every other repo's and issue's prior verdict forward as-is into your `blockers` and
+`considered` — don't re-read roadmaps or tickets the fingerprint says are identical. A `skill` or
+`linear_ok` change invalidates everything; triage in full.
+
 ### Did the previous run finish?
 
 **An interrupted run gets finished before a new item is started.** This job fires every 6 hours
