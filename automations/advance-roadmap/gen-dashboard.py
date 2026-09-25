@@ -160,7 +160,9 @@ def parse_runs(ledger):
         except ValueError:
             started = None
 
-        em = EXIT_RE.search(text)
+        # Last match, not first: the orchestrator often tails an earlier run's log
+        # while checking for a resume, which quotes that run's exit line verbatim.
+        em = next(reversed(list(EXIT_RE.finditer(text))), None)
         mm = MODEL_RE.search(text)
         if em and em.group(1) is not None:
             exit_code = int(em.group(1))
@@ -171,18 +173,14 @@ def parse_runs(ledger):
         has_header = "advance-roadmap run" in text
 
         # Body = everything the model printed, minus run.sh's own framing.
-        body = text
+        start, end = 0, len(text)
         if mm:
             nl = text.find("\n", mm.end())
             if nl != -1:
-                body = text[nl + 1:]
-        if em:
-            for marker in ("=== claude exit=", "=== advance-roadmap exit="):
-                idx = body.find(marker)
-                if idx != -1:
-                    body = body[:idx]
-                    break
-        body = body.strip()
+                start = nl + 1
+        if em and em.start() >= start:
+            end = em.start()
+        body = text[start:end].strip()
 
         fresh = (datetime.now().timestamp() - mtime) < 90 * 60
         outcome, detail = classify(text, exit_code, has_header, fresh)
