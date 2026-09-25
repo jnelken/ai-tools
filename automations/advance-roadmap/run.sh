@@ -18,6 +18,9 @@ CODE_DIR="/Users/jake/Dropbox/code"
 SKILL_DIR="${ADVANCE_ROADMAP_SKILL_DIR:-/Users/jake/.claude/skills/advance-roadmap}"
 USAGE_PY="$ROOT/lib/usage.py"
 RECORD_PY="$ROOT/lib/runrecord.py"
+PLAN_PY="$ROOT/lib/pendingplan.py"
+# Provider-neutral: the plan belongs to the repos, not to whichever CLI orchestrates.
+PENDING_PLAN="${ADVANCE_ROADMAP_PENDING_PLAN:-$CODE_DIR/.advance-roadmap/pending-plan.json}"
 WORKER_SH="$ROOT/worker.sh"
 
 CLAUDE="${ADVANCE_ROADMAP_CLAUDE_BIN:-/Users/jake/.local/bin/claude}"
@@ -246,63 +249,70 @@ providers-usage.json (consume only): $ROOT/providers-usage.json"
 If a PushNotification probe would have been useful, set a note in summary; the worker may attempt it. Do not call PushNotification yourself."
   fi
 
-  orch_out="$(mktemp "${TMPDIR:-/tmp}/advance-roadmap-orch.XXXXXX")"
-  orch_rc=0
-  case "$ORCH" in
-    codex)
-      command -v "$CODEX" >/dev/null 2>&1 || { echo "FATAL: codex not found"; exit 1; }
-      run_orchestrator_codex "$orch_out" "$ORCH_PROMPT" || orch_rc=$?
-      ;;
-    claude)
-      [ -x "$CLAUDE" ] || { echo "FATAL: claude not found"; exit 1; }
-      run_orchestrator_claude "$orch_out" "$ORCH_PROMPT" || orch_rc=$?
-      ;;
-    *) echo "FATAL: unknown orchestrator $ORCH"; exit 1 ;;
-  esac
-
-  cat "$orch_out"
-  echo ""
-  echo "=== orchestrator provider=$ORCH exit=$orch_rc ==="
-
-  # Limit failover only when the orchestrator failed to produce a result JSON.
-  # Successful triage dumps skill text that mentions "session limit" historically
-  # and must not burn a second orchestrator turn.
   result="$(mktemp "${TMPDIR:-/tmp}/advance-roadmap-result.XXXXXX")"
   req="$(mktemp "${TMPDIR:-/tmp}/advance-roadmap-req.XXXXXX")"
-  had_json=0
-  if [ -s "$orch_out.last" ] && extract_json_fence ORCHESTRATOR_RESULT_JSON "$orch_out.last" "$result"; then
-    had_json=1
-  elif extract_json_fence ORCHESTRATOR_RESULT_JSON "$orch_out" "$result"; then
-    had_json=1
-  fi
+  # A plan whose worker died last run is handed straight to a worker — no second planning pass.
+  reused=0
+  if python3 "$PLAN_PY" --file "$PENDING_PLAN" reuse --out "$result"; then
+    reused=1
+    orch_rc=0
+    ORCH=pending-plan  # the run record shows no planning pass ran
+  else
+    orch_out="$RUN_DIR/orchestrator-stdout.txt"  # kept, so a killed planning pass leaves a trace
+    orch_rc=0
+    case "$ORCH" in
+      codex)
+        command -v "$CODEX" >/dev/null 2>&1 || { echo "FATAL: codex not found"; exit 1; }
+        run_orchestrator_codex "$orch_out" "$ORCH_PROMPT" || orch_rc=$?
+        ;;
+      claude)
+        [ -x "$CLAUDE" ] || { echo "FATAL: claude not found"; exit 1; }
+        run_orchestrator_claude "$orch_out" "$ORCH_PROMPT" || orch_rc=$?
+        ;;
+      *) echo "FATAL: unknown orchestrator $ORCH"; exit 1 ;;
+    esac
 
-  if [ "$had_json" -eq 0 ] && record_limit_from_log "$ORCH" "$orch_out"; then
-    echo "(orchestrator limit recorded — attempting one same-run failover)"
-    alt=""
-    case "$ORCH" in codex) alt=claude ;; claude) alt=codex ;; esac
-    next="$(python3 "$USAGE_PY" --root "$ROOT" pick-orchestrator 2>/dev/null | tr -d '\r' || true)"
-    if [ -n "$alt" ] && [ "$next" = "$alt" ]; then
-      ORCH="$alt"
-      orch_rc=0
-      case "$ORCH" in
-        codex) run_orchestrator_codex "$orch_out" "$ORCH_PROMPT" || orch_rc=$? ;;
-        claude) run_orchestrator_claude "$orch_out" "$ORCH_PROMPT" || orch_rc=$? ;;
-      esac
-      cat "$orch_out"
-      echo "=== orchestrator provider=$ORCH exit=$orch_rc ==="
-      if [ -s "$orch_out.last" ] && extract_json_fence ORCHESTRATOR_RESULT_JSON "$orch_out.last" "$result"; then
-        had_json=1
-      elif extract_json_fence ORCHESTRATOR_RESULT_JSON "$orch_out" "$result"; then
-        had_json=1
-      else
-        record_limit_from_log "$ORCH" "$orch_out" || true
+    cat "$orch_out"
+    echo ""
+    echo "=== orchestrator provider=$ORCH exit=$orch_rc ==="
+
+    # Limit failover only when the orchestrator failed to produce a result JSON.
+    # Successful triage dumps skill text that mentions "session limit" historically
+    # and must not burn a second orchestrator turn.
+    had_json=0
+    if [ -s "$orch_out.last" ] && extract_json_fence ORCHESTRATOR_RESULT_JSON "$orch_out.last" "$result"; then
+      had_json=1
+    elif extract_json_fence ORCHESTRATOR_RESULT_JSON "$orch_out" "$result"; then
+      had_json=1
+    fi
+
+    if [ "$had_json" -eq 0 ] && record_limit_from_log "$ORCH" "$orch_out"; then
+      echo "(orchestrator limit recorded — attempting one same-run failover)"
+      alt=""
+      case "$ORCH" in codex) alt=claude ;; claude) alt=codex ;; esac
+      next="$(python3 "$USAGE_PY" --root "$ROOT" pick-orchestrator 2>/dev/null | tr -d '\r' || true)"
+      if [ -n "$alt" ] && [ "$next" = "$alt" ]; then
+        ORCH="$alt"
+        orch_rc=0
+        case "$ORCH" in
+          codex) run_orchestrator_codex "$orch_out" "$ORCH_PROMPT" || orch_rc=$? ;;
+          claude) run_orchestrator_claude "$orch_out" "$ORCH_PROMPT" || orch_rc=$? ;;
+        esac
+        cat "$orch_out"
+        echo "=== orchestrator provider=$ORCH exit=$orch_rc ==="
+        if [ -s "$orch_out.last" ] && extract_json_fence ORCHESTRATOR_RESULT_JSON "$orch_out.last" "$result"; then
+          had_json=1
+        elif extract_json_fence ORCHESTRATOR_RESULT_JSON "$orch_out" "$result"; then
+          had_json=1
+        else
+          record_limit_from_log "$ORCH" "$orch_out" || true
+        fi
       fi
     fi
-  fi
 
-  if [ "$had_json" -eq 0 ]; then
-    echo "WARNING: missing ORCHESTRATOR_RESULT_JSON — wrapping stdout as blocked_no_item"
-    python3 - "$orch_out" "$result" <<'PY'
+    if [ "$had_json" -eq 0 ]; then
+      echo "WARNING: missing ORCHESTRATOR_RESULT_JSON — wrapping stdout as blocked_no_item"
+      python3 - "$orch_out" "$result" <<'PY'
 import json, sys
 summary = open(sys.argv[1], encoding="utf-8", errors="replace").read()[-8000:]
 json.dump({
@@ -316,11 +326,14 @@ json.dump({
 }, open(sys.argv[2], "w"), indent=2)
 open(sys.argv[2], "a").write("\n")
 PY
+    fi
+
   fi
 
   echo "(orchestrator result)"
   cat "$result"
   cp "$result" "$ORCH_RESULT"
+  [ "$reused" -eq 1 ] || python3 "$PLAN_PY" --file "$PENDING_PLAN" save --result "$result" --stamp "$STAMP"
 
   action="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("action",""))' "$result")"
   case "$action" in
@@ -365,13 +378,14 @@ PY
   "$WORKER_SH" --stamp "$STAMP" --request-file "$req" --providers "${WORKERS:-}" \
     --result-file "$WORKER_RESULT" --status-file "$WORKER_STATUS" || worker_rc=$?
   echo "=== worker exit=$worker_rc ==="
+  python3 "$PLAN_PY" --file "$PENDING_PLAN" settle --worker-result "$WORKER_RESULT" --worker-rc "$worker_rc"
 
   [ -f "$PROBE_FLAG" ] || { touch "$PROBE_FLAG"; echo "(Dispatch probe flag set)"; }
 
   final_rc=0
   [ "$orch_rc" -eq 0 ] || final_rc=$orch_rc
   [ "$worker_rc" -eq 0 ] || final_rc=$worker_rc
-  rm -f "$orch_out" "$orch_out.last" "$result" "$req"
+  rm -f "$result" "$req"
   echo "=== advance-roadmap exit=$final_rc finished $(date) ==="
 } >> "$LOG" 2>&1
 # zsh runs a redirected { } in this shell, so final_rc is still set here.

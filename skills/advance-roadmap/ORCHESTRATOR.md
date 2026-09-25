@@ -95,6 +95,15 @@ It is a hint, not a constraint: if that repo no longer qualifies, move on withou
 (Headless runs use `/Users/jake/Dropbox/code` as cwd, which is why that memory directory is the
 right one. Don't guess a different path.)
 
+### A pending plan exists
+
+`/Users/jake/Dropbox/code/.advance-roadmap/pending-plan.json` holds the last dispatch decision whose
+worker never settled it (crash, limit, kill). `run.sh` reuses it without calling you when it is
+fresh (<36h), has been retried fewer than twice, and its repo is still safe — so if you are running
+and the file exists, `run.sh` declined it; the log line `pending plan: not reusing (…)` says why.
+Read it as the previous plan: re-check what made it stale, and prefer the same item if it still
+qualifies rather than re-deriving triage from scratch. Never edit or delete it — `run.sh` owns it.
+
 ### Did the previous run finish?
 
 **An interrupted run gets finished before a new item is started.** This job fires every 6 hours
