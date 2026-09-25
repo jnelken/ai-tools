@@ -8,8 +8,8 @@ node_modules/
 .env.*
 !.env.example
 
-# close-out's running cross-session handoff note - local continuity state,
-# never project documentation.
+# Running cross-session handoff note (close-out, wrapup-repos) - local
+# continuity state, never project documentation.
 .claude/IN_PROGRESS.md
 
 # simplification-retro's run log - local per-machine memory, not committed.
