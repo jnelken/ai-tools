@@ -18,11 +18,7 @@ import subprocess
 import sys
 from datetime import datetime
 
-QUERY = """query {
-  issues(first: 250, filter: {
-    team: { key: { eq: "DEV" } },
-    state: { type: { nin: ["completed", "canceled"] } }
-  }) {
+FIELDS = """
     pageInfo { hasNextPage }
     nodes {
       identifier title url priority priorityLabel updatedAt
@@ -31,9 +27,19 @@ QUERY = """query {
       relations { nodes { type relatedIssue { identifier } } }
       inverseRelations { nodes { type issue { identifier } } }
       description
-    }
-  }
-}"""
+    }"""
+# Active work, plus every pending directive whatever its ticket's state: a directive on a
+# closed ticket still gates its repo's dirty tree (Step 1a), and the planner must see it.
+QUERY = """query {
+  active: issues(first: 250, filter: {
+    team: { key: { eq: "DEV" } },
+    state: { type: { nin: ["completed", "canceled"] } }
+  }) {%s}
+  directives: issues(first: 50, filter: {
+    team: { key: { eq: "DEV" } },
+    labels: { name: { eq: "roadmap-directive" } }
+  }) {%s}
+}""" % (FIELDS, FIELDS)
 
 
 def label_name(label):
@@ -68,10 +74,15 @@ def main():
         p = subprocess.run(["linear", "api", QUERY], capture_output=True, text=True, timeout=90)
         if p.returncode != 0:
             raise RuntimeError((p.stderr or p.stdout).strip()[:500] or f"linear exited {p.returncode}")
-        issues = json.loads(p.stdout)["data"]["issues"]
-        nodes = [flatten(n) for n in issues["nodes"]]
-        snap.update(ok=True, truncated=issues["pageInfo"]["hasNextPage"], count=len(nodes), issues=nodes)
-        print(f"linear: snapshot ok — {len(nodes)} active DEV issues")
+        data = json.loads(p.stdout)["data"]
+        by_id = {}
+        for conn in (data["active"], data["directives"]):
+            for n in conn["nodes"]:
+                by_id.setdefault(n["identifier"], flatten(n))
+        nodes = list(by_id.values())
+        truncated = data["active"]["pageInfo"]["hasNextPage"] or data["directives"]["pageInfo"]["hasNextPage"]
+        snap.update(ok=True, truncated=truncated, count=len(nodes), issues=nodes)
+        print(f"linear: snapshot ok — {len(nodes)} DEV issues (active + pending directives)")
     except Exception as e:  # noqa: BLE001 — any failure degrades to file-only triage
         snap.update(ok=False, error=str(e), issues=[])
         print(f"linear: snapshot FAILED — {e}")

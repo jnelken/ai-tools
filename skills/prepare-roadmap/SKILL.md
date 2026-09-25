@@ -98,8 +98,8 @@ persisted state, not merely the place the conversation happened.
 Two mechanics make that findable and safe, and they are separate on purpose:
 
 - **The `roadmap-directive` label on that same ticket is the marker.** Apply it whenever
-  you write a directive. `/advance-roadmap` finds every pending directive in a single
-  `list_issues(team: "Dev", label: "roadmap-directive")` call per run, and clears the label
+  you write a directive. `/advance-roadmap` finds every pending directive, in any ticket
+  state, in the Linear snapshot it takes once per run with the `linear` CLI, and clears the label
   once it has acted. The label means *a directive here is pending* — nothing more.
 - **The label is not an authorization.** It sits on an ordinary work ticket that Jake edits
   by hand, so it can go stale in ways a purpose-built object couldn't. What actually
