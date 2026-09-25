@@ -96,9 +96,6 @@ In the selected repo:
   that session was actually trying to do; a cleanly-closed session's doc is deleted immediately and
   leaves nothing to find. Read its body as directional signal, same tier as `ROADMAP.md`/`PLAN.md`,
   and note its `session_id` (from the frontmatter) if it meaningfully shaped Step 5's decisions.
-- If a legacy `NEXT-STEPS.md` (this skill's old output) is still at the repo root, fold whatever
-  in it is still live into Step 5's reconcile, then delete it (`git rm` it in the Step 4 commit if
-  it's tracked). The file is retired — nothing reads it.
 - This scan feeds Step 5's decisions section — the goal is to leave the user forward-looking
   choices, not only a list of what stalled.
 

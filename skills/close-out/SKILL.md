@@ -30,7 +30,7 @@ Everything from step 1 through step 3 — every path, PID, SHA, ticket id, exact
 
 ## When NOT to use
 
-- The user wants in-progress *code* tidied and committed across repos under `~/Dropbox/code` — that's [[wrapup-repos]]. This skill closes out a *conversation*; it does not finish anyone's half-written feature. Both skills write into the same `.claude/IN_PROGRESS.md` with the same reconcile rules (step 4): wrapup-repos adds `Decisions needed`, `Ticket candidates`, and `Code state notes` entries, and its lines are as much yours to reconcile as a previous close-out's. (Its old `NEXT-STEPS.md` snapshot file is retired; if you find one, fold anything still live into `IN_PROGRESS.md` and delete it.)
+- The user wants in-progress *code* tidied and committed across repos under `~/Dropbox/code` — that's [[wrapup-repos]]. This skill closes out a *conversation*; it does not finish anyone's half-written feature. Both skills write into the same `.claude/IN_PROGRESS.md` with the same reconcile rules (step 4): wrapup-repos adds `Decisions needed`, `Ticket candidates`, and `Code state notes` entries, and its lines are as much yours to reconcile as a previous close-out's.
 - The user only wants to know which PRs haven't been announced in `#pr-review` — that's [[pr-review-gaps]], much cheaper.
 - The user only wants stray dev servers killed — that's [[reap-dev-servers]].
 - The session was short and single-purpose (one file edited, one question answered). Say so and skip; a five-step sweep on a ten-message session is noise.
