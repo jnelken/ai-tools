@@ -6,6 +6,9 @@
 #   2. Read-only orchestrator: Codex Sol (high) default; Claude Opus (high) fallback.
 #   3. Parse ORCHESTRATOR_RESULT_JSON; dispatch worker.sh (Cursor → Codex → Claude).
 #   4. Record limit hits for the next tick.
+#   5. Append exactly one row to runs.jsonl (lib/runrecord.py) — the run record the
+#      dashboard, state.json, Slack and the failure alert all read. Built from exit
+#      codes seen here and result files the agents write; never from the log text.
 #
 # Guardrails live in skills/advance-roadmap/SAFETY.md.
 set -u
@@ -14,6 +17,7 @@ ROOT="${ADVANCE_ROADMAP_ROOT:-/Users/jake/.claude/automations/advance-roadmap}"
 CODE_DIR="/Users/jake/Dropbox/code"
 SKILL_DIR="${ADVANCE_ROADMAP_SKILL_DIR:-/Users/jake/.claude/skills/advance-roadmap}"
 USAGE_PY="$ROOT/lib/usage.py"
+RECORD_PY="$ROOT/lib/runrecord.py"
 WORKER_SH="$ROOT/worker.sh"
 
 CLAUDE="${ADVANCE_ROADMAP_CLAUDE_BIN:-/Users/jake/.local/bin/claude}"
@@ -47,6 +51,40 @@ STAMP="$(date +%Y%m%d-%H%M%S)"
 LOG="$LOGDIR/run-$STAMP.log"
 find "$LOGDIR" -name 'run-*.log' -mtime +30 -delete 2>/dev/null
 
+# Per-run scratch the agents write into; runs.jsonl is the durable copy.
+RUN_DIR="$ROOT/runs/$STAMP"
+mkdir -p "$RUN_DIR"
+find "$ROOT/runs" -mindepth 1 -maxdepth 1 -type d -mtime +30 -exec rm -rf {} + 2>/dev/null
+ORCH_RESULT="$RUN_DIR/orchestrator-result.json"
+WORKER_RESULT="$RUN_DIR/worker-result.json"
+WORKER_STATUS="$RUN_DIR/worker-status.json"
+
+RECORDED=0
+ORCH=""
+orch_rc=""
+record() {
+  # record STATUS [DETAIL] [EXIT] — exactly once per run.
+  [ "$RECORDED" -eq 0 ] || return 0
+  RECORDED=1
+  local -a extra=()
+  [ -n "${3:-}" ] && extra+=(--exit "$3")
+  [ -n "${orch_rc:-}" ] && extra+=(--orch-exit "$orch_rc")
+  python3 "$RECORD_PY" --root "$ROOT" append --stamp "$STAMP" --status "$1" \
+    --detail "${2:-}" "${extra[@]}" \
+    --orch-provider "$ORCH" \
+    --orch-result "$ORCH_RESULT" \
+    --worker-status "$WORKER_STATUS" --worker-result "$WORKER_RESULT" >> "$LOG" 2>&1 || true
+}
+on_exit() {
+  local rc=$?
+  [ -n "${LOCK:-}" ] && [ "${HOLDS_LOCK:-0}" -eq 1 ] && rm -rf "$LOCK"
+  [ "$RECORDED" -eq 1 ] && return
+  record aborted "run.sh exited $rc before recording" "$rc"
+  regen_dashboard
+}
+trap on_exit EXIT
+trap 'exit 143' INT TERM
+
 # ── Cadence backoff ───────────────────────────────────────────────────────────
 # launchd always fires four times a day; backoff is enforced here instead, so the
 # schedule never has to be rewritten. gen-dashboard.py owns the classification
@@ -70,6 +108,7 @@ fi
 if [ "$run_this_tick" -eq 0 ]; then
   streak="$(jq -r '.blocked_streak // 0' "$STATE_FILE" 2>/dev/null || echo '?')"
   echo "=== advance-roadmap $STAMP: skipping — backed off to every ${CADENCE}h after ${streak} blocked runs ===" >> "$LOG"
+  record skipped-backoff "cadence ${CADENCE}h after ${streak} blocked runs"
   ln -sf "$LOG" "$LOGDIR/latest.log"
   regen_dashboard
   exit 0
@@ -77,6 +116,7 @@ fi
 
 if [ ! -f "$USAGE_PY" ]; then
   echo "=== advance-roadmap $STAMP: FATAL missing $USAGE_PY ===" >> "$LOG"
+  record aborted "missing $USAGE_PY" 1
   ln -sf "$LOG" "$LOGDIR/latest.log"
   regen_dashboard
   exit 1
@@ -88,6 +128,8 @@ ORCH="$(python3 "$USAGE_PY" --root "$ROOT" pick-orchestrator 2>/dev/null | tr -d
 orch_pick_rc=$?
 if [ "$orch_pick_rc" -ne 0 ] || [ -z "$ORCH" ] || [ "$ORCH" = "none" ]; then
   echo "=== advance-roadmap $STAMP: skipping — no orchestrator available ===" >> "$LOG"
+  ORCH=""
+  record skipped-quota "no orchestrator available"
   ln -sf "$LOG" "$LOGDIR/latest.log"
   regen_dashboard
   exit 0
@@ -98,6 +140,7 @@ WORKERS="$(python3 "$USAGE_PY" --root "$ROOT" pick-worker-chain 2>/dev/null | tr
 LOCK="$ROOT/run.lock"
 if [ -d "$LOCK" ] && [ -z "$(find "$LOCK" -maxdepth 0 -mmin +240 2>/dev/null)" ]; then
   echo "=== advance-roadmap $STAMP: another run holds $LOCK — skipping ===" >> "$LOG"
+  record skipped-lock "another run held the lock"
   ln -sf "$LOG" "$LOGDIR/latest.log"
   regen_dashboard
   exit 0
@@ -105,11 +148,12 @@ fi
 rm -rf "$LOCK" 2>/dev/null
 mkdir "$LOCK" 2>/dev/null || {
   echo "=== advance-roadmap $STAMP: could not take lock — skipping ===" >> "$LOG"
+  record skipped-lock "could not take lock"
   ln -sf "$LOG" "$LOGDIR/latest.log"
   regen_dashboard
   exit 0
 }
-trap 'rm -rf "$LOCK"' EXIT INT TERM
+HOLDS_LOCK=1
 
 extract_json_fence() {
   # extract_json_fence LABEL infile outfile
@@ -154,8 +198,12 @@ record_limit_from_log() {
 
 run_orchestrator_codex() {
   local out="$1" prompt="$2"
+  # -o writes only the final message, so the fence can't be confused with the
+  # prompt or ORCHESTRATOR.md that Codex echoes into stdout.
+  rm -f "$out.last"
   # CODE_DIR is a multi-repo parent, not a git checkout — skip the repo check.
   "$CODEX" exec \
+    -o "$out.last" \
     -m "$ORCH_CODEX_MODEL" \
     -c model_reasoning_effort=high \
     -s read-only \
@@ -222,7 +270,9 @@ If a PushNotification probe would have been useful, set a note in summary; the w
   result="$(mktemp "${TMPDIR:-/tmp}/advance-roadmap-result.XXXXXX")"
   req="$(mktemp "${TMPDIR:-/tmp}/advance-roadmap-req.XXXXXX")"
   had_json=0
-  if extract_json_fence ORCHESTRATOR_RESULT_JSON "$orch_out" "$result"; then
+  if [ -s "$orch_out.last" ] && extract_json_fence ORCHESTRATOR_RESULT_JSON "$orch_out.last" "$result"; then
+    had_json=1
+  elif extract_json_fence ORCHESTRATOR_RESULT_JSON "$orch_out" "$result"; then
     had_json=1
   fi
 
@@ -240,7 +290,9 @@ If a PushNotification probe would have been useful, set a note in summary; the w
       esac
       cat "$orch_out"
       echo "=== orchestrator provider=$ORCH exit=$orch_rc ==="
-      if extract_json_fence ORCHESTRATOR_RESULT_JSON "$orch_out" "$result"; then
+      if [ -s "$orch_out.last" ] && extract_json_fence ORCHESTRATOR_RESULT_JSON "$orch_out.last" "$result"; then
+        had_json=1
+      elif extract_json_fence ORCHESTRATOR_RESULT_JSON "$orch_out" "$result"; then
         had_json=1
       else
         record_limit_from_log "$ORCH" "$orch_out" || true
@@ -268,6 +320,7 @@ PY
 
   echo "(orchestrator result)"
   cat "$result"
+  cp "$result" "$ORCH_RESULT"
 
   action="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("action",""))' "$result")"
   case "$action" in
@@ -309,7 +362,8 @@ open(sys.argv[2], "a").write("\n")
 PY
   fi
 
-  "$WORKER_SH" --stamp "$STAMP" --request-file "$req" --providers "${WORKERS:-}" || worker_rc=$?
+  "$WORKER_SH" --stamp "$STAMP" --request-file "$req" --providers "${WORKERS:-}" \
+    --result-file "$WORKER_RESULT" --status-file "$WORKER_STATUS" || worker_rc=$?
   echo "=== worker exit=$worker_rc ==="
 
   [ -f "$PROBE_FLAG" ] || { touch "$PROBE_FLAG"; echo "(Dispatch probe flag set)"; }
@@ -317,9 +371,11 @@ PY
   final_rc=0
   [ "$orch_rc" -eq 0 ] || final_rc=$orch_rc
   [ "$worker_rc" -eq 0 ] || final_rc=$worker_rc
-  rm -f "$orch_out" "$result" "$req"
+  rm -f "$orch_out" "$orch_out.last" "$result" "$req"
   echo "=== advance-roadmap exit=$final_rc finished $(date) ==="
 } >> "$LOG" 2>&1
+# zsh runs a redirected { } in this shell, so final_rc is still set here.
+record ran "" "${final_rc:-1}"
 
 ln -sf "$LOG" "$LOGDIR/latest.log"
 regen_dashboard
@@ -340,4 +396,18 @@ if [ -n "$SLACK_WEBHOOK" ] && [ -r "$STATE_FILE" ] && command -v jq >/dev/null 2
       echo "=== slack: post failed (non-fatal) ===" >> "$LOG"
     fi
   }
+fi
+
+# ── Failure alert ─────────────────────────────────────────────────────────────
+# A routine summary line saying "error" went unnoticed for 4.5 days (Sep 20–24).
+# Consecutive failures get a louder, separate message plus a local notification.
+alert="$(python3 "$RECORD_PY" --root "$ROOT" alert 2>>"$LOG" || true)"
+if [ -n "$alert" ]; then
+  echo "=== alert: $alert ===" >> "$LOG"
+  [ "${ADVANCE_ROADMAP_NOTIFY:-1}" = "1" ] && osascript -e "display notification $(jq -rn --arg t "$alert" '$t|@json') with title \"advance-roadmap\" sound name \"Basso\"" >/dev/null 2>&1 || true
+  if [ -n "$SLACK_WEBHOOK" ] && command -v jq >/dev/null 2>&1; then
+    curl -sf -m 15 -X POST -H 'Content-Type: application/json' \
+      -d "$(jq -n --arg t "$alert" '{text:$t}')" "$SLACK_WEBHOOK" >/dev/null \
+      || echo "=== slack: alert post failed (non-fatal) ===" >> "$LOG"
+  fi
 fi

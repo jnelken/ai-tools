@@ -7,9 +7,12 @@ Hard constraints:
 
 - Obey [`SAFETY.md`](SAFETY.md) in full.
 - You are already the selected provider (Cursor Auto, Codex, or Claude). Implement directly.
-- End by printing a `WORKER_RESULT_JSON` block (schema in
-  `~/.claude/automations/advance-roadmap/schemas/worker-result.json`) **and** the plain
-  5-line summary.
+- When finished — shipped, blocked, failed, or bookkeeping — **write your result JSON to the
+  result file path named in the prompt** (schema in
+  `~/.claude/automations/advance-roadmap/schemas/worker-result.json`). That file is the run's
+  record: `run.sh` builds the dashboard, Slack summary, and failure alert from it, and a run
+  without it is recorded as `incomplete`. Also print it as a `WORKER_RESULT_JSON` block plus the
+  plain 5-line summary, for the human reading the log.
 
 ## Request
 
@@ -25,6 +28,9 @@ The prompt names a request JSON file. Modes:
   do not start a feature branch unless an archive needs the Step 7 flow.
 
 ## Output protocol
+
+Write the object below, raw JSON with no fence, to the result file path from the prompt. Then
+print the same object in a fence:
 
 ````
 ```WORKER_RESULT_JSON
@@ -42,7 +48,8 @@ The prompt names a request JSON file. Modes:
 ```
 ````
 
-`outcome`: `shipped` | `blocked-branch-left` | `failed` | `limit_hit` | `archive-only`.
+`outcome`: `shipped` | `blocked-branch-left` | `failed` | `limit_hit` | `archive-only` | `bookkeeping`
+(bookkeeping mode only — `run.sh` then records the orchestrator's `outcome_token`).
 
 ---
 

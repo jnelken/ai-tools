@@ -2,6 +2,12 @@
 # Write-capable worker for advance-roadmap. Invoked by run.sh.
 #
 #   worker.sh --stamp STAMP --request-file PATH [--providers "cursor codex claude"]
+#             [--result-file PATH] [--status-file PATH]
+#
+# --result-file: where the agent writes its WORKER_RESULT_JSON (the record run.sh
+#   keeps). If the agent doesn't, we fall back to the last valid fence in that
+#   provider's own stdout — never the combined run log.
+# --status-file: what this script observed (provider used, exit, fatal reason).
 set -u
 
 ROOT="${ADVANCE_ROADMAP_ROOT:-/Users/jake/.claude/automations/advance-roadmap}"
@@ -22,6 +28,8 @@ export PATH="/opt/homebrew/bin:/opt/homebrew/opt/node@22/bin:/usr/bin:/bin:/usr/
 STAMP=""
 REQUEST_FILE=""
 PROVIDERS_STR=""
+RESULT_FILE=""
+STATUS_FILE=""
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -29,9 +37,22 @@ while [ $# -gt 0 ]; do
     --request-file) REQUEST_FILE="$2"; shift 2 ;;
     --providers) PROVIDERS_STR="$2"; shift 2 ;;
     --provider) PROVIDERS_STR="$2"; shift 2 ;;
+    --result-file) RESULT_FILE="$2"; shift 2 ;;
+    --status-file) STATUS_FILE="$2"; shift 2 ;;
     *) echo "unknown arg: $1" >&2; exit 2 ;;
   esac
 done
+
+write_status() {
+  # write_status USED EXIT [FATAL]
+  [ -n "$STATUS_FILE" ] || return 0
+  python3 - "$STATUS_FILE" "$1" "$2" "${3:-}" <<'PY2'
+import json, sys
+path, used, rc, fatal = sys.argv[1:5]
+json.dump({"used": used or None, "exit": int(rc) if rc.lstrip("-").isdigit() else None,
+           "fatal": fatal or None}, open(path, "w"), indent=1)
+PY2
+}
 
 [ -n "$STAMP" ] || { echo "FATAL: --stamp required" >&2; exit 2; }
 [ -n "$REQUEST_FILE" ] && [ -f "$REQUEST_FILE" ] || { echo "FATAL: --request-file required" >&2; exit 2; }
@@ -51,7 +72,8 @@ PY
 )"
 case "$WORKER_MODE" in
   standard|goal) ;;
-  *) echo "FATAL: invalid worker_mode: $WORKER_MODE" >&2; exit 2 ;;
+  *) echo "FATAL: invalid worker_mode: $WORKER_MODE" >&2
+     write_status "" 2 "invalid worker_mode: $WORKER_MODE"; exit 2 ;;
 esac
 
 if [ -z "$PROVIDERS_STR" ]; then
@@ -76,6 +98,13 @@ $REQUEST_FILE
 Print a \`\`\`WORKER_RESULT_JSON fence at the end per WORKER.md, plus the plain 5-line summary.
 EOF
 )"
+if [ -n "$RESULT_FILE" ]; then
+  BASE_PROMPT="$BASE_PROMPT
+
+When you are finished — whatever the outcome — write that same WORKER_RESULT_JSON object
+(raw JSON, no fence) to: $RESULT_FILE
+run.sh records this run from that file. Without it the run is recorded as incomplete."
+fi
 
 prompt_for_provider() {
   local provider="$1"
@@ -97,6 +126,7 @@ run_cursor() {
   [ -x "$AGENT" ] || return 127
   "$AGENT" -p --force --trust --model "$CURSOR_WORKER_MODEL" \
     --workspace "$CODE_DIR" \
+    --add-dir "$ROOT" \
     --output-format text \
     "$prompt" >"$out" 2>&1
 }
@@ -112,6 +142,7 @@ run_codex() {
     -c model_reasoning_effort=high \
     -C "$CODE_DIR" \
     --add-dir "$CODE_DIR" \
+    --add-dir "$ROOT" \
     --skip-git-repo-check \
     --dangerously-bypass-approvals-and-sandbox \
     "$prompt" >"$out" 2>&1
@@ -127,6 +158,7 @@ run_claude() {
     --effort high \
     --dangerously-skip-permissions \
     --add-dir "$CODE_DIR" \
+    --add-dir "$ROOT" \
     --output-format text >"$out" 2>&1
 }
 
@@ -139,6 +171,7 @@ for provider in "${providers[@]}"; do
   out="$tmpdir/$provider.log"
   echo "=== worker try provider=$provider mode=$WORKER_MODE stamp=$STAMP ($(date)) ==="
   rc=0
+  [ -n "$RESULT_FILE" ] && rm -f "$RESULT_FILE"   # a failed-over attempt's result must not count
   case "$provider" in
     cursor) run_cursor "$out" || rc=$? ;;
     codex)  run_codex "$out"  || rc=$? ;;
@@ -168,8 +201,41 @@ done
 
 if [ -z "$used" ]; then
   echo "=== worker exhausted all providers ==="
+  write_status "" 3
   exit 3
 fi
+
+# The agent's file is the record. Fall back to this provider's own stdout only.
+if [ -n "$RESULT_FILE" ]; then
+  python3 - "$RESULT_FILE" "$tmpdir/$used.log" <<'PY2'
+import json, sys
+path, out = sys.argv[1], sys.argv[2]
+try:
+    if isinstance(json.load(open(path, encoding="utf-8")), dict):
+        sys.exit(0)
+except (OSError, ValueError):
+    pass
+text = open(out, encoding="utf-8", errors="replace").read()
+label, end = "```WORKER_RESULT_JSON", len(text)
+while (i := text.rfind(label, 0, end)) >= 0:
+    end = i
+    nl = text.find("\n", i)
+    j = text.find("```", nl + 1) if nl >= 0 else -1
+    if j < 0:
+        continue
+    try:
+        obj = json.loads(text[nl + 1:j])
+    except ValueError:
+        continue
+    if isinstance(obj, dict):
+        obj["_source"] = "stdout-fence"
+        json.dump(obj, open(path, "w"), indent=1)
+        print("(worker result file missing — recovered from stdout fence)")
+        sys.exit(0)
+print("(worker wrote no result file and no valid fence)")
+PY2
+fi
+write_status "$used" "$final_rc"
 
 echo "=== worker used=$used exit=$final_rc finished $(date) ==="
 exit $final_rc

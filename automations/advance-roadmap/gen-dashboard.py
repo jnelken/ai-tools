@@ -4,7 +4,11 @@
 Sibling of wrapup-repos/gen-dashboard.py — same look, different data model.
 
 Where the data comes from, and why it's split:
-  * LOGS are the spine. Every run leaves one, and the lines run.sh itself emits
+  * RUNS.JSONL is authoritative. run.sh appends one record per run (lib/runrecord.py)
+    from exit codes and agent-written result files. When a run has a record,
+    nothing below is consulted for its outcome — the rest is the legacy path for
+    runs that predate records (2026-09-24), and the log is kept only for display.
+  * LOGS are the legacy spine. Every run leaves one, and the lines run.sh itself emits
     (quota skip, lock skip, the exit footer) are deterministic. The model's prose
     summary is NOT — only ~9 of 29 logs carry the documented `Repo:` block — so
     nothing here depends on parsing it.
@@ -34,6 +38,7 @@ CODE_DIR = os.path.join(HOME, "Dropbox/code")
 MEMORY = os.path.join(HOME, ".claude/projects/-Users-jake-Dropbox-code/memory/project_advance-roadmap-runs.md")
 USAGE = os.path.join(HOME, ".claude/state/claude-usage.json")
 PROVIDERS_USAGE = os.path.join(ROOT, "providers-usage.json")
+RUNS_JSONL = os.path.join(ROOT, "runs.jsonl")
 
 # Thresholds mirror lib/usage.py. Kept in sync by hand; shown so the page can say
 # whether the next run would be gated.
@@ -146,7 +151,31 @@ def classify(text, exit_code, has_header, fresh=False):
     return None, ""
 
 
-def parse_runs(ledger):
+def read_records():
+    """runs.jsonl keyed by stamp; the last line for a stamp wins."""
+    out = {}
+    try:
+        with open(RUNS_JSONL, encoding="utf-8") as f:
+            for line in f:
+                try:
+                    r = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(r, dict) and r.get("stamp"):
+                    out[r["stamp"]] = r
+    except OSError:
+        pass
+    return out
+
+
+def fmt_duration(secs):
+    if secs is None or not 0 <= secs < 86400:
+        return ""
+    return f"{secs // 60}m {secs % 60}s" if secs >= 60 else f"{secs}s"
+
+
+def parse_runs(ledger, records=None):
+    records = records or {}
     runs = []
     for path in sorted(glob.glob(os.path.join(LOGDIR, "run-*.log")), reverse=True):
         try:
@@ -206,11 +235,26 @@ def parse_runs(ledger):
             if 0 <= secs < 86400:
                 duration = f"{secs // 60}m {secs % 60}s" if secs >= 60 else f"{secs}s"
 
+        rec = records.get(stamp)
+        if rec:
+            outcome, provenance = rec.get("outcome") or "error", "record"
+            detail = rec.get("detail") or ""
+            exit_code = rec.get("exit")
+            duration = fmt_duration(rec.get("duration_s")) or duration
+            repo = rec.get("repo") or ""
+            fields = {k: v for k, v in (
+                ("Repo", rec.get("repo")), ("Item", rec.get("item")),
+                ("Merge", rec.get("merge_commit")), ("Worker", rec.get("worker")),
+                ("Summary", rec.get("summary")), ("Detail", detail)) if v}
+            mm_model = rec.get("orchestrator")
+        else:
+            mm_model = mm.group(1) if mm else None
+
         runs.append({
             "stamp": stamp,
             "when": started.strftime("%a %b %d  %H:%M") if started else stamp,
             "started": started,
-            "model": (mm.group(1) if mm else "—").replace("claude-", ""),
+            "model": (mm_model or "—").replace("claude-", ""),
             "exit": exit_code,
             "outcome": outcome,
             "detail": detail,
@@ -523,7 +567,8 @@ BADGE = {
     "blocked-no-item": ("unk", "◦ blocked"), "blocked": ("unk", "◦ blocked"),
     "skipped-quota": ("off", "⏸ quota skip"), "skipped-lock": ("off", "⏸ lock skip"),
     "skipped-backoff": ("off", "⏸ backoff skip"),
-    "error": ("fail", "✗ error"), "incomplete": ("fail", "⚠ incomplete"),
+    "error": ("fail", "✗ error"), "failed": ("fail", "✗ failed"), "incomplete": ("fail", "⚠ incomplete"),
+    "archive-only": ("ok", "✓ archive-only"),
     "running": ("unk", "● running"),
 }
 
@@ -535,7 +580,7 @@ def badge(outcome):
 
 def build():
     ledger = merge_cache(read_ledger())
-    runs = parse_runs(ledger)
+    runs = parse_runs(ledger, read_records())
     repos = survey_repos()
     missed = missed_slots(runs)
     q = quota()
@@ -545,7 +590,7 @@ def build():
     shipped = sum(1 for r in runs if r["outcome"] == "shipped")
     blocked = sum(1 for r in runs if r["outcome"].startswith("blocked"))
     skipped = sum(1 for r in runs if r["outcome"].startswith("skipped"))
-    errored = sum(1 for r in runs if r["outcome"] in ("error", "incomplete"))
+    errored = sum(1 for r in runs if r["outcome"] in ("error", "failed", "incomplete"))
 
     rows = []
     for r in runs:
@@ -558,13 +603,15 @@ def build():
         elif r["detail"]:
             detail = f'<span class=dim>{esc(r["detail"])}</span>'
         push = f'<div class="pushnote">{esc(r["push"])}</div>' if r["push"] else ""
-        prov = ('<span class="prov" title="outcome taken from the run ledger">ledger</span>'
+        prov = ('<span class="prov" title="outcome from runs.jsonl, written by run.sh">record</span>'
+                if r["provenance"] == "record" else
+                '<span class="prov" title="outcome taken from the run ledger">ledger</span>'
                 if r["provenance"] == "ledger" else
                 '<span class="prov inf" title="ledger row trimmed or absent — outcome inferred from the log">inferred</span>'
                 if r["provenance"] == "inferred" else "")
         body = (f'<details><summary>log</summary><pre>{esc(r["body"])}</pre></details>'
                 if r["body"] else '<span class=dim>—</span>')
-        rows.append(f"""<tr class="{'r-fail' if r['outcome'] in ('error','incomplete') else ''}">
+        rows.append(f"""<tr class="{'r-fail' if r['outcome'] in ('error','failed','incomplete') else ''}">
           <td class="mono nowrap">{esc(r['when'])}</td>
           <td class=nowrap>{badge(r['outcome'])} {prov}</td>
           <td>{esc(r['repo']) or '<span class=dim>—</span>'}</td>
