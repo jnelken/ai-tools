@@ -27,7 +27,9 @@ import json
 import os
 import re
 import subprocess
+import sys
 from datetime import datetime, timedelta
+from pathlib import Path
 
 HOME = os.path.expanduser("~")
 ROOT = os.environ.get("ADVANCE_ROADMAP_ROOT", os.path.join(HOME, ".claude/automations/advance-roadmap"))
@@ -377,21 +379,22 @@ def quota():
     try:
         p = json.load(open(PROVIDERS_USAGE, encoding="utf-8"))
         providers = p.get("providers") or {}
-
-        def ok(name, role):
-            pr = providers.get(name) or {}
-            v = pr.get("available")
-            return v if v is not None else pr.get(f"available_for_{role}", role == "worker")
-
-        # Same preference order as lib/usage.py pick_orchestrator / pick_worker_chain.
-        routing = p.get("routing") or {}
-        if routing:
-            orch = routing.get("orchestrator")
-            workers = routing.get("worker_order") or []
-        else:
+        try:
+            # Re-derive availability now, with the gate's own code, so the
+            # badges and verdict agree with the bars (a window that reset since
+            # the reading must not still show "hot").
+            sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "lib"))
+            import usage
+            state = usage.load(Path(ROOT))
+            usage.recompute_flags(state)
+            providers = state["providers"]
+            orch = usage.pick_orchestrator(state)
+            workers = usage.pick_worker_chain(state)
+        except Exception:  # noqa: BLE001 — fall back to the flags as stored
+            def ok(name, role):
+                return (providers.get(name) or {}).get(f"available_for_{role}", role == "worker")
             orch = next((n for n in ("codex", "claude") if ok(n, "orchestrator")), None)
             workers = [n for n in ("cursor", "codex", "claude") if ok(n, "worker")]
-        orch = orch if orch not in (None, "none", "") else None
 
         updated = p.get("updated_at")
         age = 0
