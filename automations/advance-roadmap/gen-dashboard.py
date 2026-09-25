@@ -44,6 +44,10 @@ RUNS_JSONL = os.path.join(ROOT, "runs.jsonl")
 # whether the next run would be gated.
 MAX_SEVEN_DAY_PCT = 80
 MAX_FIVE_HOUR_PCT = 70
+MAX_CURSOR_PCT = 95
+# worker.sh draws Cursor usage from the Auto pool unless a named model is pinned;
+# only that pool is gated (lib/usage.py cursor_quota_ok).
+CURSOR_WORKER_MODEL = os.environ.get("ADVANCE_ROADMAP_CURSOR_WORKER_MODEL", "auto")
 SLOTS = [(4, 45), (10, 45), (16, 45), (22, 45)]
 
 QUOTA_RE = re.compile(r"skipping — (\S+) usage (\d+)% >= (\d+)%")
@@ -373,51 +377,21 @@ def quota():
     try:
         p = json.load(open(PROVIDERS_USAGE, encoding="utf-8"))
         providers = p.get("providers") or {}
-        claude = providers.get("claude") or {}
-        pools = claude.get("pools") or {}
-        # Support both new (pools) and legacy (five_hour at top level) shapes.
-        five_src = pools.get("five_hour") or claude.get("five_hour") or {}
-        seven_src = pools.get("seven_day") or claude.get("seven_day") or {}
 
-        def win_p(block, cap):
-            b = block or {}
-            pct = b.get("used_pct")
-            if pct is None:
-                pct = b.get("used_percentage", 0) or 0
-            reset_epoch = b.get("reset_epoch") or 0
-            if reset_epoch and reset_epoch < now:
-                pct = 0
-            return {"pct": pct, "cap": cap, "reset": b.get("reset_at") or "?", "gated": pct >= cap}
+        def ok(name, role):
+            pr = providers.get(name) or {}
+            v = pr.get("available")
+            return v if v is not None else pr.get(f"available_for_{role}", role == "worker")
 
+        # Same preference order as lib/usage.py pick_orchestrator / pick_worker_chain.
         routing = p.get("routing") or {}
-        orch = routing.get("orchestrator") or "none"
-        workers = routing.get("worker_order") or []
-        orch_ok = orch not in (None, "none", "")
-        # Fallback flags for legacy shape
-        if not routing:
-            flags = []
-            for name in ("codex", "claude"):
-                pr = providers.get(name) or {}
-                ok = pr.get("available")
-                if ok is None:
-                    ok = pr.get("available_for_orchestrator")
-                flags.append(f"{name}:{'ok' if ok else 'hot'}")
-            wflags = []
-            for name in ("cursor", "codex", "claude"):
-                pr = providers.get(name) or {}
-                ok = pr.get("available")
-                if ok is None:
-                    ok = pr.get("available_for_worker", True)
-                wflags.append(f"{name}:{'ok' if ok else 'hot'}")
-            routing_line = f"orch [{' '.join(flags)}] · workers [{' '.join(wflags)}]"
-            # No routing block means the file predates it — derive availability
-            # from the per-provider flags rather than reading "none" as "hot".
-            orch_ok = any(
-                (providers.get(n) or {}).get("available_for_orchestrator") or
-                (providers.get(n) or {}).get("available")
-                for n in ("codex", "claude"))
+        if routing:
+            orch = routing.get("orchestrator")
+            workers = routing.get("worker_order") or []
         else:
-            routing_line = f"orch={orch} · workers=[{', '.join(workers) or 'none'}]"
+            orch = next((n for n in ("codex", "claude") if ok(n, "orchestrator")), None)
+            workers = [n for n in ("cursor", "codex", "claude") if ok(n, "worker")]
+        orch = orch if orch not in (None, "none", "") else None
 
         updated = p.get("updated_at")
         age = 0
@@ -426,29 +400,23 @@ def quota():
                 age = int((now - datetime.fromisoformat(updated).timestamp()) / 60)
             except ValueError:
                 age = 0
-        return {
-            "five": win_p(five_src, MAX_FIVE_HOUR_PCT),
-            "seven": win_p(seven_src, MAX_SEVEN_DAY_PCT),
-            "age": age,
-            "routing": routing_line,
-            "orch_ok": orch_ok,
-            "updated": updated,
-            "providers": providers,
-        }
+        return {"age": age, "orch": orch, "workers": workers, "updated": updated,
+                "providers": providers}
     except (OSError, ValueError):
         pass
     try:
         d = json.load(open(USAGE, encoding="utf-8"))
     except (OSError, ValueError):
         return None
-    def win(k, cap):
-        w = d.get(k) or {}
-        pct = w.get("used_percentage", 0)
-        if w.get("reset_epoch", 0) and w["reset_epoch"] < now:
-            pct = 0
-        return {"pct": pct, "cap": cap, "reset": w.get("reset_at", "?"), "gated": pct >= cap}
-    return {"five": win("five_hour", MAX_FIVE_HOUR_PCT), "seven": win("seven_day", MAX_SEVEN_DAY_PCT),
-            "age": int((now - d.get("timestamp", now)) / 60), "routing": None, "orch_ok": True}
+    # Reshape the statusline file into a one-provider reading so it renders the same way.
+    claude = {k: {"used_pct": (d.get(k) or {}).get("used_percentage"),
+                  "reset_at": (d.get(k) or {}).get("reset_at"),
+                  "reset_epoch": (d.get(k) or {}).get("reset_epoch"),
+                  "source": "statusline"} for k in ("five_hour", "seven_day")}
+    ts = d.get("timestamp", now)
+    return {"age": int((now - ts) / 60), "orch": "claude", "workers": ["claude"],
+            "updated": datetime.fromtimestamp(ts).isoformat(timespec="seconds"),
+            "providers": {"claude": claude}}
 
 
 
@@ -510,55 +478,129 @@ def write_state(runs):
 
 # A pool with no reading must not render as a measured 0% — "unknown" and
 # "measured zero" mean very different things when deciding whether to run.
-POOL_KEYS = ("five_hour", "seven_day", "weekly")
+# (provider key, pool key, label, gate cap or None when the pool isn't gated)
+POOLS = {
+    "claude": (("five_hour", "5-hour", MAX_FIVE_HOUR_PCT), ("seven_day", "7-day", MAX_SEVEN_DAY_PCT)),
+    "codex": (("five_hour", "5-hour", MAX_FIVE_HOUR_PCT), ("weekly", "Weekly", MAX_SEVEN_DAY_PCT)),
+}
+# Within this many points of the cap the bar turns amber.
+WARN_MARGIN = 15
+
+
+def fmt_when(epoch, now):
+    """Relative + short absolute, e.g. 'in 4h 50m · Sat 3:02 PM'."""
+    delta = int(epoch - now)
+    mins = abs(delta) // 60
+    d, h, m = mins // 1440, (mins % 1440) // 60, mins % 60
+    rel = f"{d}d {h}h" if d else f"{h}h {m}m" if h else f"{m}m"
+    rel = "just now" if mins == 0 else f"in {rel}" if delta >= 0 else f"{rel} ago"
+    ab = datetime.fromtimestamp(epoch).strftime("%a %b %-d %-I:%M %p")
+    return rel, ab
+
+
+def reset_html(epoch, text, now):
+    if epoch:
+        rel, ab = fmt_when(float(epoch), now)
+        return f'<span class=dim>resets <time data-epoch="{int(float(epoch))}">{rel}</time> · {ab}</span>'
+    if text and text not in ("unknown", "?"):
+        return f'<span class=dim>resets {esc(text)}</span>'
+    return '<span class=dim>reset time unknown</span>'
+
+
+def pool_bar(label, pct, cap, reset_epoch, reset_text, source, now):
+    """One labelled bar: fill = used %, tick = gate threshold."""
+    tip = f"source: {source}"
+    if pct is None:
+        return (f'<div class=pbar title="{esc(tip)}"><span class=plabel>{esc(label)}</span>'
+                f'<span class="qbar none"></span><span class="pval dim">no reading</span>'
+                f'<span class=preset>{reset_html(reset_epoch, reset_text, now)}</span></div>')
+    pct = float(pct)
+    rolled = bool(reset_epoch) and float(reset_epoch) < now
+    if rolled:
+        pct = 0.0  # same rule as window_exhausted: a passed reset means a fresh window
+    if cap is not None and pct >= cap:
+        colour = "var(--fail)"
+    elif cap is not None and pct >= cap - WARN_MARGIN:
+        colour = "var(--unk)"
+    else:
+        colour = "var(--ok)"
+    shown = f"{round(pct)}%" if pct >= 1 or pct == 0 else "&lt;1%"
+    tick = f'<i class=cap style="left:{cap}%"></i>' if cap is not None else ""
+    capnote = (f'<span class=dim> / {cap}%</span>' if cap is not None
+               else '<span class=dim title="worker.sh doesn\'t draw from this pool, so it never gates a run"> · no gate</span>')
+    reset = ('<span class=dim>window reset since reading</span>' if rolled
+             else reset_html(reset_epoch, reset_text, now))
+    return (f'<div class=pbar title="{esc(tip)}"><span class=plabel>{esc(label)}</span>'
+            f'<span class=qbar><i class=fill style="width:{min(pct, 100)}%;background:{colour}"></i>{tick}</span>'
+            f'<span class="pval mono">{shown}{capnote}</span>'
+            f'<span class=preset>{reset}</span></div>')
+
+
+def limit_hit_html(hit, now):
+    """Readable summary of the last recorded limit hit, and whether it still gates."""
+    if not isinstance(hit, dict):
+        return ""
+    try:
+        observed = datetime.fromisoformat(hit["observed_at"]).timestamp()
+    except (KeyError, TypeError, ValueError):
+        observed = None
+    reset = hit.get("reset_epoch")
+    # Mirrors provider_available_from_limit: gates until its reset, or for an
+    # hour when no reset was parsed.
+    active = (bool(reset) and float(reset) > now) or \
+        (not reset and observed is not None and now - observed < 3600)
+    when = ""
+    if observed is not None:
+        rel, ab = fmt_when(observed, now)
+        when = f'{ab} <span class=dim>({rel})</span>'
+    state = ('<span class="badge fail">gating until reset</span>' if active
+             else '<span class=dim>expired — not gating</span>')
+    scope = hit.get("scope") or "unknown"
+    text = hit.get("exact_cli_text") or ""
+    detail = (f'<details><summary>CLI text</summary><pre>{esc(text)}</pre></details>'
+              if text else "")
+    return (f'<div class="hit{"" if active else " old"}"><span class=plabel>Last limit hit</span> '
+            f'{when} · scope {esc(scope)} · {state}{detail}</div>')
 
 
 def provider_rows(providers):
-    """One row per provider pool, plus availability and any recorded limit hit."""
+    """One card per provider: a bar per pool, availability, and any recorded limit hit."""
+    now = datetime.now().timestamp()
     rows = []
     for name in ("claude", "codex", "cursor"):
-        pr = providers.get(name) or {}
+        if name not in providers:
+            continue
+        pr = providers[name] or {}
         pools = pr.get("pools") or pr
-        cells = []
-        for key in POOL_KEYS:
+        bars = []
+        for key, label, cap in POOLS.get(name, ()):
             b = pools.get(key)
             if not isinstance(b, dict):
                 continue
             pct = b.get("used_pct")
             if pct is None:
                 pct = b.get("used_percentage")
-            src = b.get("source") or "unknown"
-            label = key.replace("_", "-")
-            if pct is None:
-                cells.append(f'<span class=pool><b>{label}</b> <span class=dim>no reading '
-                             f'({esc(src)})</span></span>')
-            else:
-                cells.append(f'<span class=pool><b>{label}</b> <span class=mono>{pct}%</span> '
-                             f'<span class=dim>resets {esc(b.get("reset_at") or "?")} · {esc(src)}</span></span>')
+            bars.append(pool_bar(label, pct, cap, b.get("reset_epoch"), b.get("reset_at"),
+                                 b.get("source") or "unknown", now))
         # Cursor's monthly included pool: Auto and named-model (API) usage.
         inc = pr.get("included")
-        if isinstance(inc, dict) and (inc.get("auto_pct") is not None or inc.get("api_pct") is not None):
-            for label, key in (("auto", "auto_pct"), ("api", "api_pct")):
-                if inc.get(key) is None:
-                    continue
-                cells.append(f'<span class=pool><b>{label}</b> <span class=mono>{round(inc[key])}%</span> '
-                             f'<span class=dim>resets {esc(inc.get("reset_at") or "?")} · '
-                             f'{esc(inc.get("source") or "unknown")}</span></span>')
-        if not cells:
-            src = pr.get("source") or "—"
-            cells.append(f'<span class=pool><span class=dim>no pools tracked ({esc(src)})</span></span>')
+        if isinstance(inc, dict):
+            gated = "auto_pct" if CURSOR_WORKER_MODEL == "auto" else "api_pct"
+            for label, key in (("Auto (monthly)", "auto_pct"), ("API (monthly)", "api_pct")):
+                bars.append(pool_bar(label, inc.get(key), MAX_CURSOR_PCT if key == gated else None,
+                                     inc.get("reset_epoch"), inc.get("reset_at"),
+                                     inc.get("source") or "unknown", now))
+        if not bars:
+            bars.append(f'<div class=dim>no pools tracked ({esc(pr.get("source") or "—")})</div>')
         avail = []
         for role, key in (("orchestrator", "available_for_orchestrator"), ("worker", "available_for_worker")):
             v = pr.get(key)
             if v is None:
                 continue
             avail.append(f'<span class="badge {"ok" if v else "fail"}">{role}: {"ok" if v else "hot"}</span>')
-        hit = pr.get("last_limit_hit")
-        hit_html = (f'<div class=dim style="margin-top:3px">last limit hit: {esc(hit)}</div>'
-                    if hit else "")
-        rows.append(f'<div class=prow><div class=pname>{esc(name)}</div>'
-                    f'<div class=pcells>{"".join(cells)}{hit_html}</div>'
-                    f'<div class=pavail>{" ".join(avail)}</div></div>')
+        rows.append(f'<div class=prow><div class=phead><span class=pname>{esc(name)}</span>'
+                    f'<span class=pavail>{" ".join(avail)}</span></div>'
+                    f'{"".join(bars)}{limit_hit_html(pr.get("last_limit_hit"), now)}</div>')
     return "".join(rows)
 
 
@@ -644,33 +686,28 @@ def build():
         '<p class=dim>Nothing waiting on you — no unchecked items in any <code>.claude/IN_PROGRESS.md</code>.</p>'
 
     if q:
-        def bar(w, label):
-            colour = "var(--fail)" if w["gated"] else "var(--ok)"
-            return (f'<div class=qrow><span class=k>{label}</span>'
-                    f'<span class=qbar><i style="width:{min(w["pct"],100)}%;background:{colour}"></i></span>'
-                    f'<span class=mono>{w["pct"]}% / {w["cap"]}%</span> '
-                    f'<span class=dim>resets {esc(w["reset"])}</span></div>')
-        gated = not q.get("orch_ok", True)
-        verdict = ('<span class="badge fail">next run would be SKIPPED (no orchestrator)</span>' if gated
-                   else '<span class="badge ok">next run would proceed</span>')
-        routing = (f'<div class=dim style="margin-top:6px">{esc(q["routing"])}</div>'
-                   if q.get("routing") else "")
-        checked = q.get("updated") or "unknown"
+        orch, workers = q["orch"], q["workers"]
+        verdict = ('<span class="badge fail">next run would be SKIPPED — no orchestrator available</span>'
+                   if not orch else '<span class="badge ok">next run would proceed</span>')
+        route = (f'<span class=dim>orchestrator</span> <b>{esc(orch or "none")}</b> '
+                 f'<span class=dim>· workers</span> <b>{esc(" → ".join(workers) or "none")}</b>')
+        checked = q.get("updated")
+        try:
+            ts = datetime.fromisoformat(checked).timestamp()
+            rel, ab = fmt_when(ts, datetime.now().timestamp())
+            checked_html = f'{ab} <span class=dim>(<time data-epoch="{int(ts)}">{rel}</time>)</span>'
+        except (TypeError, ValueError):
+            checked_html = '<span class=dim>unknown</span>'
         cad = run_state["cadence_hours"]
         cad_html = (f'<div class=checkline style="border-bottom:0;padding-bottom:0;margin-bottom:0">'
                     f'<strong>Cadence:</strong> every {cad}h'
                     + (f' <span class=dim>— backed off from 6h after {run_state["blocked_streak"]} '
                        f'consecutive blocked runs; resets on the next ship</span>' if cad > 6
                        else ' <span class=dim>— normal</span>') + '</div>')
-        prov_html = (f'<div class=provs>{provider_rows(q["providers"])}</div>'
-                     if q.get("providers") else "")
-        quota_html = (f'<div class=card><div class=checkline><strong>Last usage check:</strong> '
-                      f'<span class=mono>{esc(checked)}</span> <span class=dim>({q["age"]}m ago)</span></div>'
-                      f'{prov_html}'
-                      f'{bar(q["five"], "Claude 5-hour")}{bar(q["seven"], "Claude 7-day")}'
-                      f'{routing}'
-                      f'<div style="margin-top:10px">{verdict} <span class=dim>· reading is '
-                      f'{q["age"]}m old; providers-usage.json is refreshed by run.sh</span></div>'
+        quota_html = (f'<div class=card><div class=checkline>{verdict} &nbsp;{route}</div>'
+                      f'<div class=provs>{provider_rows(q["providers"])}</div>'
+                      f'<div class="checkline dim" style="font-size:12.5px">Last usage check {checked_html} · '
+                      f'bar = used, tick = gate threshold · refreshed by run.sh each run</div>'
                       f'{cad_html}</div>')
     else:
         quota_html = '<p class=dim>No usage reading available — the gate would let a run proceed.</p>'
@@ -741,16 +778,29 @@ TEMPLATE = """<!doctype html>
   .kv .k {{ display:inline-block; min-width:72px; color:var(--dim); font-size:11.5px; text-transform:uppercase; letter-spacing:.04em; }}
   .pushnote {{ font-size:12px; color:var(--unk); margin-top:4px; }}
   .checkline {{ font-size:13px; padding-bottom:10px; margin-bottom:10px; border-bottom:1px solid var(--line); }}
-  .provs {{ margin-bottom:12px; }}
-  .prow {{ display:flex; gap:12px; align-items:flex-start; padding:7px 0; border-bottom:1px solid var(--line); font-size:13px; }}
+  .provs {{ margin-bottom:10px; }}
+  .prow {{ padding:10px 0; border-bottom:1px solid var(--line); font-size:13px; }}
   .prow:last-child {{ border-bottom:0; }}
-  .pname {{ min-width:64px; font-weight:650; }}
-  .pcells {{ flex:1; display:flex; flex-direction:column; gap:2px; }}
-  .pool b {{ font-weight:600; font-size:11.5px; text-transform:uppercase; letter-spacing:.04em; color:var(--dim); margin-right:6px; }}
+  .phead {{ display:flex; justify-content:space-between; align-items:center; gap:8px; flex-wrap:wrap; margin-bottom:6px; }}
+  .pname {{ font-weight:650; font-size:14px; text-transform:capitalize; }}
   .pavail {{ display:flex; gap:4px; flex-wrap:wrap; }}
-  .qrow {{ display:flex; align-items:center; gap:10px; font-size:13px; padding:4px 0; flex-wrap:wrap; }}
-  .qbar {{ flex:1; min-width:120px; height:8px; background:var(--line); border-radius:6px; overflow:hidden; }}
-  .qbar i {{ display:block; height:100%; }}
+  .pbar {{ display:grid; grid-template-columns:128px minmax(120px,1fr) 120px minmax(0,230px); align-items:center; gap:12px; padding:3px 0; }}
+  .plabel {{ font-weight:600; font-size:11.5px; text-transform:uppercase; letter-spacing:.04em; color:var(--dim); }}
+  .pval {{ text-align:right; white-space:nowrap; }}
+  .preset {{ font-size:12.5px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }}
+  .qbar {{ position:relative; height:10px; background:var(--line); border-radius:6px; }}
+  .qbar .fill {{ display:block; height:100%; border-radius:6px; min-width:2px; }}
+  .qbar .cap {{ position:absolute; top:-3px; bottom:-3px; width:2px; margin-left:-1px; background:var(--fg); opacity:.55; border-radius:1px; }}
+  .qbar.none {{ background:repeating-linear-gradient(45deg,var(--line) 0 6px,transparent 6px 12px); border:1px dashed var(--line); }}
+  .hit {{ margin-top:6px; font-size:12.5px; }}
+  .hit.old {{ color:var(--dim); }}
+  .hit details {{ display:inline-block; margin-left:6px; }}
+  .hit pre {{ font-size:12px; }}
+  @media (max-width:640px) {{
+    .pbar {{ grid-template-columns:1fr auto; row-gap:4px; }}
+    .pbar .qbar {{ grid-column:1 / -1; grid-row:2; }}
+    .pbar .preset {{ grid-column:1 / -1; white-space:normal; }}
+  }}
   code, .mono {{ font-family:var(--mono); font-size:12.5px; }}
   .dim {{ color:var(--dim); }} .nowrap {{ white-space:nowrap; }}
   pre {{ background:var(--bg); border:1px solid var(--line); border-radius:8px; padding:12px; overflow-x:auto; font-size:12.5px; white-space:pre-wrap; word-break:break-word; margin:8px 0 0; }}
@@ -794,6 +844,17 @@ TEMPLATE = """<!doctype html>
   <h2>Slots that never fired</h2>
   {missed_html}
 </div>
+<script>
+(function () {{
+  var now = Date.now() / 1000;
+  document.querySelectorAll("time[data-epoch]").forEach(function (t) {{
+    var d = Math.round(+t.dataset.epoch - now), m = Math.floor(Math.abs(d) / 60);
+    var dd = Math.floor(m / 1440), h = Math.floor((m % 1440) / 60), mm = m % 60;
+    var r = dd ? dd + "d " + h + "h" : h ? h + "h " + mm + "m" : mm + "m";
+    t.textContent = !m ? "just now" : d >= 0 ? "in " + r : r + " ago";
+  }});
+}})();
+</script>
 </body>
 </html>"""
 
