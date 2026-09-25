@@ -19,6 +19,7 @@ SKILL_DIR="${ADVANCE_ROADMAP_SKILL_DIR:-/Users/jake/.claude/skills/advance-roadm
 USAGE_PY="$ROOT/lib/usage.py"
 RECORD_PY="$ROOT/lib/runrecord.py"
 PLAN_PY="$ROOT/lib/pendingplan.py"
+LINEAR_SNAP_PY="$ROOT/lib/linearsnap.py"
 # Provider-neutral: the plan belongs to the repos, not to whichever CLI orchestrates.
 PENDING_PLAN="${ADVANCE_ROADMAP_PENDING_PLAN:-$CODE_DIR/.advance-roadmap/pending-plan.json}"
 WORKER_SH="$ROOT/worker.sh"
@@ -259,6 +260,13 @@ If a PushNotification probe would have been useful, set a note in summary; the w
     ORCH=pending-plan  # the run record shows no planning pass ran
   else
     orch_out="$RUN_DIR/orchestrator-stdout.txt"  # kept, so a killed planning pass leaves a trace
+    # Linear goes through the `linear` CLI only. Its key is in the keychain, which the
+    # read-only Codex sandbox can't read — so snapshot the queue here and hand over the file.
+    LINEAR_SNAPSHOT="$RUN_DIR/linear-snapshot.json"
+    python3 "$LINEAR_SNAP_PY" --out "$LINEAR_SNAPSHOT"
+    ORCH_PROMPT="$ORCH_PROMPT
+
+Linear snapshot (read this; never call Linear yourself): $LINEAR_SNAPSHOT"
     orch_rc=0
     case "$ORCH" in
       codex)

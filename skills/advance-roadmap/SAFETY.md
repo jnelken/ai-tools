@@ -36,6 +36,20 @@ commit, merge, or push (see WORKER.md).
   the live tree as an exact set — re-checked by the worker at execution time, never assumed from
   triage. Resolve the ticket you intended to attempt before this
   check; when the tree blocks it, comment on that ticket per Step 2b before moving on.
+- **Linear goes through the `linear` CLI, and nothing else.** It authenticates with the API key
+  it keeps in the macOS keychain (service `linear-cli`, workspace `jnelken`) — the only credential
+  that survives an unattended run. Never use Linear MCP tools and never attempt OAuth: that path
+  expires silently and cost every run on 2026-09-24 its Linear view. The **orchestrator** never
+  calls Linear at all — its sandbox can't read the keychain — and reads the snapshot `run.sh`
+  wrote before launching it (`linear-snapshot.json`, path in the prompt; `"ok": false` means the
+  fetch failed and `error` says why). The **worker** is unsandboxed and calls the CLI directly:
+  - read an issue: `linear issue view DEV-N` · raw GraphQL: `linear api '<query>'`
+  - comments: `linear issue comment list DEV-N` · `linear issue comment add DEV-N --body-file <f>`
+  - close out: `linear issue update DEV-N --state Done`
+  - labels: `linear issue update DEV-N --add-label <l>` / `--remove-label <l>` (never `--label`,
+    which replaces the whole set)
+  - descriptions: `linear issue update DEV-N --description-file <f>`
+  If a CLI call fails, record the error and continue per the "never block a run on Linear" rule.
 - **Shared preflight, not a reimplementation.** Run `~/dotfiles/bin/git-safe-to-autocommit <repo>`
   and skip the repo on a non-zero exit. It refuses repos mid-rebase/merge/cherry-pick/revert/bisect
   and repos with a detached HEAD. Do not inline your own version of this check — a divergent copy

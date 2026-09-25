@@ -6,15 +6,16 @@ You are the **orchestrator** for an `advance-roadmap` run. Your only jobs are tr
 Hard constraints:
 
 - **Read-only.** No file edits, no commits, no pushes, no package installs.
-- Reads are required: roadmaps, git status/log, Linear list/read, run memory, logs.
+- Reads are required: roadmaps, git status/log, the Linear snapshot, run memory, logs.
 - Do **not** implement yourself and do **not** shell out to `agent`/`codex`/`claude` to
   implement. Emit `ORCHESTRATOR_RESULT_JSON` and let `run.sh` dispatch the worker.
 - Obey [`SAFETY.md`](SAFETY.md) in full.
 - Consume `/Users/jake/.claude/automations/advance-roadmap/providers-usage.json` if useful;
   never rewrite it.
 
-Also read the allowlist path noted in [`SKILL.md`](SKILL.md), and run the pending-directive Linear
-query there once, up front, holding the result as a repo -> directive map for Step 1.
+Also read the allowlist path noted in [`SKILL.md`](SKILL.md), and read the Linear snapshot named in
+your prompt once, up front (see *Linear goes through the `linear` CLI* in `SAFETY.md`). Hold its
+`roadmap-directive` issues as a repo -> directive map for Step 1.
 
 ## Output protocol
 
@@ -166,7 +167,7 @@ passes the safety rules:
 
 ## Step 1 — Find a qualifying repo
 
-Before walking repos, query active Linear issues once as described in Step 2. After removing
+Before walking repos, read the active Linear issues from the snapshot as described in Step 2. After removing
 `human-only` issues, collect those carrying `do-next`. Put their explicitly labeled `repo/*`
 directories at the front of the repo walk, preserving Linear's status/priority order; then use the
 normal prior-run-first order for everything else. A `do-next` issue without a repo label is still a
@@ -268,7 +269,7 @@ summary and point at `/prepare-roadmap` — that's the one thing that ever unblo
 ## Step 1a — A directive is a bounded exception to clean-tree, nothing more
 
 Before skipping a dirty repo, look it up in the pending-directive map from the
-`list_issues(team: "Dev", label: "roadmap-directive")` query. A pending directive is the *only*
+snapshot's issues labeled `roadmap-directive`. A pending directive is the *only*
 thing that ever lets this skill touch a dirty tree — nothing else does, ever, and its absence
 means the clean-tree rule is exactly as absolute as it reads in [`SAFETY.md`](SAFETY.md).
 
@@ -369,7 +370,9 @@ it belongs in the batch you triage.
 Linear is an **additional** source, not a replacement. A `ROADMAP.md` item is not demoted because
 an issue exists somewhere; read both, then pick one item by the prefer/skip rules above.
 
-- **Query it once**, at triage time. Take `Todo` and `In Progress` first — Jake moved those
+- **Read the snapshot**, never Linear itself. It holds every Dev issue not completed or canceled,
+  with `labels` (group children flattened to `repo/<dir>`), `blocked_by`, and the full
+  `description`. Take `Todo` and `In Progress` first — Jake moved those
   deliberately — then `Backlog`. Ignore `Done`, `Canceled`, `Duplicate`, and `In Review`.
 - **The repo comes from the `repo` label.** The workspace carries a `repo` label group with one
   child per directory under `~/Dropbox/code` — `repo/mailcruxh`, `repo/typey.site`, and so on.
@@ -416,9 +419,9 @@ an issue exists somewhere; read both, then pick one item by the prefer/skip rule
   and set it to `Done`. Don't set anything to `In Progress` on the way in — an unattended run that
   fails verification would leave the board claiming work that isn't happening, with no way to put
   it back.
-- **Never block a run on Linear.** If the MCP tools aren't authenticated — the tell is that only
-  `authenticate` / `complete_authentication` are exposed, with no `list_issues` — note it in the
-  log and carry on with the file-based sources. Never attempt OAuth from a headless run.
+- **Never block a run on Linear.** If the snapshot says `"ok": false`, quote its `error` in
+  `considered` and carry on with the file-based sources. Don't try to reach Linear another way —
+  no MCP tools, no OAuth, no `linear` calls from your sandbox.
 
 ## Step 2b — Put blockers on the ticket and mention Jake
 
@@ -427,7 +430,8 @@ on that Linear issue. This applies when the repo is dirty, a required human deci
 attended acceptance is required before implementation can safely land, or work stalls on a product
 judgment during Steps 4 or 5.
 
-Use `list_comments` on the issue before writing. A blocker comment has this shape:
+The worker posts these (you only list them in `blockers`): it runs `linear issue comment list
+DEV-N` before writing, then `linear issue comment add DEV-N --body-file <f>`. A blocker comment has this shape:
 
 ```markdown
 @jnelks advance-roadmap is blocked on this ticket.
@@ -458,7 +462,7 @@ changed, create a new top-level comment so the changed `@jnelks` mention produce
 Do not edit the older comment; it is useful history.
 
 Linear comments replace this skill's former `.claude/IN_PROGRESS.md` and `PushNotification`
-blocker channel for ticket-backed work. If Linear is unavailable, do not attempt OAuth from a
-headless run and do not mutate the repository to create a fallback note. Record the blocker and
+blocker channel for ticket-backed work. If the `linear` CLI fails, do not reach for MCP or
+OAuth and do not mutate the repository to create a fallback note. Record the blocker and
 the failed comment attempt in run memory and the final summary, then continue evaluating other
 repos when safe.

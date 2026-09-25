@@ -17,7 +17,8 @@ Take exactly ONE item from planned → shipped on `main`, or stop cleanly with b
 
 Candidate repos: direct children of `/Users/jake/Dropbox/code`. Check
 `~/.claude/automations/advance-roadmap/allowlist.txt` first when present, and query Linear once for
-pending directives — `list_issues(team: "Dev", label: "roadmap-directive")` — from
+pending directives — issues labeled `roadmap-directive`, via the `linear` CLI only (see
+`SAFETY.md`) — from
 [[prepare-roadmap]] (the only dirty-tree exception).
 
 ## Architecture (orchestrator / worker)

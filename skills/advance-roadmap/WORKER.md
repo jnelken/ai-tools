@@ -200,7 +200,8 @@ git -C <repo> push origin main
   branch onto the new `origin/main`, **re-run Step 5's verification**, then retry. Never force.
 - If the push is rejected, stop and report. Don't force, don't retry with a different flag.
 - **Once the push has succeeded**, and only then: if the item came from a Linear issue, comment the
-  merge commit on it and move it to `Done`.
+  merge commit on it (`linear issue comment add DEV-N --body-file <f>`) and move it to `Done`
+  (`linear issue update DEV-N --state Done`). Linear is CLI-only — see `SAFETY.md`.
 
 ## Step 8 — Update run memory
 
