@@ -84,6 +84,29 @@ exhaustion alone still lets the orchestrator report `blocked-no-item` / `nothing
 Guardrails (personal `jnelken` repos only, clean tree, no force, all-or-nothing verification)
 live in `SAFETY.md`. `run.sh` adds the single-instance lock.
 
+### Run record and failure alert
+
+Every run — shipped, blocked, skipped, crashed — appends exactly one row to `runs.jsonl`. `run.sh`
+writes it (`lib/runrecord.py append`) from exit codes it observed and two result files: the
+orchestrator's (Codex's `exec -o` final message, so echoed prompts can't be mistaken for it) and
+the worker's, which the agent writes to `runs/<stamp>/worker-result.json`. If the agent skips that
+file, `worker.sh` recovers it from the provider's own stdout fence and labels it `stdout-fence`.
+An EXIT trap records aborts. **Nothing reads the run log to decide an outcome**; the dashboard,
+`state.json` and the Slack summary all read the record, and fall back to log parsing only for
+runs from before 2026-09-24.
+
+Two consecutive `error` / `failed` / `incomplete` runs post a separate `<!here>` Slack alert and a
+macOS notification, then again every 4 failures; the first success afterwards posts a recovery
+line. (A routine "error" summary line went unnoticed for 4.5 days in Sep 2026.)
+
+The live folder links each file individually, so a new `lib/` module needs its own link:
+
+```sh
+ln -s ~/.ai-tools/automations/advance-roadmap/lib/runrecord.py ~/.claude/automations/advance-roadmap/lib/
+```
+
+End-to-end test with fake providers: `zsh automations/advance-roadmap/tests/test-run-record.sh`.
+
 `run.sh` regenerates `dashboard.html` after every run (including skips). The quota card shows
 Claude windows plus the multi-provider routing line from `providers-usage.json`.
 
