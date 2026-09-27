@@ -138,7 +138,7 @@ terminal `=== claude exit=` line yet); the one below it is the previous run.
 | Previous log | Meaning | Action |
 |---|---|---|
 | a `skipping — …` line only, no `=== advance-roadmap run` header | usage/orchestrator gate fired | nothing to resume |
-| `=== advance-roadmap exit=` / legacy `=== claude exit=0` plus ledger row | completed | nothing to resume |
+| `=== advance-roadmap exit=` / legacy `=== claude exit=0` plus ledger row | completed | nothing to resume (but see *A repo left with a red deploy*) |
 | non-zero exit, **or no exit line at all** | killed mid-flight | reconcile, below |
 
 **Do not use "an unmerged `roadmap/*` branch exists" as the resume signal.** Step 5's
@@ -159,6 +159,17 @@ already ruled it out before you get here.
 
 **A missing or empty ledger means no prior state, not an interruption.** Go to Step 1 and let this
 run write the first row.
+
+### A repo left with a red deploy
+
+A ledger row of `shipped-deploy-failed` means an earlier worker pushed to `main`, ran out of Step 7b
+fix attempts, and pinged Jake. That's a deliberate stop, not an interruption — don't resume it. But
+check whether that repo's production is still red before starting new work there: read the latest
+`main` commit's deploy status with `gh api repos/<owner>/<repo>/commits/<sha>/status` (read-only;
+if your sandbox can't reach GitHub, assume it's still red). If it is still red, **skip the repo for
+new work** so features don't pile up on a broken `main`. List it in `blockers` with the ticket from
+that row, and let the worker's unchanged-comment rule suppress a duplicate ping. Once the deploy is
+green, whether Jake fixed it or a later push did, the repo is eligible again.
 
 ### Reconciling an interrupted run
 
@@ -183,17 +194,42 @@ passes the safety rules:
 
 ## Step 1 — Find a qualifying repo
 
-Before walking repos, read the active Linear issues from the snapshot as described in Step 2. After removing
-`human-only` issues, collect those carrying `do-next`. Put their explicitly labeled `repo/*`
-directories at the front of the repo walk, preserving Linear's status/priority order; then use the
-normal prior-run-first order for everything else. A `do-next` issue without a repo label is still a
-Step 2b blocker, not permission to infer a repo.
+### Rank first, then walk repos
 
-This override applies only to **new selection**. Step 0 always reconciles an interrupted prior run
-first, including its existing branch and dirty work, before any `do-next` item may dispatch. The
-label changes queue order, not eligibility: every repo safety gate and Step 2 skip rule still
-applies. If the first `do-next` item is blocked, record/comment the blocker normally and continue
-to the next `do-next` item, then the ordinary queue.
+Work is taken in **one global priority order across every repo** — not repo by repo. Before walking
+repos, build a single ranked candidate list:
+
+1. Read the active Linear issues from the snapshot as described in Step 2. Drop `human-only` issues
+   silently, and drop issues whose `blocked_by` contains an issue that is still active.
+2. Add the roadmap items you already know about (from run memory or a quick read of each repo's
+   roadmap) with their roadmap tier, if the roadmap uses one.
+3. Sort by this tier table, highest first:
+
+| Tier | Linear | Roadmap |
+|---|---|---|
+| 1 | `do-next` label, any priority | — |
+| 2 | Urgent (`priority: 1`) | `P0` |
+| 3 | High (`2`) | `P1` |
+| 4 | Medium (`3`) | `P2` |
+| 5 | Low (`4`) | `P3` |
+| 6 | No priority (`0`) | untiered roadmap item, `docs/plans/` doc |
+
+   **Linear's `0` means "no priority" and ranks last, not first.** A naive ascending sort on
+   `priority` puts every unprioritized issue ahead of Urgent — don't.
+
+   Ties within a tier: Linear state (`In Progress`, then `Todo`, then `Backlog`), then the repo
+   run memory names as last worked, then the snapshot's order.
+
+Walk repos in the order their best-ranked candidate appears in that list; repos with no ranked
+candidate come after, in run memory's prior-run-first order. Within the chosen repo, Step 2 picks
+the highest-ranked eligible item by the same table. A candidate without a `repo/*` label is a
+Step 2b blocker, not permission to infer a repo — record it and continue down the list.
+
+This ranking applies only to **new selection**. Step 0 always reconciles an interrupted prior run
+first, including its existing branch and dirty work, before any ranked item — `do-next` included —
+may dispatch. Rank changes queue order, not eligibility: every repo safety gate and Step 2 skip
+rule still applies. If the top candidate is blocked, record/comment the blocker normally and
+continue to the next candidate in rank order.
 
 For each direct child of `/Users/jake/Dropbox/code` that is a git repo, in that order:
 
@@ -349,10 +385,10 @@ that exists instead of requiring one format.
 Read the whole roadmap, plus the repo's `CLAUDE.md`, `README*`, `PRODUCT.md`, and `package.json`
 scripts, so you're choosing against real project conventions.
 
-Within a qualifying repo, an eligible Linear issue labeled `do-next` outranks every fresh roadmap,
-plan, or unlabeled Linear candidate. When several carry it, use Linear state (`Todo` / `In
-Progress` before `Backlog`), then Linear priority, then the query's stable order. Do not let the
-label bypass dependencies, safety checks, or the skip rules below.
+Within a qualifying repo, take the highest-ranked eligible candidate by Step 1's tier table:
+`do-next` first, then Urgent/P0, High/P1, Medium/P2, Low/P3, then unprioritized — Linear state only
+breaks ties within a tier. The prefer/skip rules below decide *eligibility*; they don't reorder
+tiers. Do not let rank bypass dependencies, safety checks, or the skip rules.
 
 **Prefer** items that:
 - list concrete touchpoints in the ticket or source plan — an item without them is usually
@@ -388,8 +424,9 @@ an issue exists somewhere; read both, then pick one item by the prefer/skip rule
 
 - **Read the snapshot**, never Linear itself. It holds every Dev issue not completed or canceled,
   with `labels` (group children flattened to `repo/<dir>`), `blocked_by`, and the full
-  `description`. Take `Todo` and `In Progress` first — Jake moved those
-  deliberately — then `Backlog`. Ignore `Done`, `Canceled`, `Duplicate`, and `In Review`.
+  `description`. Order by Step 1's tier table — Linear **priority first**, with state
+  (`In Progress`, `Todo`, then `Backlog`) only breaking ties within a priority. Ignore `Done`,
+  `Canceled`, `Duplicate`, and `In Review`.
 - **The repo comes from the `repo` label.** The workspace carries a `repo` label group with one
   child per directory under `~/Dropbox/code` — `repo/mailcruxh`, `repo/typey.site`, and so on.
   Being a group, it's single-select: one repo per issue.
@@ -419,8 +456,8 @@ an issue exists somewhere; read both, then pick one item by the prefer/skip rule
   it does not make the issue ineligible.** It gates the repo's *tree*, not the item: a
   directive-bearing ticket is ordinary work that triages by the normal Step 2 rules, and the
   directive only decides whether the run may start on it at all.
-- **`do-next` is a next-run queue override.** It moves an otherwise eligible issue ahead of all
-  fresh work after Step 0 has reconciled any interrupted prior run. It does not override
+- **`do-next` is the tier above Urgent/P0.** It moves an otherwise eligible issue ahead of all
+  fresh work in every repo after Step 0 has reconciled any interrupted prior run. It does not override
   `human-only`, repo safety, dependencies, or the Step 2 skip list. A completed issue naturally
   leaves the active queue when Step 7 moves it to `Done`; do not remove the label on the way in.
 - **`/goal` selects durable goal execution.** For an issue carrying this label, emit
@@ -443,8 +480,8 @@ an issue exists somewhere; read both, then pick one item by the prefer/skip rule
 
 When a run tries to implement a ticket and cannot continue, put the blocker where the work lives:
 on that Linear issue. This applies when the repo is dirty, a required human decision is unresolved,
-attended acceptance is required before implementation can safely land, or work stalls on a product
-judgment during Steps 4 or 5.
+attended acceptance is required before implementation can safely land, work stalls on a product
+judgment during Steps 4 or 5, or production deploys stay red after Step 7b's fix attempts.
 
 The worker posts these (you only list them in `blockers`): it runs `linear issue comment list
 DEV-N` before writing, then `linear issue comment add DEV-N --body-file <f>`. A blocker comment has this shape:

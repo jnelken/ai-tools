@@ -619,6 +619,7 @@ BADGE = {
     "skipped-unchanged": ("off", "⏸ unchanged skip"),
     "error": ("fail", "✗ error"), "failed": ("fail", "✗ failed"), "incomplete": ("fail", "⚠ incomplete"),
     "archive-only": ("ok", "✓ archive-only"),
+    "shipped-deploy-failed": ("fail", "✗ deploy failed"),
     "running": ("unk", "● running"),
 }
 
@@ -640,7 +641,7 @@ def build():
     shipped = sum(1 for r in runs if r["outcome"] == "shipped")
     blocked = sum(1 for r in runs if r["outcome"].startswith("blocked"))
     skipped = sum(1 for r in runs if r["outcome"].startswith("skipped"))
-    errored = sum(1 for r in runs if r["outcome"] in ("error", "failed", "incomplete"))
+    errored = sum(1 for r in runs if r["outcome"] in ("error", "failed", "incomplete", "shipped-deploy-failed"))
 
     rows = []
     for r in runs:

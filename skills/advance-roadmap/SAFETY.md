@@ -59,6 +59,11 @@ commit, merge, or push (see WORKER.md).
 - **Never force anything.** No `--force`, no `--force-with-lease`, no `git reset --hard`, no
   `git clean -fd`, no rewriting published history. If the final `git push` is rejected as
   non-fast-forward, STOP — leave the branch and its commits in place, and report it.
+- **Deploy fixes are bounded fix-forward commits.** After a failed production deploy, the worker
+  may push focused `fix:` commits to `main`, but only inside Step 7b: at most 3 attempts, full
+  Step 5 verification before each push, and no force-push or revert of published history. Never
+  change Vercel/Netlify project settings, env vars, or billing to get a build green. That's a
+  blocker for Jake.
 - **Never open a PR** and never delete a branch the user created.
 - **Never commit secrets or build junk** (`.env`, `*.pem`, tokens, `node_modules/`, `dist/`,
   `.next/`, `build/`, `*.log`). Respect `.gitignore`.

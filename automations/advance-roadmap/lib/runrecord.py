@@ -18,7 +18,7 @@ import sys
 import time
 from datetime import datetime
 
-ERROR_OUTCOMES = ("error", "failed", "incomplete")
+ERROR_OUTCOMES = ("error", "failed", "incomplete", "shipped-deploy-failed")
 SKIP_OUTCOMES = ("skipped-backoff", "skipped-quota", "skipped-lock", "skipped-unchanged")
 # Alert on the 2nd consecutive error, then again every 4 more (~daily at 6h cadence).
 ALERT_FIRST, ALERT_EVERY = 2, 4
@@ -73,6 +73,9 @@ def derive(a, orch, wstatus, wresult):
             return "error", f"worker hit a limit: {wresult.get('limit_text') or '?'}"
         if o in ("shipped", "failed", "archive-only"):
             return o, ""
+        if o == "shipped-deploy-failed":
+            d = wresult.get("deploy") or {}
+            return o, f"deploy {d.get('status') or 'failed'}: {d.get('url') or '?'}"
         return "error", f"unknown worker outcome {o!r}"
 
     if w_exit not in (0, None):

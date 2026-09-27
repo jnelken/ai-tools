@@ -6,7 +6,7 @@
   "properties": {
     "outcome": {
       "type": "string",
-      "enum": ["shipped", "blocked-branch-left", "failed", "limit_hit", "archive-only", "bookkeeping"]
+      "enum": ["shipped", "shipped-deploy-failed", "blocked-branch-left", "failed", "limit_hit", "archive-only", "bookkeeping"]
     },
     "provider": {
       "type": "string",
@@ -22,6 +22,14 @@
       "enum": ["standard", "goal"]
     },
     "limit_text": { "type": ["string", "null"] },
+    "deploy": {
+      "type": ["object", "null"],
+      "properties": {
+        "status": { "type": "string", "enum": ["success", "failed", "timeout", "none"] },
+        "url": { "type": ["string", "null"] },
+        "attempts": { "type": "integer", "minimum": 0 }
+      }
+    },
     "summary": { "type": "string" }
   }
 }

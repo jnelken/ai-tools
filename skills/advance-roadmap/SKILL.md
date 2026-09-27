@@ -6,7 +6,8 @@ description: >-
   ~/Dropbox/code, implement the item on a branch, verify with the repo's test/build, move it to
   Shipped, then merge to main locally and push. No PR. Use on-demand ("/advance-roadmap", "work a
   roadmap item", "advance the roadmap", "ship something off the roadmap") or via an unattended
-  scheduled run. Sibling of [[wrapup-repos]] but NOT the same: this one pushes. Sibling of
+  scheduled run. After pushing, watches the production deploy (usually Vercel) and fixes forward
+  until it's green, within a bounded number of attempts. Sibling of [[wrapup-repos]] but NOT the same: this one pushes. Sibling of
   [[prepare-roadmap]] too: that skill only asks Jake questions and records his answers as
   directives; this is the only skill that ever acts on them.
 ---
@@ -39,8 +40,10 @@ pending directives — issues labeled `roadmap-directive`, via the `linear` CLI 
 
 Linear routing labels:
 
-- `do-next` puts an eligible ticket ahead of all fresh work on the next run, but never ahead of
-  Step 0's interrupted-run reconciliation.
+- `do-next` is a priority tier above Urgent/P0: it puts an eligible ticket ahead of all fresh
+  work in every repo on the next run, but never ahead of Step 0's interrupted-run reconciliation.
+  Below it, work is taken in global Linear priority order (Urgent/P0 → High/P1 → Medium/P2 →
+  Low/P3 → no priority), across repos — see ORCHESTRATOR.md Step 1.
 - `/goal` launches the selected worker through that provider's native durable goal command
   (`$goal` for Codex; `/goal` for Cursor and Claude).
 
@@ -67,4 +70,4 @@ JSON fence, then run:
 
 1. [`SAFETY.md`](SAFETY.md)
 2. [`ORCHESTRATOR.md`](ORCHESTRATOR.md) — Steps 0–2 + JSON protocol
-3. [`WORKER.md`](WORKER.md) — Steps 3–8 + worker result fence
+3. [`WORKER.md`](WORKER.md) — Steps 3–8 (including Step 7b's deploy watch) + worker result fence

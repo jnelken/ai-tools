@@ -47,6 +47,7 @@ case "$FAKE_WORKER" in
   file)  print -r -- "$res" > "$rf"; print "=== advance-roadmap exit=2 finished (decoy) ===" ;;
   fence) print -r -- '```WORKER_RESULT_JSON'; print -r -- "$res"; print -r -- '```' ;;
   fail)  print "boom"; exit 1 ;;
+  deploy) print -r -- '{"outcome":"shipped-deploy-failed","provider":"cursor","repo":"demo","item":"DEV-1 thing","merge_commit":"abc1234","deploy":{"status":"failed","url":"https://demo.vercel.app","attempts":3},"summary":"red"}' > "$rf" ;;
 esac
 SH
 chmod +x "$BIN/codex" "$BIN/agent"
@@ -81,5 +82,7 @@ grep -q "=== alert:" "$ROOT/logs/latest.log" && echo "ok   run.sh raised the ale
 run good file;    check "recovery run → shipped"               "$(last outcome)" shipped
 case "$(python3 "$ROOT/lib/runrecord.py" --root "$ROOT" alert)" in *recovered*) echo "ok   recovery message" ;;
   *) echo "FAIL: expected recovery message"; exit 1 ;; esac
-check "exactly one record per run" "$(wc -l < "$ROOT/runs.jsonl" | tr -d ' ')" 5
+run good deploy;  check "deploy cap hit → shipped-deploy-failed" "$(last outcome)" shipped-deploy-failed
+                  check "deploy detail names the URL"          "$(last detail)" "deploy failed: https://demo.vercel.app"
+check "exactly one record per run" "$(wc -l < "$ROOT/runs.jsonl" | tr -d ' ')" 6
 echo "all passed"

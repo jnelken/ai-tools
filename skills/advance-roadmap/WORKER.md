@@ -43,13 +43,16 @@ print the same object in a fence:
   "merge_commit": "abc1234",
   "linear_id": "DEV-35",
   "limit_text": null,
+  "deploy": {"status": "success", "url": "https://mailcruxh-abc123.vercel.app", "attempts": 0},
   "summary": "…"
 }
 ```
 ````
 
-`outcome`: `shipped` | `blocked-branch-left` | `failed` | `limit_hit` | `archive-only` | `bookkeeping`
-(bookkeeping mode only — `run.sh` then records the orchestrator's `outcome_token`).
+`outcome`: `shipped` | `shipped-deploy-failed` | `blocked-branch-left` | `failed` | `limit_hit` |
+`archive-only` | `bookkeeping` (bookkeeping mode only — `run.sh` then records the orchestrator's
+`outcome_token`). `shipped` means pushed **and** the deploy is green (or there is no deploy);
+`shipped-deploy-failed` means pushed but Step 7b's cap was hit with production still red.
 
 ---
 
@@ -199,9 +202,59 @@ git -C <repo> push origin main
 - If `--ff-only` refuses because `origin/main` moved during the run, `git fetch` and rebase the
   branch onto the new `origin/main`, **re-run Step 5's verification**, then retry. Never force.
 - If the push is rejected, stop and report. Don't force, don't retry with a different flag.
-- **Once the push has succeeded**, and only then: if the item came from a Linear issue, comment the
-  merge commit on it (`linear issue comment add DEV-N --body-file <f>`) and move it to `Done`
-  (`linear issue update DEV-N --state Done`). Linear is CLI-only — see `SAFETY.md`.
+- Do **not** close the Linear issue yet — that waits for Step 7b.
+
+## Step 7b — Watch the deploy until it's green
+
+Pushing `main` deploys production in most of these repos (usually Vercel's GitHub integration,
+sometimes Netlify). A push isn't shipped until that build succeeds.
+
+1. **Find the deploy for the pushed SHA** through GitHub, which is provider-agnostic:
+
+   ```
+   gh api repos/<owner>/<repo>/commits/<sha>/status        # Vercel posts a "Vercel" context here
+   gh api repos/<owner>/<repo>/commits/<sha>/check-runs
+   ```
+
+   Poll every ~30s. If no deploy-looking status or check-run appears within ~3 minutes **and** the
+   repo has no `vercel.json`, `.vercel/`, or `netlify.toml`, record `deploy: none` and skip to the
+   close-out below. If the repo has deploy config but nothing appears, keep polling until the timeout.
+2. **Wait for a terminal state**, up to ~15 minutes per deploy. A timeout while still pending is
+   reported like a failure, but doesn't count as a fix attempt; stop and report it rather than
+   fixing blind.
+3. **On failure, fetch the build logs.** Take the deployment URL from the status's `target_url` and
+   run `vercel inspect <url> --logs`; fall back to the check-run's `output` via `gh api`. Never
+   paste env values or secrets from the logs anywhere.
+4. **Fix forward.** Diagnose from the logs, make a focused `fix:` commit on `main`, re-run Step 5's
+   verification in full, and `git push origin main`. Never force, never revert published history,
+   never change Vercel/Netlify project settings or env vars. Then go back to 1 for the new SHA.
+5. **Cap: 3 fix-and-redeploy attempts.** If the deploy is still failing after the third, leave `main`
+   as it is and post a Step 2b blocker on the ticket (dedup rules apply):
+
+   ```markdown
+   @jnelks advance-roadmap shipped this ticket but the production deploy is failing.
+
+   **Repo:** `<directory>`
+   **Blocker:** Production deploy failing
+   **Details:** SHA `<sha>`, deployment `<url>`, error: `<short excerpt>`. Tried: <one line per attempt>.
+   **Needed from you:** Fix the build; the next run skips this repo until its deploy is green.
+
+   <!-- advance-roadmap:blocker -->
+   ```
+
+   Report outcome `shipped-deploy-failed` and do **not** move the ticket to `Done`. A failure that
+   needs something only Jake can do (a missing env var, a billing or quota block) skips straight
+   to this step — fix attempts can't help.
+
+**Close out** only once the deploy is green (or `deploy: none` is confirmed): if the item came from a
+Linear issue, comment the merge commit and deploy URL on it
+(`linear issue comment add DEV-N --body-file <f>`) and move it to `Done`
+(`linear issue update DEV-N --state Done`). Linear is CLI-only — see `SAFETY.md`. Put the deploy
+result in the result JSON's `deploy` object (`status`: `success` | `failed` | `timeout` | `none`,
+`url`, `attempts`).
+
+Bookkeeping-only pushes (archives, directive commits with no feature) still get watched, but a
+failure there is reported rather than fixed, since the push didn't change built code.
 
 ## Step 8 — Update run memory
 
@@ -209,7 +262,10 @@ Write `/Users/jake/.claude/projects/-Users-jake-Dropbox-code/memory/project_adva
 (one file, updated in place — never one file per run), with `type: project` frontmatter, recording:
 - the date of this run;
 - an **outcome token** for this run — exactly one of:
-  - `shipped` — an item went to `main`;
+  - `shipped` — an item went to `main` and its deploy is green (or the repo has none);
+  - `shipped-deploy-failed` — an item went to `main` but Step 7b ran out of fix attempts and
+    production is still red. **Name the repo, the failing SHA, and the deployment URL** — the next
+    run's orchestrator skips new work in that repo until its deploy is green again;
   - `blocked-branch-left` — an item was picked and its work is parked on a branch (verification
     failed, or a decision blocked it). **Name the repo and branch.** This is the record that stops
     a later run from resuming a branch that was abandoned on purpose;
@@ -221,7 +277,7 @@ Write `/Users/jake/.claude/projects/-Users-jake-Dropbox-code/memory/project_adva
 - the Linear issues considered, the one shipped (with its `DEV-N` id), and any that were blocked on
   not naming a repo;
 - the item picked, or why none was;
-- whether it shipped, and the merge commit hash;
+- whether it shipped, the merge commit hash, and the deploy result (status, URL, fix attempts);
 - any plan docs archived as already-implemented, so a later run doesn't go looking for them;
 - the ticket blockers encountered, their issue IDs, and whether each Linear comment was created,
   suppressed as unchanged, or failed;
@@ -249,7 +305,7 @@ never backfill a row for a run you didn't complete yourself.
 ## Final output
 
 End with a 5-line plain-text summary: repo, item shipped (or why none), test/build result, merge
-commit hash, and anything left for the user to confirm by hand. Say up front whether this run
+commit hash and deploy result, and anything left for the user to confirm by hand. Say up front whether this run
 finished an interrupted previous run or started fresh, and name the outcome token you recorded in
 Step 8. If Step 2b reported blockers, say so
 with the issue IDs and whether `@jnelks` was mentioned or an unchanged comment was suppressed. In
