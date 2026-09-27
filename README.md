@@ -149,6 +149,22 @@ curl -fsSL https://raw.githubusercontent.com/jnelken/ai-tools/main/install.sh | 
 
 What the bootstrap does **not** carry: `~/.claude/settings.json` is machine-local and not versioned, so beyond `statusLine` and the `ai-tools-sync.sh` `SessionStart` entry that `install.sh` writes, every other hook still needs wiring per [`hooks/README.md`](hooks/README.md) on each new environment. Secrets (webhook URLs, API keys) arrive via environment variables set on the environment itself — never from the repo.
 
+### Windows
+
+`install.sh` runs under Git Bash (it sets `MSYS=winsymlinks:nativestrict` so links are real NTFS symlinks, never silent copies). One-time prerequisites:
+
+- **Developer Mode** on (Settings → System → For developers) so symlinks work without elevation — `install.sh` checks this first and exits with instructions if not.
+- `jq` on `PATH` (`scoop install jq`).
+- `CLAUDE_CODE_GIT_BASH_PATH` pointing at Git Bash's `bash.exe` (e.g. `~\scoop\apps\git\current\bin\bash.exe`) when Claude Code can't find it on its own — hooks and the statusline run through it.
+
+Run from PowerShell:
+
+```powershell
+& "$env:USERPROFILE\scoop\apps\git\current\bin\bash.exe" -lc '~/.ai-tools/install.sh'
+```
+
+Launchd automations don't apply on Windows.
+
 ## Dev workflow
 
 ```

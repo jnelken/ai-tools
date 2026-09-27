@@ -55,6 +55,16 @@ resolve_path() {
   fi
 }
 
+# hash_of: sha1 of stdin. shasum on macOS/Linux; Git Bash on Windows only
+# ships sha1sum.
+hash_of() {
+  if command -v shasum >/dev/null 2>&1; then
+    shasum | awk '{print $1}'
+  else
+    sha1sum | awk '{print $1}'
+  fi
+}
+
 MSG=""
 append_msg() {
   if [ -n "$MSG" ]; then
@@ -92,7 +102,7 @@ DIRTY_STATUS="$(git -C "$AI_TOOLS_HOME" status --porcelain 2>/dev/null || true)"
 
 if [ -n "$DIRTY_STATUS" ]; then
   dirty_state_file="$STATE_DIR/ai-tools-dirty-nudge.txt"
-  dirty_hash="$(printf '%s' "$DIRTY_STATUS" | shasum 2>/dev/null | awk '{print $1}')"
+  dirty_hash="$(printf '%s' "$DIRTY_STATUS" | hash_of 2>/dev/null)"
   if [ -n "$dirty_hash" ] && cooldown_ok "$dirty_state_file" 86400 "$dirty_hash"; then
     record_cooldown "$dirty_state_file" "$dirty_hash"
     append_msg "⚠️ The ai-tools DEPLOYED copy ($AI_TOOLS_HOME) has uncommitted edits.
@@ -209,7 +219,7 @@ classify_link "$CLAUDE_DIR/awesome-statusline.sh"
 
 if [ -n "$dev_offenders" ]; then
   dev_state_file="$STATE_DIR/ai-tools-devmode-nudge.txt"
-  dev_hash="$(printf '%s' "$dev_offenders" | shasum 2>/dev/null | awk '{print $1}')"
+  dev_hash="$(printf '%s' "$dev_offenders" | hash_of 2>/dev/null)"
   if [ -n "$dev_hash" ] && cooldown_ok "$dev_state_file" 86400 "$dev_hash"; then
     record_cooldown "$dev_state_file" "$dev_hash"
     dev_count="$(printf '%s\n' "$dev_offenders" | wc -l | tr -d ' ')"
@@ -224,7 +234,7 @@ fi
 
 if [ -n "$stale_offenders" ]; then
   stale_state_file="$STATE_DIR/ai-tools-stale-nudge.txt"
-  stale_hash="$(printf '%s' "$stale_offenders" | shasum 2>/dev/null | awk '{print $1}')"
+  stale_hash="$(printf '%s' "$stale_offenders" | hash_of 2>/dev/null)"
   if [ -n "$stale_hash" ] && cooldown_ok "$stale_state_file" 86400 "$stale_hash"; then
     record_cooldown "$stale_state_file" "$stale_hash"
     append_msg "⚠️ Some ~/.claude/* links are dangling — their ai-tools target no longer exists (renamed or removed upstream):

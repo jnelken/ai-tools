@@ -25,8 +25,9 @@
 # pointing at its own path. If a per-file symlink is ever truly wanted,
 # target the resolved source path directly, never the ~/.claude/... path.
 #
-# Bash 3.2 compatible (macOS default bash) and Linux compatible: no mapfile,
-# no associative arrays, no ${var,,}, no GNU-only `realpath`/`readlink -f`.
+# Bash 3.2 compatible (macOS default bash), Linux compatible, and runs under
+# Git Bash on Windows (needs Developer Mode for symlinks — see README): no
+# mapfile, no associative arrays, no ${var,,}, no GNU-only `realpath`/`readlink -f`.
 set -euo pipefail
 
 # ── defaults (all overridable from the environment) ──
@@ -38,6 +39,17 @@ AI_TOOLS_REF="${AI_TOOLS_REF:-main}"
 while [ "${AI_TOOLS_HOME%/}" != "$AI_TOOLS_HOME" ] && [ "$AI_TOOLS_HOME" != "/" ]; do
   AI_TOOLS_HOME="${AI_TOOLS_HOME%/}"
 done
+
+# Windows (Git Bash / MSYS): plain `ln -s` silently COPIES instead of linking.
+# nativestrict makes it create real NTFS symlinks, or fail loudly if the OS
+# won't allow them (Developer Mode off and not elevated).
+IS_WINDOWS=0
+case "$(uname -s)" in
+  MINGW*|MSYS*|CYGWIN*)
+    IS_WINDOWS=1
+    export MSYS=winsymlinks:nativestrict
+    ;;
+esac
 
 CLAUDE_DIR="$HOME/.claude"
 SETTINGS="$CLAUDE_DIR/settings.json"
@@ -220,6 +232,8 @@ ensure_jq() {
   elif command -v pacman  >/dev/null 2>&1; then sudo -n pacman -S --noconfirm jq </dev/null || true
   elif command -v zypper  >/dev/null 2>&1; then sudo -n zypper install -y jq </dev/null || true
   elif command -v apk     >/dev/null 2>&1; then sudo -n apk add jq </dev/null || true
+  elif command -v scoop   >/dev/null 2>&1; then scoop install jq </dev/null || true
+  elif command -v winget  >/dev/null 2>&1; then winget install -e --id jqlang.jq --accept-source-agreements --accept-package-agreements </dev/null || true
   fi
   if command -v jq >/dev/null 2>&1; then
     echo "  jq installed."
@@ -268,6 +282,22 @@ update_ai_tools_home() {
   echo "  mv \"$AI_TOOLS_HOME\" \"$AI_TOOLS_HOME.bak\"" >&2
   exit 1
 }
+
+# ── Windows preflight: fail before touching anything if symlinks are refused ──
+check_windows_symlinks() {
+  [ "$IS_WINDOWS" -eq 1 ] || return 0
+  local probe
+  probe="$(mktemp -d)"
+  touch "$probe/target"
+  if ! ln -s "$probe/target" "$probe/link" 2>/dev/null; then
+    rm -rf "$probe"
+    echo "Error: Windows refused to create a symlink." >&2
+    echo "Turn on Developer Mode (Settings → System → For developers), then re-run." >&2
+    exit 1
+  fi
+  rm -rf "$probe"
+}
+check_windows_symlinks
 
 if [ "$DEV_MODE" -eq 0 ] && [ "$NO_UPDATE" -eq 0 ]; then
   update_ai_tools_home
