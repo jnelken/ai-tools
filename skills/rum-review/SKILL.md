@@ -7,6 +7,9 @@ description: Query Datadog RUM data, synthesize findings into categorized issues
 
 Use this skill when asked to review Datadog RUM data for UX insights and file actionable findings as Linear issues.
 
+
+**Personal workspace (`jnelken`, team Dev, DEV-\*)?** Don't create the issue here — use [[jnelken-linear]] (`jlin.py new`), which refuses to file one without its `repo/*` label.
+
 ## Invocation
 
 ```

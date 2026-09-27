@@ -149,7 +149,9 @@ Four constraints keep that from becoming a mess:
 4. **Label it the way the workspace requires.** `repo/<directory>` is mandatory and
    single-select, and the label name is the **directory** name rather than the GitHub repo —
    `repo/openclaw-vps` is `jnelken/vena-vps`, and each label's description records its own
-   mismatch, so read it when the two differ. Add `roadmap-directive`. Leave
+   mismatch, so read it when the two differ. Add `roadmap-directive`. **Create it with
+   [[jnelken-linear]]**, which sets both in one call and can't forget the repo:
+   `jlin.py new --repo <dir> --state todo --label roadmap-directive --title … --description-file …`. Leave
    `Bug`/`Improvement`/`Feature` alone unless Jake said which it is; a guessed type label is
    worse than none. File it in state **Todo** — a directive means "this is ready to pick up",
    which is what distinguishes it from the Backlog.

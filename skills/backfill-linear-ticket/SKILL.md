@@ -5,6 +5,9 @@ description: Create a Linear issue from the current git branch (or reuse one alr
 
 # Backfill Linear Ticket
 
+
+**Personal workspace (`jnelken`, team Dev, DEV-\*)?** Don't create the issue here — use [[jnelken-linear]] (`jlin.py new`), which refuses to file one without its `repo/*` label.
+
 ## Gather context first
 
 Before anything else, collect:

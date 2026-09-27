@@ -246,6 +246,14 @@ run_orchestrator_claude() {
 # Linear goes through the `linear` CLI only. Its key is in the keychain, which the
 # read-only Codex sandbox can't read — so snapshot the queue here and hand over the file.
 LINEAR_SNAPSHOT="$RUN_DIR/linear-snapshot.json"
+# Label issues filed without a repo/* label when their text names exactly one repo
+# (jnelken-linear skill). Before the snapshot, so they're plannable this run and their
+# label change moves the fingerprint. Resolved via SKILL_DIR so tests never reach Linear.
+JLIN_PY="$(dirname "$SKILL_DIR")/jnelken-linear/jlin.py"
+if [ -f "$JLIN_PY" ]; then
+  echo "=== repo-label inference ===" >> "$LOG"
+  python3 "$JLIN_PY" infer --apply >> "$LOG" 2>&1 || echo "(repo-label inference failed — non-fatal)" >> "$LOG"
+fi
 FINGERPRINT="$RUN_DIR/fingerprint.json"
 VERDICT_CHANGES="$RUN_DIR/verdict-changes.json"
 python3 "$LINEAR_SNAP_PY" --out "$LINEAR_SNAPSHOT" >> "$LOG" 2>&1

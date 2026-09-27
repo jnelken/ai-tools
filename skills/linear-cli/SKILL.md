@@ -106,7 +106,7 @@ tracker, and prefer MCP for writes when it's available.
 
 | Command | Purpose |
 |---|---|
-| `linear issue create` | Create an issue |
+| `linear issue create` | Create an issue — **not for team Dev**: use [[jnelken-linear]]'s `jlin.py new`, which sets the required `repo/*` label |
 | `linear issue update <id>` | Update an issue |
 | `linear issue comment` | Manage comments (replies, threads) |
 | `linear issue start <id>` | Move to started |
@@ -126,8 +126,9 @@ show what you intend to delete, get an explicit yes first.
 
 - **Every issue carries a `repo/*` label**, single-select, one child per directory under
   `~/Dropbox/code`. It's how automation decides where to write code, so a wrong one means a push
-  to the wrong repo. [[advance-roadmap]] treats a missing label as a blocker rather than
-  inferring the repo, and the global `CLAUDE.md` requires applying one on every file/update.
+  to the wrong repo. Create Dev issues only through [[jnelken-linear]] (`jlin.py new`), which
+  infers the label from the checkout and refuses without one; `jlin.py infer --apply` labels
+  unlabeled issues that name exactly one repo, and [[advance-roadmap]] runs it before each run.
 - States in team Dev: `Backlog`, `Todo`, `In Progress`, `In Review`, `Done`, `Canceled`,
   `Duplicate`. The CLI's `--state` takes *types* (`triage`, `backlog`, `unstarted`, `started`,
   `completed`, `canceled`), not these display names.

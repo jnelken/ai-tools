@@ -5,6 +5,9 @@ description: Generate a dead-simple PR title/body from the net diff vs base, bac
 
 # Create PR
 
+
+**Personal workspace (`jnelken`, team Dev, DEV-\*)?** Don't create the issue here — use [[jnelken-linear]] (`jlin.py new`), which refuses to file one without its `repo/*` label.
+
 ## Overview
 
 Push the current branch, generate (or preserve) a minimal PR description, backfill a Linear ticket, and open the PR **as a draft**. New PRs start as drafts on purpose — the Post-PR Workflow (in the user's global CLAUDE.md) marks them ready and badges the description once the PR has actually been shared to Slack. Don't undraft or badge here; that's a different step's job.

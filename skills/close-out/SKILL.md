@@ -124,7 +124,7 @@ Rules for what you file:
 - **If a ticket corrects an earlier claim, say so explicitly and date it.** e.g. "Correction (2026-07-30): the 2026-07-28 comment on CON-3271 said the rows were nulled by the migration. They were not — verified against prod, 19 rows still carry the old value."
 - **Never fabricate ticket content.** If you can't produce the evidence for a finding — the line number is gone, the log has rotated, the number was a guess — write *"evidence not captured; re-derive by <specific step>"* in the ticket. Inventing a plausible file:line is worse than admitting the gap, because it reads as verified.
 
-Create/update via `mcp__claude_ai_Linear__save_issue`. Record every identifier and URL you touched — step 5 reports them.
+Create/update via `mcp__claude_ai_Linear__save_issue`. **Exception: tickets for a personal repo (team Dev, `jnelken` workspace — including every `## Ticket candidates` entry from [[wrapup-repos]]) go through [[jnelken-linear]]'s `jlin.py new --repo <dir>`**, which applies the required `repo/*` label; those are assigned to nobody, not to the Concentro id above. Record every identifier and URL you touched — step 5 reports them.
 
 ### 4. Write what still needs the human to IN_PROGRESS.md
 

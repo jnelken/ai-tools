@@ -9,6 +9,8 @@ description: Use when creating or updating Linear issues — filing tickets from
 
 Turning feedback or a feature list into well-placed Linear issues: resolve the target team/project/milestone/cycle, check for overlap before creating duplicates, then create or update via the API. Org-specific facts (known project IDs, sizing conventions) belong in reference memory, not here — this skill is the procedure, memory is the data.
 
+**Personal workspace (`jnelken`, team Dev, DEV-\*)?** Don't create the issue here — use [[jnelken-linear]] (`jlin.py new`), which refuses to file one without its `repo/*` label. This skill still owns what goes *in* the ticket (duplicate check, evidence-grade body).
+
 ## When to use
 
 - Asked to create, file, or triage Linear tickets from feedback, a bug list, or a feature list
