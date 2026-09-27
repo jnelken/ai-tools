@@ -14,6 +14,7 @@ ROOT="${ADVANCE_ROADMAP_ROOT:-/Users/jake/.claude/automations/advance-roadmap}"
 CODE_DIR="/Users/jake/Dropbox/code"
 SKILL_DIR="${ADVANCE_ROADMAP_SKILL_DIR:-/Users/jake/.claude/skills/advance-roadmap}"
 USAGE_PY="$ROOT/lib/usage.py"
+REVIEW_SH="$ROOT/review.sh"
 
 CLAUDE="${ADVANCE_ROADMAP_CLAUDE_BIN:-/Users/jake/.local/bin/claude}"
 AGENT="${ADVANCE_ROADMAP_AGENT_BIN:-/Users/jake/.local/bin/agent}"
@@ -106,15 +107,23 @@ When you are finished — whatever the outcome — write that same WORKER_RESULT
 run.sh records this run from that file. Without it the run is recorded as incomplete."
 fi
 
+# Step 5b's cross-model review. The log is what run.sh reads to prove it ran.
+REVIEW_LOG="${RESULT_FILE:+${RESULT_FILE:h}/reviews.jsonl}"
+REVIEW_LOG="${REVIEW_LOG:-${TMPDIR:-/tmp}/advance-roadmap-reviews-$STAMP.jsonl}"
+
 prompt_for_provider() {
-  local provider="$1"
+  local provider="$1" prompt
+  prompt="$BASE_PROMPT
+
+Step 5b review command (you are provider '$provider'):
+$REVIEW_SH --repo <repo path> --worker $provider --round <N> --log $REVIEW_LOG"
   if [ "$WORKER_MODE" != "goal" ]; then
-    print -r -- "$BASE_PROMPT"
+    print -r -- "$prompt"
     return
   fi
   case "$provider" in
-    codex)  print -r -- "\$goal $BASE_PROMPT" ;;
-    cursor|claude) print -r -- "/goal $BASE_PROMPT" ;;
+    codex)  print -r -- "\$goal $prompt" ;;
+    cursor|claude) print -r -- "/goal $prompt" ;;
     *) return 2 ;;
   esac
 }
@@ -172,6 +181,7 @@ for provider in "${providers[@]}"; do
   echo "=== worker try provider=$provider mode=$WORKER_MODE stamp=$STAMP ($(date)) ==="
   rc=0
   [ -n "$RESULT_FILE" ] && rm -f "$RESULT_FILE"   # a failed-over attempt's result must not count
+  rm -f "$REVIEW_LOG"                              # nor its review rounds
   case "$provider" in
     cursor) run_cursor "$out" || rc=$? ;;
     codex)  run_codex "$out"  || rc=$? ;;

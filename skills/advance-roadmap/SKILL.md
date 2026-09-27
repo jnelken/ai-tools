@@ -16,6 +16,12 @@ description: >-
 
 Take exactly ONE item from planned → shipped on `main` per run, or stop cleanly with blockers recorded.
 
+**Every item is reviewed by a second model before it merges.** The worker calls `review.sh`, which
+has a different provider review the branch diff read-only; the worker fixes findings and re-reviews,
+up to 3 rounds. Findings still open after round 3 merge anyway, marked in the code as
+`FIXME(advance-roadmap review)` (bugs) or `TODO(advance-roadmap review)` (lesser) and listed in the
+summary. `runs.jsonl` records the rounds and flags a ship with no logged review.
+
 **Keep going while there's time.** A run that ships cleanly (`shipped`, deploy green) starts another
 run — fresh orchestrator pass, fresh item — as long as fewer than 40 minutes have passed since the
 first run started. Anything else (blocked, failed, red deploy, no item, quota) ends the chain. The
@@ -36,6 +42,7 @@ pending directives — issues labeled `roadmap-directive`, via the `linear` CLI 
 |---|---|---|---|
 | **Orchestrator** | Codex **Sol** high → Claude Opus high | **No** | [`ORCHESTRATOR.md`](ORCHESTRATOR.md) |
 | **Worker** | Cursor Auto → Codex Sol → Claude Opus | **Yes** | [`WORKER.md`](WORKER.md) |
+| **Reviewer** | a provider other than the worker's (Cursor ↔ Codex; Claude → Codex) | **No** | [`WORKER.md`](WORKER.md) Step 5b |
 | **Safety** | — | binds both | [`SAFETY.md`](SAFETY.md) |
 
 `run.sh` owns routing and `providers-usage.json` (`lib/usage.py`):
@@ -79,4 +86,4 @@ JSON fence, then run:
 
 1. [`SAFETY.md`](SAFETY.md)
 2. [`ORCHESTRATOR.md`](ORCHESTRATOR.md) — Steps 0–2 + JSON protocol
-3. [`WORKER.md`](WORKER.md) — Steps 3–8 (including Step 7b's deploy watch) + worker result fence
+3. [`WORKER.md`](WORKER.md) — Steps 3–8 (including Step 5b's cross-model review and Step 7b's deploy watch) + worker result fence

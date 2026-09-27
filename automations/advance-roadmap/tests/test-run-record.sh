@@ -47,6 +47,10 @@ case "$FAKE_WORKER" in
   file)  print -r -- "$res" > "$rf"; print "=== advance-roadmap exit=2 finished (decoy) ===" ;;
   fence) print -r -- '```WORKER_RESULT_JSON'; print -r -- "$res"; print -r -- '```' ;;
   fail)  print "boom"; exit 1 ;;
+  reviewed) print -r -- "$prompt" | grep -q -- '--worker cursor --round <N> --log .*/reviews.jsonl' || exit 9
+         print -r -- '{"round":1,"worker":"cursor","reviewer":"codex","verdict":"findings"}' >> "${rf:h}/reviews.jsonl"
+         print -r -- '{"round":2,"worker":"cursor","reviewer":"codex","verdict":"clean"}' >> "${rf:h}/reviews.jsonl"
+         print -r -- "$res" > "$rf" ;;
   chain) n=$(( $(cat "$CHAIN_COUNT" 2>/dev/null || echo 0) + 1 )); print $n > "$CHAIN_COUNT"
          [ $n -le 2 ] && print -r -- "$res" > "$rf" || { print "boom"; exit 1; } ;;
   deploy) print -r -- '{"outcome":"shipped-deploy-failed","provider":"cursor","repo":"demo","item":"DEV-1 thing","merge_commit":"abc1234","deploy":{"status":"failed","url":"https://demo.vercel.app","attempts":3},"summary":"red"}' > "$rf" ;;
@@ -72,6 +76,11 @@ check() { [ "$2" = "$3" ] || { echo "FAIL [$1]: expected '$3', got '$2'"; tail -
 run good file;    check "agent-written result → shipped"       "$(last outcome)" shipped
                   check "result source is the agent's file"     "$(last worker_result_source)" agent
                   check "merge commit carried through"          "$(last merge_commit)" abc1234
+                  check "unreviewed ship is flagged"            "$(last detail)" "merged without a logged review"
+run good reviewed; check "reviewed ship → shipped"             "$(last outcome)" shipped
+                  check "review rounds recorded"                "$(last review_rounds)" 2
+                  check "reviewer recorded"                     "$(last reviewer)" codex
+                  check "reviewed ship has no flag"             "$(last detail)" ""
 run good fence;   check "stdout fence fallback → shipped"       "$(last outcome)" shipped
                   check "fallback is labelled"                  "$(last worker_result_source)" stdout-fence
 run good fail;    check "worker exit 1, no result → error"      "$(last outcome)" error
@@ -87,14 +96,14 @@ case "$(python3 "$ROOT/lib/runrecord.py" --root "$ROOT" alert)" in *recovered*) 
   *) echo "FAIL: expected recovery message"; exit 1 ;; esac
 run good deploy;  check "deploy cap hit → shipped-deploy-failed" "$(last outcome)" shipped-deploy-failed
                   check "deploy detail names the URL"          "$(last detail)" "deploy failed: https://demo.vercel.app"
-check "exactly one record per run" "$(wc -l < "$ROOT/runs.jsonl" | tr -d ' ')" 6
+check "exactly one record per run" "$(wc -l < "$ROOT/runs.jsonl" | tr -d ' ')" 7
 
 # Chain: ships twice, third link fails → three rows from one tick, then it stops.
 CHAIN_MINUTES=40 run good chain
-check "chain runs until a link fails to ship" "$(wc -l < "$ROOT/runs.jsonl" | tr -d ' ')" 9
+check "chain runs until a link fails to ship" "$(wc -l < "$ROOT/runs.jsonl" | tr -d ' ')" 10
 check "chain's last link is the failure"      "$(last outcome)" error
 grep -q "starting link 3" "$ROOT"/logs/run-*.log && echo "ok   chain logged its links" || { echo "FAIL: no chain log line"; exit 1; }
 # Past the time cap, a shipped run does not chain.
 ADVANCE_ROADMAP_CHAIN_START=$(( $(date +%s) - 2401 )) CHAIN_MINUTES=40 run good file
-check "no chain past the time cap"            "$(wc -l < "$ROOT/runs.jsonl" | tr -d ' ')" 10
+check "no chain past the time cap"            "$(wc -l < "$ROOT/runs.jsonl" | tr -d ' ')" 11
 echo "all passed"

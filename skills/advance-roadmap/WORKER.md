@@ -19,7 +19,7 @@ Hard constraints:
 The prompt names a request JSON file. Modes:
 
 - **implement / resume** — fields from the orchestrator result (`repo`, `item`, `branch`,
-  `worker_brief`, `worker_mode`, …). Do Steps 3–8 (resume uses the existing branch). The launcher
+  `worker_brief`, `worker_mode`, …). Do Steps 3–8, including Step 5b's review (resume uses the existing branch). The launcher
   has already invoked the provider's native goal command when `worker_mode` is `goal`; do not
   create a second goal. When `directive_ticket` is set, do **Step 2c first** — it clears the dirty
   tree that would otherwise block Step 3.
@@ -44,6 +44,7 @@ print the same object in a fence:
   "linear_id": "DEV-35",
   "limit_text": null,
   "deploy": {"status": "success", "url": "https://mailcruxh-abc123.vercel.app", "attempts": 0},
+  "review": {"reviewer": "codex", "rounds": 1, "unresolved": 0},
   "summary": "…"
 }
 ```
@@ -145,6 +146,42 @@ the fix isn't obvious and contained, stop per the all-or-nothing rule: leave the
 merge, and report exactly what failed with the error output. If what stopped you was a question
 rather than a bug — the fix depends on a decision that's the user's to make — write it up per
 Step 2b and name the branch in the ticket comment so the question and work in flight stay linked.
+
+## Step 5b — Cross-model review (up to 3 rounds)
+
+Before anything merges, a model from a **different provider** reviews the branch. Run the review
+command from your prompt (it names your provider and the log path) from the repo, with the round
+number:
+
+```
+~/.claude/automations/advance-roadmap/review.sh --repo <repo> --worker <you> --round 1 --log <log>
+```
+
+It picks the reviewer (Cursor's work → Codex, Codex's → Cursor, Claude's → Codex, falling back to
+the remaining provider on a limit), reviews `origin/main...HEAD` read-only, prints findings, and
+ends with a `VERDICT:` line. Commit your work before calling it: it reviews commits, not the
+working tree.
+
+- **`VERDICT: clean`** → go to Step 6.
+- **`VERDICT: findings`** (or `unparsed` — read the text as findings) → take each finding on its
+  merits. Fix the real ones, re-run Step 5's verification, commit (`fix: address review round N`),
+  and call the review again with the next round number. A finding you judge wrong is dismissed,
+  not fixed — note it and why in your summary; it doesn't need a code marker.
+- **After round 3, still findings** → **merge anyway**, with every unresolved finding marked in
+  the code where it applies, in the file's comment syntax:
+  - `FIXME(advance-roadmap review): <finding> — <reviewer>, <date>` for a bug or correctness risk;
+  - `TODO(advance-roadmap review): <finding> — <reviewer>, <date>` for anything lesser (a missing
+    test, an edge case worth handling).
+
+  Commit the markers on their own (`chore: mark unresolved review findings`), list each one in the
+  final summary, and carry on to Step 6. Don't call the review a fourth time.
+- **`VERDICT: unavailable`** (every reviewer limited) → merge without review and say so in the
+  summary. The run record flags it.
+
+Only the three rounds count toward the cap — a rebase-and-reverify in Step 7 doesn't trigger a new
+review unless the rebase changed your code. Bookkeeping-only runs (archives, no code) skip this step.
+
+Record it in the result JSON as `"review": {"reviewer": "codex", "rounds": 2, "unresolved": 0}`.
 
 ## Step 6 — Update the roadmap (and friends)
 

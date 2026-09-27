@@ -86,11 +86,29 @@ def derive(a, orch, wstatus, wresult):
     return (orch.get("outcome_token") or "blocked-no-item"), "no worker result (bookkeeping)"
 
 
+def read_reviews(worker_result_path):
+    """Step 5b rounds, from the log review.sh writes beside the worker result."""
+    if not worker_result_path:
+        return []
+    path = os.path.join(os.path.dirname(worker_result_path), "reviews.jsonl")
+    try:
+        with open(path, encoding="utf-8") as f:
+            return [json.loads(l) for l in f if l.strip()]
+    except (OSError, ValueError):
+        return []
+
+
 def cmd_append(a):
     orch = load_json(a.orch_result)
     wstatus = load_json(a.worker_status)
     wresult = load_json(a.worker_result)
     outcome, detail = derive(a, orch, wstatus, wresult)
+    reviews = read_reviews(a.worker_result)
+    if outcome in ("shipped", "shipped-deploy-failed") and not detail:
+        if not reviews:
+            detail = "merged without a logged review"
+        elif reviews[-1].get("verdict") == "unavailable" or not reviews[-1].get("reviewer"):
+            detail = "merged unreviewed: every reviewer was limited"
     started = stamp_epoch(a.stamp)
     now = time.time()
     w = wresult or {}
@@ -115,6 +133,10 @@ def cmd_append(a):
         "branch": w.get("branch") or o.get("branch"),
         "merge_commit": w.get("merge_commit"),
         "linear_id": w.get("linear_id") or o.get("linear_id"),
+        "review_rounds": len(reviews),
+        "reviewer": reviews[-1].get("reviewer") if reviews else None,
+        "review_verdict": reviews[-1].get("verdict") if reviews else None,
+        "review_unresolved": (w.get("review") or {}).get("unresolved"),
         "summary": (w.get("summary") or o.get("summary") or "")[:1000],
     }
     path = os.path.join(a.root, "runs.jsonl")

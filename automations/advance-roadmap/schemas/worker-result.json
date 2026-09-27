@@ -30,6 +30,14 @@
         "attempts": { "type": "integer", "minimum": 0 }
       }
     },
+    "review": {
+      "type": ["object", "null"],
+      "properties": {
+        "reviewer": { "type": ["string", "null"], "enum": ["cursor", "codex", "claude", null] },
+        "rounds": { "type": "integer", "minimum": 0 },
+        "unresolved": { "type": "integer", "minimum": 0 }
+      }
+    },
     "summary": { "type": "string" }
   }
 }
