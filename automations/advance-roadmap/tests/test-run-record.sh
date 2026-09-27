@@ -47,6 +47,8 @@ case "$FAKE_WORKER" in
   file)  print -r -- "$res" > "$rf"; print "=== advance-roadmap exit=2 finished (decoy) ===" ;;
   fence) print -r -- '```WORKER_RESULT_JSON'; print -r -- "$res"; print -r -- '```' ;;
   fail)  print "boom"; exit 1 ;;
+  chain) n=$(( $(cat "$CHAIN_COUNT" 2>/dev/null || echo 0) + 1 )); print $n > "$CHAIN_COUNT"
+         [ $n -le 2 ] && print -r -- "$res" > "$rf" || { print "boom"; exit 1; } ;;
   deploy) print -r -- '{"outcome":"shipped-deploy-failed","provider":"cursor","repo":"demo","item":"DEV-1 thing","merge_commit":"abc1234","deploy":{"status":"failed","url":"https://demo.vercel.app","attempts":3},"summary":"red"}' > "$rf" ;;
 esac
 SH
@@ -60,6 +62,7 @@ run() {
     ADVANCE_ROADMAP_ROOT="$ROOT" ADVANCE_ROADMAP_SKILL_DIR="$SKILLS" \
     ADVANCE_ROADMAP_SECRETS=/dev/null ADVANCE_ROADMAP_NOTIFY=0 \
     ADVANCE_ROADMAP_CODEX_BIN="$BIN/codex" ADVANCE_ROADMAP_AGENT_BIN="$BIN/agent" \
+    ADVANCE_ROADMAP_CHAIN_MINUTES="${CHAIN_MINUTES:-0}" CHAIN_COUNT="$TMP/chain-count" \
     FAKE_ORCH="$1" FAKE_WORKER="$2" zsh "$ROOT/run.sh" || true
   sleep 1.1   # stamps are per-second
 }
@@ -85,4 +88,13 @@ case "$(python3 "$ROOT/lib/runrecord.py" --root "$ROOT" alert)" in *recovered*) 
 run good deploy;  check "deploy cap hit → shipped-deploy-failed" "$(last outcome)" shipped-deploy-failed
                   check "deploy detail names the URL"          "$(last detail)" "deploy failed: https://demo.vercel.app"
 check "exactly one record per run" "$(wc -l < "$ROOT/runs.jsonl" | tr -d ' ')" 6
+
+# Chain: ships twice, third link fails → three rows from one tick, then it stops.
+CHAIN_MINUTES=40 run good chain
+check "chain runs until a link fails to ship" "$(wc -l < "$ROOT/runs.jsonl" | tr -d ' ')" 9
+check "chain's last link is the failure"      "$(last outcome)" error
+grep -q "starting link 3" "$ROOT"/logs/run-*.log && echo "ok   chain logged its links" || { echo "FAIL: no chain log line"; exit 1; }
+# Past the time cap, a shipped run does not chain.
+ADVANCE_ROADMAP_CHAIN_START=$(( $(date +%s) - 2401 )) CHAIN_MINUTES=40 run good file
+check "no chain past the time cap"            "$(wc -l < "$ROOT/runs.jsonl" | tr -d ' ')" 10
 echo "all passed"

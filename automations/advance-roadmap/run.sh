@@ -9,6 +9,8 @@
 #   5. Append exactly one row to runs.jsonl (lib/runrecord.py) — the run record the
 #      dashboard, state.json, Slack and the failure alert all read. Built from exit
 #      codes seen here and result files the agents write; never from the log text.
+#   6. Chain: if this run shipped and the chain is under $CHAIN_MINUTES old, re-exec
+#      for another item. Each link is a full run with its own stamp, log and row.
 #
 # Guardrails live in skills/advance-roadmap/SAFETY.md.
 set -u
@@ -46,6 +48,13 @@ SECRETS="${ADVANCE_ROADMAP_SECRETS:-$HOME/.claude/automations/secrets.env}"
 
 # Incoming webhook for the per-run summary. Unset = feature off, silently.
 SLACK_WEBHOOK="${ADVANCE_ROADMAP_SLACK_WEBHOOK:-${SLACK_CCUSAGE_WEBHOOK_URL:-}}"
+
+# A tick keeps shipping items back to back until one fails to ship or the chain
+# passes this many minutes. The check is at the end of a link, so the last item
+# can run past it. 0 = one item per tick.
+CHAIN_MINUTES="${ADVANCE_ROADMAP_CHAIN_MINUTES:-40}"
+CHAIN_START="${ADVANCE_ROADMAP_CHAIN_START:-$(date +%s)}"
+CHAIN_LINK="${ADVANCE_ROADMAP_CHAIN_LINK:-1}"
 
 regen_dashboard() {
   [ -f "$ROOT/gen-dashboard.py" ] || return 0
@@ -106,7 +115,9 @@ fi
 case "$CADENCE" in ''|*[!0-9]*) CADENCE=6 ;; esac
 HOUR_NOW=$(date +%H)
 run_this_tick=1
-if [ "$CADENCE" -ge 24 ]; then
+if [ "$CHAIN_LINK" -gt 1 ]; then
+  :  # the tick already passed this gate; a shipped link resets cadence anyway
+elif [ "$CADENCE" -ge 24 ]; then
   [ "$HOUR_NOW" = "04" ] || run_this_tick=0
 elif [ "$CADENCE" -ge 12 ]; then
   case "$HOUR_NOW" in 04|16) ;; *) run_this_tick=0 ;; esac
@@ -253,6 +264,7 @@ fi
 
 {
   echo "=== advance-roadmap run $STAMP ($(date)) ==="
+  [ "$CHAIN_LINK" -gt 1 ] && echo "(chain link $CHAIN_LINK, started $(date -r "$CHAIN_START" '+%H:%M:%S'))"
   cat "$RUN_DIR/verdict-check.txt" 2>/dev/null
   echo "orchestrator=$ORCH  workers=${WORKERS:-none}  cwd=$CODE_DIR"
   cd "$CODE_DIR" || { echo "FATAL: cannot cd to $CODE_DIR"; exit 1; }
@@ -457,4 +469,19 @@ if [ -n "$alert" ]; then
       -d "$(jq -n --arg t "$alert" '{text:$t}')" "$SLACK_WEBHOOK" >/dev/null \
       || echo "=== slack: alert post failed (non-fatal) ===" >> "$LOG"
   fi
+fi
+
+# ── Chain ─────────────────────────────────────────────────────────────────────
+# Only a clean ship continues: blocked, failed, red deploys and quota skips all
+# mean the next link would likely hit the same wall. The next link re-picks
+# providers and re-plans from scratch, exactly like a fresh tick.
+last_outcome="$(python3 -c 'import json,sys; print(json.loads(open(sys.argv[1]).readlines()[-1]).get("outcome",""))' "$ROOT/runs.jsonl" 2>/dev/null || true)"
+elapsed=$(( $(date +%s) - CHAIN_START ))
+if [ "$last_outcome" = "shipped" ] && [ "$elapsed" -lt $(( CHAIN_MINUTES * 60 )) ]; then
+  echo "=== chain: shipped at $(( elapsed / 60 ))m of ${CHAIN_MINUTES}m — starting link $(( CHAIN_LINK + 1 )) ===" >> "$LOG"
+  trap - EXIT
+  rm -rf "$LOCK"
+  export ADVANCE_ROADMAP_CHAIN_START="$CHAIN_START" ADVANCE_ROADMAP_CHAIN_LINK=$(( CHAIN_LINK + 1 ))
+  sleep 1  # stamps are per-second; the next link must not reuse this one's
+  exec /bin/zsh "${0:A}"
 fi

@@ -1,7 +1,7 @@
 ---
 name: advance-roadmap
 description: >-
-  Ship ONE planned item end-to-end from a personal repo's ROADMAP.md, from docs/plans/ when the
+  Ship planned items end-to-end, one per run, from a personal repo's ROADMAP.md, from docs/plans/ when the
   repo has no roadmap, or from a Linear issue carrying a repo label. Pick a qualifying repo under
   ~/Dropbox/code, implement the item on a branch, verify with the repo's test/build, move it to
   Shipped, then merge to main locally and push. No PR. Use on-demand ("/advance-roadmap", "work a
@@ -14,7 +14,15 @@ description: >-
 
 # Advance the roadmap
 
-Take exactly ONE item from planned → shipped on `main`, or stop cleanly with blockers recorded.
+Take exactly ONE item from planned → shipped on `main` per run, or stop cleanly with blockers recorded.
+
+**Keep going while there's time.** A run that ships cleanly (`shipped`, deploy green) starts another
+run — fresh orchestrator pass, fresh item — as long as fewer than 40 minutes have passed since the
+first run started. Anything else (blocked, failed, red deploy, no item, quota) ends the chain. The
+check happens between runs, so the last item may finish past 40 minutes. Scheduled runs chain in
+`run.sh` (`ADVANCE_ROADMAP_CHAIN_MINUTES`, default 40; `0` = one item). Interactive runs follow the
+same rule: after the worker reports `shipped`, go back to `ORCHESTRATOR.md` Step 0 if under 40
+minutes.
 
 Candidate repos: direct children of `/Users/jake/Dropbox/code`. Check
 `~/.claude/automations/advance-roadmap/allowlist.txt` first when present, and query Linear once for
@@ -37,6 +45,7 @@ pending directives — issues labeled `roadmap-directive`, via the `linear` CLI 
 3. Parse the `ORCHESTRATOR_RESULT_JSON` fence.
 4. Dispatch `worker.sh` (Cursor → Codex → Claude) with same-run failover on limits.
 5. Persist usage for the next tick. Skip only when **no orchestrator** remains.
+6. On a clean ship under 40 minutes into the tick, re-exec for the next item.
 
 Linear routing labels:
 

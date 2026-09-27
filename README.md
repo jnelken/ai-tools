@@ -8,7 +8,7 @@ Personal AI coding tools — Claude Code and Cursor skills, slash commands, hook
 
 | Skill | Purpose |
 |---|---|
-| [`advance-roadmap`](skills/advance-roadmap) | Ship one planned `ROADMAP.md` item (or a `docs/plans/` doc, if no roadmap) in a personal repo end-to-end — branch, build, verify, mark shipped, merge + push `main` |
+| [`advance-roadmap`](skills/advance-roadmap) | Ship planned `ROADMAP.md` items (or `docs/plans/` docs, if no roadmap) in personal repos end-to-end, one per run, chaining runs for up to 40 min — branch, build, verify, mark shipped, merge + push `main` |
 | [`babysit-pr`](skills/babysit-pr) | Iteratively address automated reviewer threads (Codex, CodeRabbit, etc.) on the current PR |
 | [`logo-gestalt`](skills/logo-gestalt) | Gestalt logo design: symbol inventory, shared-vector matching, SVG + raster preview board, vision critique |
 | [`cleanup-local-branches`](skills/cleanup-local-branches) | Phased cross-repo cleanup of stale branches + worktrees with reflog-recovery log |
@@ -76,7 +76,7 @@ Hooks need extra wiring in `~/.claude/settings.json` — see [`hooks/README.md`]
 
 | Automation | Schedule | Purpose |
 |---|---|---|
-| [`advance-roadmap`](automations/advance-roadmap) | Every 6 hours — 4:45am / 10:45am / 4:45pm / 10:45pm (launchd) | Headlessly ship one planned `ROADMAP.md` item in a personal repo via the `advance-roadmap` skill |
+| [`advance-roadmap`](automations/advance-roadmap) | Every 6 hours — 4:45am / 10:45am / 4:45pm / 10:45pm (launchd) | Headlessly ship planned `ROADMAP.md` items via the `advance-roadmap` skill — keeps shipping one after another until a run doesn't ship cleanly or 40 min pass |
 | [`wrapup-repos`](automations/wrapup-repos) | Sunday 2:45am, weekly (launchd) | Headlessly wrap up in-progress work in one repo via the `wrapup-repos` skill |
 
 Scheduling (the launchd plist) needs manual per-machine setup — see [`automations/README.md`](automations/README.md).

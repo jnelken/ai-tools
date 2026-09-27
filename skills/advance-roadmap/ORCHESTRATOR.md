@@ -410,7 +410,8 @@ stop: archive any finished plan docs you found (Step 6's archive rule, landed th
 that bookkeeping happens even when nothing ships), write the blockers per Step 2b, report which
 items you considered and why each was skipped, and record it in memory.
 
-**One item per run.** Don't chain a second one because the first went fast.
+**One item per run.** Don't chain a second one because the first went fast — chaining is `run.sh`'s
+job: after a clean ship it starts a fresh run (new plan, new item) while the tick is under 40 minutes.
 
 ### Also check Linear
 
