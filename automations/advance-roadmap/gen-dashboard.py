@@ -641,8 +641,9 @@ def provider_rows(providers):
 # ── Linear: read the latest snapshot run.sh already took; never call Linear here ──
 
 def latest_snapshot():
-    """Newest ok snapshot any run left behind (post-worker, pre-run, or a backoff peek)."""
-    paths = glob.glob(os.path.join(ROOT, "runs/*/*snapshot*.json"))
+    """Newest ok snapshot: any run's (post-worker, pre-run, backoff peek) or serve.py's refresh."""
+    paths = glob.glob(os.path.join(ROOT, "runs/*/*snapshot*.json")) + [os.path.join(ROOT, "live-snapshot.json")]
+    paths = [x for x in paths if os.path.exists(x)]
     for path in sorted(paths, key=os.path.getmtime, reverse=True):
         try:
             snap = json.load(open(path, encoding="utf-8"))
@@ -848,7 +849,7 @@ def build():
         quota_html = (f'<div class=card><div class=checkline>{verdict} &nbsp;{route}</div>'
                       f'<div class=provs>{provider_rows(q["providers"])}</div>'
                       f'<div class="checkline dim" style="font-size:12.5px">Last usage check {checked_html} · '
-                      f'bar = used, tick = gate threshold · refreshed by run.sh each run</div>'
+                      f'bar = used, tick = gate threshold · refreshed by run.sh each run and by ↻ refresh</div>'
                       f'{cad_html}</div>')
     else:
         quota_html = '<p class=dim>No usage reading available — the gate would let a run proceed.</p>'
@@ -990,14 +991,20 @@ TEMPLATE = """<!doctype html>
   .plinks {{ margin-top:14px; }}
   .btn {{ display:inline-block; font-size:13px; border:1px solid var(--line); border-radius:8px; padding:4px 10px; color:var(--accent); text-decoration:none; }}
   @media (max-width:640px) {{ body {{ padding:14px; }} .rc {{ grid-template-columns:52px minmax(0,1fr); }} .rchev {{ display:none; }} }}
+  .toggle.refresh {{ margin-right:8px; }}
+  .toggle.refresh[disabled] {{ opacity:.6; cursor:progress; }}
+  .rstatus {{ float:right; clear:right; font-size:12.5px; color:var(--dim); margin-top:6px; max-width:420px; text-align:right; }}
+  .rstatus.err {{ color:var(--fail); }}
   .toggle {{ float:right; cursor:pointer; background:var(--card); border:1px solid var(--line); color:var(--fg); border-radius:8px; padding:6px 12px; font-size:13px; }}
 </style>
 </head>
 <body>
 <div class=wrap>
   <button class=toggle onclick="var r=document.documentElement;r.dataset.theme=(r.dataset.theme==='dark'?'light':'dark')">◐ theme</button>
+  <button class="toggle refresh" id=refresh title="Re-read provider usage, take a fresh Linear snapshot, rebuild this page">↻ refresh</button>
+  <span class=rstatus id=rstatus role=status></span>
   <h1>Roadmap automation</h1>
-  <div class=sub>Generated {gen} · runs every {cadence}h at :45 · reload after a run to refresh</div>
+  <div class=sub>Generated {gen} · runs every {cadence}h at :45 · ↻ refresh re-reads usage and Linear (via serve.py)</div>
 
   <div class=stats>
     <div class=stat><div class=n>{total}</div><div class=l>runs logged</div></div>
@@ -1070,6 +1077,37 @@ TEMPLATE = """<!doctype html>
     }});
   }});
   sync();
+}})();
+(function () {{
+  var btn = document.getElementById("refresh"), st = document.getElementById("rstatus");
+  var served = location.protocol === "http:" && ["127.0.0.1", "localhost"].indexOf(location.hostname) >= 0;
+  btn.addEventListener("click", function () {{
+    if (!served) {{
+      st.className = "rstatus err";
+      st.innerHTML = 'Refresh needs the local server — open <a href="http://127.0.0.1:8421/">127.0.0.1:8421</a>';
+      return;
+    }}
+    btn.disabled = true; btn.textContent = "↻ refreshing…";
+    st.className = "rstatus"; st.textContent = "Reading usage and Linear — about 10–30s";
+    fetch("/refresh", {{method: "POST"}}).then(function (r) {{
+      return r.json().then(function (j) {{ return [r.status, j]; }});
+    }}).then(function (res) {{
+      var j = res[1];
+      if (res[0] === 200) {{ sessionStorage.setItem("ar-refreshed", Date.now()); location.reload(); return; }}
+      var bad = (j.steps || []).filter(function (x) {{ return !x.ok; }})
+        .map(function (x) {{ return x.step + ": " + (x.error || "failed"); }}).join(" · ");
+      st.className = "rstatus err"; st.textContent = j.error || bad || "Refresh failed";
+      btn.disabled = false; btn.textContent = "↻ refresh";
+      if (j.steps) setTimeout(function () {{ location.reload(); }}, 4000);
+    }}).catch(function (e) {{
+      st.className = "rstatus err"; st.textContent = "Server unreachable — is serve.py running?";
+      btn.disabled = false; btn.textContent = "↻ refresh";
+    }});
+  }});
+  try {{
+    var t = +sessionStorage.getItem("ar-refreshed");
+    if (t && Date.now() - t < 15000) {{ st.textContent = "Refreshed just now"; sessionStorage.removeItem("ar-refreshed"); }}
+  }} catch (e) {{}}
 }})();
 (function () {{
   var now = Date.now() / 1000;

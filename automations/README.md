@@ -118,6 +118,19 @@ End-to-end test with fake providers: `zsh automations/advance-roadmap/tests/test
 `run.sh` regenerates `dashboard.html` after every run (including skips). The quota card shows
 Claude windows plus the multi-provider routing line from `providers-usage.json`.
 
+**Live dashboard with one-click refresh.** `serve.py` serves the page at
+<http://127.0.0.1:8421/> (localhost only). Its **↻ refresh** button runs `usage.py refresh`,
+takes a fresh Linear snapshot into `live-snapshot.json`, and rebuilds the page — about 15s. It
+skips the usage and Linear steps while a run holds `run.lock`, since the run refreshes both
+itself. Opened as `file://`, the button just points you at the server. Install it once:
+
+```sh
+cp ~/.ai-tools/automations/advance-roadmap/com.jake.advance-roadmap-dashboard.plist ~/Library/LaunchAgents/
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.jake.advance-roadmap-dashboard.plist
+```
+
+Server log: `~/.claude/automations/advance-roadmap/logs/dashboard-server.log`.
+
 The `:45` slots stay offset from `wrapup-repos` so this job never starts on a tree that job
 just dirtied.
 
