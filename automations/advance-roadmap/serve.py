@@ -87,7 +87,10 @@ class Handler(BaseHTTPRequestHandler):
             self._send(503, "dashboard.html not generated yet — POST /refresh", "text/plain")
 
     def do_POST(self):
-        if self.path not in ("/refresh", "/roadmap/refresh"):
+        # Tailscale Serve strips its mount prefix, so this normally arrives as /refresh —
+        # but the page posts to <current path>/refresh, which is the only form that survives
+        # both a bare /roadmap and a /roadmap/ URL. Accept any …/refresh rather than a fixed list.
+        if not self.path.split("?")[0].endswith("/refresh"):
             return self._send(404, "not found", "text/plain")
         if not self._allowed():
             return self._send(403, "forbidden", "text/plain")

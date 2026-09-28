@@ -1090,7 +1090,9 @@ TEMPLATE = """<!doctype html>
     }}
     btn.disabled = true; btn.textContent = "↻ refreshing…";
     st.className = "rstatus"; st.textContent = "Reading usage and Linear — about 10–30s";
-    fetch(new URL("refresh", document.baseURI), {{method: "POST"}}).then(function (r) {{
+    var base = location.pathname;
+    if (base.charAt(base.length - 1) === "/") {{ base = base.slice(0, -1); }}
+    fetch(base + "/refresh", {{method: "POST"}}).then(function (r) {{
       return r.json().then(function (j) {{ return [r.status, j]; }});
     }}).then(function (res) {{
       var j = res[1];
