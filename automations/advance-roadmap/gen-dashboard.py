@@ -1080,16 +1080,17 @@ TEMPLATE = """<!doctype html>
 }})();
 (function () {{
   var btn = document.getElementById("refresh"), st = document.getElementById("rstatus");
-  var served = location.protocol === "http:" && ["127.0.0.1", "localhost"].indexOf(location.hostname) >= 0;
+  var served = (location.protocol === "http:" && ["127.0.0.1", "localhost"].indexOf(location.hostname) >= 0)
+            || location.hostname.endsWith(".ts.net");
   btn.addEventListener("click", function () {{
     if (!served) {{
       st.className = "rstatus err";
-      st.innerHTML = 'Refresh needs the local server — open <a href="http://127.0.0.1:8421/">127.0.0.1:8421</a>';
+      st.innerHTML = 'Refresh needs the server — open <a href="http://127.0.0.1:8421/">127.0.0.1:8421</a> or the tailnet URL';
       return;
     }}
     btn.disabled = true; btn.textContent = "↻ refreshing…";
     st.className = "rstatus"; st.textContent = "Reading usage and Linear — about 10–30s";
-    fetch("/refresh", {{method: "POST"}}).then(function (r) {{
+    fetch(new URL("refresh", document.baseURI), {{method: "POST"}}).then(function (r) {{
       return r.json().then(function (j) {{ return [r.status, j]; }});
     }}).then(function (res) {{
       var j = res[1];

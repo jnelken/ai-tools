@@ -131,6 +131,23 @@ launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.jake.advance-roadmap
 
 Server log: `~/.claude/automations/advance-roadmap/logs/dashboard-server.log`.
 
+**Phone access over Tailscale.** The dashboard is reachable from any device on this Mac's
+tailnet at `https://<this-mac>.<tailnet>.ts.net/roadmap` while the Mac is awake — private to
+the tailnet; do **not** use Tailscale Funnel. `serve.py` stays bound to loopback and Tailscale
+Serve proxies to it, so the server is never itself exposed:
+
+```sh
+tailscale serve --bg --set-path /roadmap http://127.0.0.1:8421
+```
+
+↻ refresh works from the phone too. Two things make that true, and both look removable until
+you try it on a phone: `_allowed()` accepts a `*.ts.net` Host/Origin (loopback-only would 403
+every tailnet request), and the button resolves `refresh` against `document.baseURI` rather
+than posting to an absolute `/refresh`, which the `/roadmap` prefix would otherwise miss.
+
+Turn tailnet access off with `tailscale serve reset`. That leaves the local server running on
+`127.0.0.1:8421`.
+
 The `:45` slots stay offset from `wrapup-repos` so this job never starts on a tree that job
 just dirtied.
 

@@ -52,10 +52,20 @@ def refresh():
 
 class Handler(BaseHTTPRequestHandler):
     def _allowed(self):
+        # The socket is bound to loopback, so the only way a request arrives with a
+        # non-loopback Host is via Tailscale Serve, which sets that Host itself and only
+        # accepts tailnet peers. That is why *.ts.net is allowed here alongside loopback:
+        # without it /refresh 403s from the phone. Don't narrow this back to loopback, and
+        # don't hardcode the tailnet name — it changes if the machine or tailnet is renamed.
         port = self.server.server_address[1]
         hosts = {f"127.0.0.1:{port}", f"localhost:{port}"}
+
+        def ok(hostport):
+            return hostport in hosts or hostport.split(":", 1)[0].endswith(".ts.net")
+
+        host = self.headers.get("Host")
         origin = self.headers.get("Origin")
-        return self.headers.get("Host") in hosts and (origin is None or origin.split("//", 1)[-1] in hosts)
+        return bool(host) and ok(host) and (origin is None or ok(origin.split("//", 1)[-1]))
 
     def _send(self, code, body, ctype):
         data = body if isinstance(body, bytes) else body.encode()
@@ -67,7 +77,8 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     def do_GET(self):
-        if self.path.split("?")[0] not in ("/", "/dashboard.html"):
+        if self.path.split("?")[0] not in ("/", "/dashboard.html", "/roadmap", "/roadmap/",
+                                          "/roadmap/dashboard.html"):
             return self._send(404, "not found", "text/plain")
         try:
             with open(DASHBOARD, "rb") as f:
@@ -76,7 +87,7 @@ class Handler(BaseHTTPRequestHandler):
             self._send(503, "dashboard.html not generated yet — POST /refresh", "text/plain")
 
     def do_POST(self):
-        if self.path != "/refresh":
+        if self.path not in ("/refresh", "/roadmap/refresh"):
             return self._send(404, "not found", "text/plain")
         if not self._allowed():
             return self._send(403, "forbidden", "text/plain")
