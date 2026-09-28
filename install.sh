@@ -1,17 +1,17 @@
 #!/usr/bin/env bash
 # Bootstrap ai-tools into ~/.claude/.
 #
-# Deploy model: the dev repo (~/code/ai-tools) is for development only. What's
+# Deploy model: the dev repo (~/Dropbox/code/ai-tools) is for development only. What's
 # on origin/main is what actually gets deployed — identically on every
 # machine and every cloud environment. This script maintains a DEPLOY CLONE
 # at $AI_TOOLS_HOME (default ~/.ai-tools) that tracks origin/main, and
-# symlinks ~/.claude/* into THAT clone, never into ~/code/ai-tools.
+# symlinks ~/.claude/* into THAT clone, never into ~/Dropbox/code/ai-tools.
 #
 # Works three ways:
 #   1. Piped, no checkout at all:
 #        curl -fsSL https://raw.githubusercontent.com/jnelken/ai-tools/main/install.sh | bash
 #   2. Run from the deploy clone itself (~/.ai-tools/install.sh).
-#   3. Run from the dev checkout (~/code/ai-tools/install.sh) — default
+#   3. Run from the dev checkout (~/Dropbox/code/ai-tools/install.sh) — default
 #      behavior is STILL the hosted install (update+link from AI_TOOLS_HOME).
 #      Pass --dev to link from the checkout instead, for testing an unpushed
 #      change; a plain run afterward flips the links back.
@@ -89,7 +89,7 @@ Invocation modes:
   ~/.ai-tools/install.sh
       Run from the deploy clone itself. Same behavior as piped.
 
-  ~/code/ai-tools/install.sh
+  ~/Dropbox/code/ai-tools/install.sh
       Run from the dev checkout. Default behavior is STILL the hosted
       install (update + link from \$AI_TOOLS_HOME) — the dev checkout is
       NOT linked unless --dev is passed.
@@ -112,7 +112,7 @@ Environment variables:
                   (default: https://github.com/jnelken/ai-tools.git)
   AI_TOOLS_REF    Branch/ref to track (default: main)
 
-Dev workflow: edit in ~/code/ai-tools, commit, push — that IS the deploy
+Dev workflow: edit in ~/Dropbox/code/ai-tools, commit, push — that IS the deploy
 step. Then run ~/.ai-tools/install.sh (or wait for the next session's
 ai-tools-sync SessionStart hook) to pick it up on a given machine.
 EOF
@@ -142,7 +142,7 @@ fi
 
 if [ "$DEV_MODE" -eq 1 ]; then
   if [ -z "$SCRIPT_DIR" ]; then
-    echo "Error: --dev requires running install.sh from a checkout (e.g. ~/code/ai-tools/install.sh)." >&2
+    echo "Error: --dev requires running install.sh from a checkout (e.g. ~/Dropbox/code/ai-tools/install.sh)." >&2
     echo "There is no checkout to link from when the script is piped via stdin." >&2
     exit 1
   fi
@@ -246,18 +246,66 @@ ensure_jq() {
   return 0
 }
 
+# ── deploy-clone guard ──────────────────────────────────────────────────────────
+# The deploy clone is fast-forwarded from origin and is NOT where edits belong.
+# Editing here is silently costly: update_ai_tools_home() skips the sync while the
+# clone is dirty, so the machine quietly stops receiving updates and the work never
+# reaches origin. These two markers make that mistake loud instead.
+#   - .git/hooks/pre-commit  refuses `git commit` here (hooks are per-clone, unversioned)
+# The agent-facing half lives in the repo's own CLAUDE.md, which is path-aware. It is NOT
+# written here: CLAUDE.md is tracked, so writing it would leave the clone permanently dirty
+# and trip the skip-update path above — the exact failure this guard exists to prevent.
+AI_TOOLS_DEV="${AI_TOOLS_DEV:-$HOME/Dropbox/code/ai-tools}"
+
+install_deploy_guard() {
+  [ -d "$AI_TOOLS_HOME/.git" ] || return 0
+
+  local hook="$AI_TOOLS_HOME/.git/hooks/pre-commit"
+  mkdir -p "$AI_TOOLS_HOME/.git/hooks"
+  cat > "$hook" <<HOOK
+#!/bin/sh
+# Installed by ai-tools install.sh — see install_deploy_guard().
+cat >&2 <<'MSG'
+✗ Refusing to commit: this is the ai-tools DEPLOY CLONE, not a dev checkout.
+
+install.sh fast-forwards this clone from origin. A commit here never reaches
+origin, and while the clone is dirty install.sh skips the update entirely — so
+this machine silently stops syncing.
+
+Put the change in the dev checkout and push:
+
+    cd $AI_TOOLS_DEV
+    git add -p && git commit && git push
+    $AI_TOOLS_HOME/install.sh        # pull it back down here
+
+Already made the edits here? Move them across, don't retype them:
+
+    git -C $AI_TOOLS_HOME diff > /tmp/ai-tools.diff
+    git -C $AI_TOOLS_DEV apply /tmp/ai-tools.diff
+    git -C $AI_TOOLS_HOME checkout -- .
+
+Untracked files won't be in that diff — copy those over by hand first.
+MSG
+exit 1
+HOOK
+  chmod +x "$hook"
+
+}
+
 # ── update step: sync $AI_TOOLS_HOME from origin (skipped w/ --no-update or --dev) ──
 update_ai_tools_home() {
   if [ ! -e "$AI_TOOLS_HOME" ] || { [ -d "$AI_TOOLS_HOME" ] && [ -z "$(ls -A "$AI_TOOLS_HOME" 2>/dev/null)" ]; }; then
     echo "Cloning $AI_TOOLS_REPO ($AI_TOOLS_REF) into ${AI_TOOLS_HOME}..."
     git clone --branch "$AI_TOOLS_REF" "$AI_TOOLS_REPO" "$AI_TOOLS_HOME"
+    install_deploy_guard
     return
   fi
 
   if [ -d "$AI_TOOLS_HOME/.git" ]; then
+    install_deploy_guard
     if [ -n "$(git -C "$AI_TOOLS_HOME" status --porcelain 2>/dev/null)" ]; then
       echo "⚠ $AI_TOOLS_HOME (the deployed copy) has uncommitted edits — skipping update."
-      echo "  Edits belong in ~/code/ai-tools (commit + push there); this deploy clone is"
+      echo "  Edits belong in ~/Dropbox/code/ai-tools (commit + push there); this deploy clone is"
       echo "  managed by install.sh and gets overwritten on the next clean update."
       return
     fi
