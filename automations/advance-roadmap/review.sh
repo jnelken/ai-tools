@@ -22,6 +22,9 @@ CODEX="${ADVANCE_ROADMAP_CODEX_BIN:-/opt/homebrew/bin/codex}"
 CODEX_REVIEW_MODEL="${ADVANCE_ROADMAP_CODEX_REVIEW_MODEL:-gpt-5.6-sol}"
 CURSOR_REVIEW_MODEL="${ADVANCE_ROADMAP_CURSOR_REVIEW_MODEL:-auto}"
 CLAUDE_REVIEW_MODEL="${ADVANCE_ROADMAP_CLAUDE_REVIEW_MODEL:-claude-opus-5}"
+# Reviews run cheap and are repeated; the worker that fixes findings runs at high
+# effort (worker.sh). Cursor Auto has no effort knob.
+REVIEW_EFFORT="${ADVANCE_ROADMAP_REVIEW_EFFORT:-low}"
 
 export PATH="/opt/homebrew/bin:/opt/homebrew/opt/node@22/bin:/usr/bin:/bin:/usr/sbin:/sbin:/Users/jake/.local/bin"
 
@@ -77,7 +80,7 @@ run_reviewer() {
     codex)
       command -v "$CODEX" >/dev/null 2>&1 || return 127
       rm -f "$out.last"
-      "$CODEX" exec -o "$out.last" -m "$CODEX_REVIEW_MODEL" -c model_reasoning_effort=high \
+      "$CODEX" exec -o "$out.last" -m "$CODEX_REVIEW_MODEL" -c model_reasoning_effort="$REVIEW_EFFORT" \
         -s read-only -C "$REPO" "$PROMPT" >"$out" 2>&1
       local rc=$?
       [ -s "$out.last" ] && { cat "$out.last" >> "$out"; }
@@ -88,7 +91,7 @@ run_reviewer() {
         --output-format text "$PROMPT" >"$out" 2>&1 ;;
     claude)
       [ -x "$CLAUDE" ] || return 127
-      ( cd "$REPO" && "$CLAUDE" -p "$PROMPT" --model "$CLAUDE_REVIEW_MODEL" --effort high \
+      ( cd "$REPO" && "$CLAUDE" -p "$PROMPT" --model "$CLAUDE_REVIEW_MODEL" --effort "$REVIEW_EFFORT" \
         --permission-mode plan --disallowedTools "Edit,Write,NotebookEdit" \
         --output-format text ) >"$out" 2>&1 ;;
   esac
