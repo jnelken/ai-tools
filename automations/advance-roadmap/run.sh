@@ -108,6 +108,7 @@ trap 'exit 143' INT TERM
 #   6h  → every slot          (04:45 10:45 16:45 22:45)
 #   12h → 04:45 and 16:45
 #   24h → 04:45 only
+# A Linear ticket edit since the last no-work verdict bypasses the backoff (below).
 CADENCE=6
 if [ -r "$STATE_FILE" ] && command -v jq >/dev/null 2>&1; then
   CADENCE="$(jq -r '.cadence_hours // 6' "$STATE_FILE" 2>/dev/null || echo 6)"
@@ -121,6 +122,19 @@ elif [ "$CADENCE" -ge 24 ]; then
   [ "$HOUR_NOW" = "04" ] || run_this_tick=0
 elif [ "$CADENCE" -ge 12 ]; then
   case "$HOUR_NOW" in 04|16) ;; *) run_this_tick=0 ;; esac
+fi
+# A ticket edit since the last no-work verdict (a repo label added, a blocker answered,
+# needs-rescope removed) is Jake unblocking something: run now rather than wait out the
+# backoff. Read-only peek — repo churn doesn't bypass, and no verdict means no bypass.
+if [ "$run_this_tick" -eq 0 ]; then
+  peek_snap="$RUN_DIR/backoff-peek-snapshot.json"
+  peek_fp="$RUN_DIR/backoff-peek-fingerprint.json"
+  python3 "$LINEAR_SNAP_PY" --out "$peek_snap" >> "$LOG" 2>&1
+  python3 "$VERDICT_PY" fingerprint --snapshot "$peek_snap" --out "$peek_fp" >> "$LOG" 2>&1
+  if ticket_changes="$(python3 "$VERDICT_PY" ticket-changes --file "$LAST_VERDICT" --fingerprint "$peek_fp")"; then
+    echo "(backoff bypassed — ticket changes since last verdict: $ticket_changes)" >> "$LOG"
+    run_this_tick=1
+  fi
 fi
 if [ "$run_this_tick" -eq 0 ]; then
   streak="$(jq -r '.blocked_streak // 0' "$STATE_FILE" 2>/dev/null || echo '?')"

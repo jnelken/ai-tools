@@ -12,6 +12,7 @@ the skill docs — and stores it with the verdict in the provider-neutral
     verdict.py check  --file V --fingerprint F --changes OUT [--max-age-hours N]
     verdict.py save   --file V --fingerprint F --orch-result R --worker-result W --stamp S
     verdict.py clear  --file V
+    verdict.py ticket-changes --file V --fingerprint F
 
 ``check`` exits 0 only when the last verdict was no-work, is younger than the cap,
 and nothing in the fingerprint moved; otherwise it exits 1 and writes OUT — which
@@ -145,6 +146,19 @@ def cmd_check(a):
     return 0
 
 
+def cmd_ticket_changes(a):
+    """Exit 0 iff a Linear issue moved since the carried verdict — lets a ticket edit
+    bypass cadence backoff. Repo churn doesn't count, and no verdict means no bypass."""
+    last, fp = load(a.file), load(a.fingerprint)
+    if not last or not fp:
+        return 1
+    issues = [c for c in diff(last.get("fingerprint", {}), fp) if c.startswith("issue:")]
+    if not issues:
+        return 1
+    print(", ".join(issues[:12]) + (f" (+{len(issues) - 12} more)" if len(issues) > 12 else ""))
+    return 0
+
+
 def cmd_save(a):
     orch, worker = load(a.orch_result) or {}, load(a.worker_result) or {}
     if orch.get("action") not in NO_WORK_ACTIONS or worker.get("outcome") not in SETTLED_OUTCOMES:
@@ -180,12 +194,14 @@ def main():
     s = sub.add_parser("save"); s.add_argument("--file", required=True); s.add_argument("--fingerprint", required=True)
     s.add_argument("--orch-result", required=True); s.add_argument("--worker-result", required=True); s.add_argument("--stamp", required=True)
     s = sub.add_parser("clear"); s.add_argument("--file", required=True)
+    s = sub.add_parser("ticket-changes"); s.add_argument("--file", required=True); s.add_argument("--fingerprint", required=True)
     a = ap.parse_args()
     if a.cmd == "clear":
         if os.path.exists(a.file):
             os.remove(a.file)
         return 0
-    return {"fingerprint": cmd_fingerprint, "check": cmd_check, "save": cmd_save}[a.cmd](a)
+    return {"fingerprint": cmd_fingerprint, "check": cmd_check, "save": cmd_save,
+            "ticket-changes": cmd_ticket_changes}[a.cmd](a)
 
 
 if __name__ == "__main__":
