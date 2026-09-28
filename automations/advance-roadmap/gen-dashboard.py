@@ -265,10 +265,16 @@ def parse_runs(ledger, records=None):
             exit_code = rec.get("exit")
             duration = fmt_duration(rec.get("duration_s")) or duration
             repo = rec.get("repo") or ""
+            review = ""
+            if rec.get("reviewer") or rec.get("review_rounds"):
+                review = " · ".join(str(x) for x in (
+                    rec.get("reviewer"), rec.get("review_verdict"),
+                    f'{rec.get("review_rounds")} round(s)' if rec.get("review_rounds") else None) if x)
             fields = {k: v for k, v in (
                 ("Repo", rec.get("repo")), ("Item", rec.get("item")),
-                ("Merge", rec.get("merge_commit")), ("Worker", rec.get("worker")),
-                ("Summary", rec.get("summary")), ("Detail", detail)) if v}
+                ("Branch", rec.get("branch")), ("Merge", rec.get("merge_commit")),
+                ("Route", " → ".join(x for x in (rec.get("orchestrator"), rec.get("worker")) if x)),
+                ("Review", review), ("Summary", rec.get("summary")), ("Detail", detail)) if v}
             mm_model = rec.get("orchestrator")
         else:
             mm_model = mm.group(1) if mm else None
@@ -284,6 +290,7 @@ def parse_runs(ledger, records=None):
             "provenance": provenance,
             "repo": repo,
             "fields": fields,
+            "linear_id": (rec or {}).get("linear_id") or "",
             "push": pm.group(0).strip() if pm else "",
             "duration": duration,
             "body": body,
@@ -631,6 +638,94 @@ def provider_rows(providers):
     return "".join(rows)
 
 
+# ── Linear: read the latest snapshot run.sh already took; never call Linear here ──
+
+def latest_snapshot():
+    """Newest ok snapshot any run left behind (post-worker, pre-run, or a backoff peek)."""
+    paths = glob.glob(os.path.join(ROOT, "runs/*/*snapshot*.json"))
+    for path in sorted(paths, key=os.path.getmtime, reverse=True):
+        try:
+            snap = json.load(open(path, encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if snap.get("ok"):
+            return snap
+    return None
+
+
+def repo_of(issue):
+    return next((l.split("/", 1)[1] for l in issue.get("labels", []) if l.startswith("repo/")), "")
+
+
+def comment_field(body, name):
+    m = re.search(r"\*\*" + name + r":\*\*\s*(.+)", body or "")
+    return m.group(1).strip() if m else ""
+
+
+def ticket_item(i, note, note_cls="dim"):
+    repo = repo_of(i)
+    return (f'<div class=wi><a class=mono href="{esc(i["url"])}" target=_blank rel=noopener>{esc(i["id"])}</a> '
+            f'{esc(i["title"])}{f" <span class=dim>· {esc(repo)}</span>" if repo else ""}'
+            f'<div class="wnote {note_cls}">{note}</div></div>')
+
+
+def waiting_html(snap, repos):
+    if snap:
+        issues = snap.get("issues", [])
+        needs = [i for i in issues if i.get("state") == "Needs Input"]
+        paused = [i for i in issues if i.get("state") == "Paused"]
+        n_items = []
+        for i in needs:
+            c = i.get("blocker_comment", "")
+            q = comment_field(c, "Details") or comment_field(c, "Needed from you")
+            n_items.append(ticket_item(i, esc(q) if q else "parked by you — no question from the bot",
+                                       "" if q else "dim"))
+        p_items = [ticket_item(i, esc(comment_field(i.get("blocker_comment", ""), "Blocker") or "waiting on a live condition"))
+                   for i in paused]
+        try:
+            ts = datetime.fromisoformat(snap["fetched_at"]).timestamp()
+            asof = f'as of <time data-epoch="{int(ts)}">{esc(snap["fetched_at"])}</time>'
+        except (KeyError, TypeError, ValueError):
+            asof = "as of the last run"
+    else:
+        n_items, p_items, asof = [], [], "no Linear snapshot yet"
+    d_items = [f'<div class=wi><b>{esc(r["name"])}</b> <span class=dim>· {r["blockers"]} open</span>'
+               f'<details><summary>{esc(r["blockfile"])}</summary><pre>{esc(r["blocktext"])}</pre></details></div>'
+               for r in repos if r["blockers"]]
+
+    def col(icon, title, count_cls, items, foot, empty):
+        body = "".join(items) or f'<div class="wi dim">{empty}</div>'
+        return (f'<div class=wcol><div class=whead><span>{icon} {title}</span>'
+                f'<span class="badge {count_cls if items else "off"}">{len(items)}</span></div>{body}'
+                f'<div class=wfoot>{foot}</div></div>')
+    return (f'<div class=wgrid>'
+            + col("?", "Needs input", "unk", n_items, "Answer with <code>/unblock-roadmap</code>",
+                  "Nothing needs your answer.")
+            + col("‖", "Paused", "off", p_items, "Re-checked every run — clears itself",
+                  "Nothing paused.")
+            + col("☐", "Open decisions", "unk", d_items, "From <code>IN_PROGRESS.md</code> · <code>/unblock-roadmap</code> asks these too",
+                  "No unchecked items in any <code>IN_PROGRESS.md</code>.")
+            + f'</div><div class="dim" style="font-size:12px;margin-top:6px">Linear {asof}</div>')
+
+
+CATEGORY = {"shipped": "shipped", "completed": "shipped", "archive-only": "shipped",
+            "blocked-no-item": "blocked", "blocked": "blocked",
+            "error": "error", "failed": "error", "incomplete": "error", "shipped-deploy-failed": "error"}
+
+
+def category(outcome):
+    return CATEGORY.get(outcome) or ("skipped" if (outcome or "").startswith("skipped") else "other")
+
+
+def run_title(r):
+    f = r["fields"]
+    if f.get("Item"):
+        return f["Item"]
+    if r["outcome"].startswith("blocked"):
+        return "No item qualified"
+    return r["detail"] or BADGE.get(r["outcome"], ("", r["outcome"]))[1].lstrip("✓◦⏸✗⚠● ")
+
+
 BADGE = {
     "shipped": ("ok", "✓ shipped"), "completed": ("ok", "✓ completed"),
     "blocked-no-item": ("unk", "◦ blocked"), "blocked": ("unk", "◦ blocked"),
@@ -663,34 +758,49 @@ def build():
     skipped = sum(1 for r in runs if r["outcome"].startswith("skipped"))
     errored = sum(1 for r in runs if r["outcome"] in ("error", "failed", "incomplete", "shipped-deploy-failed"))
 
-    rows = []
-    for r in runs:
+    snap = latest_snapshot()
+    urls = {i["id"]: i["url"] for i in (snap or {}).get("issues", [])}
+    cards, panels = [], []
+    for idx, r in enumerate(runs):
         f = r["fields"]
-        detail = ""
-        if f:
-            detail = "".join(
-                f'<div class=kv><span class=k>{esc(k)}</span> {esc(v)}</div>'
-                for k, v in f.items() if v)
-        elif r["detail"]:
-            detail = f'<span class=dim>{esc(r["detail"])}</span>'
-        push = f'<div class="pushnote">{esc(r["push"])}</div>' if r["push"] else ""
+        cat = category(r["outcome"])
         prov = ('<span class="prov" title="outcome from runs.jsonl, written by run.sh">record</span>'
                 if r["provenance"] == "record" else
                 '<span class="prov" title="outcome taken from the run ledger">ledger</span>'
                 if r["provenance"] == "ledger" else
                 '<span class="prov inf" title="ledger row trimmed or absent — outcome inferred from the log">inferred</span>'
                 if r["provenance"] == "inferred" else "")
-        body = (f'<details><summary>log</summary><pre>{esc(r["body"])}</pre></details>'
-                if r["body"] else '<span class=dim>—</span>')
-        rows.append(f"""<tr class="{'r-fail' if r['outcome'] in ('error','failed','incomplete') else ''}">
-          <td class="mono nowrap">{esc(r['when'])}</td>
-          <td class=nowrap>{badge(r['outcome'])} {prov}</td>
-          <td>{esc(r['repo']) or '<span class=dim>—</span>'}</td>
-          <td class="mono dim nowrap">{esc(r['duration'])}</td>
-          <td class="mono dim nowrap">{esc(r['model'])}</td>
-          <td>{detail}{push}{body}</td>
-        </tr>""")
-    run_rows = "\n".join(rows) or '<tr><td colspan=6 class=dim>No runs logged yet.</td></tr>'
+        started = r["started"]
+        day = started.strftime("%a %d") if started else ""
+        hm = started.strftime("%H:%M") if started else esc(r["stamp"])
+        meta = " · ".join(x for x in (r["repo"], r["duration"], r["model"] if r["model"] != "—" else "") if x)
+        summary = f.get("Summary") or (r["detail"] if f.get("Item") else "")
+        rid = f'run-{r["stamp"]}'
+        cards.append(
+            f'<a class="rc c-{cat}" href="#{rid}" data-cat="{cat}">'
+            f'<span class="rwhen mono">{esc(day)}<br>{esc(hm)}</span>'
+            f'<span class=rmain><span class=rtop>{badge(r["outcome"])} <span class="mono dim">{esc(meta)}</span></span>'
+            f'<span class=rtitle>{esc(run_title(r))}</span>'
+            + (f'<span class=rsum>{esc(summary)}</span>' if summary else "")
+            + '</span><span class=rchev aria-hidden=true>›</span></a>')
+        kv = "".join(f'<dt>{esc(k)}</dt><dd{" class=mono" if k in ("Merge", "Branch") else ""}>{esc(v)}</dd>'
+                     for k, v in f.items() if v and k not in ("Summary", "Item", "Repo"))
+        lid = r.get("linear_id") or (re.match(r"DEV-\d+", f.get("Item", "")) or [None])[0]
+        links = (f'<a class=btn href="{esc(urls[lid])}" target=_blank rel=noopener>{esc(lid)} ↗</a>'
+                 if lid and lid in urls else "")
+        panels.append(
+            f'<template id="{rid}"><div class=ptop>{badge(r["outcome"])} {prov}</div>'
+            f'<h3 class=ptitle>{esc(run_title(r))}</h3>'
+            f'<div class="mono dim">{esc(" · ".join(x for x in (r["repo"], r["when"], r["duration"], r["model"]) if x and x != "—"))}</div>'
+            + (f'<dl class=pkv>{kv}</dl>' if kv else "")
+            + (f'<h4>Summary</h4><p class=psum>{esc(summary)}</p>' if summary else "")
+            + (f'<div class=pushnote>{esc(r["push"])}</div>' if r["push"] else "")
+            + (f'<div class=plinks>{links}</div>' if links else "")
+            + (f'<h4>Log</h4><pre>{esc(r["body"])}</pre>' if r["body"] else '<p class=dim>No log body.</p>')
+            + '</template>')
+    run_cards = "\n".join(cards) or '<p class=dim style="padding:14px">No runs logged yet.</p>'
+    run_panels = "\n".join(panels)
+    counts = {c: sum(1 for r in runs if category(r["outcome"]) == c) for c in ("shipped", "blocked", "skipped", "error")}
 
     repo_cards = ""
     for r in repos:
@@ -701,18 +811,20 @@ def build():
             state = '<span class="badge ok">eligible</span>'
         else:
             state = "".join(f'<span class="badge unk">{esc(b)}</span> ' for b in r["blocks"])
-        bl = (f'<div class=kv><span class=k>blockers</span> {r["blockers"]} awaiting <code>/pick-up</code> '
+        bl = (f'<div class=kv><span class=k>decisions</span> {r["blockers"]} open '
               f'<span class=dim>({esc(r["blockfile"])})</span></div>') if r["blockers"] else ""
+        for st, cls in (("Needs Input", "unk"), ("Paused", "off")):
+            n_st = sum(1 for i in (snap or {}).get("issues", []) if i.get("state") == st and repo_of(i) == r["name"])
+            if n_st:
+                state_note = f'<span class="badge {cls}">{n_st} {st.lower()}</span> '
+                bl += f'<div class=kv><span class=k>linear</span> {state_note}</div>'
+
         repo_cards += (f'<div class=card><h3>{esc(r["name"])}</h3>'
                        f'<div class=kv><span class=k>roadmap</span> {src}</div>{bl}'
                        f'<div style="margin-top:8px">{state}</div></div>')
     repo_cards = repo_cards or '<p class=dim>No jnelken-owned repos found.</p>'
 
-    block_cards = "".join(
-        f'<div class=card><h3>{esc(r["name"])} <span class=dim>({r["blockers"]} open)</span></h3>'
-        f'<details><summary>{esc(r["blockfile"])}</summary><pre>{esc(r["blocktext"])}</pre></details></div>'
-        for r in repos if r["blockers"]) or \
-        '<p class=dim>Nothing waiting on you — no unchecked items in any <code>.claude/IN_PROGRESS.md</code>.</p>'
+    waiting = waiting_html(snap, repos)
 
     if q:
         orch, workers = q["orch"], q["workers"]
@@ -756,8 +868,8 @@ def build():
         gen=esc(datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
         cadence=base_cadence(),
         total=n, shipped=shipped, blocked=blocked, skipped=skipped, errored=errored,
-        last_line=last_line, run_rows=run_rows, repo_cards=repo_cards,
-        block_cards=block_cards, quota_html=quota_html, missed_html=missed_html,
+        last_line=last_line, run_cards=run_cards, run_panels=run_panels, repo_cards=repo_cards,
+        waiting=waiting, quota_html=quota_html, missed_html=missed_html, **{f"n_{k}": v for k, v in counts.items()},
     )
 
 
@@ -836,6 +948,48 @@ TEMPLATE = """<!doctype html>
   pre {{ background:var(--bg); border:1px solid var(--line); border-radius:8px; padding:12px; overflow-x:auto; font-size:12.5px; white-space:pre-wrap; word-break:break-word; margin:8px 0 0; }}
   details summary {{ cursor:pointer; }}
   summary {{ color:var(--accent); }}
+  .wgrid {{ display:grid; grid-template-columns:repeat(auto-fit,minmax(260px,1fr)); gap:12px; }}
+  .wcol {{ background:var(--card); border:1px solid var(--line); border-radius:10px; padding:12px 14px; display:flex; flex-direction:column; }}
+  .whead {{ display:flex; justify-content:space-between; align-items:center; font-weight:650; font-size:14px; margin-bottom:4px; }}
+  .wi {{ font-size:13px; padding:7px 0; border-top:1px solid var(--line); }}
+  .wi a {{ color:var(--accent); text-decoration:none; }}
+  .wnote {{ font-size:12.5px; margin-top:2px; }}
+  .wfoot {{ margin-top:auto; padding-top:8px; font-size:12px; color:var(--dim); }}
+  .chips {{ display:flex; flex-wrap:wrap; gap:6px; margin-bottom:10px; }}
+  .chip {{ font:inherit; font-size:13px; background:var(--card); color:var(--fg); border:1px solid var(--line); border-radius:20px; padding:4px 12px; cursor:pointer; }}
+  .chip b {{ font-weight:650; margin-left:4px; }}
+  .chip.on {{ border-color:var(--accent); color:var(--accent); }}
+  .runlist {{ border:1px solid var(--line); border-radius:10px; background:var(--card); overflow:hidden; }}
+  .rc {{ display:grid; grid-template-columns:64px minmax(0,1fr) 16px; gap:14px; align-items:start; padding:11px 14px; border-bottom:1px solid var(--line); color:inherit; text-decoration:none; }}
+  .rc:last-child {{ border-bottom:0; }}
+  .rc:hover, .rc.sel {{ background:var(--bg); }}
+  .rc:focus-visible {{ outline:2px solid var(--accent); outline-offset:-2px; }}
+  .rc.c-error {{ box-shadow:inset 3px 0 0 var(--fail); }}
+  .rc.c-shipped {{ box-shadow:inset 3px 0 0 var(--ok); }}
+  .rwhen {{ color:var(--dim); line-height:1.35; }}
+  .rmain {{ display:flex; flex-direction:column; min-width:0; gap:2px; }}
+  .rtop {{ display:flex; gap:8px; align-items:center; flex-wrap:wrap; }}
+  .rtitle {{ font-size:14.5px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }}
+  .rsum {{ font-size:13px; color:var(--dim); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }}
+  .rchev {{ color:var(--dim); font-size:20px; line-height:1; align-self:center; }}
+  .scrim {{ position:fixed; inset:0; background:rgba(0,0,0,.28); opacity:0; pointer-events:none; transition:opacity .18s; }}
+  .drawer {{ position:fixed; top:0; right:0; bottom:0; width:min(560px,100vw); background:var(--card); border-left:1px solid var(--line);
+            overflow-y:auto; padding:20px 22px 40px; transform:translateX(100%); transition:transform .2s ease; z-index:10; }}
+  body.drawer-open .drawer {{ transform:none; }}
+  body.drawer-open .scrim {{ opacity:1; pointer-events:auto; }}
+  body.drawer-open {{ overflow:hidden; }}
+  @media (prefers-reduced-motion: reduce) {{ .drawer, .scrim {{ transition:none; }} }}
+  .pclose {{ float:right; color:var(--dim); text-decoration:none; font-size:18px; padding:2px 6px; border-radius:6px; }}
+  .pclose:hover {{ background:var(--bg); color:var(--fg); }}
+  .ptitle {{ font-size:17px; margin:12px 0 4px; line-height:1.35; }}
+  .pkv {{ display:grid; grid-template-columns:80px minmax(0,1fr); gap:5px 12px; margin:16px 0; font-size:13px; }}
+  .pkv dt {{ color:var(--dim); font-size:11.5px; text-transform:uppercase; letter-spacing:.04em; padding-top:2px; }}
+  .pkv dd {{ margin:0; overflow-wrap:anywhere; }}
+  .drawer h4 {{ font-size:12px; text-transform:uppercase; letter-spacing:.05em; color:var(--dim); margin:18px 0 6px; }}
+  .psum {{ font-size:14px; margin:0; }}
+  .plinks {{ margin-top:14px; }}
+  .btn {{ display:inline-block; font-size:13px; border:1px solid var(--line); border-radius:8px; padding:4px 10px; color:var(--accent); text-decoration:none; }}
+  @media (max-width:640px) {{ body {{ padding:14px; }} .rc {{ grid-template-columns:52px minmax(0,1fr); }} .rchev {{ display:none; }} }}
   .toggle {{ float:right; cursor:pointer; background:var(--card); border:1px solid var(--line); color:var(--fg); border-radius:8px; padding:6px 12px; font-size:13px; }}
 </style>
 </head>
@@ -857,16 +1011,19 @@ TEMPLATE = """<!doctype html>
   <h2>Quota gate</h2>
   {quota_html}
 
-  <h2>Waiting on you <span class="dim" style="text-transform:none;letter-spacing:0">(run <code>/pick-up</code> in the repo)</span></h2>
-  <div class=cards>{block_cards}</div>
+  <h2>Waiting on you</h2>
+  {waiting}
 
-  <h2>Runs</h2>
-  <div class=tablewrap>
-    <table>
-      <thead><tr><th>When</th><th>Outcome</th><th>Repo</th><th>Took</th><th>Model</th><th>Detail</th></tr></thead>
-      <tbody>{run_rows}</tbody>
-    </table>
+  <h2 id=runs>Runs</h2>
+  <div class=chips role=group aria-label="Filter runs">
+    <button class="chip on" data-f=all>All <b>{total}</b></button>
+    <button class=chip data-f=shipped>Shipped <b>{n_shipped}</b></button>
+    <button class=chip data-f=blocked>Blocked <b>{n_blocked}</b></button>
+    <button class=chip data-f=skipped>Skipped <b>{n_skipped}</b></button>
+    <button class=chip data-f=error>Errors <b>{n_error}</b></button>
   </div>
+  <div class=runlist id=runlist>{run_cards}</div>
+  {run_panels}
 
   <h2>Candidate repos</h2>
   <div class=cards>{repo_cards}</div>
@@ -874,7 +1031,46 @@ TEMPLATE = """<!doctype html>
   <h2>Slots that never fired</h2>
   {missed_html}
 </div>
+<div class=scrim id=scrim></div>
+<aside class=drawer id=drawer aria-hidden=true aria-label="Run details">
+  <a class=pclose href="#runs" aria-label="Close">✕</a>
+  <div id=pbody></div>
+</aside>
 <script>
+(function () {{
+  var drawer = document.getElementById("drawer"), scrim = document.getElementById("scrim"),
+      pbody = document.getElementById("pbody"), last = null;
+  function sync() {{
+    var id = location.hash.slice(1), tpl = id.indexOf("run-") === 0 && document.getElementById(id);
+    document.querySelectorAll(".rc.sel").forEach(function (c) {{ c.classList.remove("sel"); }});
+    if (tpl) {{
+      pbody.replaceChildren(tpl.content.cloneNode(true));
+      drawer.scrollTop = 0;
+      var card = document.querySelector('.rc[href="#' + id + '"]');
+      if (card) {{ card.classList.add("sel"); last = card; }}
+      document.body.classList.add("drawer-open");
+      drawer.setAttribute("aria-hidden", "false");
+      drawer.querySelector(".pclose").focus({{preventScroll: true}});
+    }} else if (document.body.classList.contains("drawer-open")) {{
+      document.body.classList.remove("drawer-open");
+      drawer.setAttribute("aria-hidden", "true");
+      if (last) last.focus({{preventScroll: true}});
+    }}
+  }}
+  window.addEventListener("hashchange", sync);
+  scrim.addEventListener("click", function () {{ location.hash = "runs"; }});
+  document.addEventListener("keydown", function (e) {{
+    if (e.key === "Escape" && document.body.classList.contains("drawer-open")) location.hash = "runs";
+  }});
+  document.querySelectorAll(".chip").forEach(function (b) {{
+    b.addEventListener("click", function () {{
+      document.querySelectorAll(".chip").forEach(function (x) {{ x.classList.toggle("on", x === b); }});
+      var f = b.dataset.f;
+      document.querySelectorAll(".rc").forEach(function (c) {{ c.hidden = f !== "all" && c.dataset.cat !== f; }});
+    }});
+  }});
+  sync();
+}})();
 (function () {{
   var now = Date.now() / 1000;
   document.querySelectorAll("time[data-epoch]").forEach(function (t) {{

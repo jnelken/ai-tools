@@ -27,7 +27,7 @@ FIELDS = """
       labels { nodes { name parent { name } } }
       relations { nodes { type relatedIssue { identifier } } }
       inverseRelations { nodes { type issue { identifier } } }
-      comments(first: 100) { nodes { body } }
+      comments(first: 100) { nodes { body createdAt } }
       description
     }"""
 # Active work, plus recently-closed tickets: a directive can ride on a ticket that's since been
@@ -64,6 +64,14 @@ def human_comments_sha(node):
     return hashlib.sha1("\x00".join(bodies).encode()).hexdigest()[:16]
 
 
+def blocker_comment(node):
+    bot = [c for c in node["comments"]["nodes"] if BOT_MARKER in c["body"]]
+    if not bot:
+        return ""
+    body = max(bot, key=lambda c: c.get("createdAt") or "")["body"]
+    return body.replace(BOT_MARKER, "").strip()
+
+
 def flatten(node):
     return {
         "id": node["identifier"],
@@ -78,6 +86,7 @@ def flatten(node):
         "blocks": [r["relatedIssue"]["identifier"] for r in node["relations"]["nodes"] if r["type"] == "blocks"],
         "blocked_by": [r["issue"]["identifier"] for r in node["inverseRelations"]["nodes"] if r["type"] == "blocks"],
         "human_comments_sha": human_comments_sha(node),
+        "blocker_comment": blocker_comment(node),
         "description": node.get("description") or "",
     }
 
