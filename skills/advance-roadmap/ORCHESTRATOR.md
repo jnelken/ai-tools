@@ -449,6 +449,10 @@ an issue exists somewhere; read both, then pick one item by the prefer/skip rule
   count it among the items you report as considered. Log `skipped-human-only` plus the `DEV-N` id
   in run memory and move on. It's a flat workspace label that coexists with the issue's `repo/*`
   label, so check labels for both independently.
+- **`needs-rescope` is also a silent exclusion.** Jake has said the ticket's scope is stale or
+  changing and he will rewrite it. Drop it from the batch like `human-only`: no Step 2b comment, no
+  `@jnelks`, not reported as considered. Log `skipped-needs-rescope` with the `DEV-N` id. It becomes
+  eligible again only when the label is removed.
 - **`roadmap-directive` marks a pending directive.** The ticket's description carries a
   `## Directive` section from [[prepare-roadmap]] — Jake's recorded answer to what blocked this
   repo. It is the only dirty-tree exception (Step 1a), it is a *pending* marker and not an
