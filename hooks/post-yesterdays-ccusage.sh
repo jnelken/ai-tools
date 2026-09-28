@@ -212,6 +212,15 @@ while [[ ! "$current" > "$yesterday" ]]; do
     end
   ' 2>/dev/null) || summary="ccusage $pretty — $who: (parse error)"
 
+  # No Claude or Codex usage that day — skip the Slack post entirely (still
+  # advance the marker so catchup doesn't re-check this day every session).
+  if [[ "$summary" == "_ccusage "*" no activity_" ]]; then
+    printf '%s' "$current" > "$last_file"
+    current=$(date -j -v+1d -f "%Y-%m-%d" "$current" +%Y-%m-%d 2>/dev/null \
+           || date -d "$current + 1 day" +%Y-%m-%d)
+    continue
+  fi
+
   payload=$(jq -n --arg t "$summary" '{text: $t}')
   if curl -sf -X POST -H 'Content-Type: application/json' -d "$payload" "$WEBHOOK" > /dev/null; then
     printf '%s' "$current" > "$last_file"   # advance ONLY on success
