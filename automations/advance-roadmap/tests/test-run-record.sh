@@ -66,6 +66,7 @@ run() {
     ADVANCE_ROADMAP_ROOT="$ROOT" ADVANCE_ROADMAP_SKILL_DIR="$SKILLS" \
     ADVANCE_ROADMAP_SECRETS=/dev/null ADVANCE_ROADMAP_NOTIFY=0 \
     ADVANCE_ROADMAP_CODEX_BIN="$BIN/codex" ADVANCE_ROADMAP_AGENT_BIN="$BIN/agent" \
+    ADVANCE_ROADMAP_CADENCE_HOURS="${CADENCE_HOURS:-1}" \
     ADVANCE_ROADMAP_CHAIN_MINUTES="${CHAIN_MINUTES:-0}" CHAIN_COUNT="$TMP/chain-count" \
     FAKE_ORCH="$1" FAKE_WORKER="$2" zsh "$ROOT/run.sh" || true
   sleep 1.1   # stamps are per-second
@@ -106,4 +107,11 @@ grep -q "starting link 3" "$ROOT"/logs/run-*.log && echo "ok   chain logged its 
 # Past the time cap, a shipped run does not chain.
 ADVANCE_ROADMAP_CHAIN_START=$(( $(date +%s) - 2401 )) CHAIN_MINUTES=40 run good file
 check "no chain past the time cap"            "$(wc -l < "$ROOT/runs.jsonl" | tr -d ' ')" 11
+# Cadence: a tick off the base grid leaves no trace at all (24h grid = 03:45 only).
+if [ "$(date +%H)" != "03" ]; then
+  logs_before=$(ls "$ROOT"/logs | wc -l)
+  CADENCE_HOURS=24 run good file
+  check "off-grid tick records nothing"        "$(wc -l < "$ROOT/runs.jsonl" | tr -d ' ')" 11
+  check "off-grid tick leaves no log"          "$(ls "$ROOT"/logs | wc -l)" "$logs_before"
+fi
 echo "all passed"

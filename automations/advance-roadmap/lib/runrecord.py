@@ -20,7 +20,7 @@ from datetime import datetime
 
 ERROR_OUTCOMES = ("error", "failed", "incomplete", "shipped-deploy-failed")
 SKIP_OUTCOMES = ("skipped-backoff", "skipped-quota", "skipped-lock", "skipped-unchanged")
-# Alert on the 2nd consecutive error, then again every 4 more (~daily at 6h cadence).
+# Alert on the 2nd consecutive error, then again every 4 more (~8h at the 2h cadence).
 ALERT_FIRST, ALERT_EVERY = 2, 4
 
 

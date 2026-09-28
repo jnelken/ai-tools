@@ -123,7 +123,7 @@ Carry every other repo's and issue's prior verdict forward as-is into your `bloc
 
 ### Did the previous run finish?
 
-**An interrupted run gets finished before a new item is started.** This job fires every 6 hours
+**An interrupted run gets finished before a new item is started.** This job fires every 2 hours
 under launchd and dies for reasons that have nothing to do with the work — a session limit hit
 mid-build (`run-20260907-104501.log`), the machine sleeping, launchd killing the process. What it
 leaves behind is a repo sitting on `roadmap/<slug>` with real commits nobody will ever merge, while
@@ -152,7 +152,7 @@ run that was killed never got there. So take the previous log's stamp from its h
 (`=== advance-roadmap run 20260907-104501 …` → `20260907-104501`) and look that stamp up in the
 ledger. **No row → it was interrupted.**
 
-Match on the **stamp, not the date.** This job runs four times a day; a date alone can't tell this
+Match on the **stamp, not the date.** This job runs several times a day; a date alone can't tell this
 morning's run from last night's. And note what the ledger deliberately doesn't contain: a
 quota-gate skip never reached Step 8 either, but its log has no run header, so the table above
 already ruled it out before you get here.

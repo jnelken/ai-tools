@@ -100,28 +100,37 @@ on_exit() {
 trap on_exit EXIT
 trap 'exit 143' INT TERM
 
-# ── Cadence backoff ───────────────────────────────────────────────────────────
-# launchd always fires four times a day; backoff is enforced here instead, so the
-# schedule never has to be rewritten. gen-dashboard.py owns the classification
-# and writes cadence_hours to state.json: 6h normally, 12h after 4 consecutive
-# blocked runs, 24h after 8. Any run that ships resets it.
-#   6h  → every slot          (04:45 10:45 16:45 22:45)
-#   12h → 04:45 and 16:45
-#   24h → 04:45 only
+# ── Cadence ───────────────────────────────────────────────────────────────────
+# launchd fires every hour at :45; the cadence is enforced here, so changing it
+# never means rewriting the plist. ADVANCE_ROADMAP_CADENCE_HOURS (set in the plist,
+# default 2) is the base. gen-dashboard.py owns the backoff and writes cadence_hours
+# to state.json: the base normally, 2× after 4 consecutive blocked runs, 4× after 8,
+# capped at 24h. Any run that ships resets it.
+# Slots are hours where (hour - 3) is a multiple of the cadence, so the 2h grid is
+# 01:45 03:45 … 23:45 — never 02:45, when wrapup-repos commits WIP on Sundays.
+# Pick a divisor of 24 or the grid drifts at midnight.
 # A Linear ticket edit since the last no-work verdict bypasses the backoff (below).
-CADENCE=6
+export ADVANCE_ROADMAP_CADENCE_HOURS="${ADVANCE_ROADMAP_CADENCE_HOURS:-2}"
+BASE_CADENCE="$ADVANCE_ROADMAP_CADENCE_HOURS"
+case "$BASE_CADENCE" in ''|0|*[!0-9]*) BASE_CADENCE=2 ;; esac
+CADENCE="$BASE_CADENCE"
 if [ -r "$STATE_FILE" ] && command -v jq >/dev/null 2>&1; then
-  CADENCE="$(jq -r '.cadence_hours // 6' "$STATE_FILE" 2>/dev/null || echo 6)"
+  CADENCE="$(jq -r ".cadence_hours // $BASE_CADENCE" "$STATE_FILE" 2>/dev/null || echo "$BASE_CADENCE")"
 fi
-case "$CADENCE" in ''|*[!0-9]*) CADENCE=6 ;; esac
-HOUR_NOW=$(date +%H)
+case "$CADENCE" in ''|0|*[!0-9]*) CADENCE="$BASE_CADENCE" ;; esac
+[ "$CADENCE" -lt "$BASE_CADENCE" ] && CADENCE="$BASE_CADENCE"  # state.json from an older, faster base
+HOUR_NOW=$(( 10#$(date +%H) ))
+on_grid() { [ $(( (HOUR_NOW - 3 + 24) % $1 )) -eq 0 ]; }
+if [ "$CHAIN_LINK" -eq 1 ] && ! on_grid "$BASE_CADENCE"; then
+  # An hourly tick between slots: not a run, so no record, log or dashboard churn.
+  rm -f "$LOG"; rm -rf "$RUN_DIR"; RECORDED=1
+  exit 0
+fi
 run_this_tick=1
 if [ "$CHAIN_LINK" -gt 1 ]; then
   :  # the tick already passed this gate; a shipped link resets cadence anyway
-elif [ "$CADENCE" -ge 24 ]; then
-  [ "$HOUR_NOW" = "04" ] || run_this_tick=0
-elif [ "$CADENCE" -ge 12 ]; then
-  case "$HOUR_NOW" in 04|16) ;; *) run_this_tick=0 ;; esac
+elif ! on_grid "$CADENCE"; then
+  run_this_tick=0  # a base slot the backoff skips
 fi
 # A ticket edit since the last no-work verdict (a repo label added, a blocker answered,
 # needs-rescope removed) is Jake unblocking something: run now rather than wait out the
@@ -466,10 +475,10 @@ regen_dashboard
 # describes THIS run. No webhook configured = no-op, not an error.
 if [ -n "$SLACK_WEBHOOK" ] && [ -r "$STATE_FILE" ] && command -v jq >/dev/null 2>&1; then
   summary="$(jq -r '.last_summary // ""' "$STATE_FILE" 2>/dev/null)"
-  cadence="$(jq -r '.cadence_hours // 6' "$STATE_FILE" 2>/dev/null)"
+  cadence="$(jq -r ".cadence_hours // $BASE_CADENCE" "$STATE_FILE" 2>/dev/null)"
   [ -n "$summary" ] && {
     text="*advance-roadmap* $(date '+%a %H:%M') — ${summary}"
-    [ "$cadence" != "6" ] && text="$text  _(backed off to every ${cadence}h)_"
+    [ "$cadence" != "$BASE_CADENCE" ] && text="$text  _(backed off to every ${cadence}h)_"
     payload="$(jq -n --arg t "$text" '{text:$t}')"
     if curl -sf -m 15 -X POST -H 'Content-Type: application/json' -d "$payload" "$SLACK_WEBHOOK" >/dev/null; then
       echo "=== slack: summary posted ===" >> "$LOG"

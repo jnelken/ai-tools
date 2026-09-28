@@ -75,7 +75,7 @@ Hooks need extra wiring in `~/.claude/settings.json` — see [`hooks/README.md`]
 
 | Automation | Schedule | Purpose |
 |---|---|---|
-| [`advance-roadmap`](automations/advance-roadmap) | Every 6 hours — 4:45am / 10:45am / 4:45pm / 10:45pm (launchd) | Headlessly ship planned `ROADMAP.md` items via the `advance-roadmap` skill — keeps shipping one after another until a run doesn't ship cleanly or 40 min pass |
+| [`advance-roadmap`](automations/advance-roadmap) | Every 2 hours at :45 on odd hours (launchd; `ADVANCE_ROADMAP_CADENCE_HOURS` in the plist) | Headlessly ship planned `ROADMAP.md` items via the `advance-roadmap` skill — keeps shipping one after another until a run doesn't ship cleanly or 40 min pass |
 | [`wrapup-repos`](automations/wrapup-repos) | Sunday 2:45am, weekly (launchd) | Headlessly wrap up in-progress work in one repo via the `wrapup-repos` skill |
 
 Scheduling (the launchd plist) needs manual per-machine setup — see [`automations/README.md`](automations/README.md).

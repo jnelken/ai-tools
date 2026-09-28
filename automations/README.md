@@ -18,29 +18,37 @@ makes the deploy clone dirty.
 
 ## `advance-roadmap`
 
-Every 6 hours (4:45am / 10:45am / 4:45pm / 10:45pm local time — see **Cadence backoff** below),
+Every 2 hours (1:45am, 3:45am … 11:45pm local time — see **Cadence** below),
 picks a personal repo under
 `~/Dropbox/code` whose `ROADMAP.md` has real planned work, ships exactly ONE item on a
 branch, verifies with the repo's own `npm test` / `npm run build`, moves the item to Shipped,
 then merges to `main` locally and **pushes**. No PR.
 
-### Cadence backoff
+### Cadence
 
-launchd always fires four times a day; the effective cadence is enforced inside `run.sh`, so the
-schedule never has to be rewritten. `gen-dashboard.py` already classifies every run, so it owns
-the arithmetic and writes `cadence_hours` to `state.json`:
+launchd fires every hour at :45; `run.sh` decides which ticks run, so the plist never has to be
+rewritten for a cadence change. The base cadence is `ADVANCE_ROADMAP_CADENCE_HOURS` in the plist's
+`EnvironmentVariables` (default **2**; use a divisor of 24). Slots are the hours where
+`(hour - 3) % cadence == 0`, so the 2h grid is 1:45, 3:45 … 11:45pm — never 2:45, when
+wrapup-repos commits WIP on Sundays. Ticks between slots exit silently: no log, no record.
+To change it, edit the plist value, copy it to `~/Library/LaunchAgents/`, and reload with
+`launchctl bootout gui/$(id -u)/com.jake.advance-roadmap` then
+`launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.jake.advance-roadmap.plist`.
 
-| Consecutive unproductive runs | Cadence | Slots that run |
+**Backoff.** `gen-dashboard.py` already classifies every run, so it owns the arithmetic and
+writes `cadence_hours` to `state.json`:
+
+| Consecutive unproductive runs | Cadence | At the 2h base |
 |---|---|---|
-| 0–3 | 6h | 04:45, 10:45, 16:45, 22:45 |
-| 4–7 | 12h | 04:45, 16:45 |
-| 8+ | 24h | 04:45 |
+| 0–3 | base | every 2h |
+| 4–7 | 2× base | every 4h (3:45, 7:45 …) |
+| 8+ | 4× base, max 24h | every 8h (3:45, 11:45, 7:45pm) |
 
 "Unproductive" means `blocked-no-item` **or** `nothing-qualified` — a run that found no qualifying
 repo at all counts too, since an empty queue is exactly when backing off is worth the most. Four
 of them is a full day of finding nothing. **Any run that ships resets it.** Quota, lock
 and backoff skips don't count toward the streak — they're not evidence either way. A missing or
-corrupt `state.json` falls back to 6h, so a bad read can never wedge the job off.
+corrupt `state.json` falls back to the base cadence, so a bad read can never wedge the job off.
 
 ### Slack summary
 

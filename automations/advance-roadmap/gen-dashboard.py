@@ -50,7 +50,20 @@ MAX_CURSOR_PCT = 95
 # worker.sh draws Cursor usage from the Auto pool unless a named model is pinned;
 # only that pool is gated (lib/usage.py cursor_quota_ok).
 CURSOR_WORKER_MODEL = os.environ.get("ADVANCE_ROADMAP_CURSOR_WORKER_MODEL", "auto")
-SLOTS = [(4, 45), (10, 45), (16, 45), (22, 45)]
+# Before GRID_SINCE launchd fired at fixed 6h slots; after it, hourly with run.sh keeping
+# the base-cadence grid ((hour - 3) % base == 0). Old history is judged by the old slots.
+LEGACY_SLOTS = [(4, 45), (10, 45), (16, 45), (22, 45)]
+GRID_SINCE = datetime(2026, 9, 27, 22, 0)
+
+
+def slots_on(day):
+    """Scheduled slot datetimes on this calendar day, under whichever grid applied then."""
+    base = base_cadence()
+    grid = [(h, 45) for h in range(24) if (h - 3) % base == 0]
+    return ([day.replace(hour=h, minute=m) for h, m in LEGACY_SLOTS
+             if day.replace(hour=h, minute=m) < GRID_SINCE]
+            + [day.replace(hour=h, minute=m) for h, m in grid
+               if day.replace(hour=h, minute=m) >= GRID_SINCE])
 
 QUOTA_RE = re.compile(r"skipping — (\S+) usage (\d+)% >= (\d+)%")
 NO_ORCH_RE = re.compile(r"skipping — no orchestrator available")
@@ -282,7 +295,7 @@ def missed_slots(runs):
     """Scheduled fires with no log at all — the machine was asleep.
 
     A catch-up fire lands late (e.g. 12:59 for the 10:45 slot), so each run is
-    assigned to the nearest PRECEDING slot within 4 hours.
+    assigned to the nearest PRECEDING slot within 4 hours (or one cadence, if shorter).
     """
     if not runs:
         return []
@@ -293,15 +306,15 @@ def missed_slots(runs):
     covered, expected = set(), []
     day = first.replace(hour=0, minute=0, second=0, microsecond=0)
     while day <= now:
-        for h, m in SLOTS:
-            s = day.replace(hour=h, minute=m)
+        for s in slots_on(day):
             if first - timedelta(minutes=30) <= s <= now - timedelta(minutes=20):
                 expected.append(s)
         day += timedelta(days=1)
     for st in stamps:
         best = None
         for s in expected:
-            if s <= st + timedelta(minutes=5) and (st - s) <= timedelta(hours=4):
+            window = timedelta(hours=4 if s < GRID_SINCE else min(4, base_cadence()))
+            if s <= st + timedelta(minutes=5) and (st - s) <= window:
                 if best is None or s > best:
                     best = s
         if best:
@@ -435,7 +448,14 @@ STATE = os.path.join(ROOT, "state.json")
 BLOCKED_OUTCOMES = ("blocked-no-item", "blocked", "nothing-qualified")
 # Consecutive blocked runs before each step down. At 4 runs/day, 4 is one full
 # day of finding nothing, 8 is two.
-BACKOFF_STEPS = ((8, 24), (4, 12))
+# run.sh exports the base; the backoff multiplies it: (blocked streak, multiplier).
+def base_cadence():
+    v = os.environ.get("ADVANCE_ROADMAP_CADENCE_HOURS", "2")
+    return int(v) if v.isdigit() and int(v) > 0 else 2
+
+
+BACKOFF_STEPS = ((8, 4), (4, 2))
+MAX_CADENCE = 24
 
 
 def write_state(runs):
@@ -449,10 +469,10 @@ def write_state(runs):
             continue
         break                           # shipped / completed / error ends the streak
 
-    hours = 6
-    for need, h in BACKOFF_STEPS:
+    hours = base_cadence()
+    for need, mult in BACKOFF_STEPS:
         if streak >= need:
-            hours = h
+            hours = max(hours, min(hours * mult, MAX_CADENCE))
             break
 
     last = next((r for r in runs if r["outcome"] != "running"), None)
@@ -710,8 +730,8 @@ def build():
         cad = run_state["cadence_hours"]
         cad_html = (f'<div class=checkline style="border-bottom:0;padding-bottom:0;margin-bottom:0">'
                     f'<strong>Cadence:</strong> every {cad}h'
-                    + (f' <span class=dim>— backed off from 6h after {run_state["blocked_streak"]} '
-                       f'consecutive blocked runs; resets on the next ship</span>' if cad > 6
+                    + (f' <span class=dim>— backed off from {base_cadence()}h after {run_state["blocked_streak"]} '
+                       f'consecutive blocked runs; resets on the next ship</span>' if cad > base_cadence()
                        else ' <span class=dim>— normal</span>') + '</div>')
         quota_html = (f'<div class=card><div class=checkline>{verdict} &nbsp;{route}</div>'
                       f'<div class=provs>{provider_rows(q["providers"])}</div>'
@@ -734,6 +754,7 @@ def build():
 
     return TEMPLATE.format(
         gen=esc(datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
+        cadence=base_cadence(),
         total=n, shipped=shipped, blocked=blocked, skipped=skipped, errored=errored,
         last_line=last_line, run_rows=run_rows, repo_cards=repo_cards,
         block_cards=block_cards, quota_html=quota_html, missed_html=missed_html,
@@ -822,7 +843,7 @@ TEMPLATE = """<!doctype html>
 <div class=wrap>
   <button class=toggle onclick="var r=document.documentElement;r.dataset.theme=(r.dataset.theme==='dark'?'light':'dark')">◐ theme</button>
   <h1>Roadmap automation</h1>
-  <div class=sub>Generated {gen} · runs every 6h at 4:45 / 10:45am, 4:45 / 10:45pm · reload after a run to refresh</div>
+  <div class=sub>Generated {gen} · runs every {cadence}h at :45 · reload after a run to refresh</div>
 
   <div class=stats>
     <div class=stat><div class=n>{total}</div><div class=l>runs logged</div></div>

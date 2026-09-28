@@ -429,7 +429,7 @@ he didn't touch himself; he should know exactly which, and that the next run wil
 If any tracked edit somehow ended up *not* covered by a directive, say so loudly — that repo
 is now blocked until it is.
 
-Close by saying that the next `/advance-roadmap` run (scheduled, four times a day) picks
+Close by saying that the next `/advance-roadmap` run (scheduled every 2 hours) picks
 up each pending directive automatically — or that Jake can run `/advance-roadmap` right now
 if he wants one acted on immediately.
 

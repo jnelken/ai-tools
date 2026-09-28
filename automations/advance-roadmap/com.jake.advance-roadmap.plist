@@ -11,17 +11,22 @@
 		<string>/Users/jake/.claude/automations/advance-roadmap/run.sh</string>
 	</array>
 
-	<!-- Every 6 hours, local time (handles DST automatically): 4:45am, 10:45am, 4:45pm, 10:45pm.
-	     The :45 offset keeps every slot clear of wrapup-repos' 2:45/7:45/12:45/17:45 runs —
-	     that job commits WIP, and this one requires a clean tree, so it must never land on top
-	     of it. If the Mac is asleep at a scheduled time, launchd runs the missed job on wake. -->
+	<!-- Fires every hour at :45; run.sh decides which ticks run. The base cadence is
+	     ADVANCE_ROADMAP_CADENCE_HOURS below (a divisor of 24): slots are the hours where
+	     (hour - 3) is a multiple of it, so 2h → 1:45, 3:45 … 11:45pm. That grid never lands on
+	     2:45, when wrapup-repos commits WIP on Sundays — this job requires a clean tree.
+	     Off-slot ticks exit silently. If the Mac is asleep at a scheduled time, launchd runs
+	     the missed job on wake. Edit the value, then reload:
+	       launchctl bootout gui/$(id -u)/com.jake.advance-roadmap
+	       launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.jake.advance-roadmap.plist -->
 	<key>StartCalendarInterval</key>
-	<array>
-		<dict><key>Hour</key><integer>4</integer><key>Minute</key><integer>45</integer></dict>
-		<dict><key>Hour</key><integer>10</integer><key>Minute</key><integer>45</integer></dict>
-		<dict><key>Hour</key><integer>16</integer><key>Minute</key><integer>45</integer></dict>
-		<dict><key>Hour</key><integer>22</integer><key>Minute</key><integer>45</integer></dict>
-	</array>
+	<dict><key>Minute</key><integer>45</integer></dict>
+
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>ADVANCE_ROADMAP_CADENCE_HOURS</key>
+		<string>2</string>
+	</dict>
 
 	<key>RunAtLoad</key>
 	<false/>
