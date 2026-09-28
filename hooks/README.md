@@ -102,12 +102,6 @@ If you already have a `hooks.SessionStart` array, append the new entry rather th
 
 Remove the entry from `settings.json` OR `unset SLACK_CCUSAGE_WEBHOOK_URL` to no-op.
 
-## set-process-name.sh + set-process-title.cjs
-
-A pair that labels every agent-spawned node process for Activity Monitor — `c-eslint-my-feature` instead of `node`. The PreToolUse hook rewrites Bash commands to export `PROCESS_NAME={agent}-{script}-{branch}`; the `.cjs` injector (loaded via `NODE_OPTIONS=--require`) applies it as the process title, falling back to the script basename so MCP servers self-label too.
-
-Full setup, optional MCP/Codex coverage, and gotchas: [`named-node-processes.md`](named-node-processes.md).
-
 ## block-push-to-main.sh
 
 Prevents an accidental Claude-issued `git push` to `main` without breaking terminal-driven pushes. Wired into `.claude/settings.json` as a `PreToolUse` hook on Bash, it reads the arguments of each push segment (not the whole command string) and denies when the destination resolves to `main`. It is opt-in per repo: only repos named (one per line) in `~/.claude/hooks/block-push-to-main.denylist` are guarded, so personal repos where agents may push `main` freely are simply not listed. The canonical copy lives in `Concentro-Inc/folio-platform` at `.claude/hooks/block-push-to-main.sh`; this file is an installed copy written by `fp hooks:install --repo ~/code/ai-tools --dest ~/code/ai-tools/hooks`, with `block-push-to-main.installed` beside it recording the source commit and sha256. Never edit it here — change folio-platform, run its `tests/block-push-to-main.test.sh`, land it, then re-run the installer (`fp hooks:check … --dest hooks` reports drift).

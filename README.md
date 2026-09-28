@@ -60,8 +60,6 @@ Each skill is a directory with a `SKILL.md` (required) plus optional `scripts/`,
 | [`ai-tools-sync.sh`](hooks/ai-tools-sync.sh) | SessionStart | Keep the deploy clone (`~/.ai-tools`) synced with `origin/main`, re-link on change, and nudge about a dirty deploy clone or leftover `--dev` links |
 | [`post-yesterdays-ccusage.sh`](hooks/post-yesterdays-ccusage.sh) | SessionStart | Post daily Claude + Codex token-usage summaries to Slack, catching up missed days |
 | [`pick-up-nudge.sh`](hooks/pick-up-nudge.sh) | SessionStart | Nudge to run `/pick-up` when the repo has an `IN_PROGRESS.md` with open checklist items |
-| [`set-process-name.sh`](hooks/set-process-name.sh) | PreToolUse (Bash) | Label agent-spawned node processes `{agent}-{script}-{branch}` so Activity Monitor shows origins — see [named-node-processes.md](hooks/named-node-processes.md) |
-| [`set-process-title.cjs`](hooks/set-process-title.cjs) | via `NODE_OPTIONS` | Injector applying the title to any node process; MCP servers self-label from their script basename |
 | [`block-push-to-main.sh`](hooks/block-push-to-main.sh) | PreToolUse (Bash) | Block a Claude-issued `git push` that would target `main`, with a per-repo allowlist |
 | [`enforce-claude-symlinks.sh`](hooks/enforce-claude-symlinks.sh) | git `pre-commit` hook (not a `settings.json` hook — runs only from the dev checkout) | Reject a commit that adds an unsymlinked regular file under `~/.claude/` |
 | [`claude-symlink-hygiene.sh`](hooks/claude-symlink-hygiene.sh) | SessionStart | Nudge about new unsymlinked files in `~/.claude/{hooks,commands,agents}/` before they become a blocker |

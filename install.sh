@@ -426,7 +426,6 @@ section_hooks() {
         README*|*.md) continue ;;
         # Wired outside settings.json's hooks tree — not applicable here.
         enforce-claude-symlinks.sh) continue ;;  # git pre-commit hook (.git/hooks/pre-commit)
-        set-process-title.cjs) continue ;;       # loaded via env.NODE_OPTIONS, not hooks.*
         lib) continue ;;                         # shared helper dir, not an individual hook
       esac
       if ! jq -e --arg name "$name" \
