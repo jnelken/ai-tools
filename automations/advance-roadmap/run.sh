@@ -133,8 +133,10 @@ elif ! on_grid "$CADENCE"; then
   run_this_tick=0  # a base slot the backoff skips
 fi
 # A ticket edit since the last no-work verdict (a repo label added, a blocker answered,
-# needs-rescope removed) is Jake unblocking something: run now rather than wait out the
-# backoff. Read-only peek — repo churn doesn't bypass, and no verdict means no bypass.
+# a ticket moved out of Needs Input) is Jake unblocking something: run now rather than wait
+# out the backoff. Read-only peek — repo churn doesn't bypass, and no verdict means no bypass.
+# (A run's own Needs-Input/Paused writes don't cause a false bypass at the *next* tick: the
+# fingerprint saved below is taken after the worker runs, so those writes are already baked in.)
 if [ "$run_this_tick" -eq 0 ]; then
   peek_snap="$RUN_DIR/backoff-peek-snapshot.json"
   peek_fp="$RUN_DIR/backoff-peek-fingerprint.json"
@@ -453,7 +455,15 @@ PY
     --result-file "$WORKER_RESULT" --status-file "$WORKER_STATUS" || worker_rc=$?
   echo "=== worker exit=$worker_rc ==="
   python3 "$PLAN_PY" --file "$PENDING_PLAN" settle --worker-result "$WORKER_RESULT" --worker-rc "$worker_rc"
-  python3 "$VERDICT_PY" save --file "$LAST_VERDICT" --fingerprint "$FINGERPRINT" \
+  # Re-fingerprint after the worker, not before: a bookkeeping worker's own Step 2b can flip a
+  # ticket to Needs Input or Paused, and saving the pre-worker $FINGERPRINT would make the next
+  # tick's backoff peek see that as "Jake changed something" and bypass the backoff for no reason. Never
+  # overwrites $LINEAR_SNAPSHOT — that's the record of what the orchestrator actually triaged.
+  POST_SNAPSHOT="$RUN_DIR/linear-snapshot-post.json"
+  POST_FINGERPRINT="$RUN_DIR/fingerprint-post.json"
+  python3 "$LINEAR_SNAP_PY" --out "$POST_SNAPSHOT" >> "$LOG" 2>&1
+  python3 "$VERDICT_PY" fingerprint --snapshot "$POST_SNAPSHOT" --out "$POST_FINGERPRINT" >> "$LOG" 2>&1
+  python3 "$VERDICT_PY" save --file "$LAST_VERDICT" --fingerprint "$POST_FINGERPRINT" \
     --orch-result "$ORCH_RESULT" --worker-result "$WORKER_RESULT" --stamp "$STAMP"
 
   [ -f "$PROBE_FLAG" ] || { touch "$PROBE_FLAG"; echo "(Dispatch probe flag set)"; }

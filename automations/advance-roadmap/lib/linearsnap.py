@@ -30,16 +30,20 @@ FIELDS = """
       comments(first: 100) { nodes { body } }
       description
     }"""
-# Active work, plus every pending directive whatever its ticket's state: a directive on a
-# closed ticket still gates its repo's dirty tree (Step 1a), and the planner must see it.
+# Active work, plus recently-closed tickets: a directive can ride on a ticket that's since been
+# closed and still gate its repo's dirty tree (Step 1a), so the planner must see it. There used to
+# be a `roadmap-directive` label driving a second query; it's retired — the planner now finds a
+# pending directive by parsing the `## Directive` marker straight out of `description`, so this
+# just needs every issue's description in front of it, active or recently closed.
 QUERY = """query {
   active: issues(first: 250, filter: {
     team: { key: { eq: "DEV" } },
     state: { type: { nin: ["completed", "canceled"] } }
   }) {%s}
-  directives: issues(first: 50, filter: {
+  closed_recent: issues(first: 50, filter: {
     team: { key: { eq: "DEV" } },
-    labels: { name: { eq: "roadmap-directive" } }
+    state: { type: { in: ["completed", "canceled"] } },
+    updatedAt: { gt: "-P180D" }
   }) {%s}
 }""" % (FIELDS, FIELDS)
 
@@ -89,13 +93,13 @@ def main():
             raise RuntimeError((p.stderr or p.stdout).strip()[:500] or f"linear exited {p.returncode}")
         data = json.loads(p.stdout)["data"]
         by_id = {}
-        for conn in (data["active"], data["directives"]):
+        for conn in (data["active"], data["closed_recent"]):
             for n in conn["nodes"]:
                 by_id.setdefault(n["identifier"], flatten(n))
         nodes = list(by_id.values())
-        truncated = data["active"]["pageInfo"]["hasNextPage"] or data["directives"]["pageInfo"]["hasNextPage"]
+        truncated = data["active"]["pageInfo"]["hasNextPage"] or data["closed_recent"]["pageInfo"]["hasNextPage"]
         snap.update(ok=True, truncated=truncated, count=len(nodes), issues=nodes)
-        print(f"linear: snapshot ok — {len(nodes)} DEV issues (active + pending directives)")
+        print(f"linear: snapshot ok — {len(nodes)} DEV issues (active + recently-closed)")
     except Exception as e:  # noqa: BLE001 — any failure degrades to file-only triage
         snap.update(ok=False, error=str(e), issues=[])
         print(f"linear: snapshot FAILED — {e}")

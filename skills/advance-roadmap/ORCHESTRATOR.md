@@ -14,8 +14,10 @@ Hard constraints:
   never rewrite it.
 
 Also read the allowlist path noted in [`SKILL.md`](SKILL.md), and read the Linear snapshot named in
-your prompt once, up front (see *Linear goes through the `linear` CLI* in `SAFETY.md`). Hold its
-`roadmap-directive` issues as a repo -> directive map for Step 1.
+your prompt once, up front (see *Linear goes through the `linear` CLI* in `SAFETY.md`). Scan every
+issue's `description` for an unconsumed `## Directive` marker (`<!-- advance-roadmap:directive:
+<repo> -->`, heading with no "(consumed"/"(archived" suffix) and hold those as a repo -> directive
+map for Step 1.
 
 ## Output protocol
 
@@ -168,8 +170,15 @@ check whether that repo's production is still red before starting new work there
 `main` commit's deploy status with `gh api repos/<owner>/<repo>/commits/<sha>/status` (read-only;
 if your sandbox can't reach GitHub, assume it's still red). If it is still red, **skip the repo for
 new work** so features don't pile up on a broken `main`. List it in `blockers` with the ticket from
-that row, and let the worker's unchanged-comment rule suppress a duplicate ping. Once the deploy is
-green, whether Jake fixed it or a later push did, the repo is eligible again.
+that row, and let the worker's unchanged-comment rule suppress a duplicate ping — its Step 2b sets
+that ticket to `Paused` (never `Needs Input`; the deploy can recover on its own).
+
+**Once the deploy is green, whether Jake fixed it or a later push did, the repo is eligible again**
+— *and* that original ticket needs closing out, since Step 7b never moved it to `Done`. If this run
+dispatches a worker to that repo (a new item, or bookkeeping if nothing else qualifies), say so
+explicitly in `worker_brief`: comment on `DEV-N` that the deploy recovered, move it to `Done`, and
+clear its `Paused` state. If no dispatch happens to that repo this run, leave it — the next run's
+Step 0 finds it green and does the same check again.
 
 ### Reconciling an interrupted run
 
@@ -316,29 +325,30 @@ Take the first repo that passes everything. **If no repo qualifies, stop and rep
 actionable roadmap was found** — record it in memory (Step 8) and do nothing else. Do not invent
 roadmap items, do not go looking for other work to do, do not fall back to `wrapup-repos` behavior.
 If a dirty repo would otherwise have qualified and has no directive waiting, say so in the final
-summary and point at `/prepare-roadmap` — that's the one thing that ever unblocks it.
+summary and point at `/unblock-roadmap` — that's the one thing that ever unblocks it.
 
 ## Step 1a — A directive is a bounded exception to clean-tree, nothing more
 
-Before skipping a dirty repo, look it up in the pending-directive map from the
-snapshot's issues labeled `roadmap-directive`. A pending directive is the *only*
+Before skipping a dirty repo, look it up in the pending-directive map you built from the
+snapshot (the description scan from the top of this file). A pending directive is the *only*
 thing that ever lets this skill touch a dirty tree — nothing else does, ever, and its absence
 means the clean-tree rule is exactly as absolute as it reads in [`SAFETY.md`](SAFETY.md).
 
-**You decide; you never act.** You are read-only: do not commit, discard, restore, relabel, or edit
+**You decide; you never act.** You are read-only: do not commit, discard, restore, or edit
 anything here. Your job is to establish that a directive plausibly authorizes this repo, put its
 ticket id in `directive_ticket`, and let the worker execute it (Step 2c). The worker re-reads the
 directive and re-checks it against the live tree itself — time passes between triage and execution,
 and only the process about to change a tree can meaningfully check it.
 
-1. **Exactly one pending directive per repo, or none.** Two tickets labelled `roadmap-directive`
-   for the same repo is a live ambiguity, not a stale leftover: `/prepare-roadmap` edits an
-   existing directive rather than filing a second, so duplicates mean a human intervened. Refuse
-   the repo, record a blocker naming both tickets, and move on. Never pick one and guess.
+1. **Exactly one pending directive per repo, or none.** Two tickets each carrying an unconsumed
+   `## Directive` marker for the same repo is a live ambiguity, not a stale leftover:
+   `/unblock-roadmap` edits an existing directive rather than filing a second, so duplicates mean a
+   human intervened. Refuse the repo, record a blocker naming both tickets, and move on. Never pick
+   one and guess.
 2. **Read the `## Directive` section** in that ticket's description. It has up to three parts: a
    dirty-tree resolution (the canonical `git status` snapshot plus Jake's verbatim instruction),
-   answered decisions, and a go-ahead. A ticket carrying the label with no parsable section is a
-   blocker, not an authorization — report it and skip.
+   answered decisions, and a go-ahead. A ticket whose marker you matched but whose section doesn't
+   parse is a blocker, not an authorization — report it and skip.
 3. **Classify the instruction, and sanity-check the snapshot against live `git status`:**
    - A **commit-shaped** instruction ("commit it as one", "split into A and B") only needs the
      paths it names to still exist and still be dirty. Unrelated dirty paths that appeared since
@@ -353,15 +363,15 @@ and only the process about to change a tree can meaningfully check it.
      "fix" it by loosening to a substring match, which is precisely how you discard work the
      snapshot never described.
    - Any set mismatch on a destructive instruction: do **not** dispatch it. Record a blocker saying
-     the tree changed since the directive was recorded, so `/prepare-roadmap`'s next sweep re-asks
+     the tree changed since the directive was recorded, so `/unblock-roadmap`'s next sweep re-asks
      against current state, and skip this repo this run.
    - A commit-shaped instruction whose named paths are no longer dirty is a **no-op, not an
-     error** — Jake resolved it himself. Dispatch the bookkeeping-only clear (the worker retires
-     the label and stamps the section) and treat the repo as clean for the rest of triage.
+     error** — Jake resolved it himself. Dispatch the bookkeeping-only clear (the worker stamps the
+     section as consumed) and treat the repo as clean for the rest of triage.
 4. **Carry the rest of the directive into `worker_brief`.** Name the answered decisions and each
    one's `**Recorded in:**` field, so the worker knows which are already written into the repo's
    markdown (commit them) and which it must still write itself (`not yet`). A dirty-tree snapshot
-   may legitimately include a `.md` file `/prepare-roadmap` edited when recording an answer — that
+   may legitimately include a `.md` file `/unblock-roadmap` edited when recording an answer — that
    is a normal commit-shaped path, not drift. Quote the go-ahead verbatim. A directive's answered decisions can unblock an item Step 2 would
    otherwise still skip in this same run, so apply them while judging the item, not after.
 5. **Continue into this repo's remaining Step 1 checks** (preflight, live sessions) and Step 2
@@ -426,8 +436,23 @@ an issue exists somewhere; read both, then pick one item by the prefer/skip rule
 - **Read the snapshot**, never Linear itself. It holds every Dev issue not completed or canceled,
   with `labels` (group children flattened to `repo/<dir>`), `blocked_by`, and the full
   `description`. Order by Step 1's tier table — Linear **priority first**, with state
-  (`In Progress`, `Todo`, then `Backlog`) only breaking ties within a priority. Ignore `Done`,
-  `Canceled`, `Duplicate`, and `In Review`.
+  (`In Progress`, `Todo`, `Paused`, then `Backlog`) only breaking ties within a priority. `Paused`
+  ranks with `Todo`: it's real, ready work that just hit an environmental snag, not lesser-priority
+  backlog. Ignore `Done`, `Canceled`, `Duplicate`, `In Review`, and `Needs Input`.
+- **`Needs Input` means Jake hasn't answered a decision or attended-acceptance question yet — don't
+  re-attempt it.** Step 2b moves a ticket here only for those two blocker types. Re-triaging a
+  `Needs Input` ticket would just re-post the same comment for no work done, so treat it like
+  `human-only`: drop it from the batch silently, no new comment, not counted among items
+  considered. It becomes eligible again only when the state changes away from `Needs Input` —
+  Jake moving it back himself, or `/unblock-roadmap` recording a directive and resetting it —
+  never something this skill does on its own.
+- **`Paused` is the opposite: always re-attempt it.** Step 2b sets it for a dirty tree or a red
+  deploy after Step 7b's cap — both conditions that can resolve themselves outside this skill
+  (Jake commits his WIP, or fixes the env var directly) — so unlike `Needs Input`, a `Paused`
+  ticket stays fully eligible and gets the same live check every run (git status, or the deploy's
+  actual health) that would happen regardless of its Linear state. The state is a visible marker
+  for Jake, not a triage gate; the worker clears it back to `Todo` the moment it actually proceeds
+  (WORKER.md Step 2b, point 4).
 - **The repo comes from the `repo` label.** The workspace carries a `repo` label group with one
   child per directory under `~/Dropbox/code` — `repo/mailcruxh`, `repo/typey.site`, and so on.
   Being a group, it's single-select: one repo per issue.
@@ -449,18 +474,16 @@ an issue exists somewhere; read both, then pick one item by the prefer/skip rule
   count it among the items you report as considered. Log `skipped-human-only` plus the `DEV-N` id
   in run memory and move on. It's a flat workspace label that coexists with the issue's `repo/*`
   label, so check labels for both independently.
-- **`needs-rescope` is also a silent exclusion.** Jake has said the ticket's scope is stale or
-  changing and he will rewrite it. Drop it from the batch like `human-only`: no Step 2b comment, no
-  `@jnelks`, not reported as considered. Log `skipped-needs-rescope` with the `DEV-N` id. It becomes
-  eligible again only when the label is removed.
-- **`roadmap-directive` marks a pending directive.** The ticket's description carries a
-  `## Directive` section from [[prepare-roadmap]] — Jake's recorded answer to what blocked this
-  repo. It is the only dirty-tree exception (Step 1a), it is a *pending* marker and not an
-  authorization, and the worker retires the label once it has acted. Like `human-only`, it is a
-  flat workspace label that coexists with the issue's `repo/*` label — but **unlike `human-only`,
-  it does not make the issue ineligible.** It gates the repo's *tree*, not the item: a
-  directive-bearing ticket is ordinary work that triages by the normal Step 2 rules, and the
-  directive only decides whether the run may start on it at all.
+- **Scope going stale or changing is a `Needs Input` case, not a label.** Jake moves the ticket to
+  `Needs Input` himself when its scope needs a rewrite before this skill should touch it — the same
+  silent-skip bullet above covers it; there's nothing further to check.
+- **An unconsumed `## Directive` marker gates a repo's tree, not the item.** The ticket's
+  description carries a `## Directive` section from [[unblock-roadmap]] — Jake's recorded answer to
+  what blocked this repo. It is the only dirty-tree exception (Step 1a), it is a *pending* marker
+  and not an authorization, and the worker stamps the section as consumed once it has acted (no
+  label involved). **Unlike `Needs Input`, it does not make the issue ineligible** — it gates the repo's
+  *tree*, not the item: a directive-bearing ticket is ordinary work that triages by the normal
+  Step 2 rules, and the directive only decides whether the run may start on it at all.
 - **`do-next` is the tier above Urgent/P0.** It moves an otherwise eligible issue ahead of all
   fresh work in every repo after Step 0 has reconciled any interrupted prior run. It does not override
   `human-only`, repo safety, dependencies, or the Step 2 skip list. A completed issue naturally
@@ -481,34 +504,22 @@ an issue exists somewhere; read both, then pick one item by the prefer/skip rule
   `considered` and carry on with the file-based sources. Don't try to reach Linear another way —
   no MCP tools, no OAuth, no `linear` calls from your sandbox.
 
-## Step 2b — Put blockers on the ticket and mention Jake
+## Step 2b — Decide what blocks, and name it in `blockers`
 
-When a run tries to implement a ticket and cannot continue, put the blocker where the work lives:
-on that Linear issue. This applies when the repo is dirty, a required human decision is unresolved,
-attended acceptance is required before implementation can safely land, work stalls on a product
-judgment during Steps 4 or 5, or production deploys stay red after Step 7b's fix attempts.
+When a run tries to implement a ticket and cannot continue — the repo is dirty with no directive, a
+required human decision is unresolved, or attended acceptance is required before implementation can
+safely land — that's a blocker. You are read-only, so **you never touch Linear yourself**: name it
+in `blockers` (`repo`, `linear_id`, `detail`) and the worker executes the whole thing —
+comment, dedup check, and (for a decision or attended-acceptance blocker only) setting the ticket
+to `Needs Input` — per its own Step 2b in `WORKER.md`. A dirty tree is never set `Needs Input`, since it can
+resolve itself outside this skill and gets re-attempted live every run instead. Write `detail` as
+the smallest self-contained question and its viable options for a decision blocker, or the dirty
+paths for a dirty-tree one; the worker's Step 2b turns it into the actual comment. (A stalled
+Steps 4–5 judgment or a red deploy are the same mechanism, but the worker hits those itself mid-run
+and runs its own Step 2b directly — you never see them in triage.)
 
-The worker posts these (you only list them in `blockers`): it runs `linear issue comment list
-DEV-N` before writing, then `linear issue comment add DEV-N --body-file <f>`. A blocker comment has this shape:
-
-```markdown
-@jnelks advance-roadmap is blocked on this ticket.
-
-**Repo:** `<directory>`
-**Blocker:** Dirty working tree
-**Details:** `M src/example.ts`, `?? notes.md`
-**Needed from you:** Resolve the listed work, or run `/prepare-roadmap` to record how it should be handled.
-
-<!-- advance-roadmap:blocker -->
-```
-
-For a decision blocker, replace `Details` with the smallest self-contained question and its viable
-options. For attended acceptance, name the device, interaction, visual, or by-ear check required.
-Never paste diff contents, credentials, environment values, or other secrets into the comment.
-
-`@jnelks` is Jake's Linear `displayName`; use that exact mention so Linear notifies him. Add one
-comment per affected ticket, not one per roadmap bullet. If an issue lacks a repo label, comment on
-that same issue and ask which repo it belongs to.
+If an issue lacks a repo label, name that as the blocker too: comment on that same issue and ask
+which repo it belongs to.
 
 ### Deduplicate scheduled-run pings
 

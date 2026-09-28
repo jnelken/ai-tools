@@ -24,7 +24,6 @@ Personal AI coding tools — Claude Code and Cursor skills, slash commands, hook
 | [`move-diff`](skills/move-diff) | Relocate uncommitted changes to a different branch/worktree |
 | [`peer-review`](skills/peer-review) | Run Codex code review locally before pushing |
 | [`post-pr`](skills/post-pr) | Take a finished PR the rest of the way: review until clean, watch CI, post to `#pr-review`, badge + undraft |
-| [`prepare-roadmap`](skills/prepare-roadmap) | Interactive sweep of the repos `advance-roadmap` is blocked on — asks how to resolve each, records answers as directives for a later run |
 | [`pr-review-gaps`](skills/pr-review-gaps) | Find sswt PRs never posted to `#pr-review`, with a hold-list for deliberately parked ones |
 | [`rebase-after-squash`](skills/rebase-after-squash) | Resolve rebase-after-squash-merge conflicts cleanly |
 | [`rum-review`](skills/rum-review) | Query Datadog RUM data, synthesize findings into categorized issues |
@@ -34,6 +33,7 @@ Personal AI coding tools — Claude Code and Cursor skills, slash commands, hook
 | [`slack-gif-creator`](skills/slack-gif-creator) | Build animated GIFs optimized for Slack |
 | [`superset-config`](skills/superset-config) | Configure superset.sh (agentic IDE) project scripts — setup/run/teardown |
 | [`tab-triage`](skills/tab-triage) | Flush open Chrome tabs through chrome-tab-org, then triage the JSON log into vault notes and ClickUp tasks |
+| [`unblock-roadmap`](skills/unblock-roadmap) | Interactive sweep of the repos `advance-roadmap` is blocked on — asks how to resolve each, records answers as directives for a later run |
 | [`use-spark`](skills/use-spark) | Query the Spark email client CLI — emails, calendar, contacts, scheduling |
 | [`weekly-product-changelog-and-announcement`](skills/weekly-product-changelog-and-announcement) | Generate + post a weekly per-engineer changelog (internal) and a customer-facing product announcement (external) from cross-repo git history |
 | [`wrapup-repos`](skills/wrapup-repos) | Wrap up in-progress work in one repo unattended — commit + record decisions in `.claude/IN_PROGRESS.md` |

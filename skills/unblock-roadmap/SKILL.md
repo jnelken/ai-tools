@@ -1,23 +1,24 @@
 ---
-name: prepare-roadmap
-description: Interactive-only sweep across every personal repo under ~/Dropbox/code that is currently blocked from advance-roadmap — a dirty working tree, or open "decisions needed" questions — and asks Jake how to resolve each one, one repo at a time. Writes no code and runs no git: it persists each answer immediately as a `## Directive` section on that repo's Linear ticket, and may record the answer in the repo's own markdown (ROADMAP.md, docs/plans/, IN_PROGRESS.md), which a later /advance-roadmap run reads, commits, and acts on. Use on-demand ("/prepare-roadmap", "unblock the roadmap repos", "clear the roadmap blockers", "sweep the blocked repos"). Complementary to [[advance-roadmap]], never a replacement — this skill only asks and records; that one is the only thing that ever writes code, commits, or pushes.
+name: unblock-roadmap
+description: Interactive-only sweep across every personal repo under ~/Dropbox/code that is currently blocked from advance-roadmap — a dirty working tree, a `Needs Input` Linear ticket, or open "decisions needed" questions — and asks Jake how to resolve each one, one repo at a time. Writes no code and runs no git: it persists each answer immediately as a `## Directive` section on that repo's Linear ticket (moving the ticket out of `Needs Input` when that's what was gating it), and may record the answer in the repo's own markdown (ROADMAP.md, docs/plans/, IN_PROGRESS.md), which a later /advance-roadmap run reads, commits, and acts on. Use on-demand ("/unblock-roadmap", "unblock the roadmap repos", "clear the roadmap blockers", "sweep the blocked repos"). Complementary to [[advance-roadmap]], never a replacement — this skill only asks and records; that one is the only thing that ever writes code, commits, or pushes.
 ---
 
-# Prepare the roadmap
+# Unblock the roadmap
 
-`/advance-roadmap` refuses to touch a repo with a dirty working tree, and it can't
-decide a product/taste question that's the user's to make — so both classes of repo sit
-blocked indefinitely, run after run, until a human clears them. This skill is that human
-pass: sweep every candidate repo, surface what's blocking each one, ask Jake one question
-at a time, and record his answer immediately — so a sweep he abandons halfway through
-still leaves every repo he did answer fully unblocked.
+`/advance-roadmap` refuses to touch a repo with a dirty working tree, sets a Linear ticket
+to `Needs Input` rather than guess at a decision that's the user's to make, and can't decide a
+product/taste question either — so all three classes of repo sit stuck indefinitely, run
+after run, until a human clears them. This skill is that human pass: sweep every candidate
+repo, surface what's blocking each one, ask Jake one question at a time, and record his
+answer immediately — so a sweep he abandons halfway through still leaves every repo he did
+answer fully unblocked.
 
 **This skill is interactive-only.** It exists to ask questions a human has to answer, so
 it has no scheduled/unattended mode. If invoked headlessly, say so and stop.
 
 ## The hard rule: no code, no git — prose and Linear only
 
-`/prepare-roadmap` may write in exactly two places: **Linear** (directives, and the tickets
+`/unblock-roadmap` may write in exactly two places: **Linear** (directives, and the tickets
 to carry them), and a repo's own **markdown** — `ROADMAP.md`, `docs/plans/*.md`, other docs,
 and `.claude/IN_PROGRESS.md` — where an answer belongs in the prose.
 
@@ -57,8 +58,8 @@ Two consequences worth stating plainly:
   ignored, it's a tracked edit and the rule above applies in full.
 - **Never write a destructive instruction for a file you wrote.** "Discard it" covering your
   own prose edit is incoherent. Commit-shaped only, and attribute it honestly: the instruction
-  is `/prepare-roadmap`'s ("commit the ROADMAP.md decision edits recorded by
-  /prepare-roadmap"), not a quote of something Jake said.
+  is `/unblock-roadmap`'s ("commit the ROADMAP.md decision edits recorded by
+  /unblock-roadmap"), not a quote of something Jake said.
 
 ### Writing `.claude/IN_PROGRESS.md`, which you share with two other skills
 
@@ -66,7 +67,7 @@ That file is owned by [[close-out]] and read by [[pick-up]], so treat it as a **
 document you append to**, never a file you author: read it first, leave every open item
 another session put there, and follow close-out's own conventions — resolve a line by
 **deleting** it rather than leaving a `- [x]` row behind, and stamp
-`_Last updated: <date> (prepare-roadmap)_` so it's obvious which writer touched it last.
+`_Last updated: <date> (unblock-roadmap)_` so it's obvious which writer touched it last.
 Three writers on one file is workable only if each of them is additive.
 
 ### Where an answered decision should land
@@ -97,15 +98,25 @@ persisted state, not merely the place the conversation happened.
 
 Two mechanics make that findable and safe, and they are separate on purpose:
 
-- **The `roadmap-directive` label on that same ticket is the marker.** Apply it whenever
-  you write a directive. `/advance-roadmap` finds every pending directive, in any ticket
-  state, in the Linear snapshot it takes once per run with the `linear` CLI, and clears the label
-  once it has acted. The label means *a directive here is pending* — nothing more.
-- **The label is not an authorization.** It sits on an ordinary work ticket that Jake edits
-  by hand, so it can go stale in ways a purpose-built object couldn't. What actually
+- **The `<!-- advance-roadmap:directive:<repo> -->` marker comment, and the bare `## Directive`
+  heading right after it, are the pending signal — nothing else.** No label. `/advance-roadmap`
+  finds every pending directive, in any ticket state, by scanning `description` in the Linear
+  snapshot it takes once per run with the `linear` CLI, and rewrites the heading in place —
+  `## Directive (consumed <date>)` — once it has acted. A bare `## Directive` heading means *a
+  directive here is pending*; a heading with a `(consumed …)` or `(archived …)` suffix means it
+  isn't. There is nothing to apply and nothing to clear beyond writing that heading.
+- **The marker is not an authorization.** It sits in an ordinary work ticket's description that
+  Jake edits by hand, so it can go stale in ways a purpose-built object couldn't. What actually
   authorizes a destructive instruction is the recorded `git status` snapshot matching the
   live tree exactly, checked by `/advance-roadmap` at execution time. Write the snapshot
   carefully; it's the real safety mechanism.
+- **If the ticket is sitting in `Needs Input`, move it to `Todo` in the same write that records the
+  directive.** `Needs Input` means `/advance-roadmap` needed Jake's input to proceed; recording his
+  answer here is exactly what resolves that, and `/advance-roadmap` treats a still-`Needs Input`
+  ticket as ineligible and skips it silently forever (see its "Also check Linear" rules) — so a
+  directive recorded without this state change is a directive that never gets read. A ticket
+  that was never `Needs Input` (the dirty-tree-only case, usually already `Todo`) needs no state
+  change at all.
 
 Because the directive rides on a real work ticket, there is no risk of `/advance-roadmap`
 mistaking a directive for an item to implement — the ticket *is* legitimate work, and the
@@ -149,9 +160,10 @@ Four constraints keep that from becoming a mess:
 4. **Label it the way the workspace requires.** `repo/<directory>` is mandatory and
    single-select, and the label name is the **directory** name rather than the GitHub repo —
    `repo/openclaw-vps` is `jnelken/vena-vps`, and each label's description records its own
-   mismatch, so read it when the two differ. Add `roadmap-directive`. **Create it with
-   [[jnelken-linear]]**, which sets both in one call and can't forget the repo:
-   `jlin.py new --repo <dir> --state todo --label roadmap-directive --title … --description-file …`. Leave
+   mismatch, so read it when the two differ. No other label to add — the `## Directive` marker
+   in the description is what makes it findable. **Create it with [[jnelken-linear]]**, which
+   sets the repo label in one call and can't forget it:
+   `jlin.py new --repo <dir> --state todo --title … --description-file …`. Leave
    `Bug`/`Improvement`/`Feature` alone unless Jake said which it is; a guessed type label is
    worse than none. File it in state **Todo** — a directive means "this is ready to pick up",
    which is what distinguishes it from the Backlog.
@@ -169,7 +181,7 @@ first line and carries the repo name, so it is a unique anchor for a later `patc
 <!-- advance-roadmap:directive:apt-sqft -->
 ## Directive
 
-**Recorded:** 2026-09-23 by /prepare-roadmap · **Repo:** `apt-sqft`
+**Recorded:** 2026-09-23 by /unblock-roadmap · **Repo:** `apt-sqft`
 
 ### Dirty-tree resolution
 
@@ -194,8 +206,8 @@ A- | src/staged.ts
 Where a line is a prose edit this skill made rather than work Jake left behind — `ROADMAP.md`
 above — say so, and attribute the instruction to the skill rather than quoting Jake:
 
-**Instruction:** Commit the `ROADMAP.md` decision edits recorded by `/prepare-roadmap`
-(`/prepare-roadmap`'s own instruction, not Jake's words)
+**Instruction:** Commit the `ROADMAP.md` decision edits recorded by `/unblock-roadmap`
+(`/unblock-roadmap`'s own instruction, not Jake's words)
 
 ### Answered decisions
 
@@ -240,8 +252,9 @@ path field.
 
 ### Updating a directive rather than filing a second
 
-If a ticket for this repo already carries the `roadmap-directive` label, a directive is
-already pending and `/advance-roadmap` hasn't consumed it yet:
+If a ticket for this repo's description already carries an unconsumed `## Directive` section
+(bare heading, no `(consumed …)`/`(archived …)` suffix), a directive is already pending and
+`/advance-roadmap` hasn't consumed it yet:
 
 - Don't write a second one. **Edit the existing section** (`save_issue` with a `patch`
   anchored on that repo's marker comment) — adding an answered decision to a directive that
@@ -283,12 +296,29 @@ For each direct child of `/Users/jake/Dropbox/code`:
    that have one, so `git status` won't surface it. Parse its `- [ ]` lines under any
    "Decisions needed" heading. Any unchecked line → decisions-needed blocked. An
    all-checked or missing file is not blocked.
+6. From the same Linear query as *Also resolve each candidate's ticket now* below, add any
+   repo whose ticket is sitting in **`Needs Input` and carries a `<!-- advance-roadmap:blocker -->`
+   comment** — `/advance-roadmap` moved it there itself, and that comment names what it needs.
+   `/advance-roadmap` only ever sets `Needs Input` for a decision or attended-acceptance question
+   (never a dirty tree or a red deploy, which it re-attempts live instead and marks `Paused` —
+   a self-healing marker, not something for this skill to ask about; ignore it entirely), so this
+   class is always exactly that: the comment's Details/Needed-from-you text **is** the question,
+   verbatim, and it never overlaps with dirty-tree discovery above. There's no filesystem
+   signal to look for, and a `Needs Input` ticket may belong to a repo that's otherwise clean with
+   no open `IN_PROGRESS.md` lines.
 
-A repo can be dirty-tree blocked, decisions-needed blocked, both, or neither. Both is
-common: [[wrapup-repos]] writes its roadmap and judgment-call decisions into this same
+   **A `Needs Input` ticket with no `advance-roadmap:blocker` comment is Jake's own doing, not
+   this skill's** — he moved it there by hand (the old `needs-rescope` use case: scope is
+   stale and he'll rewrite it himself) and there's no bot-authored question to relay. Skip it
+   silently, like `human-only`: no question, not reported as a candidate. It's his to clear
+   when the rewrite is done, the same way he'd have removed the old label.
+
+A repo can be dirty-tree blocked, decisions-needed blocked, `Needs Input`-ticket blocked, any
+combination, or none. Dirty-tree and decisions-needed together is common:
+[[wrapup-repos]] writes its roadmap and judgment-call decisions into this same
 `Decisions needed` heading, and the repos it works are usually the dirty ones — so read the
 file on dirty repos too, and ask about the tree and the decisions in the same pass. Build
-the candidate list from every repo that's at least one of the two.
+the candidate list from every repo that's at least one of the three.
 
 **Sanity-check your own sweep before asking anything**: the repos it finds dirty should
 line up with what `project_advance-roadmap-runs.md`'s prose separately names as dirty
@@ -298,13 +328,15 @@ whichever of the actively-tracked four — typey.site, mailcruxh, jakenelken.com
 happen to be dirty right now). If your sweep misses names memory calls out, the discovery
 logic above is wrong; fix it before proceeding, don't just note the discrepancy.
 
-**Also resolve each candidate's ticket now**, in the same pass: query Linear once for the
-repo labels in play, and for each candidate find the ticket a directive would attach to
+**Also resolve each candidate's ticket now**, in the same pass: query Linear once for every
+Dev issue carrying a `repo/*` label (any state — this is also where step 6 above finds its
+`Needs Input` tickets), and for each candidate find the ticket a directive would attach to
 (the roadmap index's linked ticket, or the highest-priority eligible `repo/*` issue). A
 candidate with no eligible ticket still gets asked about — you file its ticket once he
 answers, per *When a blocked repo has no eligible ticket, file one* above. Note which
-candidates already carry `roadmap-directive`; those are already queued and get skipped this
-sweep.
+candidates' tickets already carry an unconsumed `## Directive` section (bare heading, no
+`(consumed …)`/`(archived …)` suffix) in their description; those are already queued and get
+skipped this sweep.
 
 ### No shell available? Fall back to Linear, and say that you did
 
@@ -341,6 +373,9 @@ show Jake enough to decide:
   tree contains per `project_advance-roadmap-runs.md`), mention it — Jake may not
   remember what he left uncommitted three days ago.
 - **Decisions-needed blocker:** the repo name and each unresolved question line verbatim.
+- **`Needs Input`-ticket blocker:** the ticket id and its newest `<!-- advance-roadmap:blocker -->`
+  comment verbatim (Blocker type, Details, Needed from you) — always a decision or
+  attended-acceptance question, never a dirty tree, so it never overlaps with the bullet above.
 
 Also name the ticket the directive will land on, so Jake can object before it's written.
 
@@ -367,8 +402,9 @@ For the dirty tree, two questions:
    Skip this second question if the answer to the first was "Leave it" — there's nothing
    to build on top of a tree that's staying dirty.
 
-For a decisions-needed blocker, one question per unresolved line (batch up to 4 per call
-when a repo has several — they're independent). For the options:
+For a decisions-needed blocker, or a `Needs Input`-ticket blocker, one question per unresolved line
+or comment (batch up to 4 per call when a repo has
+several — they're independent). For the options:
 
 - If the line's own text already names two or three concrete alternatives (many do — the
   Step 2b format asks "does X or Y?"), offer those as the options.
@@ -401,17 +437,17 @@ Concretely, per repo:
    `Todo`. This is the one point in the sweep where a ticket gets created: after the answer,
    never before.
 4. `save_issue` on that ticket, appending the `## Directive` section (or `patch`ing the
-   existing one, per *Updating a directive* above).
-5. `save_issue` again — or in the same call — to add the `roadmap-directive` label. On a
-   ticket that already existed use `addLabels`, never `labels`, which would replace the whole
-   label set and drop its `repo/*` label. (On a ticket you just created you can pass both
-   labels at creation.)
-6. A "Skip" answer writes nothing for that item — it simply isn't recorded, so the next
+   existing one, per *Updating a directive* above). **In the same call, if the ticket's
+   current state is `Needs Input`, also set `state: Todo`.** That state change is what makes the
+   directive eligible for the next `/advance-roadmap` run at all — see *Where directives
+   live* above. A ticket that was never `Needs Input` needs no state change.
+5. A "Skip" answer writes nothing for that item — it simply isn't recorded, so the next
    sweep asks again naturally. There's no partial-answer state to track. **A skipped repo
    gets no ticket either** — if every answer for a repo was "Leave it" / "Skip", nothing at
-   all is created for it.
+   all is created for it. **A `Needs Input` ticket whose only answer was "Skip" stays `Needs Input`** —
+   don't reset its state without an actual answer to record.
 
-If a repo's only answers were "Leave it" / "Skip", write no directive and apply no label.
+If a repo's only answers were "Leave it" / "Skip", write no directive and change no state.
 
 ## Step 3 — Final summary
 

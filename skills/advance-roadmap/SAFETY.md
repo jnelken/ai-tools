@@ -28,11 +28,12 @@ commit, merge, or push (see WORKER.md).
   must be empty. Uncommitted work means the user is mid-thought there; branching, merging and
   pushing around it tangles their diff. Pick a different repo — never stash, reset, or commit
   their WIP to get started **on your own initiative**. The one exception: a pending directive from
-  [[prepare-roadmap]] — a `## Directive` section in the description of a ticket labelled
-  `roadmap-directive` for this repo, which means Jake was already asked and already answered. See
-  Step 1a (orchestrator, decides) and Step 2c (worker, acts) for exactly how far that authorization
-  extends and no further. **The label only marks a directive as pending; it authorizes nothing by
-  itself.** What authorizes a destructive instruction is the recorded `git status` snapshot matching
+  [[unblock-roadmap]] — an unconsumed `## Directive` section (marker `<!-- advance-roadmap:directive:
+  <repo> -->`, heading with no "(consumed"/"(archived" suffix) in the description of that repo's
+  ticket, which means Jake was already asked and already answered. See Step 1a (orchestrator,
+  decides) and Step 2c (worker, acts) for exactly how far that authorization extends and no further.
+  **The marker only marks a directive as pending; it authorizes nothing by itself.** What authorizes
+  a destructive instruction is the recorded `git status` snapshot matching
   the live tree as an exact set — re-checked by the worker at execution time, never assumed from
   triage. Resolve the ticket you intended to attempt before this
   check; when the tree blocks it, comment on that ticket per Step 2b before moving on.
@@ -46,6 +47,11 @@ commit, merge, or push (see WORKER.md).
   - read an issue: `linear issue view DEV-N` · raw GraphQL: `linear api '<query>'`
   - comments: `linear issue comment list DEV-N` · `linear issue comment add DEV-N --body-file <f>`
   - close out: `linear issue update DEV-N --state Done`
+  - flag: `linear issue update DEV-N --state "Needs Input"` (Step 2b, decision or
+    attended-acceptance blocker only — skipped by triage until Jake or `/unblock-roadmap` clears
+    it) or `linear issue update DEV-N --state Paused` (Step 2b, dirty tree or a red deploy after
+    Step 7b's cap — stays fully eligible; the live git-status/deploy check runs regardless).
+    Skip the CLI call if the issue is already in the target state.
   - labels: `linear issue update DEV-N --add-label <l>` / `--remove-label <l>` (never `--label`,
     which replaces the whole set)
   - descriptions: `linear issue update DEV-N --description-file <f>`

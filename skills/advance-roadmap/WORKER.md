@@ -22,10 +22,14 @@ The prompt names a request JSON file. Modes:
   `worker_brief`, `worker_mode`, …). Do Steps 3–8, including Step 5b's review (resume uses the existing branch). The launcher
   has already invoked the provider's native goal command when `worker_mode` is `goal`; do not
   create a second goal. When `directive_ticket` is set, do **Step 2c first** — it clears the dirty
-  tree that would otherwise block Step 3.
+  tree that would otherwise block Step 3. If `worker_brief` names a recovered-deploy ticket to
+  close out, do that alongside your own item's Step 6/7 bookkeeping (comment, `Done`, clear
+  `Paused`) — it's a different ticket than the one you're implementing.
 - **bookkeeping** — full orchestrator result with `blocked_no_item` / `nothing_qualified`
-  (request field `orchestrator`). Post Step 2b comments, perform `archives`, write Step 8;
-  do not start a feature branch unless an archive needs the Step 7 flow.
+  (request field `orchestrator`). Run Step 2b once per entry in `blockers[]`, perform `archives`,
+  close out any recovered-deploy ticket `worker_brief` names (comment, `Done`, clear `Paused` —
+  see ORCHESTRATOR.md's *A repo left with a red deploy*), write Step 8; do not start a feature
+  branch unless an archive needs the Step 7 flow.
 
 ## Output protocol
 
@@ -76,28 +80,27 @@ Only when the request carries a `directive_ticket`. This is the dirty-tree excep
      the two-char status field written as `-`) and require **set-equality** with the recorded
      snapshot: order-independent, whitespace-independent, never a raw string or substring compare.
      On any mismatch, discard nothing, stop, and report `failed` with the mismatch — the next
-     `/prepare-roadmap` sweep re-asks against current state.
+     `/unblock-roadmap` sweep re-asks against current state.
    - **No-op** — a commit-shaped instruction whose named paths are already clean means Jake handled
      it himself. Do the bookkeeping in step 4 and carry on; this is not an error.
 3. **Write commit messages in the repo's own convention** (`git log -5`), using the intent Jake
    described rather than his words as a literal subject line. This commit lands on `main` through
    Step 7's flow like any other.
-4. **Retire the directive, but never destroy it.** Two operations on the ticket, both required:
-   - `removeLabels: ["roadmap-directive"]` — the label is the state, so removing it is what makes
-     the directive no longer pending. Use `removeLabels`, never `labels`, which would replace the
-     ticket's whole label set and drop its `repo/*` label.
-   - `patch` the description so the section header records the outcome in place —
-     `## Directive` becomes `## Directive (consumed <date>)`, or
-     `## Directive (archived unconsumed <date> — tree changed)` when you stopped. Anchor the patch
-     on that repo's marker comment (`<!-- advance-roadmap:directive:<repo> -->`), which is unique;
-     `## Directive` alone may not be.
+4. **Retire the directive, but never destroy it.** `patch` the description so the section header
+   records the outcome in place — `## Directive` becomes `## Directive (consumed <date>)`, or
+   `## Directive (archived unconsumed <date> — tree changed)` when you stopped. Anchor the patch
+   on that repo's marker comment (`<!-- advance-roadmap:directive:<repo> -->`), which is unique;
+   `## Directive` alone may not be. That heading rewrite is the entire "no longer pending" signal —
+   no label to remove. (If the ticket was ever `Needs Input`, `/unblock-roadmap` already moved it back
+   to `Todo` when it recorded the directive — that's why you were able to select it at all; this
+   step has nothing further to do with the ticket's state.)
 
    **Leave the snapshot and Jake's verbatim instruction in place.** Linear description edits have no
    recoverable history through this path, and an authorization to discard someone's work must not
    vanish in the same operation that acts on it. If the description genuinely has to end up clean,
    copy the whole section verbatim into your outcome comment *first*.
 5. **Fold in the answered decisions** the brief names — but check each one's `**Recorded in:**`
-   field first. `/prepare-roadmap` may already have written the decision into the repo's own
+   field first. `/unblock-roadmap` may already have written the decision into the repo's own
    markdown, in which case your job is to **commit that edit, not to write it again**; a second
    copy in the ticket description or a duplicated `**Decided:**` line is the failure here. Only
    where the field says `not yet` do you write the prose yourself — into the ticket description
@@ -108,6 +111,62 @@ Only when the request carries a `directive_ticket`. This is the dirty-tree excep
 7. **The tree must be clean before Step 3.** Confirm `git status --porcelain` is empty for the paths
    the directive covered. If the go-ahead was "just clean up", stop here: land the resolution through
    Step 7, write Step 8, and report `archive-only` — do not start a feature branch.
+
+## Step 2b — Post a blocker comment (and set Needs Input or Paused)
+
+You are the only role that ever writes to Linear, so this is yours to execute wherever a blocker
+comes from: an entry in the orchestrator's `blockers[]` list (bookkeeping mode), or one you hit
+yourself mid-run — a dirty tree with no directive, an unresolved decision, attended acceptance
+required before landing, a product judgment stalling Steps 4–5, or a red deploy after Step 7b's
+fix cap.
+
+1. **Dedup first.** `linear issue comment list DEV-N`, find the newest comment containing
+   `<!-- advance-roadmap:blocker -->`, normalize whitespace in its body, and compare with the
+   comment you're about to post. If the repo, blocker type, details, and requested action are
+   unchanged, don't post again — record `blocker-comment-unchanged` and move on. Otherwise post a
+   fresh top-level comment (don't edit the old one; it's useful history).
+2. **Post with this shape** (`linear issue comment add DEV-N --body-file <f>`):
+
+   ```markdown
+   @jnelks advance-roadmap is blocked on this ticket.
+
+   **Repo:** `<directory>`
+   **Blocker:** Dirty working tree
+   **Details:** `M src/example.ts`, `?? notes.md`
+   **Needed from you:** Resolve the listed work, or run `/unblock-roadmap` to record how it should be handled.
+
+   <!-- advance-roadmap:blocker -->
+   ```
+
+   For a decision blocker, replace `Details` with the smallest self-contained question and its
+   viable options (the orchestrator's `blockers[].detail` already has this shaped, in bookkeeping
+   mode). For attended acceptance, name the device, interaction, visual, or by-ear check required.
+   Never paste diff contents, credentials, environment values, or other secrets into the comment.
+   `@jnelks` is Jake's Linear `displayName` — use it exactly so Linear notifies him. One comment
+   per affected ticket, not one per roadmap bullet. If an issue lacks a repo label, comment on that
+   same issue and ask which repo it belongs to.
+3. **Set the ticket's state in the same step — which one depends on the blocker type:**
+   - **Decision or attended-acceptance** → `Needs Input`
+     (`linear issue update DEV-N --state "Needs Input"`). This one is *skipped* by
+     `/advance-roadmap`'s triage until Jake or `/unblock-roadmap` moves it off — re-attempting
+     buys nothing without his answer.
+   - **Dirty tree, or a red deploy after Step 7b's cap** → `Paused`
+     (`linear issue update DEV-N --state Paused`). Unlike `Needs Input`, a `Paused` ticket is
+     **not** skipped — `/advance-roadmap` re-checks the live condition (git status, or the
+     deploy's actual health) every run regardless of this state, so it's a visible marker for
+     Jake, not a triage gate. Both conditions can resolve themselves outside this skill (Jake
+     commits his WIP, or fixes the env var directly), and that live re-check — with the
+     comment dedup above already preventing spam — is the whole point.
+
+   Skip the CLI call if the ticket is already in the target state. This is a plain state
+   change, not a label — it doesn't interact with `human-only` or an unconsumed `## Directive`
+   marker. Never set either on a ROADMAP.md item with no backing Linear issue; there's no
+   ticket to move.
+4. **Clear `Paused` the moment you actually proceed on that ticket.** Before Step 3 (branching)
+   or Step 2c (directive consumption), if the item's ticket — or `directive_ticket` — is
+   currently `Paused`, set it to `Todo` first: reaching this step at all means the tree read
+   clean or the deploy's live check came back green, so the marker is stale. `Needs Input`
+   never needs this from you — `/unblock-roadmap` is what moves it off, per its own design.
 
 ## Step 3 — Branch off fresh `origin/main`
 
@@ -266,7 +325,7 @@ sometimes Netlify). A push isn't shipped until that build succeeds.
    verification in full, and `git push origin main`. Never force, never revert published history,
    never change Vercel/Netlify project settings or env vars. Then go back to 1 for the new SHA.
 5. **Cap: 3 fix-and-redeploy attempts.** If the deploy is still failing after the third, leave `main`
-   as it is and post a Step 2b blocker on the ticket (dedup rules apply):
+   as it is and run Step 2b above with this shape (dedup rules apply):
 
    ```markdown
    @jnelks advance-roadmap shipped this ticket but the production deploy is failing.
@@ -280,8 +339,8 @@ sometimes Netlify). A push isn't shipped until that build succeeds.
    ```
 
    Report outcome `shipped-deploy-failed` and do **not** move the ticket to `Done`. A failure that
-   needs something only Jake can do (a missing env var, a billing or quota block) skips straight
-   to this step — fix attempts can't help.
+   needs something only Jake can do (a missing env var, a billing or quota block) skips straight to
+   this step — fix attempts can't help.
 
 **Close out** only once the deploy is green (or `deploy: none` is confirmed): if the item came from a
 Linear issue, comment the merge commit and deploy URL on it

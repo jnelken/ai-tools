@@ -8,7 +8,7 @@ description: >-
   roadmap item", "advance the roadmap", "ship something off the roadmap") or via an unattended
   scheduled run. After pushing, watches the production deploy (usually Vercel) and fixes forward
   until it's green, within a bounded number of attempts. Sibling of [[wrapup-repos]] but NOT the same: this one pushes. Sibling of
-  [[prepare-roadmap]] too: that skill only asks Jake questions and records his answers as
+  [[unblock-roadmap]] too: that skill only asks Jake questions and records his answers as
   directives; this is the only skill that ever acts on them.
 ---
 
@@ -32,9 +32,8 @@ minutes.
 
 Candidate repos: direct children of `/Users/jake/Dropbox/code`. Check
 `~/.claude/automations/advance-roadmap/allowlist.txt` first when present, and query Linear once for
-pending directives — issues labeled `roadmap-directive`, via the `linear` CLI only (see
-`SAFETY.md`) — from
-[[prepare-roadmap]] (the only dirty-tree exception).
+pending directives — tickets carrying an unconsumed `## Directive` section, via the `linear` CLI
+only (see `SAFETY.md`) — from [[unblock-roadmap]] (the only dirty-tree exception).
 
 ## Architecture (orchestrator / worker)
 

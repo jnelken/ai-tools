@@ -126,7 +126,7 @@ If you made changes and there is anything sensible to commit:
 
 Write into the selected repo's `.claude/IN_PROGRESS.md` — the same running file [[close-out]]
 owns, [[pick-up]] resumes from, the `pick-up-nudge` SessionStart hook surfaces, and
-[[prepare-roadmap]] sweeps for open decisions. That is how this run's output reaches the user:
+[[unblock-roadmap]] sweeps for open decisions. That is how this run's output reaches the user:
 there is no separate report file.
 
 **Follow close-out's step 4 procedure for the reconcile — don't reinvent it:** read the existing
@@ -138,7 +138,7 @@ if needed. Never overwrite the file wholesale.
 
 What this skill contributes, by section:
 
-- **`## Decisions needed`** — the most important section, and the heading [[prepare-roadmap]]
+- **`## Decisions needed`** — the most important section, and the heading [[unblock-roadmap]]
   parses, so keep it spelled exactly so. Each item is an unchecked `- [ ]` line framed as a
   concrete choice with options, never an open question, e.g. "Storage: (a) keep localStorage, or
   (b) move to cookie — left as (a)." Don't limit it to what was *necessary* to unblock what
@@ -146,7 +146,7 @@ What this skill contributes, by section:
   - **Architectural / roadmap decisions first.** If Step 2 found a roadmap, plan doc, or "Future
     work" section, formalize its loose bullets as sequenced, concrete choices with tradeoffs, not
     restated TODOs. When an item is about a specific `ROADMAP.md` / `docs/plans/` item, name that
-    item so prepare-roadmap can record the answer (`**Decided:**`) in the right place. If no doc
+    item so unblock-roadmap can record the answer (`**Decided:**`) in the right place. If no doc
     exists but the diff implies a direction (new abstraction, stub, half-wired integration),
     surface the choice that direction is heading toward. If there's no directional signal, add
     nothing — don't invent one.
