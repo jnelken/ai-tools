@@ -49,10 +49,20 @@ print the same object in a fence:
   "limit_text": null,
   "deploy": {"status": "success", "url": "https://mailcruxh-abc123.vercel.app", "attempts": 0},
   "review": {"reviewer": "codex", "rounds": 1, "unresolved": 0},
-  "summary": "…"
+  "summary": "…",
+  "slack_summary": "…"
 }
 ```
 ````
+
+`summary` is the full account for the dashboard drawer: SHAs, verification, review rounds, Step 2b
+bookkeeping, anything a debugger would want. `slack_summary` is what #eng reads — one or two
+sentences on what changed for the user of the repo, and the ticket's end state. Leave out SHAs,
+commands, test counts, review rounds, directive/comment mechanics, blocker bookkeeping, and "no X"
+negatives; the Slack post already shows the repo, ticket, merge commit and duration. Keep a
+manual check Jake has to do, a FIXME left behind, or a red deploy — those are what he'd act on.
+For DEV-87's cleanup run: "Committed the existing .gitignore (.vercel) change and the README
+rewrite on master; Vercel deploy succeeded. DEV-87 Done."
 
 `outcome`: `shipped` | `shipped-deploy-failed` | `blocked-branch-left` | `failed` | `limit_hit` |
 `archive-only` | `bookkeeping` (bookkeeping mode only — `run.sh` then records the orchestrator's

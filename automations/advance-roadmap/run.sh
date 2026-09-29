@@ -481,14 +481,14 @@ ln -sf "$LOG" "$LOGDIR/latest.log"
 regen_dashboard
 
 # ── Slack summary ─────────────────────────────────────────────────────────────
-# Slackagent posts this run's full summary (the dashboard drawer's Summary
-# paragraph, plus any Detail) to #eng as its bot. It exits 0 for a deliberate skip
+# Slackagent posts this run to #eng as its bot, using the worker's short
+# slack_summary (falling back to the full drawer summary). It exits 0 for a deliberate skip
 # (skipped-* ticks are dashboard-only) and nonzero on a real failure — only then
 # does the old one-line webhook post below run as a fallback.
 SLACKAGENT_DIR="${ADVANCE_ROADMAP_SLACKAGENT_DIR:-$CODE_DIR/slackagent}"
 slackagent_posted=0
 if [ -f "$SLACKAGENT_DIR/scripts/post-roadmap-summary.mjs" ]; then
-  if node "$SLACKAGENT_DIR/scripts/post-roadmap-summary.mjs" --stamp "$STAMP" >> "$LOG" 2>&1; then
+  if node "$SLACKAGENT_DIR/scripts/post-roadmap-summary.mjs" --stamp "$STAMP" --runs "$ROOT/runs.jsonl" >> "$LOG" 2>&1; then
     slackagent_posted=1
   else
     echo "=== slack: slackagent post failed; falling back to webhook ===" >> "$LOG"

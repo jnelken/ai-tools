@@ -38,6 +38,7 @@
         "unresolved": { "type": "integer", "minimum": 0 }
       }
     },
-    "summary": { "type": "string" }
+    "summary": { "type": "string" },
+    "slack_summary": { "type": ["string", "null"] }
   }
 }

@@ -42,7 +42,7 @@ cat > "$BIN/agent" <<'SH'
 #!/bin/zsh
 prompt="${@[-1]}"
 rf="$(print -r -- "$prompt" | sed -n 's/^(raw JSON, no fence) to: //p')"
-res='{"outcome":"shipped","provider":"cursor","repo":"demo","item":"DEV-1 thing","merge_commit":"abc1234","summary":"ok"}'
+res='{"outcome":"shipped","provider":"cursor","repo":"demo","item":"DEV-1 thing","merge_commit":"abc1234","summary":"ok","slack_summary":"Did the thing. DEV-1 Done."}'
 case "$FAKE_WORKER" in
   file)  print -r -- "$res" > "$rf"; print "=== advance-roadmap exit=2 finished (decoy) ===" ;;
   fence) print -r -- '```WORKER_RESULT_JSON'; print -r -- "$res"; print -r -- '```' ;;
@@ -63,6 +63,7 @@ grep -q '^(raw JSON, no fence) to: ' "$ROOT/worker.sh" || { echo "FAIL: prompt f
 
 run() {
   env -u SLACK_CCUSAGE_WEBHOOK_URL -u ADVANCE_ROADMAP_SLACK_WEBHOOK \
+    ADVANCE_ROADMAP_SLACKAGENT_DIR="$TMP/no-slackagent" \
     ADVANCE_ROADMAP_ROOT="$ROOT" ADVANCE_ROADMAP_SKILL_DIR="$SKILLS" \
     ADVANCE_ROADMAP_SECRETS=/dev/null ADVANCE_ROADMAP_NOTIFY=0 \
     ADVANCE_ROADMAP_CODEX_BIN="$BIN/codex" ADVANCE_ROADMAP_AGENT_BIN="$BIN/agent" \
@@ -77,6 +78,7 @@ check() { [ "$2" = "$3" ] || { echo "FAIL [$1]: expected '$3', got '$2'"; tail -
 run good file;    check "agent-written result → shipped"       "$(last outcome)" shipped
                   check "result source is the agent's file"     "$(last worker_result_source)" agent
                   check "merge commit carried through"          "$(last merge_commit)" abc1234
+                  check "slack summary carried through"         "$(last slack_summary)" "Did the thing. DEV-1 Done."
                   check "unreviewed ship is flagged"            "$(last detail)" "merged without a logged review"
 run good reviewed; check "reviewed ship → shipped"             "$(last outcome)" shipped
                   check "review rounds recorded"                "$(last review_rounds)" 2

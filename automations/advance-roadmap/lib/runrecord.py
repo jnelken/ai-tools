@@ -138,6 +138,7 @@ def cmd_append(a):
         "review_verdict": reviews[-1].get("verdict") if reviews else None,
         "review_unresolved": (w.get("review") or {}).get("unresolved"),
         "summary": (w.get("summary") or o.get("summary") or "")[:1000],
+        "slack_summary": (w.get("slack_summary") or "")[:400] or None,
     }
     path = os.path.join(a.root, "runs.jsonl")
     with open(path, "a", encoding="utf-8") as f:
