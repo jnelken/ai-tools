@@ -240,6 +240,8 @@ Codex's review output is free-form prose, usually structured as numbered finding
 | Codex is wrong (you can verify by reading the file) | **skip**, note why |
 | Finding is already fixed in the working tree (Codex reviewed a stale snapshot) | **skip**, note |
 
+**Two kinds of skip, and only one blocks the push.** A skip is **dismissed** only when you have cited evidence against the finding. That means one of three things: the file on disk contradicts Codex, the finding is already fixed, or the user or spec has already decided that exact point (quote where). Every other skipped P1/P2 is **unresolved**, including one that "needs a policy call", is a judgment you're unsure of, or is marked "probably fine". Dismissed findings don't gate step 8, but each one's evidence goes in the step 6 report and in the PR comment. When in doubt, it's unresolved.
+
 Treat Codex's confidence as a hint, not gospel. Read the actual file before applying anything — Codex sometimes hallucinates line numbers, variable names, or "current behavior" that's already different from what's on disk. Compare current `git rev-parse HEAD` against the `head=` value you recorded in the lock file when you claimed it (step 0) — if it moved, someone else committed while the review ran; some findings are likely already fixed under the "already fixed" rule above, so re-check every finding against the live file, not just the ones that look suspicious.
 
 **Escalation check (skip on round 1 — nothing to compare against yet).** A quiet P1 column is evidence the substantive defects are out, not proof — the effort step-down (step 2) reads it as a signal that this round is mostly follow-ons, and that reading can be wrong. Compare this round's findings against every prior round's step-6 report earlier in this session: if any finding here is a **genuinely new class** — a different subsystem or defect category the earlier round(s) plausibly should have caught but didn't — and this round ran at medium effort, force the *next* round back to high:
@@ -300,7 +302,7 @@ Codex review summary
 - Committed: yes, <sha>
 ```
 
-Surface skipped P1/P2 items as a bulleted list with one-line context each — they gate step 8 below.
+Surface skipped P1/P2 items as a bulleted list with one-line context each, each marked **unresolved** or **dismissed** with its evidence (step 3). Unresolved ones gate step 8 below.
 
 ### 7. Decide whether to continue (only under `/loop`)
 
@@ -310,7 +312,8 @@ If invoked under `/loop`:
 |---|---|
 | Applied ≥1 fix this iteration | `ScheduleWakeup(60s)` — re-run review to confirm convergence or catch second-order issues |
 | Zero fixes this iteration AND zero P1/P2 findings | omit `ScheduleWakeup` — clean, exit `/loop`, proceed to step 8 |
-| Zero fixes this iteration AND skipped P1/P2 findings remain | omit `ScheduleWakeup` — the remaining work needs the user; exit `/loop`, **do not** proceed to step 8 |
+| Zero fixes this iteration AND only dismissed P1/P2 findings (step 3) | omit `ScheduleWakeup` — clean, exit `/loop`, proceed to step 8 |
+| Zero fixes this iteration AND unresolved P1/P2 findings remain | omit `ScheduleWakeup` — the remaining work needs the user; exit `/loop`, **do not** proceed to step 8 |
 | Three consecutive iterations with no progress (same findings keep coming back) | omit `ScheduleWakeup`, escalate to user — Codex disagrees with itself or you're misreading it; **do not** proceed to step 8 |
 | Hit the 5-iteration hard ceiling | exit `/loop`; proceed to step 8 only if no unresolved P1/P2 findings remain, otherwise escalate to user |
 
