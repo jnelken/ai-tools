@@ -1,11 +1,11 @@
 ---
 name: screenshot-pr
-description: Capture one signature screenshot of the current branch's most visually-significant UI change and embed it in the corresponding GitHub PR description, all driven through a single Playwright browser session against the Netlify deploy preview. Use this skill whenever the user asks to "add screenshots", "screenshot the PR", "snap the PR", "drop a visual into the PR", "capture the change", or otherwise asks to attach a visual to a pull request — even if they don't mention Playwright. The skill handles diff analysis, deploy-preview login, capture, and the GitHub web-UI upload that `gh` CLI cannot do directly. Falls back to localhost only when explicitly requested.
+description: Capture one signature screenshot of the current branch's most visually-significant UI change and embed it in the corresponding GitHub PR description, captured in Playwright against the Netlify deploy preview (or localhost for a sub-PR into a trunk, which never gets one) and uploaded through Claude-in-Chrome, the browser actually signed into GitHub. Use this skill whenever the user asks to "add screenshots", "screenshot the PR", "snap the PR", "drop a visual into the PR", "capture the change", or otherwise asks to attach a visual to a pull request — even if they don't mention Playwright. The skill handles diff analysis, deploy-preview login, capture, and the GitHub web-UI upload that `gh` CLI cannot do directly. Uses localhost when explicitly requested or when the PR's base isn't the default branch.
 ---
 
 # screenshot-pr
 
-Take one screenshot of the current branch's UI work and embed it in the open PR's description, above the second section header. One screenshot per PR — the most visually-significant change. Driven by a single Playwright browser session that captures from the **Netlify deploy preview** and handles the GitHub upload in the same session (since `gh` CLI cannot upload images).
+Take one screenshot of the current branch's UI work and embed it in the open PR's description, above the second section header. One screenshot per PR — the most visually-significant change. Captured in a Playwright session (it holds the app login) from the **Netlify deploy preview**, then uploaded through **Claude-in-Chrome** — the user's real Chrome, which is signed into GitHub — since `gh` CLI cannot upload images.
 
 ## When this skill applies
 
@@ -13,9 +13,9 @@ Trigger on phrases like "add screenshot(s)", "screenshot the PR", "snap a shot f
 
 The skill assumes:
 - The user has already pushed the branch and opened a PR.
-- The PR has a Netlify **deploy preview** ready or in progress (the default capture target — see below). Localhost is only used as an explicit fallback.
+- The PR has a Netlify **deploy preview** ready or in progress (the default capture target — see below) — unless its base isn't the default branch, in which case there is no preview and a local dev server is the target.
 - `.env` contains the app's test-user login credentials (the same login works on the deploy preview).
-- The user is signed into github.com in the Playwright browser session, or is willing to sign in once when prompted.
+- The user's own Chrome (driven through Claude-in-Chrome) is signed into github.com. The Playwright MCP browser is a separate profile that is **never** signed into GitHub — a private-repo PR page 404s there — so don't try the upload in it.
 
 If any of these is false, stop and tell the user — don't try to work around them.
 
@@ -31,7 +31,7 @@ The Netlify check (`netlify/partner-concentro/deploy-preview`) links to a `*.net
 
 **Wait for the deploy preview to be ready before capturing.** Run `gh pr checks <PR_NUMBER> --json name,state` and find the entry whose name starts with `netlify/`. If `state == "SUCCESS"`, capture immediately. If `PENDING` or `IN_PROGRESS`, tell the user "deploy preview building, polling for up to 5 min", then poll every 30 seconds. If `FAILURE`, stop and report — don't fall back to localhost silently.
 
-**Use localhost only when the user explicitly asks for it** (e.g. "screenshot from localhost", "use the dev server", or when capturing uncommitted work that isn't pushed yet). In that case, swap the deploy-preview URL for `http://localhost:5173` and start `npm run dev` if it's not running.
+**Use localhost when the user explicitly asks for it** (e.g. "screenshot from localhost", "use the dev server", or when capturing uncommitted work that isn't pushed yet), **or when the PR's base isn't the repo's default branch.** Netlify only builds previews for PRs based on `main`, so a sub-PR into a `feature/*` trunk never gets one — don't poll for it, go straight to localhost. In that case, swap the deploy-preview URL for `http://localhost:5173` and start a dev server if it's not running. Against stage in woodrow that is `VITE_LOCAL_STAGE_TOKEN_AUTH=true VITE_API_URL=https://stage.api.concentro.io pnpm run dev` (via `superset terminals create`); without the token-auth flag, sign-in returns 200 but the page just reloads.
 
 ## The shape of the output
 
@@ -46,6 +46,7 @@ The skill runs five phases. Each phase has a clear exit condition; if you can't 
 Run in parallel:
 - `gh pr view --json url,number,body,title` — confirm an open PR. If none, stop: "no open PR for branch X — push and open one first."
 - `gh pr checks <PR_NUMBER> --json name,state,link` — find the Netlify deploy-preview check.
+- `gh pr view <PR_NUMBER> --json baseRefName -q .baseRefName` — a non-default base means no preview; take the localhost path in Phase 3.
 - `git diff origin/main...HEAD --name-only` — list changed files for diff analysis.
 - Confirm the test-user credentials are present in `.env` (use whatever variable names your project uses, e.g. `APP_USER_EMAIL` / `APP_USER_PASSWORD`).
 
@@ -77,7 +78,7 @@ Wait for confirmation. The user may correct the route, viewport, or setup steps.
 - `FAILURE` → stop. Report the deploy-log link from the check; don't silently fall back.
 - No Netlify check at all → ask the user; the repo may not have deploy previews configured.
 
-**Localhost fallback (only if the user explicitly asks):** `curl -s -o /dev/null -w "%{http_code}" http://localhost:5173` — if not 200, start `npm run dev` with `run_in_background: true` and poll until it responds. If `npm run dev` errors out, stop and surface it.
+**Localhost (the user asked, or the base isn't the default branch):** `curl -s -o /dev/null -w "%{http_code}" http://localhost:5173` — if not 200, start `npm run dev` with `run_in_background: true` and poll until it responds. If `npm run dev` errors out, stop and surface it.
 
 ### Phase 4 — Drive the capture
 
@@ -91,21 +92,20 @@ One Playwright session, sequential calls:
 6. `browser_wait_for` a UI element from the actual change — not a generic spinner. If the change is "stripe in the sidebar", wait for the sidebar to be present, not for the network to idle.
 7. `browser_take_screenshot` saving to `.playwright-mcp/screenshots/<slug>-<unix-ts>.png`. `<slug>` derives from the branch name (e.g. `jake-env-colors` → `jake-env-colors`). Create the directory if missing.
 
-Why one session: switching browsers loses the auth state, and the screenshot benefits from the same viewport + cookies that the GitHub upload step needs.
+Why Playwright for the capture: it holds the app's test-user login and a controllable viewport. It does not hold a GitHub session, which is why the upload moves to the user's Chrome.
 
-### Phase 5 — Upload via the same browser session
+### Phase 5 — Upload through Claude-in-Chrome
 
-`gh` CLI cannot upload images, but GitHub's web editor accepts file uploads and rewrites them into `user-attachments` URLs server-side. Reuse the existing Playwright session:
+`gh` CLI cannot upload images, but GitHub's web editor accepts file uploads and rewrites them into `user-attachments` URLs server-side. Do this in the user's own Chrome via the `mcp__claude-in-chrome__*` tools (load `tabs_context_mcp`, `navigate`, `find`, `computer`, `javascript_tool`, `file_upload`, `tabs_close_mcp` in one ToolSearch):
 
-1. `browser_navigate` to the PR URL.
-2. Confirm GitHub is signed in (look for the avatar in the top-right). If not, stop and ask the user to sign in once — don't try to automate GitHub login.
-3. Click the kebab (`···`) on the PR's opening comment → **Edit**. The body becomes a `<textarea>`.
-4. Determine the insertion point. Read the textarea's value, find the **second** `\n## ` (the second top-level heading). Insert a blank line plus a placeholder marker like `__SCREENSHOT_HERE__` immediately above that heading, set the textarea's value, and dispatch an `input` event so React/GitHub registers the change.
-5. Move the cursor to the placeholder line (`browser_evaluate` to set `selectionStart`/`selectionEnd` to the placeholder's position).
-6. Trigger `browser_file_upload` on the file input GitHub provides (the textarea has an associated `<input type="file" multiple>` — Playwright's file_upload finds it). Upload the screenshot path.
-7. `browser_wait_for` the `[Uploading …]` placeholder text to be replaced with a `https://github.com/user-attachments/assets/…` URL. Then remove the `__SCREENSHOT_HERE__` marker if any of it remains.
-8. Click **Save**.
-9. Verify with `gh pr view --json body` — the body should now contain a `user-attachments` URL above the second `## ` heading.
+1. `tabs_context_mcp` with `createIfEmpty`, then `navigate` the tab to the PR URL.
+2. Confirm GitHub is signed in (the tab title is the PR title, not "Page not found"). If not, stop and ask the user to sign in once — don't try to automate GitHub login.
+3. `find` the opening comment's **Show options** kebab, click it, then click **Edit comment**. The body becomes a `<textarea>`.
+4. Determine the insertion point with `javascript_tool`. Find the textarea whose value contains the first heading (e.g. `## Summary`) and stash it on `window` for later calls. Locate the **second** heading by matching `(^|\n)## `, not `\n## `: the body usually *starts* with `## Summary` at index 0, so `\n## ` finds the second heading first and you'd insert above the third. Insert `__SCREENSHOT_HERE__` plus a blank line immediately above that heading. Set the value through the native `HTMLTextAreaElement.prototype` value setter, dispatch an `input` event so GitHub registers the change, and select the marker (`setSelectionRange`).
+5. `find` the description form's `input[type=file]` (not the new-comment form's) and `file_upload` the screenshot path. The worktree's `.playwright-mcp/screenshots/` path is accepted.
+6. Re-read the textarea after a few seconds. It should contain `https://github.com/user-attachments/assets/…` and no `Uploading` text. The upload replaces the selected marker; remove any leftover marker. Replace GitHub's filename alt text with a short description.
+7. Click **Update comment** (find the form's button by its text).
+8. Verify with `gh api repos/<owner>/<repo>/pulls/<N> --jq .body` — the body should now contain a `user-attachments` URL above the second `## ` heading. Then `tabs_close_mcp` the tab.
 
 If any step fails, take a debug screenshot of the GitHub editor state, save it next to the original capture, and report what you saw — don't silently retry.
 
@@ -121,10 +121,11 @@ If any step fails, take a debug screenshot of the GitHub editor state, save it n
 | `gh pr view` returns nothing | No open PR for current branch | Stop; ask the user to push and open one |
 | Netlify check is `FAILURE` | Build broken on this branch | Stop; report the deploy-log URL — fix the build first |
 | Netlify check stays `PENDING` past 5 min | Slow build, queue, or stuck | Ask the user whether to keep waiting or fall back to localhost |
-| No `netlify/*` check in `gh pr checks` | Repo doesn't have deploy previews | Ask the user; offer localhost as alternative |
+| No `netlify/*` check in `gh pr checks` | Base isn't `main` (sub-PR into a trunk), or the repo has no deploy previews | Non-default base: use localhost without asking. Otherwise ask the user and offer localhost. |
 | `localhost:5173` doesn't respond (fallback path) | Port mismatch or build error | Read the dev server's stdout; if build error, stop and report; if different port, ask the user |
 | Login form selectors changed | App login UI was redesigned | Stop; ask the user to walk through it once so you can update the skill |
-| GitHub edit textarea never appears | Not signed into GitHub in this session | Ask the user to sign in once; resume |
+| GitHub PR page 404s | Upload attempted in the Playwright browser, which has no GitHub session | Switch to Claude-in-Chrome (Phase 5) |
+| GitHub edit textarea never appears | The user's Chrome isn't signed into GitHub | Ask the user to sign in once; resume |
 | `[Uploading …]` placeholder never replaced | Upload failed silently (file too large, GitHub flake) | Take a debug screenshot of the editor; abort; report |
 | Two `## ` headers can't be found | PR body is short / unconventional | Ask the user where to insert (top of body? after first paragraph?) |
 
@@ -142,7 +143,7 @@ If any step fails, take a debug screenshot of the GitHub editor state, save it n
 
 **One screenshot, not many.** A reviewer scanning a PR has limited attention. One shot of the signature change does more work than a gallery — and forces the skill to make a judgment call about what matters, which is the user-facing point of having a skill at all.
 
-**Same Playwright session for both capture and upload.** Two browsers means two auth states and two contexts to manage. Reusing the session keeps state simple and proves out the upload immediately after capture (no "saved a file, now what" dead end).
+**Capture in Playwright, upload in the user's Chrome.** Each browser holds exactly one of the two logins the job needs. Playwright has the app's test user and a controllable viewport; the user's Chrome has GitHub. Earlier versions did both in one Playwright session and stalled at the upload every time (woodrow#1632, 2026-09-29).
 
 **Insert above the second `## `, not at the top.** TL;DR/Summary first, then the visual. The visual reinforces the prose; the prose isn't a caption for the visual.
 

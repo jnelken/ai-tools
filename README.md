@@ -29,7 +29,7 @@ Personal AI coding tools — Claude Code and Cursor skills, slash commands, hook
 | [`rum-review`](skills/rum-review) | Query Datadog RUM data, synthesize findings into categorized issues |
 | [`scoutmail`](skills/scoutmail) | Monitor all Spark email accounts and surface only new messages that genuinely require attention |
 | [`session-hardening`](skills/session-hardening) | Session retrospective: turn friction and gaps hit during a session (wrong docs, misfiring hooks, missing skills, repeated manual steps, newly-dead mechanisms) into concrete tooling fixes |
-| [`screenshot-pr`](skills/screenshot-pr) | Capture one signature screenshot from the deploy preview, embed in PR description |
+| [`screenshot-pr`](skills/screenshot-pr) | Capture one signature screenshot (deploy preview, or localhost for a sub-PR), upload it via Claude-in-Chrome into the PR description |
 | [`slack-gif-creator`](skills/slack-gif-creator) | Build animated GIFs optimized for Slack |
 | [`superset-config`](skills/superset-config) | Configure superset.sh (agentic IDE) project scripts — setup/run/teardown |
 | [`tab-triage`](skills/tab-triage) | Flush open Chrome tabs through chrome-tab-org, then triage the JSON log into vault notes and ClickUp tasks |
