@@ -3,6 +3,9 @@ name: jnelken-linear
 description: Create or relabel an issue in Jake's personal Linear workspace (`jnelken`, team Dev, keys DEV-*) — the only sanctioned way to file one, because it refuses to create an issue without a `repo/<directory>` label and infers that label from the checkout you're in. Use whenever filing a ticket about a personal repo under the personal code dir, capturing an idea or bug for one of Jake's side projects, fixing an issue that's missing its repo label, or when advance-roadmap reports "has no repo/* label". Not for Concentro (CON-*) tickets — those use [[linear-ticket-gen]].
 ---
 
+> **Personal machines only (OMEN, JXIV).** `install.sh` doesn't link this skill on the work laptop
+> (`~/dotfiles/bin/is-personal-machine`).
+
 # Filing jnelken Linear issues
 
 Every Dev issue carries exactly one `repo/<directory>` label. [[advance-roadmap]] reads it to decide

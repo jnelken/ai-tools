@@ -3,6 +3,9 @@ name: unblock-roadmap
 description: Interactive-only sweep across every personal repo under the personal code dir that is currently blocked from advance-roadmap — a dirty working tree, a `Needs Input` Linear ticket, or open "decisions needed" questions — and asks Jake how to resolve each one, one repo at a time. Writes no code and runs no git: it persists each answer immediately as a `## Directive` section on that repo's Linear ticket (moving the ticket out of `Needs Input` when that's what was gating it), and may record the answer in the repo's own markdown (ROADMAP.md, docs/plans/, IN_PROGRESS.md), which a later /advance-roadmap run reads, commits, and acts on. Use on-demand ("/unblock-roadmap", "unblock the roadmap repos", "clear the roadmap blockers", "sweep the blocked repos"). Complementary to [[advance-roadmap]], never a replacement — this skill only asks and records; that one is the only thing that ever writes code, commits, or pushes.
 ---
 
+> **Personal machines only (OMEN, JXIV).** `install.sh` doesn't link this skill on the work laptop
+> (`~/dotfiles/bin/is-personal-machine`).
+
 # Unblock the roadmap
 
 `/advance-roadmap` refuses to touch a repo with a dirty working tree, sets a Linear ticket
