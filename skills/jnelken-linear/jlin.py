@@ -34,7 +34,16 @@ import sys
 CODE_DIR = os.environ.get("JLIN_CODE_DIR", os.path.expanduser("~/Dropbox/code"))
 TEAM_KEY = "DEV"
 REPO_GROUP = "repo"
-STATES = {"backlog": "backlog", "todo": "unstarted"}  # CLI name -> Linear state type
+# CLI name -> (Linear state name, state type). Match by name first: the team has more than one
+# state of a type (e.g. "Needs Input" is also `unstarted`, and advance-roadmap skips it), so
+# picking the first `unstarted` state files a ready ticket where no automation reads it.
+STATES = {"backlog": ("Backlog", "backlog"), "todo": ("Todo", "unstarted")}
+
+
+def pick_state(states, choice):
+    name, typ = STATES[choice]
+    return (next((s for s in states if s["name"] == name), None)
+            or next((s for s in states if s["type"] == typ), None))
 
 
 # ── Linear ───────────────────────────────────────────────────────────────────
@@ -214,7 +223,7 @@ def cmd_new(a):
         desc = open(a.description_file, encoding="utf-8").read()
     t = team()
     extra = extra_labels(a.label, t["id"])
-    state = next((s for s in t["states"]["nodes"] if s["type"] == STATES[a.state]), None)
+    state = pick_state(t["states"]["nodes"], a.state)
     inp = {"teamId": t["id"], "title": a.title, "description": desc,
            "labelIds": [lb["id"]] + extra, "stateId": state["id"] if state else None}
     if a.priority is not None:

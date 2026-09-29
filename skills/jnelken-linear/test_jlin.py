@@ -71,5 +71,23 @@ class Inference(unittest.TestCase):
         self.assertEqual(names("Slackagent Phase 2 — hosted split"), ["slackagent"])
 
 
+class PickStateTest(unittest.TestCase):
+    # "Needs Input" is also `unstarted` and sorts first in the API response; DEV-101..104 landed there.
+    STATES = [
+        {"id": "ni", "name": "Needs Input", "type": "unstarted"},
+        {"id": "todo", "name": "Todo", "type": "unstarted"},
+        {"id": "bl", "name": "Backlog", "type": "backlog"},
+    ]
+
+    def test_todo_matches_by_name_not_first_of_type(self):
+        self.assertEqual(jlin.pick_state(self.STATES, "todo")["id"], "todo")
+
+    def test_backlog(self):
+        self.assertEqual(jlin.pick_state(self.STATES, "backlog")["id"], "bl")
+
+    def test_falls_back_to_type_when_name_missing(self):
+        self.assertEqual(jlin.pick_state([{"id": "x", "name": "To Do", "type": "unstarted"}], "todo")["id"], "x")
+
+
 if __name__ == "__main__":
     unittest.main()
