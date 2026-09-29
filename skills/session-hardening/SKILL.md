@@ -100,7 +100,7 @@ Friction hit: <one sentence>
 
 | # | Kind | Moment | Fix | Evidence | Tier |
 |---|---|---|---|---|---|
-| 1 | Wrong knowledge | tried `foo --bar`, got "unknown flag" | correct the flag in skills/x/SKILL.md | flag removed in v2 (changelog) | 1 |
+| F1 | Wrong knowledge | tried `foo --bar`, got "unknown flag" | correct the flag in skills/x/SKILL.md | flag removed in v2 (changelog) | 1 |
 
 ### Applied (Tier 1)
 - <what changed> — restore with `<command>`
@@ -109,11 +109,13 @@ Friction hit: <one sentence>
 - <things that looked like friction or residue but are load-bearing, and why>
 
 ### Awaiting your call
-1. <Tier 2 finding> — <proposed action>
-2. <Tier 3 finding> — <remediation, and why this skill won't do it>
+1. (F2) <Tier 2 finding> — <proposed action>
+2. (F4) <Tier 3 finding> — <remediation, and why this skill won't do it>
 
-Enter numbers (e.g. `1 4`), a category name, `all`, or `none`.
+Enter numbers (e.g. `1 2`), a category name, `all`, or `none`.
 ```
+
+Findings are `F1, F2, …` and the offers are plain `1, 2, …`, each citing its finding. Keep the two schemes distinct so a bare number in the reply can only mean an offer.
 
 The **"working correctly — do not change"** section is not optional. It stops a hardening pass from eating load-bearing things next time and is the only place a deliberate non-finding gets recorded.
 
