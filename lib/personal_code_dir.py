@@ -21,10 +21,11 @@ Code dir, first match wins:
   ~/Dropbox/code
   ~/Library/CloudStorage/Dropbox/code
 
-A named repo (--repo): <code dir>/NAME, ~/code/NAME, ~/code/others/NAME — the
-first that is a git checkout whose origin is owned by `jnelken`. The owner, not
-the repo name, is what's checked: a directory's name can differ from its GitHub
-repo (openclaw-vps is jnelken/vena-vps).
+A named repo (--repo): <code dir>/NAME if it is a directory (everything there is
+personal, git checkout or not), else ~/code/NAME or ~/code/others/NAME if it is a
+git checkout whose origin is owned by `jnelken` — those parents also hold work
+repos. The owner, not the repo name, is what's checked: a directory's name can
+differ from its GitHub repo (openclaw-vps is jnelken/vena-vps).
 """
 import argparse
 import os
@@ -62,8 +63,9 @@ def is_personal_checkout(path):
 
 def find_repo(name, legacy_env=None):
     root = code_dir(legacy_env)
-    parents = ([root] if root else []) + REPO_PARENTS_EXTRA
-    for parent in parents:
+    if root and os.path.isdir(os.path.join(root, name)):
+        return os.path.join(root, name)
+    for parent in REPO_PARENTS_EXTRA:
         path = os.path.join(parent, name)
         if is_personal_checkout(path):
             return path
@@ -87,8 +89,8 @@ def main():
     if args.repo:
         path = find_repo(args.repo, args.legacy_env)
         if not path:
-            sys.exit(f"personal-code-dir: no jnelken checkout named {args.repo!r} "
-                     "(looked in the personal code dir, ~/code, ~/code/others)")
+            sys.exit(f"personal-code-dir: no personal repo named {args.repo!r} "
+                     "(looked in the personal code dir, and for a jnelken checkout in ~/code, ~/code/others)")
     else:
         path = code_dir(args.legacy_env)
         if not path:
