@@ -221,7 +221,7 @@ main content.
 
 Ask before doing this if it wasn't already agreed — it edits the user's global
 `CLAUDE.md`. If agreed, add an `@`-import of the synthesis file
-via the stable `@~/.claude/JAKE.md` path — dotfiles' `install.sh` links that to
+via the stable `@~/.claude/JAKE.md` path — ai-tools' `install.sh` links that to
 `<personal code dir>/claude-projects-memory/JAKE.md` — so it loads
 automatically in every future Claude Code session, with a short note that it's
 background context (not instructions), regenerated periodically, and that live

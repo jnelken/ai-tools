@@ -595,6 +595,18 @@ section_statusline() {
   fi
 }
 
+# ── personal context: ~/.claude/JAKE.md ──
+# The global CLAUDE.md imports @~/.claude/JAKE.md: imports can't be computed, so
+# this stable path is linked to wherever sync-claude-projects-memory wrote the
+# synthesis on this machine. No personal code dir (or no JAKE.md) = nothing to link.
+section_personal() {
+  command -v python3 >/dev/null 2>&1 || return 0
+  local dir
+  dir="$(python3 "$SRC_ROOT/bin/personal-code-dir" --repo claude-projects-memory 2>/dev/null)" || return 0
+  [ -f "$dir/JAKE.md" ] || return 0
+  link_one "$dir/JAKE.md" "$CLAUDE_DIR/JAKE.md" "personal context file"
+}
+
 # ── prune: dangling ~/.claude/* symlinks left by renamed/removed ai-tools content ──
 # install.sh only ever links names that exist in the source tree, so a skill or
 # automation that was renamed upstream leaves an orphan behind (and would trip
@@ -646,6 +658,7 @@ run_section "── agents ──" section_agents
 run_section "── hooks ──" section_hooks
 run_section "── automations ──" section_automations
 run_section "── statusline ──" section_statusline
+run_section "── personal context ──" section_personal
 
 echo ""
 echo "Done."
