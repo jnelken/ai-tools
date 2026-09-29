@@ -26,7 +26,7 @@ printenv | grep -i LINEAR            # check first — don't assume
 linear api '{ viewer { name } organization { name urlKey } }'   # sanity-check key + workspace
 ```
 
-The variable that is actually set on this machine is **`LINEAR_API_TOKEN`** (a `lin_api_…` key). `LINEAR_API_KEY`, which earlier versions of this skill referenced, is **unset** — a `curl` built on it sends an empty `Authorization` header and fails confusingly. Its source is not established: it is not in `~/.zshrc`, `~/.zshenv`, `~/.zprofile`, or `~/.claude/settings*.json`, so don't tell the user where it comes from, and don't assume it's present in a non-interactive script, CI, or another user's shell. If it's missing, say so rather than guessing at a workaround.
+`linear api` needs CLI 2.x and authenticates from the CLI's stored workspace credential, not the environment — [[linear-cli]] has the version check and upgrade command. Which `LINEAR_*` env key exists varies by machine (`LINEAR_API_TOKEN` on some, `LINEAR_API_KEY` on others), so a raw-HTTP fallback uses `${LINEAR_API_TOKEN:-$LINEAR_API_KEY}`; a `curl` built on an unset one sends an empty `Authorization` header and fails confusingly. Don't assume either is present in a non-interactive script, CI, or another user's shell.
 
 If you do fall back to raw HTTP, note there is no `Bearer` prefix — Linear takes the raw key.
 
@@ -61,6 +61,8 @@ mutation($id: String!, $input: IssueUpdateInput!) { issueUpdate(id: $id, input: 
 ```
 
 **Default for newly-created tickets, unless the user says otherwise:** `stateId` = the team's `Groomed` state, `cycleId` = the next upcoming cycle (compute per the cycle math above). Set both explicitly on every `issueCreate` — don't leave them unset and let Linear pick a default for you.
+
+**Exception — a ticket for work already in flight** (backfilled for a branch or PR this session is building, e.g. by [[create-pr]]): use the **current** cycle, not the next one. The work lands this cycle; filing it into the next misreports when it happened. Keep `Groomed` as the state — the PR link moves it forward.
 
 **For updates to existing tickets** (e.g. the overlap-check case above), the rule flips: only touch `assigneeId`/`cycleId`/`projectMilestoneId`/`stateId` if the user actually asked for that — don't pull an existing ticket into a cycle or change its state just because you edited its description.
 

@@ -15,16 +15,18 @@ fall back to raw `curl`. Verified working 2026-09-25 in a session where
 
 ## Setup facts
 
+These differ between machines and sessions — check them, don't assume them.
+
 | | |
 |---|---|
-| Binary | `/opt/homebrew/bin/linear`, v2.5.0 |
-| Auth | `LINEAR_API_TOKEN` in the environment (a `lin_api_…` key) |
-| Workspace | `jnelken` — one team, **Dev**, key `DEV` |
+| Binary | `/opt/homebrew/bin/linear`, Homebrew formula `schpet/tap/linear`. **`linear api` needs 2.x** — run `linear --version` first; 1.x answers `Unknown command "api"`. Upgrade with `brew upgrade schpet/tap/linear` (Homebrew 7+ first refuses the untrusted tap; `brew trust --formula schpet/tap/linear` trusts just this formula). Verified 2.6.0 on 2026-09-29. |
+| Auth | The CLI's **stored workspace credential** (`linear auth list`), not an env var — verified 2026-09-29: `linear api` worked with both `LINEAR_*` vars unset. |
+| Workspace | Whichever `linear auth list` marks `*`; target another with `-w <slug>`. Seen: `jnelken` (team **Dev**, key `DEV`) and `concentro` (team **CON**). |
 
-**Check the token with `printenv \| grep -i LINEAR` rather than assuming a source.** It is *not*
-`LINEAR_API_KEY` (unset on this machine), and it was not found in `~/.zshrc`, `~/.zshenv`,
-`~/.zprofile`, or `~/.claude/settings*.json` — so don't tell the user where it comes from. If
-it's missing, say so instead of guessing at a workaround.
+**Env keys, for raw HTTP only, vary by machine.** Seen: only `LINEAR_API_TOKEN` (2026-09-25) and
+only `LINEAR_API_KEY` (2026-09-29). Check with `printenv | grep -i LINEAR` and use
+`${LINEAR_API_TOKEN:-$LINEAR_API_KEY}`. Neither is in `~/.zshrc`, `~/.zshenv`, `~/.zprofile`, or
+`~/.claude/settings*.json`, so don't tell the user where it comes from.
 
 Sanity-check auth and workspace in one call:
 
@@ -143,7 +145,8 @@ show what you intend to delete, get an explicit yes first.
 - **Using `issue list` as a search.** It's `issue mine`. Unassigned work is invisible to it.
 - **Passing `--label repo/knowledge-vault`.** Use the child name alone.
 - **Reaching for `curl https://api.linear.app/graphql` by hand.** `linear api` already carries
-  the auth and is shorter. (And `LINEAR_API_KEY`, which older notes reference, is unset here.)
+  the auth and is shorter. Only on a 1.x CLI you can't upgrade, POST the query yourself with
+  `-H "Authorization: ${LINEAR_API_TOKEN:-$LINEAR_API_KEY}"` (raw key, no `Bearer`).
 - **Trusting a write command in this skill because it's written down.** The write table is
   `--help` output, not verified behaviour.
 - **Asking Jake to re-authenticate MCP.** That's the situation this skill exists to route
