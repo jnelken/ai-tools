@@ -481,9 +481,23 @@ ln -sf "$LOG" "$LOGDIR/latest.log"
 regen_dashboard
 
 # ── Slack summary ─────────────────────────────────────────────────────────────
-# One short line per run. state.json was just rewritten by regen_dashboard, so it
-# describes THIS run. No webhook configured = no-op, not an error.
-if [ -n "$SLACK_WEBHOOK" ] && [ -r "$STATE_FILE" ] && command -v jq >/dev/null 2>&1; then
+# Slackagent posts this run's full summary (the dashboard drawer's Summary
+# paragraph, plus any Detail) to #eng as its bot. It exits 0 for a deliberate skip
+# (skipped-* ticks are dashboard-only) and nonzero on a real failure — only then
+# does the old one-line webhook post below run as a fallback.
+SLACKAGENT_DIR="${ADVANCE_ROADMAP_SLACKAGENT_DIR:-$CODE_DIR/slackagent}"
+slackagent_posted=0
+if [ -f "$SLACKAGENT_DIR/scripts/post-roadmap-summary.mjs" ]; then
+  if node "$SLACKAGENT_DIR/scripts/post-roadmap-summary.mjs" --stamp "$STAMP" >> "$LOG" 2>&1; then
+    slackagent_posted=1
+  else
+    echo "=== slack: slackagent post failed; falling back to webhook ===" >> "$LOG"
+  fi
+fi
+
+# Fallback: one short line per run. state.json was just rewritten by regen_dashboard,
+# so it describes THIS run. No webhook configured = no-op, not an error.
+if [ "$slackagent_posted" -eq 0 ] && [ -n "$SLACK_WEBHOOK" ] && [ -r "$STATE_FILE" ] && command -v jq >/dev/null 2>&1; then
   summary="$(jq -r '.last_summary // ""' "$STATE_FILE" 2>/dev/null)"
   cadence="$(jq -r ".cadence_hours // $BASE_CADENCE" "$STATE_FILE" 2>/dev/null)"
   [ -n "$summary" ] && {
