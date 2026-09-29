@@ -50,6 +50,20 @@ Every failure mode — missing deps, `$AI_TOOLS_HOME` not existing or not a git 
 
 Remove the entry from `settings.json`.
 
+## status-glyph-check.sh
+
+A **Stop hook** that enforces the response sign-off glyphs defined in the global `CLAUDE.md` ("Response Sign-off Glyphs"): the last non-blank line of every final assistant message must start with 🛑 ⚠️ ⏳ 💡 ✅ ⛏️ or 💬. If it doesn't, it returns `decision: "block"` with the legend, so Claude appends a single status line. ⚠️ and ⛏️ count only in emoji form (followed by U+FE0F); the bare text glyphs are rejected.
+
+Reads `last_assistant_message` from the hook input, falling back to the last non-sidechain assistant entry in `transcript_path`. A turn that ended on a tool call (AskUserQuestion, ExitPlanMode) has no final text and passes. `stop_hook_active` short-circuits so it blocks at most once per turn, and any parse failure exits 0.
+
+### settings.json wiring
+
+```json
+{ "hooks": { "Stop": [ { "hooks": [ { "type": "command", "command": "bash \"$HOME/.claude/hooks/status-glyph-check.sh\"" } ] } ] } }
+```
+
+Tests: `bash hooks/tests/status-glyph-check.test.sh`.
+
 ## post-yesterdays-ccusage.sh
 
 Posts daily ccusage summaries (Claude + Codex token usage) to a Slack channel via incoming webhook. Triggered on every Claude Code session start; catches up any days missed since the last successful post.
