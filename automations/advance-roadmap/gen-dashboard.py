@@ -41,6 +41,7 @@ MEMORY = os.path.join(HOME, ".claude/projects/-Users-jake-Dropbox-code/memory/pr
 USAGE = os.path.join(HOME, ".claude/state/claude-usage.json")
 PROVIDERS_USAGE = os.path.join(ROOT, "providers-usage.json")
 RUNS_JSONL = os.path.join(ROOT, "runs.jsonl")
+LOG_TAIL_CHARS = 4000
 
 # Thresholds mirror lib/usage.py. Kept in sync by hand; shown so the page can say
 # whether the next run would be gated.
@@ -293,7 +294,10 @@ def parse_runs(ledger, records=None):
             "linear_id": (rec or {}).get("linear_id") or "",
             "push": pm.group(0).strip() if pm else "",
             "duration": duration,
-            "body": body,
+            "log_tail": body[-LOG_TAIL_CHARS:],
+            "log_chars": len(body),
+            "log_path": ("~/" + str(Path(path).relative_to(HOME))
+                         if Path(path).is_relative_to(HOME) else path),
         })
     return runs
 
@@ -789,6 +793,14 @@ def build():
         lid = r.get("linear_id") or (re.match(r"DEV-\d+", f.get("Item", "")) or [None])[0]
         links = (f'<a class=btn href="{esc(urls[lid])}" target=_blank rel=noopener>{esc(lid)} ↗</a>'
                  if lid and lid in urls else "")
+        omitted_chars = r["log_chars"] - len(r["log_tail"])
+        log_note = (f'<p class=dim>Log truncated — {omitted_chars:,} chars omitted; showing the last '
+                    f'{len(r["log_tail"]):,} of {r["log_chars"]:,} chars.</p>'
+                    if omitted_chars else "")
+        log_path = f'<p class=dim>Full log on this Mac: <code>{esc(r["log_path"])}</code></p>'
+        log = (f'<h4>Log</h4>{log_note}'
+               + (f'<pre>{esc(r["log_tail"])}</pre>' if r["log_tail"] else '<p class=dim>No log body.</p>')
+               + log_path)
         panels.append(
             f'<template id="{rid}"><div class=ptop>{badge(r["outcome"])} {prov}</div>'
             f'<h3 class=ptitle>{esc(run_title(r))}</h3>'
@@ -797,7 +809,7 @@ def build():
             + (f'<h4>Summary</h4><p class=psum>{esc(summary)}</p>' if summary else "")
             + (f'<div class=pushnote>{esc(r["push"])}</div>' if r["push"] else "")
             + (f'<div class=plinks>{links}</div>' if links else "")
-            + (f'<h4>Log</h4><pre>{esc(r["body"])}</pre>' if r["body"] else '<p class=dim>No log body.</p>')
+            + log
             + '</template>')
     run_cards = "\n".join(cards) or '<p class=dim style="padding:14px">No runs logged yet.</p>'
     run_panels = "\n".join(panels)
@@ -963,6 +975,7 @@ TEMPLATE = """<!doctype html>
   .runlist {{ border:1px solid var(--line); border-radius:10px; background:var(--card); overflow:hidden; }}
   .rc {{ display:grid; grid-template-columns:64px minmax(0,1fr) 16px; gap:14px; align-items:start; padding:11px 14px; border-bottom:1px solid var(--line); color:inherit; text-decoration:none; }}
   .rc:last-child {{ border-bottom:0; }}
+  .rc[hidden] {{ display:none; }}
   .rc:hover, .rc.sel {{ background:var(--bg); }}
   .rc:focus-visible {{ outline:2px solid var(--accent); outline-offset:-2px; }}
   .rc.c-error {{ box-shadow:inset 3px 0 0 var(--fail); }}
