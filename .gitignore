@@ -12,5 +12,5 @@ node_modules/
 # continuity state, never project documentation.
 .claude/IN_PROGRESS.md
 
-# simplification-retro's run log - local per-machine memory, not committed.
-skills/simplification-retro/memory.md
+# tool-hardening's run log - local per-machine memory, not committed.
+skills/tool-hardening/memory.md
