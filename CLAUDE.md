@@ -9,14 +9,15 @@ Canonical URL: https://github.com/jnelken/ai-tools
 **Which checkout am I in?** Run `pwd`. If it is `~/.ai-tools`, you are in the **deploy
 clone — do not edit or commit here**; a `pre-commit` hook will refuse the commit, and while
 this clone is dirty `install.sh` silently skips updating this machine. Move the edit to the
-dev checkout (`~/Dropbox/code/ai-tools`) and push. Everything below describes that dev
-checkout.
+dev checkout — wherever this repo is cloned for editing (`~/code/ai-tools` on Jake's Mac;
+the deploy guard's refusal message names the resolved path) — and push. Everything below
+describes that dev checkout.
 
-**The dev checkout (`~/Dropbox/code/ai-tools`) is dev-only.** `~/.claude/*` is symlinked from a separate deploy clone at `~/.ai-tools`, which tracks `origin/main` and is managed entirely by `install.sh` — never hand-edited. Concretely:
+**The dev checkout is dev-only.** `~/.claude/*` is symlinked from a separate deploy clone at `~/.ai-tools`, which tracks `origin/main` and is managed entirely by `install.sh` — never hand-edited. Concretely:
 
 - `git push` to `main` from this checkout **is** the deploy step — it doesn't reach any machine until something updates `~/.ai-tools` from origin.
 - After pushing, run `~/.ai-tools/install.sh` to make *this* machine pick the change up right away, instead of waiting for the next session's `ai-tools-sync` SessionStart hook to fetch/merge/re-link it automatically.
-- Editing through `~/.claude/...` instead of `~/Dropbox/code/ai-tools/...` edits the *deployed copy*, not the source of truth — it'll get flagged as dirty (by `ai-tools-sync.sh` and `claude-symlink-hygiene.sh`) and overwritten on the next clean update. The fix is always: move the edit back here, commit, push.
+- Editing through `~/.claude/...` instead of the dev checkout edits the *deployed copy*, not the source of truth — it'll get flagged as dirty (by `ai-tools-sync.sh` and `claude-symlink-hygiene.sh`) and overwritten on the next clean update. The fix is always: move the edit back here, commit, push.
 
 See `README.md`'s Install / Dev workflow sections for the full mechanics (`install.sh --dev` to test an unpushed change, invocation modes, env vars).
 

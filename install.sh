@@ -1,17 +1,17 @@
 #!/usr/bin/env bash
 # Bootstrap ai-tools into ~/.claude/.
 #
-# Deploy model: the dev repo (~/Dropbox/code/ai-tools) is for development only. What's
+# Deploy model: the dev checkout (e.g. ~/code/ai-tools) is for development only. What's
 # on origin/main is what actually gets deployed — identically on every
 # machine and every cloud environment. This script maintains a DEPLOY CLONE
 # at $AI_TOOLS_HOME (default ~/.ai-tools) that tracks origin/main, and
-# symlinks ~/.claude/* into THAT clone, never into ~/Dropbox/code/ai-tools.
+# symlinks ~/.claude/* into THAT clone, never into the dev checkout.
 #
 # Works three ways:
 #   1. Piped, no checkout at all:
 #        curl -fsSL https://raw.githubusercontent.com/jnelken/ai-tools/main/install.sh | bash
 #   2. Run from the deploy clone itself (~/.ai-tools/install.sh).
-#   3. Run from the dev checkout (~/Dropbox/code/ai-tools/install.sh) — default
+#   3. Run from the dev checkout (e.g. ~/code/ai-tools/install.sh) — default
 #      behavior is STILL the hosted install (update+link from AI_TOOLS_HOME).
 #      Pass --dev to link from the checkout instead, for testing an unpushed
 #      change; a plain run afterward flips the links back.
@@ -89,7 +89,7 @@ Invocation modes:
   ~/.ai-tools/install.sh
       Run from the deploy clone itself. Same behavior as piped.
 
-  ~/Dropbox/code/ai-tools/install.sh
+  <dev checkout>/install.sh   (e.g. ~/code/ai-tools/install.sh)
       Run from the dev checkout. Default behavior is STILL the hosted
       install (update + link from \$AI_TOOLS_HOME) — the dev checkout is
       NOT linked unless --dev is passed.
@@ -111,8 +111,11 @@ Environment variables:
   AI_TOOLS_REPO   Git remote to clone/update from
                   (default: https://github.com/jnelken/ai-tools.git)
   AI_TOOLS_REF    Branch/ref to track (default: main)
+  AI_TOOLS_DEV    Dev checkout named in guard messages (default: resolved —
+                  this script's own checkout, else ~/code/ai-tools or
+                  ~/Dropbox/code/ai-tools, whichever is an ai-tools clone)
 
-Dev workflow: edit in ~/Dropbox/code/ai-tools, commit, push — that IS the deploy
+Dev workflow: edit in the dev checkout, commit, push — that IS the deploy
 step. Then run ~/.ai-tools/install.sh (or wait for the next session's
 ai-tools-sync SessionStart hook) to pick it up on a given machine.
 EOF
@@ -142,7 +145,7 @@ fi
 
 if [ "$DEV_MODE" -eq 1 ]; then
   if [ -z "$SCRIPT_DIR" ]; then
-    echo "Error: --dev requires running install.sh from a checkout (e.g. ~/Dropbox/code/ai-tools/install.sh)." >&2
+    echo "Error: --dev requires running install.sh from a checkout (e.g. ~/code/ai-tools/install.sh)." >&2
     echo "There is no checkout to link from when the script is piped via stdin." >&2
     exit 1
   fi
@@ -255,7 +258,33 @@ ensure_jq() {
 # The agent-facing half lives in the repo's own CLAUDE.md, which is path-aware. It is NOT
 # written here: CLAUDE.md is tracked, so writing it would leave the clone permanently dirty
 # and trip the skip-update path above — the exact failure this guard exists to prevent.
-AI_TOOLS_DEV="${AI_TOOLS_DEV:-$HOME/Dropbox/code/ai-tools}"
+#
+# The dev checkout the guard points edits at lives in different places on
+# different machines, so it is resolved rather than assumed: $AI_TOOLS_DEV, then
+# this script's own checkout when it isn't the deploy clone, then the first
+# common location holding an ai-tools clone. Unresolved, the messages say so
+# instead of naming a path that doesn't exist.
+is_ai_tools_checkout() {
+  local dir="$1" url
+  [ -e "$dir/.git" ] || return 1
+  [ "$(cd "$dir" 2>/dev/null && pwd -P)" != "$(cd "$AI_TOOLS_HOME" 2>/dev/null && pwd -P)" ] || return 1
+  url="$(git -C "$dir" remote get-url origin 2>/dev/null)" || return 1
+  case "$url" in */ai-tools|*/ai-tools.git) return 0 ;; esac
+  return 1
+}
+
+resolve_ai_tools_dev() {
+  local candidate
+  for candidate in "$SCRIPT_DIR" "$HOME/code/ai-tools" "$HOME/Dropbox/code/ai-tools"; do
+    if [ -n "$candidate" ] && is_ai_tools_checkout "$candidate"; then
+      (cd "$candidate" && pwd -P)
+      return
+    fi
+  done
+}
+
+AI_TOOLS_DEV="${AI_TOOLS_DEV:-$(resolve_ai_tools_dev)}"
+AI_TOOLS_DEV_HINT="${AI_TOOLS_DEV:-<your ai-tools dev checkout>}"
 
 install_deploy_guard() {
   [ -d "$AI_TOOLS_HOME/.git" ] || return 0
@@ -274,14 +303,14 @@ this machine silently stops syncing.
 
 Put the change in the dev checkout and push:
 
-    cd $AI_TOOLS_DEV
+    cd "$AI_TOOLS_DEV_HINT"
     git add -p && git commit && git push
     $AI_TOOLS_HOME/install.sh        # pull it back down here
 
 Already made the edits here? Move them across, don't retype them:
 
     git -C $AI_TOOLS_HOME diff > /tmp/ai-tools.diff
-    git -C $AI_TOOLS_DEV apply /tmp/ai-tools.diff
+    git -C "$AI_TOOLS_DEV_HINT" apply /tmp/ai-tools.diff
     git -C $AI_TOOLS_HOME checkout -- .
 
 Untracked files won't be in that diff — copy those over by hand first.
@@ -305,7 +334,7 @@ update_ai_tools_home() {
     install_deploy_guard
     if [ -n "$(git -C "$AI_TOOLS_HOME" status --porcelain 2>/dev/null)" ]; then
       echo "⚠ $AI_TOOLS_HOME (the deployed copy) has uncommitted edits — skipping update."
-      echo "  Edits belong in ~/Dropbox/code/ai-tools (commit + push there); this deploy clone is"
+      echo "  Edits belong in $AI_TOOLS_DEV_HINT (commit + push there); this deploy clone is"
       echo "  managed by install.sh and gets overwritten on the next clean update."
       return
     fi
