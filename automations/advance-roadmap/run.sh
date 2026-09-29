@@ -16,6 +16,15 @@
 set -u
 
 ROOT="${ADVANCE_ROADMAP_ROOT:-/Users/jake/.claude/automations/advance-roadmap}"
+# Personal machines only (OMEN, JXIV): this commits across the personal repos.
+if [ -x "$HOME/dotfiles/bin/is-personal-machine" ]; then
+  "$HOME/dotfiles/bin/is-personal-machine"
+  if [ $? -eq 1 ]; then
+    echo "advance-roadmap: work machine — runs on the personal machines only."
+    exit 0
+  fi
+fi
+
 # Where the personal repos live differs by machine; ai-tools' personal-code-dir
 # decides (never ~/code, which holds work checkouts). Unresolved = nothing to do.
 CODE_DIR="${PERSONAL_CODE_DIR:-$("$(cd -P "$(dirname "$0")/../.." && pwd)/bin/personal-code-dir" 2>/dev/null)}" || CODE_DIR=""

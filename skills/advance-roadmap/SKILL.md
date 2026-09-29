@@ -12,6 +12,9 @@ description: >-
   directives; this is the only skill that ever acts on them.
 ---
 
+> **Personal machines only (OMEN, JXIV).** `install.sh` doesn't link this skill or its automation on
+> the work laptop (`~/dotfiles/bin/is-personal-machine`), and `run.sh` refuses to run there.
+
 # Advance the roadmap
 
 Take exactly ONE item from planned → shipped on `main` per run, or stop cleanly with blockers recorded.
@@ -31,7 +34,7 @@ same rule: after the worker reports `shipped`, go back to `ORCHESTRATOR.md` Step
 minutes.
 
 Candidate repos: direct children of the personal code dir, `CODE_DIR=$(~/.ai-tools/bin/personal-code-dir)` (`~/Dropbox/code` on
-the personal Mac; if it exits non-zero, this machine has no personal repos — stop). Check
+the personal machines; if it exits non-zero, this machine has no personal repos — stop). Check
 `~/.claude/automations/advance-roadmap/allowlist.txt` first when present, and query Linear once for
 pending directives — tickets carrying an unconsumed `## Directive` section, via the `linear` CLI
 only (see `SAFETY.md`) — from [[unblock-roadmap]] (the only dirty-tree exception).

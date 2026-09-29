@@ -360,6 +360,43 @@ update_ai_tools_home() {
   exit 1
 }
 
+# ── personal-only content ──
+# advance-roadmap and wrapup-repos commit (and push) across the personal repos,
+# so they belong on the personal machines (OMEN, JXIV) only. On the work laptop
+# they aren't linked at all, and links left by an earlier install are removed.
+# dotfiles' is-personal-machine decides; without it (a cloud env, a machine with
+# no dotfiles) the machine counts as personal, same as hygiene-scan-all.sh.
+PERSONAL_ONLY="advance-roadmap wrapup-repos"
+IS_WORK_MACHINE=0
+if [ -x "$HOME/dotfiles/bin/is-personal-machine" ]; then
+  # Only exit 1 means "work": a guard that can't run (no zsh) must not hide them.
+  guard_rc=0
+  "$HOME/dotfiles/bin/is-personal-machine" >/dev/null 2>&1 || guard_rc=$?
+  [ "$guard_rc" -eq 1 ] && IS_WORK_MACHINE=1
+fi
+skip_personal_only() {
+  [ "$IS_WORK_MACHINE" -eq 1 ] || return 1
+  case " $PERSONAL_ONLY " in *" $1 "*) return 0 ;; esac
+  return 1
+}
+# unlink_personal_only <path>: remove the ai-tools symlinks at or under <path>,
+# then any directories left empty. Real files (logs, state) are never touched.
+unlink_personal_only() {
+  local path="$1" link removed=0
+  [ -L "$path" ] || [ -d "$path" ] || return 0
+  if [ -L "$path" ]; then
+    if is_ai_tools_target "$(readlink "$path")"; then rm "$path"; removed=1; fi
+  else
+    while IFS= read -r link; do
+      if is_ai_tools_target "$(readlink "$link")"; then rm "$link"; removed=$((removed + 1)); fi
+    done < <(find "$path" -type l)
+    find "$path" -depth -type d -empty -exec rmdir {} \;
+  fi
+  if [ "$removed" -gt 0 ]; then
+    echo "  ✂ ${path#"$HOME"/} (personal machines only) unlinked${removed:+ ($removed link(s))}"
+  fi
+}
+
 # ── Windows preflight: fail before touching anything if symlinks are refused ──
 check_windows_symlinks() {
   [ "$IS_WINDOWS" -eq 1 ] || return 0
@@ -403,6 +440,7 @@ section_skills() {
   for skill in "$SRC_ROOT/skills"/*/; do
     [ -d "$skill" ] || continue
     name="$(basename "${skill%/}")"
+    if skip_personal_only "$name"; then unlink_personal_only "$CLAUDE_DIR/skills/$name"; continue; fi
     link_one "$SRC_ROOT/skills/$name" "$CLAUDE_DIR/skills/$name" "skill directory"
   done
 }
@@ -537,6 +575,7 @@ section_automations() {
   for auto in "$SRC_ROOT/automations"/*/; do
     [ -d "$auto" ] || continue
     name="$(basename "${auto%/}")"
+    if skip_personal_only "$name"; then unlink_personal_only "$CLAUDE_DIR/automations/$name"; continue; fi
     mkdir -p "$CLAUDE_DIR/automations/$name"
     for script in "$auto"*.sh "$auto"*.py; do
       [ -e "$script" ] || continue

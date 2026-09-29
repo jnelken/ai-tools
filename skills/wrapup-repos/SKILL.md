@@ -3,6 +3,9 @@ name: wrapup-repos
 description: Wrap up in-progress work in one local repo under the personal code dir — pick the dirtiest/most-recently-touched repo, finish obvious low-risk loose ends, run the quick verify, commit on the current branch, and record decisions, ticket candidates, and code-state notes in the repo's `.claude/IN_PROGRESS.md`. Use on-demand ("/wrapup-repos", "wrap up my repos", "tidy my in-progress work") or via the scheduled off-peak launchd job. Safe by design: never pushes, never force/destructive, never commits secrets or build junk.
 ---
 
+> **Personal machines only (OMEN, JXIV).** `install.sh` doesn't link this skill or its automation on
+> the work laptop (`~/dotfiles/bin/is-personal-machine`), and `run.sh` refuses to run there.
+
 # Wrap up in-progress repo work
 
 Advance ONE local repo's in-progress work to a clean, committed, well-documented state, and leave
@@ -10,7 +13,7 @@ the user a short list of decisions to make when they return. The user's time is 
 resource: do the obvious, low-risk implementation work; hand back only the judgment calls.
 
 Candidate repos are the direct children of the personal code dir, `CODE_DIR=$(~/.ai-tools/bin/personal-code-dir)`
-(`~/Dropbox/code` on the personal Mac). If it exits non-zero, this machine has no personal repos —
+(`~/Dropbox/code` on the personal machines). If it exits non-zero, this machine has no personal repos —
 stop; never fall back to `~/code`, which holds work checkouts.
 
 ## Two ways this runs

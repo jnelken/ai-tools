@@ -20,7 +20,7 @@ makes the deploy clone dirty.
 
 Every 2 hours (1:45am, 3:45am … 11:45pm local time — see **Cadence** below),
 picks a personal repo under
-the personal code dir (`bin/personal-code-dir`; `~/Dropbox/code` on the personal Mac) whose `ROADMAP.md` has real planned work, ships exactly ONE item on a
+the personal code dir (`bin/personal-code-dir`; `~/Dropbox/code` on the personal machines) whose `ROADMAP.md` has real planned work, ships exactly ONE item on a
 branch, verifies with the repo's own `npm test` / `npm run build`, moves the item to Shipped,
 then merges to `main` locally and **pushes**. No PR.
 
