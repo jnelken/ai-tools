@@ -3,7 +3,7 @@ name: tool-hardening
 description: Session retrospective (not monthly-retro). Turn friction and gaps hit while working in a session into concrete fixes that make the next session faster — a wrong or missing doc, skill or instruction, a hook or permission that misfired, flaky or slow tooling, a manual step done twice, an assumption traced to stale memory, or a mechanism the work just made dead. General counterpart to the Datadog Debugging Follow-ups (which owns observability gaps). Report-only when self-started by the CLAUDE.md trigger; when invoked by name it also applies provably safe, trivially reversible fixes, with everything else a numbered offer. Trigger phrases include "tool hardening", "harden this", "what slowed us down", "what would have made this easier", "session follow-ups", "what can we delete now", "retro this session".
 ---
 
-# Tool Hardening
+# Session Hardening
 
 You are turning **friction from this session** into fixes, so the next session doesn't hit it.
 
