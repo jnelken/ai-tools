@@ -127,7 +127,7 @@ show what you intend to delete, get an explicit yes first.
 ## Conventions this repo's Linear depends on
 
 - **Every issue carries a `repo/*` label**, single-select, one child per directory under
-  `~/Dropbox/code`. It's how automation decides where to write code, so a wrong one means a push
+  the personal code dir (`bin/personal-code-dir`). It's how automation decides where to write code, so a wrong one means a push
   to the wrong repo. Create Dev issues only through [[jnelken-linear]] (`jlin.py new`), which
   infers the label from the checkout and refuses without one; `jlin.py infer --apply` labels
   unlabeled issues that name exactly one repo, and [[advance-roadmap]] runs it before each run.

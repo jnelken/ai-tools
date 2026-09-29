@@ -6,7 +6,7 @@ worker, and the next run six hours later usually reaches the identical verdict.
 This fingerprints everything that verdict was derived from — each repo's HEAD,
 branches, working tree and session files; the Linear snapshot; the allowlist and
 the skill docs — and stores it with the verdict in the provider-neutral
-``~/Dropbox/code/.advance-roadmap/last-verdict.json``.
+``<personal code dir>/.advance-roadmap/last-verdict.json``.
 
     verdict.py fingerprint --snapshot S --out F
     verdict.py check  --file V --fingerprint F --changes OUT [--max-age-hours N]
@@ -27,7 +27,22 @@ import subprocess
 import sys
 from datetime import datetime, timedelta
 
-CODE_DIR = "/Users/jake/Dropbox/code"
+def _personal_code_dir_module():
+    """ai-tools' lib/personal_code_dir.py is the one place that decides where the
+    personal repos live; find it from this file's real (symlink-resolved) location."""
+    d = os.path.dirname(os.path.realpath(__file__))
+    while d != os.path.dirname(d) and not os.path.isfile(os.path.join(d, "lib", "personal_code_dir.py")):
+        d = os.path.dirname(d)
+    if d == os.path.dirname(d):  # a copy outside the repo (e.g. a test root): use the deploy clone
+        d = os.environ.get("AI_TOOLS_HOME", os.path.expanduser("~/.ai-tools"))
+    sys.path.insert(0, os.path.join(d, "lib"))
+    import personal_code_dir
+    return personal_code_dir
+
+
+CODE_DIR = _personal_code_dir_module().code_dir()
+if not CODE_DIR:
+    sys.exit("verdict: no personal code dir on this machine (set PERSONAL_CODE_DIR)")
 SKILL_DIR = os.path.expanduser("~/.claude/skills/advance-roadmap")
 ALLOWLIST = os.path.expanduser("~/.claude/automations/advance-roadmap/allowlist.txt")
 NO_WORK_ACTIONS = {"blocked_no_item", "nothing_qualified"}

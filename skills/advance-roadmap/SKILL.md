@@ -3,7 +3,7 @@ name: advance-roadmap
 description: >-
   Ship planned items end-to-end, one per run, from a personal repo's ROADMAP.md, from docs/plans/ when the
   repo has no roadmap, or from a Linear issue carrying a repo label. Pick a qualifying repo under
-  ~/Dropbox/code, implement the item on a branch, verify with the repo's test/build, move it to
+  the personal code dir, implement the item on a branch, verify with the repo's test/build, move it to
   Shipped, then merge to main locally and push. No PR. Use on-demand ("/advance-roadmap", "work a
   roadmap item", "advance the roadmap", "ship something off the roadmap") or via an unattended
   scheduled run. After pushing, watches the production deploy (usually Vercel) and fixes forward
@@ -30,7 +30,8 @@ check happens between runs, so the last item may finish past 40 minutes. Schedul
 same rule: after the worker reports `shipped`, go back to `ORCHESTRATOR.md` Step 0 if under 40
 minutes.
 
-Candidate repos: direct children of `/Users/jake/Dropbox/code`. Check
+Candidate repos: direct children of the personal code dir, `CODE_DIR=$(~/.ai-tools/bin/personal-code-dir)` (`~/Dropbox/code` on
+the personal Mac; if it exits non-zero, this machine has no personal repos — stop). Check
 `~/.claude/automations/advance-roadmap/allowlist.txt` first when present, and query Linear once for
 pending directives — tickets carrying an unconsumed `## Directive` section, via the `linear` CLI
 only (see `SAFETY.md`) — from [[unblock-roadmap]] (the only dirty-tree exception).

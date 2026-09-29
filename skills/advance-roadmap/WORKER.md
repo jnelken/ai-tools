@@ -1,7 +1,7 @@
 # Worker role (write-capable)
 
 You are the **worker** for an `advance-roadmap` run. The orchestrator already triaged.
-Execute the assignment; do not re-pick a different item across `~/Dropbox/code`.
+Execute the assignment; do not re-pick a different item across the personal code dir.
 
 Hard constraints:
 
@@ -364,7 +364,7 @@ failure there is reported rather than fixed, since the push didn't change built 
 
 ## Step 8 — Update run memory
 
-Write `/Users/jake/.claude/projects/-Users-jake-Dropbox-code/memory/project_advance-roadmap-runs.md`
+Write `$(~/.ai-tools/bin/personal-code-dir --memory-dir)/project_advance-roadmap-runs.md`
 (one file, updated in place — never one file per run), with `type: project` frontmatter, recording:
 - the date of this run;
 - an **outcome token** for this run — exactly one of:

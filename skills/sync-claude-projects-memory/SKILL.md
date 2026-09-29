@@ -43,7 +43,7 @@ summary. This skill produces a narrative index, not a full-fidelity archive.
 
 ## Output location
 
-Default: `~/Dropbox/code/claude-projects-memory/` (adjust if the user's setup differs —
+Default: `$(~/.ai-tools/bin/personal-code-dir)/claude-projects-memory/` (adjust if the user's setup differs —
 this directory is not itself a git repo and shouldn't need to be; if it ends up inside
 one, gitignore it rather than committing personal Project content). Contains:
 
@@ -221,7 +221,8 @@ main content.
 
 Ask before doing this if it wasn't already agreed — it edits the user's global
 `CLAUDE.md`. If agreed, add an `@`-import of the synthesis file
-(e.g. `@/Users/jake/Dropbox/code/claude-projects-memory/JAKE.md`) so it loads
+via the stable `@~/.claude/JAKE.md` path — dotfiles' `install.sh` links that to
+`<personal code dir>/claude-projects-memory/JAKE.md` — so it loads
 automatically in every future Claude Code session, with a short note that it's
 background context (not instructions), regenerated periodically, and that live
 project-specific memory or direct confirmation should win over it for anything

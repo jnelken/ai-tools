@@ -1,6 +1,6 @@
 ---
 name: wrapup-repos
-description: Wrap up in-progress work in one local repo under ~/Dropbox/code — pick the dirtiest/most-recently-touched repo, finish obvious low-risk loose ends, run the quick verify, commit on the current branch, and record decisions, ticket candidates, and code-state notes in the repo's `.claude/IN_PROGRESS.md`. Use on-demand ("/wrapup-repos", "wrap up my repos", "tidy my in-progress work") or via the scheduled off-peak launchd job. Safe by design: never pushes, never force/destructive, never commits secrets or build junk.
+description: Wrap up in-progress work in one local repo under the personal code dir — pick the dirtiest/most-recently-touched repo, finish obvious low-risk loose ends, run the quick verify, commit on the current branch, and record decisions, ticket candidates, and code-state notes in the repo's `.claude/IN_PROGRESS.md`. Use on-demand ("/wrapup-repos", "wrap up my repos", "tidy my in-progress work") or via the scheduled off-peak launchd job. Safe by design: never pushes, never force/destructive, never commits secrets or build junk.
 ---
 
 # Wrap up in-progress repo work
@@ -9,7 +9,9 @@ Advance ONE local repo's in-progress work to a clean, committed, well-documented
 the user a short list of decisions to make when they return. The user's time is the scarce
 resource: do the obvious, low-risk implementation work; hand back only the judgment calls.
 
-Candidate repos are the direct children of `/Users/jake/Dropbox/code`.
+Candidate repos are the direct children of the personal code dir, `CODE_DIR=$(~/.ai-tools/bin/personal-code-dir)`
+(`~/Dropbox/code` on the personal Mac). If it exits non-zero, this machine has no personal repos —
+stop; never fall back to `~/code`, which holds work checkouts.
 
 ## Two ways this runs
 - **On-demand (interactive):** the user invoked you directly. If they named a specific repo or
@@ -49,9 +51,9 @@ Candidate repos are the direct children of `/Users/jake/Dropbox/code`.
 
 ## Step 1 — Select ONE repo
 
-First build the **eligible** set: every git repo directly under `/Users/jake/Dropbox/code`, MINUS
+First build the **eligible** set: every git repo directly under `$CODE_DIR`, MINUS
 any repo the user has disabled. A repo is disabled (skip it entirely) if EITHER:
-- its name matches an uncommented line in `/Users/jake/Dropbox/code/.wrapup-ignore` (one
+- its name matches an uncommented line in `$CODE_DIR/.wrapup-ignore` (one
   name or glob per line; `#` starts a comment; leading/trailing whitespace ignored), OR
 - a `.nowrapup` file exists at the repo root (portable per-repo opt-out that travels with the repo).
 
@@ -74,7 +76,7 @@ Candidate set = repos whose `recency` is within the last **14 days**. Among cand
 
 Select exactly ONE repo. (You MAY do a second only if the first finishes fast and you have clear
 time budget — otherwise stop at one.) If NO repo was modified in the last 14 days, append a
-one-line timestamped note to `/Users/jake/Dropbox/code/.wrapup-idle.log` and stop.
+one-line timestamped note to `$CODE_DIR/.wrapup-idle.log` and stop.
 
 ## Step 2 — Understand the in-progress work AND the direction
 

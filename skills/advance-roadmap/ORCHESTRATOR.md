@@ -90,17 +90,17 @@ ledger writes happen with write tools — put everything they need in this JSON.
 
 ## Step 0 — Read run memory, then reconcile the previous run
 
-Read `/Users/jake/.claude/projects/-Users-jake-Dropbox-code/memory/project_advance-roadmap-runs.md`
+Read `$(~/.ai-tools/bin/personal-code-dir --memory-dir)/project_advance-roadmap-runs.md`
 if it exists. It records which repos had actionable roadmap content on prior runs, what was shipped,
 and what was deliberately skipped. Check the repo it names first — it's the cheapest lead you have.
 It is a hint, not a constraint: if that repo no longer qualifies, move on without ceremony.
 
-(Headless runs use `/Users/jake/Dropbox/code` as cwd, which is why that memory directory is the
-right one. Don't guess a different path.)
+(Headless runs use the personal code dir — `$CODE_DIR`, from `~/.ai-tools/bin/personal-code-dir` — as cwd, which is why
+that memory directory is the right one. Don't guess a different path.)
 
 ### A pending plan exists
 
-`/Users/jake/Dropbox/code/.advance-roadmap/pending-plan.json` holds the last dispatch decision whose
+`$CODE_DIR/.advance-roadmap/pending-plan.json` holds the last dispatch decision whose
 worker never settled it (crash, limit, kill). `run.sh` reuses it without calling you when it is
 fresh (<36h), has been retried fewer than twice, and its repo is still safe — so if you are running
 and the file exists, `run.sh` declined it; the log line `pending plan: not reusing (…)` says why.
@@ -112,7 +112,7 @@ qualifies rather than re-deriving triage from scratch. Never edit or delete it �
 When the last run found no work and its bookkeeping landed, `run.sh` stores that verdict with a
 fingerprint of everything it was derived from (each repo's HEAD, branches, working tree and
 `.claude-sessions`; the Linear snapshot; the allowlist; these skill docs) in
-`/Users/jake/Dropbox/code/.advance-roadmap/last-verdict.json`. If nothing moved, the run is skipped
+`$CODE_DIR/.advance-roadmap/last-verdict.json`. If nothing moved, the run is skipped
 before you start (`skipping — verdict: nothing changed since …`, no run header — a gate skip, not
 an interruption). The verdict is re-derived in full at least every 24h regardless.
 
@@ -240,7 +240,7 @@ may dispatch. Rank changes queue order, not eligibility: every repo safety gate 
 rule still applies. If the top candidate is blocked, record/comment the blocker normally and
 continue to the next candidate in rank order.
 
-For each direct child of `/Users/jake/Dropbox/code` that is a git repo, in that order:
+For each direct child of `$CODE_DIR` that is a git repo, in that order:
 
 1. Skip it if `.noroadmap` exists at the root.
 2. Skip it unless `origin` is a `jnelken/*` repo.
@@ -454,7 +454,7 @@ an issue exists somewhere; read both, then pick one item by the prefer/skip rule
   for Jake, not a triage gate; the worker clears it back to `Todo` the moment it actually proceeds
   (WORKER.md Step 2b, point 4).
 - **The repo comes from the `repo` label.** The workspace carries a `repo` label group with one
-  child per directory under `~/Dropbox/code` — `repo/mailcruxh`, `repo/typey.site`, and so on.
+  child per directory under `$CODE_DIR` — `repo/mailcruxh`, `repo/typey.site`, and so on.
   Being a group, it's single-select: one repo per issue.
 - **You are the enforcement.** Linear has no custom fields, and required fields are a Jira concept
   Linear deliberately doesn't implement, so nothing stops an issue being filed without the label.

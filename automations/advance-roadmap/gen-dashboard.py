@@ -31,13 +31,31 @@ import sys
 from datetime import datetime, timedelta
 from pathlib import Path
 
+def _personal_code_dir_module():
+    """ai-tools' lib/personal_code_dir.py is the one place that decides where the
+    personal repos live; find it from this file's real (symlink-resolved) location."""
+    d = os.path.dirname(os.path.realpath(__file__))
+    while d != os.path.dirname(d) and not os.path.isfile(os.path.join(d, "lib", "personal_code_dir.py")):
+        d = os.path.dirname(d)
+    if d == os.path.dirname(d):  # a copy outside the repo (e.g. a test root): use the deploy clone
+        d = os.environ.get("AI_TOOLS_HOME", os.path.expanduser("~/.ai-tools"))
+    sys.path.insert(0, os.path.join(d, "lib"))
+    import personal_code_dir
+    return personal_code_dir
+
+
 HOME = os.path.expanduser("~")
 ROOT = os.environ.get("ADVANCE_ROADMAP_ROOT", os.path.join(HOME, ".claude/automations/advance-roadmap"))
 LOGDIR = os.path.join(ROOT, "logs")
 CACHE = os.path.join(ROOT, "ledger-cache.json")
 OUT = os.path.join(ROOT, "dashboard.html")
-CODE_DIR = os.path.join(HOME, "Dropbox/code")
-MEMORY = os.path.join(HOME, ".claude/projects/-Users-jake-Dropbox-code/memory/project_advance-roadmap-runs.md")
+_pcd = _personal_code_dir_module()
+CODE_DIR = _pcd.code_dir()
+if not CODE_DIR:
+    print("gen-dashboard: no personal code dir on this machine (set PERSONAL_CODE_DIR) — nothing to show.")
+    sys.exit(0)
+# Headless runs use CODE_DIR as cwd, so this is that project's memory dir.
+MEMORY = os.path.join(_pcd.memory_dir(CODE_DIR), "project_advance-roadmap-runs.md")
 USAGE = os.path.join(HOME, ".claude/state/claude-usage.json")
 PROVIDERS_USAGE = os.path.join(ROOT, "providers-usage.json")
 RUNS_JSONL = os.path.join(ROOT, "runs.jsonl")

@@ -2,7 +2,7 @@
 """Create and label issues in the personal `jnelken` Linear workspace (team Dev).
 
 Every Dev issue must carry exactly one `repo/<directory>` label — advance-roadmap
-reads it to decide which checkout under ~/Dropbox/code to write code in. This
+reads it to decide which checkout under the personal code dir to write code in. This
 script is the only sanctioned way to create one, so the label can't be skipped:
 
   jlin.py new --title T [--repo DIR] [--description TEXT | --description-file F]
@@ -22,7 +22,7 @@ script is the only sanctioned way to create one, so the label can't be skipped:
   jlin.py repos
       Directory → label mapping, including directories with no label yet.
 
-Talks to Linear only through `linear api` (LINEAR_API_TOKEN), never MCP.
+Talks to Linear only through `linear api` (the CLI's stored credential), never MCP.
 """
 import argparse
 import json
@@ -31,7 +31,20 @@ import re
 import subprocess
 import sys
 
-CODE_DIR = os.environ.get("JLIN_CODE_DIR", os.path.expanduser("~/Dropbox/code"))
+def _personal_code_dir_module():
+    """ai-tools' lib/personal_code_dir.py is the one place that decides where the
+    personal repos live; find it from this file's real (symlink-resolved) location."""
+    d = os.path.dirname(os.path.realpath(__file__))
+    while d != os.path.dirname(d) and not os.path.isfile(os.path.join(d, "lib", "personal_code_dir.py")):
+        d = os.path.dirname(d)
+    if d == os.path.dirname(d):  # a copy outside the repo (e.g. a test root): use the deploy clone
+        d = os.environ.get("AI_TOOLS_HOME", os.path.expanduser("~/.ai-tools"))
+    sys.path.insert(0, os.path.join(d, "lib"))
+    import personal_code_dir
+    return personal_code_dir
+
+
+CODE_DIR = _personal_code_dir_module().code_dir(legacy_env="JLIN_CODE_DIR") or ""
 TEAM_KEY = "DEV"
 REPO_GROUP = "repo"
 # CLI name -> (Linear state name, state type). Match by name first: the team has more than one
@@ -148,7 +161,8 @@ def resolve_dir(repo):
     for d in dirs:
         if dir_key(d) == repo:
             return d
-    sys.exit(f"no directory {repo!r} under {CODE_DIR}. Every Dev issue needs a repo — "
+    sys.exit(f"no directory {repo!r} under {CODE_DIR or 'a personal code dir (none on this machine; set PERSONAL_CODE_DIR)'}. "
+             "Every Dev issue needs a repo — "
              "ask Jake which one (or whether it needs a new repo) instead of guessing.")
 
 

@@ -7,7 +7,7 @@ description: Flush every open Chrome tab through the chrome-tab-org extension, t
 
 The AI half of [[chrome-tab-org]]. The extension closes tabs and writes a JSONL log; **this skill
 is the "separate, later AI pass" that log was always designed to feed** — see
-`~/Dropbox/code/chrome-tab-org/docs/plans/chrome-tab-organizer.md` for why the analysis
+`$(~/.ai-tools/bin/personal-code-dir --repo chrome-tab-org)/docs/plans/chrome-tab-organizer.md` for why the analysis
 deliberately lives out here instead of inside the extension (short version: doing it in-extension
 meant a pasted API key, and neither Anthropic's nor Notion's OAuth actually solves that).
 
@@ -32,7 +32,7 @@ Check `~/Downloads/tab-organizer-logs/`.
 try to do it yourself, `chrome://extensions` is not agent-reachable:
 
 1. `chrome://extensions` → toggle **Developer mode** (top right)
-2. **Load unpacked** → `/Users/jake/Dropbox/code/chrome-tab-org`
+2. **Load unpacked** → the `chrome-tab-org` checkout (`~/.ai-tools/bin/personal-code-dir --repo chrome-tab-org`)
 3. Click the toolbar icon to open the side panel
 
 **Then, either way**, ask him to flush:
@@ -59,7 +59,7 @@ ls -t ~/Downloads/tab-organizer-logs/*/tab-log-*.jsonl | head -1
 ```
 
 **The guard is idempotence, not recency.** Grep the capture-doc directory
-(`~/Dropbox/code/chrome-tab-org/docs/captures/`) for that filename. If it's already recorded there,
+(`$(~/.ai-tools/bin/personal-code-dir --repo chrome-tab-org)/docs/captures/`) for that filename. If it's already recorded there,
 this batch has been triaged — say so and stop, rather than re-filing every task a second time.
 
 Do *not* reject a log for being older than this session. "I flushed twenty minutes ago, triage it
@@ -138,7 +138,7 @@ set `dismissed`, never `bucket`, and never something you write for him.
 
 ## 5. Write the capture doc
 
-`~/Dropbox/code/chrome-tab-org/docs/captures/<YYYY-MM-DD>-<slug>.md`. The slug comes from Jake's
+`<chrome-tab-org checkout>/docs/captures/<YYYY-MM-DD>-<slug>.md`. The slug comes from Jake's
 note, or the dominant group name, or just `flush`.
 
 ```markdown

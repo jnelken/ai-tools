@@ -8,7 +8,7 @@ TMP="$(mktemp -d "${TMPDIR:-/tmp}/advance-roadmap-record-test.XXXXXX")"
 trap 'rm -rf "$TMP"' EXIT INT TERM
 
 ROOT="$TMP/root"; SKILLS="$TMP/skills"; BIN="$TMP/bin"
-mkdir -p "$ROOT/lib" "$SKILLS" "$BIN"
+mkdir -p "$ROOT/lib" "$SKILLS" "$BIN" "$TMP/code"
 cp "$HERE/run.sh" "$HERE/worker.sh" "$ROOT/"
 cp "$HERE/lib/runrecord.py" "$ROOT/lib/"
 for f in ORCHESTRATOR.md SAFETY.md WORKER.md; do echo stub > "$SKILLS/$f"; done
@@ -63,7 +63,7 @@ grep -q '^(raw JSON, no fence) to: ' "$ROOT/worker.sh" || { echo "FAIL: prompt f
 
 run() {
   env -u SLACK_CCUSAGE_WEBHOOK_URL -u ADVANCE_ROADMAP_SLACK_WEBHOOK \
-    ADVANCE_ROADMAP_SLACKAGENT_DIR="$TMP/no-slackagent" \
+    ADVANCE_ROADMAP_SLACKAGENT_DIR="$TMP/no-slackagent" PERSONAL_CODE_DIR="$TMP/code" \
     ADVANCE_ROADMAP_ROOT="$ROOT" ADVANCE_ROADMAP_SKILL_DIR="$SKILLS" \
     ADVANCE_ROADMAP_SECRETS=/dev/null ADVANCE_ROADMAP_NOTIFY=0 \
     ADVANCE_ROADMAP_CODEX_BIN="$BIN/codex" ADVANCE_ROADMAP_AGENT_BIN="$BIN/agent" \

@@ -11,7 +11,10 @@
 set -u
 
 ROOT="${ADVANCE_ROADMAP_ROOT:-/Users/jake/.claude/automations/advance-roadmap}"
-CODE_DIR="/Users/jake/Dropbox/code"
+# Where the personal repos live differs by machine; ai-tools' personal-code-dir
+# decides (never ~/code, which holds work checkouts). Unresolved = nothing to do.
+CODE_DIR="${PERSONAL_CODE_DIR:-$("$(cd -P "$(dirname "$0")/../.." && pwd)/bin/personal-code-dir" 2>/dev/null)}" || CODE_DIR=""
+[ -n "$CODE_DIR" ] || { echo "worker: no personal code dir on this machine (set PERSONAL_CODE_DIR)" >&2; exit 1; }
 SKILL_DIR="${ADVANCE_ROADMAP_SKILL_DIR:-/Users/jake/.claude/skills/advance-roadmap}"
 USAGE_PY="$ROOT/lib/usage.py"
 REVIEW_SH="$ROOT/review.sh"

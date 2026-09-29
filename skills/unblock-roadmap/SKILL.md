@@ -1,6 +1,6 @@
 ---
 name: unblock-roadmap
-description: Interactive-only sweep across every personal repo under ~/Dropbox/code that is currently blocked from advance-roadmap — a dirty working tree, a `Needs Input` Linear ticket, or open "decisions needed" questions — and asks Jake how to resolve each one, one repo at a time. Writes no code and runs no git: it persists each answer immediately as a `## Directive` section on that repo's Linear ticket (moving the ticket out of `Needs Input` when that's what was gating it), and may record the answer in the repo's own markdown (ROADMAP.md, docs/plans/, IN_PROGRESS.md), which a later /advance-roadmap run reads, commits, and acts on. Use on-demand ("/unblock-roadmap", "unblock the roadmap repos", "clear the roadmap blockers", "sweep the blocked repos"). Complementary to [[advance-roadmap]], never a replacement — this skill only asks and records; that one is the only thing that ever writes code, commits, or pushes.
+description: Interactive-only sweep across every personal repo under the personal code dir that is currently blocked from advance-roadmap — a dirty working tree, a `Needs Input` Linear ticket, or open "decisions needed" questions — and asks Jake how to resolve each one, one repo at a time. Writes no code and runs no git: it persists each answer immediately as a `## Directive` section on that repo's Linear ticket (moving the ticket out of `Needs Input` when that's what was gating it), and may record the answer in the repo's own markdown (ROADMAP.md, docs/plans/, IN_PROGRESS.md), which a later /advance-roadmap run reads, commits, and acts on. Use on-demand ("/unblock-roadmap", "unblock the roadmap repos", "clear the roadmap blockers", "sweep the blocked repos"). Complementary to [[advance-roadmap]], never a replacement — this skill only asks and records; that one is the only thing that ever writes code, commits, or pushes.
 ---
 
 # Unblock the roadmap
@@ -279,7 +279,7 @@ observation, not hypothetical — would never appear in a memory-first sweep. Di
 instead; read memory only afterward, per repo, to add context ("dirty for the Nth run
 running") to what you show Jake.
 
-For each direct child of `/Users/jake/Dropbox/code`:
+For each direct child of `$(~/.ai-tools/bin/personal-code-dir)` (non-zero exit: no personal repos on this machine — stop):
 
 1. Skip if not a git repo (no `.git`), or if `.git` is a **file** (a linked worktree of a
    repo already in the list).

@@ -46,6 +46,7 @@ run_case() {
   local provider="$1" request="$2" expected="$3"
   local capture="$TMP_ROOT/$provider-${request:t}.prompt"
   CAPTURE="$capture" \
+  PERSONAL_CODE_DIR="$TMP_ROOT" \
   ADVANCE_ROADMAP_ROOT="$TMP_ROOT/root" \
   ADVANCE_ROADMAP_SKILL_DIR="$SKILL_DIR" \
   ADVANCE_ROADMAP_AGENT_BIN="$TMP_ROOT/bin/agent" \

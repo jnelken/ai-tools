@@ -12,7 +12,7 @@
 
 set -u  # NOT -e
 
-CODE_DIR="${HYGIENE_CODE_DIR:-$HOME/Dropbox/code}"
+CODE_DIR=""  # resolved below, once the script's real location is known
 REPORT="${HYGIENE_REPORT:-$HOME/.claude/HYGIENE.md}"
 TTL_HOURS="${HYGIENE_REPORT_TTL_HOURS:-24}"
 
@@ -25,11 +25,12 @@ while [ -L "$_src" ]; do
   case "$_src" in /*) ;; *) _src="$_dir/$_src" ;; esac
 done
 LIB="$(cd -P "$(dirname "$_src")" 2>/dev/null && pwd)/lib/hygiene-checks.sh"
+CODE_DIR="$("$(cd -P "$(dirname "$_src")/.." 2>/dev/null && pwd)/bin/personal-code-dir" --legacy-env HYGIENE_CODE_DIR 2>/dev/null)" || CODE_DIR=""
 [ -r "$LIB" ] || exit 0
 # shellcheck source=lib/hygiene-checks.sh
 . "$LIB" || exit 0
 
-# Personal machines only. ~/Dropbox/code syncs to the work laptop, so the
+# Personal machines only. The personal code dir can sync to the work laptop, so the
 # directory existing there says nothing — without this the full ~6s scan would
 # fire on every work session for repos the hygiene system doesn't govern.
 # Shared predicate with dotfiles/install.sh; absent guard = assume personal.

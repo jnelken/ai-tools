@@ -1,10 +1,17 @@
 #!/bin/zsh
 # Off-peak repo wrap-up — launched by launchd (com.jake.wrapup-repos).
-# Runs claude headless over ~/Dropbox/code. Safe to run manually to test.
+# Runs claude headless over the personal code dir. Safe to run manually to test.
 set -u
 
 ROOT="/Users/jake/.claude/automations/wrapup-repos"
-CODE_DIR="/Users/jake/Dropbox/code"
+# Where the personal repos live differs by machine; ai-tools' personal-code-dir
+# decides (never ~/code, which holds work checkouts). Unresolved = nothing to do.
+CODE_DIR="${PERSONAL_CODE_DIR:-$("$(cd -P "$(dirname "$0")/../.." && pwd)/bin/personal-code-dir" 2>/dev/null)}" || CODE_DIR=""
+if [ -z "$CODE_DIR" ]; then
+  echo "wrapup-repos: no personal code dir on this machine (set PERSONAL_CODE_DIR) — nothing to do."
+  exit 0
+fi
+export PERSONAL_CODE_DIR="$CODE_DIR"
 CLAUDE="/Users/jake/.local/bin/claude"
 MODEL="claude-sonnet-5"          # change to claude-opus-4-8 for max quality (higher quota cost)
 

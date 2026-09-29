@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Generate a self-contained dashboard.html for the wrapup-repos automation.
 
-Scans run logs, (auto) commits across ~/Dropbox/code, and .claude/IN_PROGRESS.md files,
+Scans run logs, (auto) commits across the personal code dir, and .claude/IN_PROGRESS.md files,
 and writes a single static HTML file (data baked in — safe to open via file://).
 Run manually or let run.sh call it after each run.
 """
@@ -11,12 +11,29 @@ import html
 import os
 import re
 import subprocess
+import sys
 from datetime import datetime, timezone
+
+def _personal_code_dir_module():
+    """ai-tools' lib/personal_code_dir.py is the one place that decides where the
+    personal repos live; find it from this file's real (symlink-resolved) location."""
+    d = os.path.dirname(os.path.realpath(__file__))
+    while d != os.path.dirname(d) and not os.path.isfile(os.path.join(d, "lib", "personal_code_dir.py")):
+        d = os.path.dirname(d)
+    if d == os.path.dirname(d):  # a copy outside the repo (e.g. a test root): use the deploy clone
+        d = os.environ.get("AI_TOOLS_HOME", os.path.expanduser("~/.ai-tools"))
+    sys.path.insert(0, os.path.join(d, "lib"))
+    import personal_code_dir
+    return personal_code_dir
+
 
 HOME = os.path.expanduser("~")
 ROOT = os.path.join(HOME, ".claude/automations/wrapup-repos")
 LOGDIR = os.path.join(ROOT, "logs")
-CODE_DIR = os.path.join(HOME, "Dropbox/code")
+CODE_DIR = _personal_code_dir_module().code_dir()
+if not CODE_DIR:
+    print("gen-dashboard: no personal code dir on this machine (set PERSONAL_CODE_DIR) — nothing to show.")
+    sys.exit(0)
 OUT = os.path.join(ROOT, "dashboard.html")
 
 HEADER_RE = re.compile(r"run (\d{8}-\d{6}) \((.*?)\)")
@@ -199,7 +216,7 @@ def build():
             f'<span class="badge off">{esc(name)} <span class=dim>· {esc(reason)}</span></span>'
             for name, reason in disabled)
     else:
-        disabled_html = '<p class=dim>None — all repos eligible. Edit <code>~/Dropbox/code/.wrapup-ignore</code> to disable some.</p>'
+        disabled_html = f'<p class=dim>None — all repos eligible. Edit <code>{html.escape(os.path.join(CODE_DIR, ".wrapup-ignore"))}</code> to disable some.</p>'
 
     last_line = (f'{badge(last["exit"])} &nbsp;<span class=mono>{esc(last["when"])}</span> &nbsp;'
                  f'{esc(last["repo"])}' if last else '<span class=dim>no runs yet</span>')
@@ -207,7 +224,7 @@ def build():
     return TEMPLATE.format(
         gen=esc(gen), total=total, ok=ok, failed=failed, last_line=last_line,
         run_rows=run_rows, commit_html=commit_html, steps_html=steps_html, idle_html=idle_html,
-        disabled_html=disabled_html,
+        disabled_html=disabled_html, ignore_file=esc(os.path.join(CODE_DIR, ".wrapup-ignore")),
     )
 
 
@@ -290,7 +307,7 @@ TEMPLATE = """<!doctype html>
   <h2>Automated commits</h2>
   <div class=cards>{commit_html}</div>
 
-  <h2>Disabled repos <span class="dim" style="text-transform:none;letter-spacing:0">(toggle in ~/Dropbox/code/.wrapup-ignore)</span></h2>
+  <h2>Disabled repos <span class="dim" style="text-transform:none;letter-spacing:0">(toggle in {ignore_file})</span></h2>
   {disabled_html}
 
   <h2>Idle runs (nothing recent to do)</h2>

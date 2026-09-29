@@ -6,7 +6,7 @@ dispatches then dies (limit, crash, launchd kill), the next run used to re-plan
 from scratch. This file keeps the plan so the next run can hand it straight to a
 worker instead.
 
-It lives in the code parent (``~/Dropbox/code/.advance-roadmap/``), not under
+It lives in the code parent (``<personal code dir>/.advance-roadmap/``), not under
 ``~/.claude``: the plan belongs to the repos, whichever provider orchestrates
 them. That parent is not a git checkout, so the file never dirties a repo.
 
@@ -22,7 +22,22 @@ import subprocess
 import sys
 from datetime import datetime, timedelta
 
-CODE_DIR = "/Users/jake/Dropbox/code"
+def _personal_code_dir_module():
+    """ai-tools' lib/personal_code_dir.py is the one place that decides where the
+    personal repos live; find it from this file's real (symlink-resolved) location."""
+    d = os.path.dirname(os.path.realpath(__file__))
+    while d != os.path.dirname(d) and not os.path.isfile(os.path.join(d, "lib", "personal_code_dir.py")):
+        d = os.path.dirname(d)
+    if d == os.path.dirname(d):  # a copy outside the repo (e.g. a test root): use the deploy clone
+        d = os.environ.get("AI_TOOLS_HOME", os.path.expanduser("~/.ai-tools"))
+    sys.path.insert(0, os.path.join(d, "lib"))
+    import personal_code_dir
+    return personal_code_dir
+
+
+CODE_DIR = _personal_code_dir_module().code_dir()
+if not CODE_DIR:
+    sys.exit("pendingplan: no personal code dir on this machine (set PERSONAL_CODE_DIR)")
 PREFLIGHT = os.path.expanduser("~/dotfiles/bin/git-safe-to-autocommit")
 DISPATCH_ACTIONS = {"dispatch_worker", "resume_worker"}
 # A worker that reports one of these made no durable progress; keep the plan.

@@ -20,7 +20,7 @@ makes the deploy clone dirty.
 
 Every 2 hours (1:45am, 3:45am … 11:45pm local time — see **Cadence** below),
 picks a personal repo under
-`~/Dropbox/code` whose `ROADMAP.md` has real planned work, ships exactly ONE item on a
+the personal code dir (`bin/personal-code-dir`; `~/Dropbox/code` on the personal Mac) whose `ROADMAP.md` has real planned work, ships exactly ONE item on a
 branch, verifies with the repo's own `npm test` / `npm run build`, moves the item to Shipped,
 then merges to `main` locally and **pushes**. No PR.
 
@@ -199,7 +199,7 @@ Limitations:
 ## `wrapup-repos`
 
 Off-peak, weekly (Sunday 2:45am local time), picks the dirtiest/most-recently
-touched repo under `~/Dropbox/code`, finishes obvious low-risk loose ends, commits a WIP,
+touched repo under the personal code dir, finishes obvious low-risk loose ends, commits a WIP,
 and reconciles its decisions, ticket candidates, and code-state notes into that repo's
 `.claude/IN_PROGRESS.md`. Single source of truth for the actual workflow is the
 [`wrapup-repos`](../skills/wrapup-repos/SKILL.md) skill — `run.sh` just invokes
@@ -208,5 +208,5 @@ and reconciles its decisions, ticket candidates, and code-state notes into that 
 
 After each run, `run.sh` also regenerates `~/.claude/automations/wrapup-repos/dashboard.html`
 via `gen-dashboard.py` — a self-contained (file://-safe) status page covering run history,
-open `.claude/IN_PROGRESS.md` items, `(auto)` commits, and disabled repos across `~/Dropbox/code`.
+open `.claude/IN_PROGRESS.md` items, `(auto)` commits, and disabled repos across the personal code dir.
 Open it directly in a browser to check the automation's state without digging through logs.

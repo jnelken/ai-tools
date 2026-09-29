@@ -1,12 +1,12 @@
 ---
 name: jnelken-linear
-description: Create or relabel an issue in Jake's personal Linear workspace (`jnelken`, team Dev, keys DEV-*) — the only sanctioned way to file one, because it refuses to create an issue without a `repo/<directory>` label and infers that label from the checkout you're in. Use whenever filing a ticket about a personal repo under ~/Dropbox/code, capturing an idea or bug for one of Jake's side projects, fixing an issue that's missing its repo label, or when advance-roadmap reports "has no repo/* label". Not for Concentro (CON-*) tickets — those use [[linear-ticket-gen]].
+description: Create or relabel an issue in Jake's personal Linear workspace (`jnelken`, team Dev, keys DEV-*) — the only sanctioned way to file one, because it refuses to create an issue without a `repo/<directory>` label and infers that label from the checkout you're in. Use whenever filing a ticket about a personal repo under the personal code dir, capturing an idea or bug for one of Jake's side projects, fixing an issue that's missing its repo label, or when advance-roadmap reports "has no repo/* label". Not for Concentro (CON-*) tickets — those use [[linear-ticket-gen]].
 ---
 
 # Filing jnelken Linear issues
 
 Every Dev issue carries exactly one `repo/<directory>` label. [[advance-roadmap]] reads it to decide
-which checkout under `~/Dropbox/code` to write code in and push, so:
+which checkout under the personal code dir (`~/.ai-tools/bin/personal-code-dir`) to write code in and push, so:
 
 - **no label** → the issue is invisible to automation (it sits as a "which repository?" blocker);
 - **wrong label** → code gets pushed to the wrong repo.
@@ -18,12 +18,12 @@ agent that didn't know this filed eight unlabeled issues in one sitting.
 ## Create
 
 ```bash
-cd ~/Dropbox/code/<repo>          # repo is inferred from the checkout you're in
+cd "$(~/.ai-tools/bin/personal-code-dir)/<repo>"   # repo is inferred from the checkout you're in
 python3 ~/.claude/skills/jnelken-linear/jlin.py new --title "Imperative title" \
   --description-file /path/to/body.md [--priority 1-4] [--state backlog|todo]
 ```
 
-Outside a checkout, pass `--repo <directory>` (a directory name under `~/Dropbox/code`, or its label
+Outside a checkout, pass `--repo <directory>` (a directory name under the personal code dir, or its label
 name). Always `--dry-run` first when unsure — it prints the payload, including which label it chose.
 
 - **Repo unknown?** Ask Jake. `jlin.py` exits rather than filing, on purpose. Don't pick the "closest"

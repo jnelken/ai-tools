@@ -1,6 +1,6 @@
 ---
 name: kosha-triage
-description: Migrate stale ClickUp captures into the markdown vault at ~/Dropbox/code/knowledge-vault and delete the originals. Use when triaging, migrating, consolidating, or distilling ClickUp tasks — especially Memos, Backlog, or Someday — into vault records, or when Jake says "clean up my inbox", "what's in Memos", "distill these", "migrate the backlog", or asks where an old capture should live. Also use for any end-of-session distill that needs routing into bija / manana / pariksha / smriti / shruti. Read this before reading any ClickUp task you intend to consolidate or delete — partial metadata reads lose data silently.
+description: Migrate stale ClickUp captures into the markdown vault (the `knowledge-vault` repo) and delete the originals. Use when triaging, migrating, consolidating, or distilling ClickUp tasks — especially Memos, Backlog, or Someday — into vault records, or when Jake says "clean up my inbox", "what's in Memos", "distill these", "migrate the backlog", or asks where an old capture should live. Also use for any end-of-session distill that needs routing into bija / manana / pariksha / smriti / shruti. Read this before reading any ClickUp task you intend to consolidate or delete — partial metadata reads lose data silently.
 ---
 
 # kosha-triage
@@ -22,7 +22,7 @@ a task until the vault file has been read back.
 
 ## The vault
 
-`~/Dropbox/code/knowledge-vault/kosha/`
+`$(~/.ai-tools/bin/personal-code-dir --repo knowledge-vault)/kosha/`
 
 ```
 bija/        बीज — seeds. Raw jots, not yet routed
@@ -101,7 +101,7 @@ a record whose section counts don't match its contents:
 
 ```bash
 export CLICKUP_TOKEN=pk_...
-python3 ~/Dropbox/code/knowledge-vault/scripts/clickup_dump.py \
+python3 "$(~/.ai-tools/bin/personal-code-dir --repo knowledge-vault)/scripts/clickup_dump.py" \
   --list 900501279116 --md -o /tmp/memos.md
 ```
 
