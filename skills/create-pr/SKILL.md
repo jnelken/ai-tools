@@ -1,6 +1,6 @@
 ---
 name: create-pr
-description: Generate a dead-simple PR title/body from the net diff vs base, backfill a Linear ticket, and open the PR as a draft (or update an existing one). Use when the user wants to open a PR from the current branch, e.g. "create a PR", "open a PR for this", "push this and make a PR". Preserves an existing non-empty PR body — only normalizes the title. For force-rewriting an existing description instead, see [[refresh-pr]].
+description: Generate a dead-simple PR title/body from the net diff vs base, backfill a Linear ticket, and open the PR as a draft by default; `draft=false` opens it ready (or update an existing one). Use when the user wants to open a PR from the current branch, e.g. "create a PR", "open a PR for this", "push this and make a PR". Preserves an existing non-empty PR body — only normalizes the title. For force-rewriting an existing description instead, see [[refresh-pr]].
 ---
 
 # Create PR
@@ -10,14 +10,17 @@ description: Generate a dead-simple PR title/body from the net diff vs base, bac
 
 ## Overview
 
-Push the current branch, generate (or preserve) a minimal PR description, backfill a Linear ticket, and open the PR **as a draft**. New PRs start as drafts on purpose — the Post-PR Workflow (in the user's global CLAUDE.md) marks them ready and badges the description once the PR has actually been shared to Slack. Don't undraft or badge here; that's a different step's job.
+Push the current branch, generate (or preserve) a minimal PR description, backfill a Linear ticket, and open the PR **as a draft** (override with `draft=false`). New PRs start as drafts by default, on purpose — the Post-PR Workflow (in the user's global CLAUDE.md) marks them ready and badges the description once the PR has actually been shared to Slack. Don't undraft or badge here; that's a different step's job.
 
 ## Invocation
 
 ```
 /create-pr                        # PR into the repo's default branch
 /create-pr base=feature/<slug>    # sub-PR into a trunk branch (stacked PR)
+/create-pr draft=false            # open ready-for-review instead of as a draft
 ```
+
+`draft=<true|false>` (default `true`) sets the state the PR is created in. Honor `draft=false` only when explicitly passed; otherwise always draft. Options combine (`base=… draft=false`).
 
 `base=<branch>` sets the PR's base for both the net diff and `gh pr create --base`. Without it, the base is the default branch unless step 1's auto-detection finds a trunk the branch was cut from.
 
@@ -56,7 +59,7 @@ Before anything else, collect:
    - **Body**: follow the **PR Descriptions** format in the user's global CLAUDE.md (`~/.claude/CLAUDE.md`) exactly — that doc is the single source of truth for section shape, skimmability rules, and what to omit. Don't duplicate that guidance here; read it fresh each time in case it's changed.
    - No `🤖 Generated with` footer.
 7. Push the branch to origin if not already pushed (`git push -u origin <branch>`). **Before pushing**, if the current branch equals the base branch (e.g. you're on `main`/`master` itself), STOP and confirm with the user — running a PR workflow from the base branch is almost certainly a mistake, and pushing could ship unintended work to production.
-8. If a PR exists with a non-empty body, only update the title: `gh pr edit --title "..."`. If a PR exists with an empty body, edit title and body. Otherwise create a new PR **as a draft**, passing `--base <base-branch>` whenever the base resolved in step 1 is not the default branch. `gh` rejects `--draft` combined with `--web` (`the --draft flag is not supported with --web`), so create it headless and open the browser as a separate step: `gh pr create --draft [--base <base-branch>] --title "..." --body "..."` then `gh pr view --web`.
+8. If a PR exists with a non-empty body, only update the title: `gh pr edit --title "..."`. If a PR exists with an empty body, edit title and body. Otherwise create a new PR — **as a draft** unless `draft=false` was passed (then omit `--draft`) — passing `--base <base-branch>` whenever the base resolved in step 1 is not the default branch. `gh` rejects `--draft` combined with `--web` (`the --draft flag is not supported with --web`), so create it headless and open the browser as a separate step: `gh pr create --draft [--base <base-branch>] --title "..." --body "..."` then `gh pr view --web`.
 9. Use a HEREDOC for the PR body to preserve formatting (body content per the global CLAUDE.md format resolved in step 6):
 
    ```bash
@@ -67,7 +70,8 @@ Before anything else, collect:
    gh pr view --web
    ```
 
-10. Output the PR URL (printed by `gh pr create`, or `gh pr view --json url -q .url`).
+10. **Verify the draft state matches the request** — `gh pr view --json isDraft -q .isDraft` should be `true` unless `draft=false` was passed. A repo wrapper (e.g. a `pr:create` script) that opens PRs itself may ignore `--draft`; if the state is wrong, fix it (`gh pr ready --undo` to draft, `gh pr ready` to undraft) and say so. This applies to an existing PR too: don't silently leave a PR in a state the caller didn't ask for.
+11. Output the PR URL (printed by `gh pr create`, or `gh pr view --json url -q .url`).
 
 ## Linear ticket backfill
 
