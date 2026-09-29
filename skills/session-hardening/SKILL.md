@@ -1,6 +1,6 @@
 ---
-name: tool-hardening
-description: Session retrospective (not monthly-retro). Turn friction and gaps hit while working in a session into concrete fixes that make the next session faster — a wrong or missing doc, skill or instruction, a hook or permission that misfired, flaky or slow tooling, a manual step done twice, an assumption traced to stale memory, or a mechanism the work just made dead. General counterpart to the Datadog Debugging Follow-ups (which owns observability gaps). Report-only when self-started by the CLAUDE.md trigger; when invoked by name it also applies provably safe, trivially reversible fixes, with everything else a numbered offer. Trigger phrases include "tool hardening", "harden this", "what slowed us down", "what would have made this easier", "session follow-ups", "what can we delete now", "retro this session".
+name: session-hardening
+description: Session retrospective (not monthly-retro). Turn friction and gaps hit while working in a session into concrete fixes that make the next session faster — a wrong or missing doc, skill or instruction, a hook or permission that misfired, flaky or slow tooling, a manual step done twice, an assumption traced to stale memory, or a mechanism the work just made dead. General counterpart to the Datadog Debugging Follow-ups (which owns observability gaps). Report-only when self-started by the CLAUDE.md trigger; when invoked by name it also applies provably safe, trivially reversible fixes, with everything else a numbered offer. Trigger phrases include "session hardening", "harden this", "what slowed us down", "what would have made this easier", "session follow-ups", "what can we delete now", "retro this session".
 ---
 
 # Session Hardening
@@ -21,12 +21,12 @@ A member of the session-retrospective class — see [`docs/session-retrospective
 ## Invocation
 
 ```
-/tool-hardening [<branch|PR number|"this session">]
+/session-hardening [<branch|PR number|"this session">]
 ```
 
 No argument: this session.
 
-**Invoked vs self-started.** The `## Session Retrospectives` section of `~/.claude/CLAUDE.md` self-starts the *note* — after a session that hit tooling friction, the gaps get written up without anyone asking. That self-started note is **report-only**: it never applies a change, because editing shared tooling is licensed by explicit invocation, not by a standing trigger. Reaching this skill by name unlocks steps 5–7. If you arrived here from the CLAUDE.md trigger rather than a `/tool-hardening` call, run steps 1–4, emit the findings, and stop.
+**Invoked vs self-started.** The `## Session Retrospectives` section of `~/.claude/CLAUDE.md` self-starts the *note* — after a session that hit tooling friction, the gaps get written up without anyone asking. That self-started note is **report-only**: it never applies a change, because editing shared tooling is licensed by explicit invocation, not by a standing trigger. Reaching this skill by name unlocks steps 5–7. If you arrived here from the CLAUDE.md trigger rather than a `/session-hardening` call, run steps 1–4, emit the findings, and stop.
 
 ## When NOT to use
 
@@ -92,7 +92,7 @@ One dated entry. Never rewrite prior entries. The log is local per machine and g
 ## Output format
 
 ```
-## Tool hardening — <session or work identifier>
+## Session hardening — <session or work identifier>
 
 Friction hit: <one sentence>
 
