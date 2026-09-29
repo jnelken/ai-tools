@@ -30,9 +30,9 @@ CODE_DIR="$("$(cd -P "$(dirname "$_src")/.." 2>/dev/null && pwd)/bin/personal-co
 # shellcheck source=lib/hygiene-checks.sh
 . "$LIB" || exit 0
 
-# Personal machines only. The personal code dir can sync to the work laptop, so the
-# directory existing there says nothing — without this the full ~6s scan would
-# fire on every work session for repos the hygiene system doesn't govern.
+# Personal machines only (OMEN, JXIV). The work laptop normally has no personal
+# code dir at all, but PERSONAL_CODE_DIR can point one anywhere — without this
+# the full ~6s scan would fire on work sessions for repos it doesn't govern.
 # Shared predicate with dotfiles/install.sh; absent guard = assume personal.
 GUARD="$HOME/dotfiles/bin/is-personal-machine"
 if [ -x "$GUARD" ] && ! "$GUARD"; then
