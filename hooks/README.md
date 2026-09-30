@@ -325,3 +325,13 @@ Two different handoff files can legitimately coexist in a repo under `~/Dropbox/
 ### Disabling
 
 Remove all three entries from `settings.json`.
+
+## model-router-pointer.sh
+
+A **SessionStart hook** that, when the session's cwd is inside the personal code dir (`personal-code-dir`; `~/Dropbox/code` on the personal machines), injects a one-line pointer to `~/.claude/MODEL_ROUTER.md` (the provider/model routing policy, tracked in `jnelken/dotfiles`). Silent everywhere else — Concentro repos, the work laptop, machines with no personal code dir. It points rather than inlining the file so the ~10k-char policy is only read if the agent actually delegates.
+
+Wire it in `~/.claude/settings.json` under `hooks.SessionStart`:
+
+```json
+{ "hooks": [ { "type": "command", "command": "bash \"$HOME/.claude/hooks/model-router-pointer.sh\"" } ] }
+```
