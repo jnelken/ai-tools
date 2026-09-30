@@ -81,6 +81,8 @@ Report every check: name, status, URL. Flag failures prominently with their URLs
 
 Checks reporting `NEUTRAL` or `SKIPPED` are not failures — Netlify's informational checks land this way routinely.
 
+**A green check is not always a green step.** In woodrow, the Unit Tests and Lint & Typecheck steps run with `continue-on-error`, so the check reports pass even when tests or lint fail. Read the step logs for the head commit (`gh run list --commit <sha>`, then `gh run view <id> --log`, grepping for the vitest `Tests`/`Test Files` summary, `✖ N problems`, and `error TS`). Failures the branch introduced gate like a red check. Errors that already exist on the base count as not introduced only after you compare error counts per file against the base (`git show origin/<base>:<file> | eslint --stdin --stdin-filename <file>`). Report them separately rather than silently passing them.
+
 A PR whose base is not the repo's default branch typically has *fewer* checks to watch, not zero — this repo's `unit-tests.yml` and `e2e-tests.yml` are both scoped to `pull_request: branches: [main]`, so a stacked PR only gets whatever workflows aren't main-restricted (e.g. a labeler). That's expected, not a red flag: don't wait for checks that structurally cannot run, and don't treat their absence as a gate failure. Rely on local verification (tests, typecheck) for the rest.
 
 ### 3.5. Check whether this PR is externally announceable

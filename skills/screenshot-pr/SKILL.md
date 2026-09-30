@@ -69,6 +69,8 @@ Send the user one short message proposing:
 
 Wait for confirmation. The user may correct the route, viewport, or setup steps.
 
+**Exception — running unattended.** When this skill runs inside `/post-pr` or another run the user already authorized to proceed without stopping, don't wait: pick the target yourself, state the route/viewport/setup and rationale in the final report, and carry on. A wrong pick costs one re-capture; blocking an unattended run costs the whole chain.
+
 ### Phase 3 — Wait for the deploy preview (or start localhost)
 
 **Default path (deploy preview):** confirm the Phase 1 `gh pr checks` output has a `netlify/partner-concentro/deploy-preview` entry in `SUCCESS`, then open `https://deploy-preview-<PR_NUMBER>.folio.concentro.io`. Never use the raw `deploy-preview-<N>--partner-concentro.netlify.app` host the check links to: the stage API's CORS allowlist admits only the `folio.concentro.io` alias, so sign-in there fails with "Login attempt timed out" (see the woodrow README, "Deploy Previews").
@@ -109,6 +111,17 @@ Why Playwright for the capture: it holds the app's test-user login and a control
 
 If any step fails, take a debug screenshot of the GitHub editor state, save it next to the original capture, and report what you saw — don't silently retry.
 
+#### Fallback — the Superset browser pane
+
+If the Claude-in-Chrome tab vanishes right after navigating to github.com (`No tab with given id …` or `No tab group exists` on the next call), a tab-routing extension has recreated it outside Claude-in-Chrome's group; retrying won't help. Use the Superset workspace's in-app browser instead, which holds its own GitHub session:
+
+1. `superset browser list --workspace "$SUPERSET_WORKSPACE_ID"` → a pane id (or `superset browser open --workspace … --url <PR_URL>`). Confirm the login with `superset browser eval --workspace … --pane … --code "document.querySelector('meta[name=user-login]')?.content"`.
+2. Run steps 3–4 above as one async IIFE through `superset browser eval --code "(async () => { … })()"` (it returns the IIFE's result). Stash the textarea and the form's `input[type=file]` on `window`.
+3. Upload by building the file inside the page: embed the PNG as base64 in the `--code` string, `atob` it into a `Uint8Array`, wrap it in `new File([bytes], 'shot.png', {type: 'image/png'})`, assign it with `const dt = new DataTransfer(); dt.items.add(file); input.files = dt.files`, and dispatch a bubbling `change` event. Poll the textarea until it holds a `user-attachments` URL and no `Uploading` text.
+4. Steps 6–8 as above (alt text, **Update comment**, verify with `gh api`).
+
+`superset browser cdp` also prints a CDP endpoint if a Playwright-class client is easier than `eval`.
+
 ## Path conventions
 
 - `.playwright-mcp/screenshots/<slug>-<unix-ts>.png` — output. Already covered by `.playwright-mcp/` in `.gitignore`.
@@ -126,6 +139,7 @@ If any step fails, take a debug screenshot of the GitHub editor state, save it n
 | Login form selectors changed | App login UI was redesigned | Stop; ask the user to walk through it once so you can update the skill |
 | GitHub PR page 404s | Upload attempted in the Playwright browser, which has no GitHub session | Switch to Claude-in-Chrome (Phase 5) |
 | GitHub edit textarea never appears | The user's Chrome isn't signed into GitHub | Ask the user to sign in once; resume |
+| Claude-in-Chrome tab id is gone right after opening the PR | A tab-routing extension moved github.com tabs out of the MCP group | Use the Superset browser pane fallback (Phase 5) |
 | `[Uploading …]` placeholder never replaced | Upload failed silently (file too large, GitHub flake) | Take a debug screenshot of the editor; abort; report |
 | Two `## ` headers can't be found | PR body is short / unconventional | Ask the user where to insert (top of body? after first paragraph?) |
 
