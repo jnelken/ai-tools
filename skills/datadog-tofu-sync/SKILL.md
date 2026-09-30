@@ -9,6 +9,14 @@ description: Reconcile `infra/datadog/` (OpenTofu) with live Datadog state — i
 
 Adopt resources that already exist in Datadog into the OpenTofu state tracked at `infra/datadog/terraform.tfstate` so a future `tofu apply` does not create duplicates. Never modify Datadog autonomously — this skill only mutates local state and (with permission) `.tf` / docs.
 
+## Where this runs
+
+The stack is in **folio-platform** (`~/code/folio-platform/infra/datadog/`). It isn't in api or woodrow any more, and older briefs that still say `api/infra/datadog` are stale. Its state is local and gitignored, so:
+
+- Work in the **root checkout** on the open batch branch, not a worktree. Follow folio-platform's `CLAUDE.md` workflow.
+- **Before you edit or apply, confirm the tree is yours.** Check `git status --porcelain` and `git log @{u}..HEAD`. Other sessions share this checkout, and `apply` takes the whole working tree, including their uncommitted `.tf` and unpushed commits. If anything isn't yours, coordinate with its session before touching the tree.
+- **Apply before you push.** The pre-push hook blocks any push that still has unapplied changes.
+
 ## Auth
 
 Always invoke through the npm wrapper scripts. They handle credentials via the `DD_API_KEY` / `DD_APP_KEY` / `DD_SITE` chain (env → `.env` → `~/.zsh_secrets`) and `cd` into `infra/datadog/` before running `tofu`. Do not call `tofu` directly from the repo root — the state file lives in the subdirectory.
