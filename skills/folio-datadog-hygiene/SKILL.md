@@ -71,7 +71,7 @@ Flag:
 
 ### 3. Service catalog hygiene — agent: `service-catalog`
 
-List current Datadog services and compare against folio-platform IaC in `infra/datadog`.
+List current Datadog services and compare against the folio-platform catalog definitions in `catalog/*.json` (Software Catalog entities are JSON managed with `pup`, no longer OpenTofu).
 
 Flag:
 - Raw `ep-*` Neon services in Datadog service lists.
@@ -124,8 +124,8 @@ Specifically audit `Single Neon Compute metrics (with dropdown)`.
 
 - Default to **read-only** for steps 1–7. Nothing gets mutated until the report is out and the user has approved specific remediations (see below).
 - Do not apply broad OpenTofu plans.
-- If proposing IaC changes, locate them in `/Users/jake/code/folio-platform/infra/datadog` — use the `datadog-tofu-sync` skill's conventions for that (never run `tofu apply` autonomously).
-- If OpenTofu shows unrelated monitor destroys or drift while you're in there, report it separately — do not fold it into the hygiene fix.
+- If proposing monitor or catalog changes, draft them as JSON in `/Users/jake/code/folio-platform/monitors/` or `catalog/` (managed with `pup`; see that repo's `CLAUDE.md`). Only logs metrics, the logs index and synthetics tests are still OpenTofu (`infra/datadog`, `datadog-tofu-sync` conventions; never run `tofu apply` autonomously).
+- If `pup monitors diff` or OpenTofu shows unrelated drift while you're in there, report it separately — do not fold it into the hygiene fix.
 - Durable Datadog dependency docs belong in folio-platform alongside the IaC, not in this skill's output.
 
 ## Output format
@@ -154,12 +154,12 @@ Wait for the user's response before touching anything. Do not implement speculat
 For each approved item, implement according to its category — each category has a different blast radius:
 
 - **No-code Datadog UI fixes** (tag edits, service catalog descriptions, inferred-service remapping rules, monitor exclusion-list edits, dashboard template variable fixes): apply directly via the matching `datadog-api-claude-plugin` agent. State exactly what will change before calling a mutating tool, since these affect a shared observability system other engineers rely on.
-- **IaC/catalog changes**: draft the `.tf` diff in `/Users/jake/code/folio-platform/infra/datadog` (following `datadog-tofu-sync` conventions) and hand it to the user for review. Never run `tofu apply` yourself — that boundary holds even during remediation, not just during investigation.
+- **Monitor/catalog changes**: draft the JSON diff in `/Users/jake/code/folio-platform/monitors/` or `catalog/` and hand it to the user for review; don't run `pup monitors update` / `entities upsert` yourself. For the remaining OpenTofu resources (`infra/datadog`, `datadog-tofu-sync` conventions) never run `tofu apply` yourself — that boundary holds even during remediation, not just during investigation.
 - **Runtime/deployment tag changes**: these live in application/deployment config (e.g. the Koyeb Datadog Agent service config for `env`/`team` tags), outside this skill's normal scope — point to the exact file/setting and ask before editing infra config in another repo.
 - **Monitor/dashboard query cleanup**: apply directly via `monitoring-alerting` / `dashboards` agents once the specific before/after query diff has been shown and approved.
 - **Follow-up validation queries**: just run them and report results — lowest risk, no approval needed beyond the initial category selection.
 
-Report back what was actually changed vs. what still needs a human (e.g. approving a `.tf` diff, editing deployment config in another repo).
+Report back what was actually changed vs. what still needs a human (e.g. approving a monitor/catalog JSON diff or a `.tf` diff, editing deployment config in another repo).
 
 ## Maintenance note
 
