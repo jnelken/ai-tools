@@ -71,6 +71,19 @@ fi
   ```bash
   echo "$(date +%s) pid=$$ head=$(git rev-parse --short HEAD)" > "$LOCK"
   ```
+- **Then reset the per-PR state if this is a different PR than the last round reviewed.** The round counter, last-P1 count, focus prompt, lens partition, escalate flag and model ledger live in `$GIT_DIR`, and a worktree outlives its PR: after a merge, the next PR on the same branch name (or the same reused worktree) would start at the old round count and review against the old focus prompt. Key the state on the PR number, falling back to the branch name when no PR exists yet:
+  ```bash
+  GIT_DIR=$(git rev-parse --git-dir)
+  PR_KEY=$(gh pr view --json number -q .number 2>/dev/null)
+  [ -n "$PR_KEY" ] || PR_KEY="branch:$(git branch --show-current)"
+  if [ "$(cat "$GIT_DIR/peer-review-pr" 2>/dev/null)" != "$PR_KEY" ]; then
+    rm -f "$GIT_DIR"/peer-review-rounds "$GIT_DIR"/peer-review-last-p1 \
+          "$GIT_DIR"/peer-review-escalate "$GIT_DIR"/peer-review-focus \
+          "$GIT_DIR"/peer-review-lenses "$GIT_DIR"/peer-review-models.tsv
+    echo "$PR_KEY" > "$GIT_DIR/peer-review-pr"
+  fi
+  ```
+  A reset means round 1 and a fresh focus prompt (step 2). Never reset between iterations of the same PR: that would clear the round count and the "do not re-report" lines mid-loop.
 - **Release the lock as the last action of every iteration**, unconditionally, on every exit path — after step 5/6's commit-or-report, or immediately if you exit early (codex failed, nothing to review, lock was held by someone else). `rm -f "$LOCK"` before ending the turn. This only removes the lock — the round counter (step 2) is a separate file and survives.
 
 ### 1. Determine scope and mode
@@ -214,7 +227,7 @@ printf '%s\t%s\t%s\t%s\t%s\n' \
 ```
 `$TRANSCRIPT` means the `/tmp/peer-review-*.txt` path passed to `tee` or used as the detached process's output for this run; assign it when launching the review. The transcript header is the source of truth for the reviewer model/effort. Do **not** attribute the orchestrating agent's model or launch effort to Codex, and do not infer Codex's settings from a config file after the run. If either transcript header is unexpectedly absent, record `unknown` rather than guessing.
 
-Both files are scoped to the worktree the same way the lock and survive between iterations. The rounds file is the running total for step 8; the TSV is an append-only, one-row-per-completed-round ledger with columns `round`, `reviewer model`, `reviewer effort`, `reviewee model`, and `reviewee effort`.
+Both files are scoped to the worktree the same way the lock, are keyed to the current PR (step 0 clears them when the PR changes), and survive between iterations. The rounds file is the running total for step 8; the TSV is an append-only, one-row-per-completed-round ledger with columns `round`, `reviewer model`, `reviewer effort`, `reviewee model`, and `reviewee effort`.
 
 ### 3. Triage findings — DO NOT edit yet
 
@@ -295,7 +308,7 @@ Always end with a short summary, even if no fixes landed:
 
 ```
 Codex review summary
-- Round: 3 (cumulative for this branch)
+- Round: 3 (cumulative for this PR)
 - Findings: 5 total (2 P1, 2 P2, 1 nit)
 - Applied: 3 (src/foo.ts:42, src/bar.ts:88, docs/api.md:30)
 - Skipped: 2
@@ -386,7 +399,7 @@ EOF
    Found one real bug: `groupKey` used `??`, which only falls back on null/undefined — so items with `label: ""` (rather than `null`) all collapsed into a single group and got hidden as spurious duplicates of one another. Fixed by falling back with `||` instead, added a regression test for the empty-string case, and re-ran the full suite clean (committed as `abc1234de`).
    ```
 
-The round counter (`$GIT_DIR/peer-review-rounds`) is cumulative for the life of this worktree and this step never resets it. If the branch gets more local review rounds later (new commits, another `/peer-review` pass, another push), the next comment reports the new running total — reviewers see the full history of local review on this PR, not just the latest session.
+The round counter (`$GIT_DIR/peer-review-rounds`) is cumulative for the life of this PR and this step never resets it; only step 0 does, when the PR number changes. If the PR gets more local review rounds later (new commits, another `/peer-review` pass, another push), the next comment reports the new running total — reviewers see the full history of local review on this PR, not just the latest session.
 
 ## Anti-loop safeguards
 
@@ -413,7 +426,8 @@ The round counter (`$GIT_DIR/peer-review-rounds`) is cumulative for the life of 
 - **Posting the round-count line with no substance** — the comment must include a prose summary of what was actually found/fixed (or "No issues found"), not just the round/model/effort line. A bare round-count line makes reviewers ask "okay, but what did it find?"
 - **Calling the orchestrator the reviewer** — `codex review` is the reviewer; the Claude/Codex agent driving the skill is the reviewee and triage/apply side. Capture both independently and show them side by side.
 - **Reading reviewer settings from `config.toml` after the run** — that can miss project, profile, managed, or CLI overrides. Parse the effective `model:` and `reasoning effort:` headers from that round's transcript instead.
-- **Resetting the round counter** — it's cumulative on purpose. Don't zero `$GIT_DIR/peer-review-rounds` after a successful notify.
+- **Resetting the round counter** — it's cumulative per PR on purpose. Don't zero `$GIT_DIR/peer-review-rounds` after a successful notify; step 0's PR-change guard is the only place it resets.
+- **Reusing a worktree's review state for a new PR** — an earlier PR's round count and focus prompt carry into the next PR's comment and review unless step 0's PR-key guard clears them (seen on api #1461 and #1476: a 1-round PR reported "6 rounds").
 - **Forgetting `local` when the user wants the old no-push, no-`gh` behavior** — default mode now pushes and comments; `local` is the opt-out, not the other way around.
 - **Skipping the summary** — even on a clean review, report it. The user invoked the skill expecting output.
 - **Starting a review without checking the lock** — a round in flight elsewhere means your review's findings go stale mid-run. Check step 0 first, every iteration.
