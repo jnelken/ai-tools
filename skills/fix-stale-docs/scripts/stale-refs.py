@@ -48,7 +48,7 @@ for f in files:
             ref = m.group(1).rstrip(".,:;)")
             if not pathlike.match(ref) or ref.startswith(("http", "/", "~")) or "*" in ref:
                 continue
-            before = line[-0:][: m.start()][-40:]  # the repo name must sit right before the path
+            before = line[: m.start()][-40:]  # the repo name must sit right before the path
             named = [x for x in siblings if x != os.path.basename(repo) and re.search(rf"\b{re.escape(x)}'?s?\b", before)]
             docdir = os.path.dirname(os.path.join(repo, f))
             cands = [os.path.join(repo, ref), os.path.join(repo, "src", ref), os.path.join(docdir, ref)]
