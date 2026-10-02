@@ -21,6 +21,7 @@ Personal AI coding tools — Claude Code and Cursor skills, slash commands, hook
 | [`monthly-retro`](skills/monthly-retro) | Generate a stakeholder-readable monthly retrospective from commit history |
 | [`monthly-retro-commits`](skills/monthly-retro-commits) | Export commit-level effort data (TSV, lines-changed sorted) for the retro skill |
 | [`move-diff`](skills/move-diff) | Relocate uncommitted changes to a different branch/worktree |
+| [`fix-stale-docs`](skills/fix-stale-docs) | Scan for dead doc references, fix or delete them, push to an open (preferably approved) branch |
 | [`peer-review`](skills/peer-review) | Run Codex code review locally before pushing |
 | [`post-pr`](skills/post-pr) | Take a finished PR the rest of the way: review until clean, watch CI, post to `#pr-review`, badge + undraft |
 | [`pr-review-gaps`](skills/pr-review-gaps) | Find sswt PRs never posted to `#pr-review`, with a hold-list for deliberately parked ones |
