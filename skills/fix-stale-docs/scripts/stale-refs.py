@@ -10,6 +10,7 @@ or against a sibling repo named just before it ("folio-platform `infra/x.tf`" ->
 Skipped by default (historical records, not live docs): CHANGELOG*, docs/plans/,
 dated files (YYYY-MM-DD-*), and any decisions/ directory. Pass --all to include them.
 When the basename exists elsewhere in the target repo, the hit names it ("moved?").
+A sibling-repo ref also counts as found if it exists on origin's default branch.
 A hit is a *candidate* — confirm by reading the line; the file may be generated,
 gitignored, or deliberately historical.
 """
@@ -56,6 +57,12 @@ for f in files:
             if named:
                 base = os.path.join(root, named[-1])
                 cands += [os.path.join(base, ref), os.path.join(base, "src", ref)]
+            if named and not any(os.path.exists(c) for c in cands):
+                # a sibling checkout can lag its remote; trust origin's default branch too
+                for rel in (ref, os.path.join("src", ref)):
+                    if subprocess.run(["git", "-C", base, "cat-file", "-e", f"origin/HEAD:{rel}"], capture_output=True).returncode == 0:
+                        cands.append(base)  # any existing path marks it found
+                        break
             if not any(os.path.exists(c) for c in cands):
                 where = named[-1] if named else "this repo"
                 moved = [t for t in basenames(base).get(os.path.basename(ref), []) if t != ref][:3]

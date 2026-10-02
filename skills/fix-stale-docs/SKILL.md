@@ -13,7 +13,7 @@ Standing permission (Jake, 2026-10-02): stale-doc fixes may be committed and pus
 python3 ~/.claude/skills/fix-stale-docs/scripts/stale-refs.py <repo-dir>      # add --all to include dated/plan/CHANGELOG files
 ```
 
-Lists backticked paths that don't exist, resolving `repo-name `path`` against `~/code/<repo-name>` and hinting `moved? <new path>` when the basename lives elsewhere. Output is **candidates, not verdicts** — read each line. Two known false-positive shapes: a path that belongs to a sibling repo but the repo name sits more than ~40 characters earlier on the line, and generated or gitignored files. Skipped by default because they are historical records: `CHANGELOG*`, `docs/plans/`, dated files, `decisions/`.
+Lists backticked paths that don't exist, resolving `repo-name `path`` against `~/code/<repo-name>` and hinting `moved? <new path>` when the basename lives elsewhere. Output is **candidates, not verdicts** — read each line. Known false-positive shapes: a path in a sibling repo whose name sits more than ~40 characters earlier on the line; generated or gitignored files; paths that are deliberately historical ("previously lived in X as `path`") or consumer-relative (an action input's default like `.github/linear-routing.json`, which names a path in the *calling* repo). Skipped by default because they are historical records: `CHANGELOG*`, `docs/plans/`, dated files, `decisions/`.
 
 Stale prose has no path to scan for. Also grep for what the session just changed (a renamed monitor, a removed flag, a moved config) across the sibling repos — that is how the stale refs this skill was born from were found.
 
