@@ -27,7 +27,7 @@ fi
 
 # Where the personal repos live differs by machine; ai-tools' personal-code-dir
 # decides (never ~/code, which holds work checkouts). Unresolved = nothing to do.
-CODE_DIR="${PERSONAL_CODE_DIR:-$("$(cd -P "$(dirname "$0")/../.." && pwd)/bin/personal-code-dir" 2>/dev/null)}" || CODE_DIR=""
+CODE_DIR="${PERSONAL_CODE_DIR:-$("${0:A:h:h:h}/bin/personal-code-dir" 2>/dev/null)}" || CODE_DIR=""
 if [ -z "$CODE_DIR" ]; then
   echo "advance-roadmap: no personal code dir on this machine (set PERSONAL_CODE_DIR) — nothing to do."
   exit 0
