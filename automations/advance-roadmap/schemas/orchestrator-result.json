@@ -34,6 +34,11 @@
       "enum": ["standard", "goal"],
       "default": "standard"
     },
+    "work_kind": {
+      "type": "string",
+      "enum": ["feature", "code_health"],
+      "default": "feature"
+    },
     "directive_ticket": { "type": ["string", "null"] },
     "worker_brief": { "type": ["string", "null"] },
     "archives": {

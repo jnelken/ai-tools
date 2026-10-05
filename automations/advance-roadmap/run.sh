@@ -9,7 +9,7 @@
 #   5. Append exactly one row to runs.jsonl (lib/runrecord.py) — the run record the
 #      dashboard, state.json, Slack and the failure alert all read. Built from exit
 #      codes seen here and result files the agents write; never from the log text.
-#   6. Chain: if this run shipped and the chain is under $CHAIN_MINUTES old, re-exec
+#   6. Chain: if this run shipped a feature and the chain is under $CHAIN_MINUTES old, re-exec
 #      for another item. Each link is a full run with its own stamp, log and row.
 #
 # Guardrails live in skills/advance-roadmap/SAFETY.md.
@@ -322,6 +322,7 @@ fi
   [ -f "$SKILL_DIR/SAFETY.md" ] || { echo "FATAL: missing SAFETY.md"; exit 1; }
 
   ORCH_PROMPT="Read and follow $SKILL_DIR/ORCHESTRATOR.md and $SKILL_DIR/SAFETY.md exactly.
+Step 2d's code-health fallback uses the rubric in $SKILL_DIR/CODE_HEALTH.md.
 
 This is an unattended scheduled ORCHESTRATOR run (stamp=$STAMP). You are READ-ONLY.
 Emit one \`\`\`ORCHESTRATOR_RESULT_JSON fence per ORCHESTRATOR.md. Do not implement.
@@ -544,12 +545,15 @@ if [ -n "$alert" ]; then
 fi
 
 # ── Chain ─────────────────────────────────────────────────────────────────────
-# Only a clean ship continues: blocked, failed, red deploys and quota skips all
-# mean the next link would likely hit the same wall. The next link re-picks
-# providers and re-plans from scratch, exactly like a fresh tick.
-last_outcome="$(python3 -c 'import json,sys; print(json.loads(open(sys.argv[1]).readlines()[-1]).get("outcome",""))' "$ROOT/runs.jsonl" 2>/dev/null || true)"
+# Only a clean feature ship continues: blocked, failed, red deploys and quota
+# skips all mean the next link would likely hit the same wall, and a code-health
+# ship means the queue was empty — chaining would just be a refactor spree. The
+# next link re-picks providers and re-plans from scratch, exactly like a fresh tick.
+last_outcome="$(python3 -c 'import json,sys; r=json.loads(open(sys.argv[1]).readlines()[-1]); print(r.get("outcome",""), r.get("work_kind") or "feature")' "$ROOT/runs.jsonl" 2>/dev/null || true)"
 elapsed=$(( $(date +%s) - CHAIN_START ))
-if [ "$last_outcome" = "shipped" ] && [ "$elapsed" -lt $(( CHAIN_MINUTES * 60 )) ]; then
+if [ "$last_outcome" = "shipped code_health" ]; then
+  echo "=== chain: code-health pass shipped — not chaining ===" >> "$LOG"
+elif [ "$last_outcome" = "shipped feature" ] && [ "$elapsed" -lt $(( CHAIN_MINUTES * 60 )) ]; then
   echo "=== chain: shipped at $(( elapsed / 60 ))m of ${CHAIN_MINUTES}m — starting link $(( CHAIN_LINK + 1 )) ===" >> "$LOG"
   trap - EXIT
   rm -rf "$LOCK"

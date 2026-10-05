@@ -4,7 +4,9 @@ description: >-
   Ship planned items end-to-end, one per run, from a personal repo's ROADMAP.md, from docs/plans/ when the
   repo has no roadmap, or from a Linear issue carrying a repo label. Pick a qualifying repo under
   the personal code dir, implement the item on a branch, verify with the repo's test/build, move it to
-  Shipped, then merge to main locally and push. No PR. Use on-demand ("/advance-roadmap", "work a
+  Shipped, then merge to main locally and push. No PR. When nothing is actionable anywhere, runs one
+  bounded, behavior-preserving code-health refactor instead; after each clean ship, files what it
+  noticed as code-health tickets. Use on-demand ("/advance-roadmap", "work a
   roadmap item", "advance the roadmap", "ship something off the roadmap") or via an unattended
   scheduled run. After pushing, watches the production deploy (usually Vercel) and fixes forward
   until it's green, within a bounded number of attempts. Sibling of [[wrapup-repos]] but NOT the same: this one pushes. Sibling of
@@ -25,13 +27,20 @@ up to 3 rounds. Findings still open after round 3 merge anyway, marked in the co
 `FIXME(advance-roadmap review)` (bugs) or `TODO(advance-roadmap review)` (lesser) and listed in the
 summary. `runs.jsonl` records the rounds and flags a ship with no logged review.
 
-**Keep going while there's time.** A run that ships cleanly (`shipped`, deploy green) starts another
+**Nothing to ship? Clean something up.** When no item is dispatchable in any repo, the orchestrator
+picks one repo for a bounded, behavior-preserving refactor (`work_kind: code_health`) — an open
+`code-health` ticket first, otherwise an audit against a shared rubric — instead of stopping. And
+after every clean ship, the worker runs a short code-health retrospective on the repo it just
+touched and files up to 2 deduped `code-health` tickets. Those tickets rank below all feature work.
+Rubric, retrospective and refactor caps: [`CODE_HEALTH.md`](CODE_HEALTH.md).
+
+**Keep going while there's time.** A run that ships a feature cleanly (`shipped`, deploy green) starts another
 run — fresh orchestrator pass, fresh item — as long as fewer than 40 minutes have passed since the
 first run started. Anything else (blocked, failed, red deploy, no item, quota) ends the chain. The
 check happens between runs, so the last item may finish past 40 minutes. Scheduled runs chain in
-`run.sh` (`ADVANCE_ROADMAP_CHAIN_MINUTES`, default 40; `0` = one item). Interactive runs follow the
-same rule: after the worker reports `shipped`, go back to `ORCHESTRATOR.md` Step 0 if under 40
-minutes.
+`run.sh` (`ADVANCE_ROADMAP_CHAIN_MINUTES`, default 40; `0` = one item). A code-health ship never chains — one
+refactor per tick at most. Interactive runs follow the same rule: after the worker reports a
+feature `shipped`, go back to `ORCHESTRATOR.md` Step 0 if under 40 minutes.
 
 Candidate repos: direct children of the personal code dir, `CODE_DIR=$(~/.ai-tools/bin/personal-code-dir)` (`~/Dropbox/code` on
 the personal machines; if it exits non-zero, this machine has no personal repos — stop). Check
@@ -88,5 +97,6 @@ JSON fence, then run:
 ## What to read next
 
 1. [`SAFETY.md`](SAFETY.md)
-2. [`ORCHESTRATOR.md`](ORCHESTRATOR.md) — Steps 0–2 + JSON protocol
-3. [`WORKER.md`](WORKER.md) — Steps 3–8 (including Step 5b's cross-model review and Step 7b's deploy watch) + worker result fence
+2. [`ORCHESTRATOR.md`](ORCHESTRATOR.md) — Steps 0–2d + JSON protocol
+3. [`WORKER.md`](WORKER.md) — Steps 3–8 (including Step 5b's cross-model review, Step 7b's deploy watch and Step 7c's retrospective) + worker result fence
+4. [`CODE_HEALTH.md`](CODE_HEALTH.md) — the code-health rubric, retrospective, and refactor pass

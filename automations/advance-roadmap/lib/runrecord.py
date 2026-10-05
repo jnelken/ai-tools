@@ -130,6 +130,7 @@ def cmd_append(a):
         "worker_result_source": w.get("_source") or ("agent" if wresult else None),
         "repo": w.get("repo") or o.get("repo"),
         "item": w.get("item") or o.get("item"),
+        "work_kind": o.get("work_kind") or "feature",
         "branch": w.get("branch") or o.get("branch"),
         "merge_commit": w.get("merge_commit"),
         "linear_id": w.get("linear_id") or o.get("linear_id"),

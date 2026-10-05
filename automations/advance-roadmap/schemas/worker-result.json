@@ -21,6 +21,10 @@
       "type": "string",
       "enum": ["standard", "goal"]
     },
+    "work_kind": {
+      "type": "string",
+      "enum": ["feature", "code_health"]
+    },
     "limit_text": { "type": ["string", "null"] },
     "deploy": {
       "type": ["object", "null"],

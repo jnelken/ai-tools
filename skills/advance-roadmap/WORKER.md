@@ -25,6 +25,10 @@ The prompt names a request JSON file. Modes:
   tree that would otherwise block Step 3. If `worker_brief` names a recovered-deploy ticket to
   close out, do that alongside your own item's Step 6/7 bookkeeping (comment, `Done`, clear
   `Paused`) — it's a different ticket than the one you're implementing.
+- **code-health** — an implement/resume request whose orchestrator result says
+  `"work_kind": "code_health"`. Read [`CODE_HEALTH.md`](CODE_HEALTH.md) first; its *code-health
+  pass* section amends Steps 3–8 (baseline first, caps, stricter verification, commit trailer, no
+  roadmap edits). The product must behave exactly as before.
 - **bookkeeping** — full orchestrator result with `blocked_no_item` / `nothing_qualified`
   (request field `orchestrator`). Run Step 2b once per entry in `blockers[]`, perform `archives`,
   close out any recovered-deploy ticket `worker_brief` names (comment, `Done`, clear `Paused` —
@@ -49,6 +53,7 @@ print the same object in a fence:
   "limit_text": null,
   "deploy": {"status": "success", "url": "https://mailcruxh-abc123.vercel.app", "attempts": 0},
   "review": {"reviewer": "codex", "rounds": 1, "unresolved": 0},
+  "work_kind": "feature",
   "summary": "…",
   "slack_summary": "…"
 }
@@ -254,6 +259,9 @@ Record it in the result JSON as `"review": {"reviewer": "codex", "rounds": 2, "u
 
 ## Step 6 — Update the roadmap (and friends)
 
+A code-health pass skips this step: it isn't a roadmap item, and a ticket-backed one is closed in
+Step 7b's close-out like any ticket.
+
 In the roadmap file you located in Step 1 (not necessarily a root `ROADMAP.md`):
 - Move the completed item into the **Shipped (reference)** section, in that section's existing prose
   or list style — don't paste the full planned-item block in.
@@ -361,6 +369,16 @@ result in the result JSON's `deploy` object (`status`: `success` | `failed` | `t
 
 Bookkeeping-only pushes (archives, directive commits with no feature) still get watched, but a
 failure there is reported rather than fixed, since the push didn't change built code.
+
+## Step 7c — Code-health retrospective
+
+Only when this run's outcome is `shipped` (feature or code-health; never bookkeeping): before you
+write run memory, look at the repo you just worked in and file what you saw, per
+[`CODE_HEALTH.md`](CODE_HEALTH.md)'s *retrospective* — dedupe against the repo's open
+`code-health` tickets, file at most 2 new ones through `jlin.py`, change no code. A code-health
+pass that already filed its leftovers has done this; don't repeat it. Name what you filed in
+`summary`. It must never change the outcome: if Linear fails, list the findings in `summary` and
+finish the run.
 
 ## Step 8 — Update run memory
 

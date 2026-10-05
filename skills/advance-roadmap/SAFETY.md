@@ -75,6 +75,10 @@ commit, merge, or push (see WORKER.md).
   `.next/`, `build/`, `*.log`). Respect `.gitignore`.
 - **Honor `.noroadmap`.** A repo with a `.noroadmap` file at its root has opted out. Never create,
   modify, or delete `.noroadmap` — it is the user's toggle.
+- **Code-health passes preserve behavior.** A `code_health` run is a refactor: no changed UI, copy,
+  URLs, APIs, storage formats or env vars, no new runtime dependencies, never in a dirty repo (no
+  directive exception), and only with a green baseline it can re-prove afterward. Caps and details
+  in [`CODE_HEALTH.md`](CODE_HEALTH.md).
 - **All-or-nothing.** If verification fails and you can't fix it cleanly, do NOT merge or push.
   Leave the work on its branch, say so, and stop. A half-shipped roadmap item on `main` is worse
   than no run at all.

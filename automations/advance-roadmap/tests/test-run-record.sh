@@ -30,10 +30,11 @@ print -r -- '{ "action": <decoy from echoed prompt> }'
 print -r -- '```'
 print -r -- "=== advance-roadmap exit=2 finished (quoted from an old log) ==="
 [ "$FAKE_ORCH" = "garbage" ] && { print "no fence here"; exit 0; }
-cat > "$last" <<'EOF'
-```ORCHESTRATOR_RESULT_JSON
-{"action": "dispatch_worker", "outcome_token": null, "repo": "demo", "item": "DEV-1 thing", "worker_mode": "standard"}
-```
+kind=feature; [ "$FAKE_ORCH" = "health" ] && kind=code_health
+cat > "$last" <<EOF
+\`\`\`ORCHESTRATOR_RESULT_JSON
+{"action": "dispatch_worker", "outcome_token": null, "repo": "demo", "item": "DEV-1 thing", "worker_mode": "standard", "work_kind": "$kind"}
+\`\`\`
 EOF
 SH
 
@@ -106,14 +107,21 @@ CHAIN_MINUTES=40 run good chain
 check "chain runs until a link fails to ship" "$(wc -l < "$ROOT/runs.jsonl" | tr -d ' ')" 10
 check "chain's last link is the failure"      "$(last outcome)" error
 grep -q "starting link 3" "$ROOT"/logs/run-*.log && echo "ok   chain logged its links" || { echo "FAIL: no chain log line"; exit 1; }
+check "a feature ship records its kind"     "$(last work_kind)" feature
+# A code-health ship never chains, even well inside the time cap.
+rm -f "$TMP/chain-count"
+CHAIN_MINUTES=40 run health chain
+check "code-health ship does not chain"      "$(wc -l < "$ROOT/runs.jsonl" | tr -d ' ')" 11
+check "code-health kind recorded"            "$(last work_kind)" code_health
+check "code-health ship is still shipped"    "$(last outcome)" shipped
 # Past the time cap, a shipped run does not chain.
 ADVANCE_ROADMAP_CHAIN_START=$(( $(date +%s) - 2401 )) CHAIN_MINUTES=40 run good file
-check "no chain past the time cap"            "$(wc -l < "$ROOT/runs.jsonl" | tr -d ' ')" 11
+check "no chain past the time cap"            "$(wc -l < "$ROOT/runs.jsonl" | tr -d ' ')" 12
 # Cadence: a tick off the base grid leaves no trace at all (24h grid = 03:45 only).
 if [ "$(date +%H)" != "03" ]; then
   logs_before=$(ls "$ROOT"/logs | wc -l)
   CADENCE_HOURS=24 run good file
-  check "off-grid tick records nothing"        "$(wc -l < "$ROOT/runs.jsonl" | tr -d ' ')" 11
+  check "off-grid tick records nothing"        "$(wc -l < "$ROOT/runs.jsonl" | tr -d ' ')" 12
   check "off-grid tick leaves no log"          "$(ls "$ROOT"/logs | wc -l)" "$logs_before"
 fi
 echo "all passed"

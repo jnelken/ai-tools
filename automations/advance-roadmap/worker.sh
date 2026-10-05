@@ -94,6 +94,7 @@ fi
 
 BASE_PROMPT="$(cat <<EOF
 Read and follow $SKILL_DIR/WORKER.md and $SKILL_DIR/SAFETY.md exactly.
+Code-health passes and the Step 7c retrospective also follow $SKILL_DIR/CODE_HEALTH.md.
 
 This is an unattended scheduled worker run (stamp=$STAMP). You are write-capable.
 Assignment JSON (read fully first):
