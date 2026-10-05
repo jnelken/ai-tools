@@ -163,6 +163,12 @@ def window_exhausted(used_pct: Any, reset_epoch: Any, max_pct: int, now: float) 
 
 
 def claude_available(prov: dict[str, Any], now: float) -> bool:
+    """Claude is gated only by an observed limit hit, never by usage percentage.
+
+    The 5h/7d thresholds existed when Claude did all the implementation; now Codex
+    orchestrates and Cursor builds, so Claude is the fallback and runs until it
+    actually hits a limit. The windows are still probed for the dashboard.
+    """
     hit = prov.get("last_limit_hit") or {}
     reset_epoch = hit.get("reset_epoch")
     if reset_epoch:
@@ -171,12 +177,6 @@ def claude_available(prov: dict[str, Any], now: float) -> bool:
                 return False
         except (TypeError, ValueError):
             pass
-    five = prov.get("five_hour") or {}
-    seven = prov.get("seven_day") or {}
-    if window_exhausted(five.get("used_pct"), five.get("reset_epoch"), MAX_FIVE_HOUR_PCT, now):
-        return False
-    if window_exhausted(seven.get("used_pct"), seven.get("reset_epoch"), MAX_SEVEN_DAY_PCT, now):
-        return False
     return True
 
 

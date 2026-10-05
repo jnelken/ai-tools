@@ -541,7 +541,7 @@ def write_state(runs):
 # "measured zero" mean very different things when deciding whether to run.
 # (provider key, pool key, label, gate cap or None when the pool isn't gated)
 POOLS = {
-    "claude": (("five_hour", "5-hour", MAX_FIVE_HOUR_PCT), ("seven_day", "7-day", MAX_SEVEN_DAY_PCT)),
+    "claude": (("five_hour", "5-hour", None), ("seven_day", "7-day", None)),
     "codex": (("five_hour", "5-hour", MAX_FIVE_HOUR_PCT), ("weekly", "Weekly", MAX_SEVEN_DAY_PCT)),
 }
 # Within this many points of the cap the bar turns amber.

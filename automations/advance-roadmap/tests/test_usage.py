@@ -132,6 +132,16 @@ class RoutingTests(unittest.TestCase):
         self.assertFalse(self.flags()["codex"]["available_for_orchestrator"])
         self.assertEqual(usage.pick_orchestrator(self.state), "claude")
 
+    def test_claude_high_usage_does_not_gate(self):
+        self.state["providers"]["claude"]["five_hour"] = {"used_pct": 99, "reset_epoch": FUTURE}
+        self.state["providers"]["claude"]["seven_day"] = {"used_pct": 99, "reset_epoch": FUTURE}
+        self.assertTrue(self.flags()["claude"]["available_for_orchestrator"])
+        self.assertTrue(self.flags()["claude"]["available_for_worker"])
+
+    def test_claude_observed_limit_hit_still_gates(self):
+        self.state["providers"]["claude"]["last_limit_hit"] = {"reset_epoch": FUTURE}
+        self.assertFalse(self.flags()["claude"]["available_for_orchestrator"])
+
     def test_codex_past_reset_counts_as_zero(self):
         parsed = usage.parse_codex_rate_limits(app_server_result(five=99, weekly=99, five_reset=PAST, weekly_reset=PAST))
         usage.apply_codex(self.state, probed(parsed, "app_server"))

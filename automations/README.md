@@ -167,7 +167,7 @@ provider with no reading at all is assumed available until it hits a limit.
 
 | Provider | Source (in order) | Gate |
 | --- | --- | --- |
-| Claude | `~/.claude/state/claude-usage.json` (statusline) | 5h ≥ 70% or 7d ≥ 80% |
+| Claude | `~/.claude/state/claude-usage.json` (statusline) | none by percentage — shown on the dashboard only; gated solely by an observed limit hit |
 | Codex | 1. short-lived `codex app-server` → `account/rateLimits/read` (fresh, ~1s) · 2. newest `token_count.rate_limits` in `~/.codex/sessions/**/rollout-*.jsonl` (as fresh as the last Codex turn; never overwrites a newer stored reading) | 5h ≥ 70%, 7d ≥ 80%, or `rateLimitReachedType` set while a window is unexpired |
 | Cursor | `POST api2.cursor.sh/aiserver.v1.DashboardService/GetCurrentPeriodUsage` with the Agent CLI's Keychain token (`cursor-access-token` / `cursor-user`) — the RPC behind the CLI's own `/usage` | the pool the worker draws from ≥ 95%: `autoPercentUsed` when `ADVANCE_ROADMAP_CURSOR_WORKER_MODEL` is `auto` (default), `apiPercentUsed` otherwise; clears at `billingCycleEnd` |
 
