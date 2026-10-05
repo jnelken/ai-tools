@@ -80,8 +80,12 @@ run_reviewer() {
     codex)
       command -v "$CODEX" >/dev/null 2>&1 || return 127
       rm -f "$out.last"
+      # `</dev/null` is load-bearing: codex exec reads instructions from stdin, and with $PROMPT
+      # also passed as an argument it appends stdin as a <stdin> block — so an inherited open stdin
+      # hangs it forever on "Reading additional input from stdin...". This survived only by
+      # inheriting a closed stdin from worker.sh; don't rely on that.
       "$CODEX" exec -o "$out.last" -m "$CODEX_REVIEW_MODEL" -c model_reasoning_effort="$REVIEW_EFFORT" \
-        -s read-only -C "$REPO" "$PROMPT" >"$out" 2>&1
+        -s read-only -C "$REPO" "$PROMPT" >"$out" 2>&1 </dev/null
       local rc=$?
       [ -s "$out.last" ] && { cat "$out.last" >> "$out"; }
       return $rc ;;

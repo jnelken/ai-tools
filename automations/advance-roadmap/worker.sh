@@ -158,7 +158,7 @@ run_codex() {
     --add-dir "$ROOT" \
     --skip-git-repo-check \
     --dangerously-bypass-approvals-and-sandbox \
-    "$prompt" >"$out" 2>&1
+    "$prompt" >"$out" 2>&1 </dev/null
 }
 
 run_claude() {

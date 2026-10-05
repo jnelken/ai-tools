@@ -271,7 +271,7 @@ run_orchestrator_codex() {
     -C "$CODE_DIR" \
     --add-dir "$CODE_DIR" \
     --skip-git-repo-check \
-    "$prompt" >"$out" 2>&1
+    "$prompt" >"$out" 2>&1 </dev/null
 }
 
 run_orchestrator_claude() {
