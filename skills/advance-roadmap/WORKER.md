@@ -382,49 +382,67 @@ finish the run.
 
 ## Step 8 — Update run memory
 
-Write `$(~/.ai-tools/bin/personal-code-dir --memory-dir)/project_advance-roadmap-runs.md`
-(one file, updated in place — never one file per run), with `type: project` frontmatter, recording:
-- the date of this run;
-- an **outcome token** for this run — exactly one of:
-  - `shipped` — an item went to `main` and its deploy is green (or the repo has none);
-  - `shipped-deploy-failed` — an item went to `main` but Step 7b ran out of fix attempts and
-    production is still red. **Name the repo, the failing SHA, and the deployment URL** — the next
-    run's orchestrator skips new work in that repo until its deploy is green again;
-  - `blocked-branch-left` — an item was picked and its work is parked on a branch (verification
-    failed, or a decision blocked it). **Name the repo and branch.** This is the record that stops
-    a later run from resuming a branch that was abandoned on purpose;
-  - `blocked-no-item` — repos qualified but every candidate was skipped at Step 2; blockers were
-    commented on the affected Linear tickets or the Linear failure was recorded;
-  - `nothing-qualified` — no repo passed Step 1;
-- whether this run resumed an interrupted previous run, and what state it found;
-- which repos had a qualifying roadmap and which were checked and didn't;
-- the Linear issues considered, the one shipped (with its `DEV-N` id), and any that were blocked on
-  not naming a repo;
-- the item picked, or why none was;
-- whether it shipped, the merge commit hash, and the deploy result (status, URL, fix attempts);
-- any plan docs archived as already-implemented, so a later run doesn't go looking for them;
-- the ticket blockers encountered, their issue IDs, and whether each Linear comment was created,
-  suppressed as unchanged, or failed;
-- any item deliberately skipped and the reason — so the next run doesn't re-evaluate it from
-  scratch.
+Run memory is **one file per repo** under `$(~/.ai-tools/bin/personal-code-dir --memory-dir)/advance-roadmap-runs/`
+(`<repo>.md`; a run that names no repo uses `_none.md`). **Never edit those files by hand** — several runs
+(or a [[conductor]] session and a scheduled run) can finish at once, and a hand edit would lose the other's
+row. Everything goes through `~/.claude/automations/advance-roadmap/lib/runmemory.py`, which locks the
+directory and rewrites the file atomically. (The older `project_advance-roadmap-runs.md` is the pre-split
+archive plus cross-repo notes; don't write to it.)
 
-Keep it short and current: replace stale run detail rather than appending an ever-growing log. Add
-the one-line pointer to `MEMORY.md` if it isn't there yet.
+1. **Read what's there:** `runmemory.py show --repo <repo>` for the repo you worked in (skip if it has
+   none yet).
+2. **Write the notes**, replacing the repo's `## Notes` section — pipe the full new text on stdin:
 
-### The run ledger — the one append-only part of that file
+   ```
+   runmemory.py write-notes --repo <repo> <<'EOF'
+   …
+   EOF
+   ```
 
-Run memory carries a `## Run ledger` table. Append exactly one row for this run as part of this
-step, using the stamp from your own log header:
+   Keep it short and current: carry forward what is still true, drop what isn't, never grow an
+   ever-longer log. Record:
+   - the date of this run and whether it resumed an interrupted previous run (and what state it found);
+   - the item picked (or why none), whether it shipped, the merge commit, and the deploy result (status,
+     URL, fix attempts);
+   - this repo's Linear issues considered, the one shipped (`DEV-N`), any blocked on a missing repo label,
+     and any `skipped-human-only`;
+   - any plan docs archived as already-implemented, so a later run doesn't go looking for them;
+   - ticket blockers, their issue IDs, and whether each comment was created, suppressed
+     (`blocker-comment-unchanged`) or failed;
+   - anything deliberately skipped and why, so the next run doesn't re-evaluate it from scratch.
 
-| Stamp | Date | Repo | Outcome |
-|---|---|---|---|
-| `20260908-044500` | 2026-09-08 | mailcruxh | shipped |
+   A fact about *another* repo (considered and skipped, cooling down) goes in that repo's notes, not
+   yours. For a run that names no repo, write to `none`.
+3. **Append the ledger row — last, once everything else is done:**
 
-**This table is exempt from the replace-stale rule above** — it is the only thing in the file that
-accumulates, and Step 0 reads it to tell a run that stopped on purpose from one that was killed.
-Trim it to the last ~10 rows and no further: a row you delete is a run that looks interrupted
-forever. A run that never reaches this step correctly leaves no row; that gap is the signal, so
-never backfill a row for a run you didn't complete yourself.
+   ```
+   runmemory.py append-ledger --repo <repo|none> --stamp <stamp> --outcome <token> [--detail "<what landed>"]
+   ```
+
+   Use the stamp from your own log header. `--detail` becomes a parenthetical in the Repo cell — use it
+   when the token alone understates what landed (`blocked-no-item` plus a pushed sha means no *feature*
+   shipped but `origin/main` moved). The script keeps each repo's last 10 rows and replaces a row with the
+   same stamp rather than duplicating it.
+
+The **outcome token** is exactly one of:
+- `shipped` — an item went to `main` and its deploy is green (or the repo has none);
+- `shipped-deploy-failed` — an item went to `main` but Step 7b ran out of fix attempts and production is
+  still red. **Name the repo, the failing SHA, and the deployment URL** in the notes — the next run's
+  orchestrator skips new work in that repo until its deploy is green again;
+- `blocked-branch-left` — an item was picked and its work is parked on a branch (verification failed, or a
+  decision blocked it). **Name the repo and branch** in the notes. This is the record that stops a later
+  run from resuming a branch that was abandoned on purpose;
+- `blocked-no-item` — repos qualified but every candidate was skipped at Step 2; blockers were commented
+  on the affected Linear tickets or the Linear failure was recorded;
+- `nothing-qualified` — no repo passed Step 1.
+
+### The ledger — the append-only part
+
+The ledger is exempt from the replace-stale rule: it is what Step 0 reads to tell a run that stopped on
+purpose from one that was killed. A run that never reaches this step correctly leaves no row; that gap is
+the signal, so **never backfill a row for a run you didn't complete yourself**. Because each repo keeps its
+own last 10 rows, the newest run on the machine is always the newest row of some repo's ledger, so the
+lookup never loses the row it needs.
 
 ## Final output
 

@@ -100,10 +100,15 @@ ledger writes happen with write tools — put everything they need in this JSON.
 
 ## Step 0 — Read run memory, then reconcile the previous run
 
-Read `$(~/.ai-tools/bin/personal-code-dir --memory-dir)/project_advance-roadmap-runs.md`
-if it exists. It records which repos had actionable roadmap content on prior runs, what was shipped,
-and what was deliberately skipped. Check the repo it names first — it's the cheapest lead you have.
-It is a hint, not a constraint: if that repo no longer qualifies, move on without ceremony.
+Read run memory: one file per repo in `$(~/.ai-tools/bin/personal-code-dir --memory-dir)/advance-roadmap-runs/`
+(`<repo>.md`, plus `_none.md` for runs that named no repo) — `runmemory.py show` under
+`~/.claude/automations/advance-roadmap/lib/` prints them all, or just read the files. Each holds that repo's
+run ledger and notes: what shipped, what was deliberately skipped, blockers. The older
+`project_advance-roadmap-runs.md` next to that directory is the pre-split archive plus cross-repo notes —
+read it for context, but it no longer receives new rows. The repo whose ledger has the newest stamp is the
+last-worked repo — check it first, it's the cheapest lead you have. Run memory is a hint, not a
+constraint: if that repo no longer qualifies, move on without ceremony. You only read it; the worker writes
+it, through `runmemory.py`, never by hand.
 
 (Headless runs use the personal code dir — `$CODE_DIR`, from `~/.ai-tools/bin/personal-code-dir` — as cwd, which is why
 that memory directory is the right one. Don't guess a different path.)
@@ -159,10 +164,11 @@ and nothing about the branch itself distinguishes that from a crash. Re-attempti
 hours is how a run that correctly gave up becomes an infinite loop.
 
 The real discriminator is **whether Step 8 ran**. A run that stopped deliberately — shipped,
-blocked, or nothing qualified — appended itself to run memory's `## Run ledger` before exiting. A
+blocked, or nothing qualified — appended a row to its repo's run ledger (`runmemory.py append-ledger`) before exiting. A
 run that was killed never got there. So take the previous log's stamp from its header
 (`=== advance-roadmap run 20260907-104501 …` → `20260907-104501`) and look that stamp up in the
-ledger. **No row → it was interrupted.**
+ledgers: `runmemory.py has-stamp --stamp <stamp>` (exit 0, prints the repo, when any repo's ledger has it).
+**No row anywhere → it was interrupted.**
 
 Match on the **stamp, not the date.** This job runs several times a day; a date alone can't tell this
 morning's run from last night's. And note what the ledger deliberately doesn't contain: a

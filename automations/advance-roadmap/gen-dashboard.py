@@ -56,6 +56,7 @@ if not CODE_DIR:
     sys.exit(0)
 # Headless runs use CODE_DIR as cwd, so this is that project's memory dir.
 MEMORY = os.path.join(_pcd.memory_dir(CODE_DIR), "project_advance-roadmap-runs.md")
+RUNS_DIR = os.path.join(_pcd.memory_dir(CODE_DIR), "advance-roadmap-runs")
 USAGE = os.path.join(HOME, ".claude/state/claude-usage.json")
 PROVIDERS_USAGE = os.path.join(ROOT, "providers-usage.json")
 RUNS_JSONL = os.path.join(ROOT, "runs.jsonl")
@@ -114,20 +115,24 @@ def git(args, cwd=None, timeout=15):
 # ── ledger ────────────────────────────────────────────────────────────────────
 
 def read_ledger():
-    """Rows currently in run memory's ## Run ledger, keyed by stamp."""
+    """Rows currently in every run-memory ledger, keyed by stamp. Ledgers are per repo
+    (advance-roadmap-runs/*.md, written by lib/runmemory.py); the legacy single file is read too, for
+    rows from before the split."""
     out = {}
-    try:
-        text = open(MEMORY, encoding="utf-8", errors="replace").read()
-    except OSError:
-        return out
-    if "## Run ledger" not in text:
-        return out
-    section = text.split("## Run ledger", 1)[1]
-    section = section.split("\n## ", 1)[0]
-    for line in section.splitlines():
-        m = LEDGER_ROW_RE.match(line.strip())
-        if m and m.group(1):
-            out[m.group(1)] = {"date": m.group(2), "repo": m.group(3), "outcome": m.group(4)}
+    paths = sorted(glob.glob(os.path.join(RUNS_DIR, "*.md"))) + [MEMORY]
+    for path in paths:
+        try:
+            text = open(path, encoding="utf-8", errors="replace").read()
+        except OSError:
+            continue
+        if "## Run ledger" not in text:
+            continue
+        section = text.split("## Run ledger", 1)[1]
+        section = section.split("\n## ", 1)[0]
+        for line in section.splitlines():
+            m = LEDGER_ROW_RE.match(line.strip())
+            if m and m.group(1):
+                out[m.group(1)] = {"date": m.group(2), "repo": m.group(3), "outcome": m.group(4)}
     return out
 
 

@@ -92,6 +92,13 @@ exhaustion alone still lets the orchestrator report `blocked-no-item` / `nothing
 Guardrails (personal `jnelken` repos only, clean tree, no force, all-or-nothing verification)
 live in `SAFETY.md`. `run.sh` adds the single-instance lock.
 
+### Run memory
+
+One file per repo in the Claude memory dir's `advance-roadmap-runs/` (ledger of each repo's last 10 runs
+plus notes), written only through [`lib/runmemory.py`](advance-roadmap/lib/runmemory.py), which locks the
+directory and rewrites atomically so concurrent runs can't lose each other's rows. `has-stamp` is what
+Step 0 uses to tell a finished run from a killed one.
+
 ### Run record and failure alert
 
 Every run — shipped, blocked, skipped, crashed — appends exactly one row to `runs.jsonl`. `run.sh`
