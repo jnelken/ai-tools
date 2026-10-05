@@ -2,7 +2,7 @@
 
 These bind **both** the read-only orchestrator and the write-capable worker. Never weaken them.
 
-The orchestrator must not mutate repos (see ORCHESTRATOR.md). Only the worker may branch, edit,
+The orchestrator must not mutate repos (see [`ORCHESTRATOR.md`](../conductor/ORCHESTRATOR.md)). Only the worker may branch, edit,
 commit, merge, or push (see WORKER.md).
 
 ## Hard safety rules (never violate)

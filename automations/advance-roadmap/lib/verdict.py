@@ -44,6 +44,7 @@ CODE_DIR = _personal_code_dir_module().code_dir()
 if not CODE_DIR:
     sys.exit("verdict: no personal code dir on this machine (set PERSONAL_CODE_DIR)")
 SKILL_DIR = os.path.expanduser("~/.claude/skills/advance-roadmap")
+CONDUCTOR_DIR = os.path.expanduser("~/.claude/skills/conductor")  # holds ORCHESTRATOR.md
 ALLOWLIST = os.path.expanduser("~/.claude/automations/advance-roadmap/allowlist.txt")
 NO_WORK_ACTIONS = {"blocked_no_item", "nothing_qualified"}
 # Worker outcomes that mean the bookkeeping actually landed (comments, ledger).
@@ -112,7 +113,7 @@ def cmd_fingerprint(a):
         "linear_ok": bool(snap.get("ok")),
         "issues": issues,
         "allowlist": file_sha(ALLOWLIST),
-        "skill": sha("".join(file_sha(p) or "-" for p in sorted(glob.glob(os.path.join(SKILL_DIR, "*.md"))))),
+        "skill": sha("".join(file_sha(p) or "-" for p in sorted(glob.glob(os.path.join(SKILL_DIR, "*.md")) + glob.glob(os.path.join(CONDUCTOR_DIR, "*.md"))))),
     }
     with open(a.out, "w", encoding="utf-8") as f:
         json.dump(fp, f, indent=2)

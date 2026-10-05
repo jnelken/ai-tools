@@ -9,6 +9,7 @@ Personal AI coding tools — Claude Code and Cursor skills, slash commands, hook
 | Skill | Purpose |
 |---|---|
 | [`advance-roadmap`](skills/advance-roadmap) | Ship planned `ROADMAP.md` items (or `docs/plans/` docs, if no roadmap) in personal repos end-to-end, one per run, chaining runs for up to 40 min — branch, build, verify, mark shipped, merge + push `main`. With nothing to ship, runs one behavior-preserving code-health refactor; files code-health tickets after each ship |
+| [`conductor`](skills/conductor) | Human-driven "ship one item" that never implements in-process: the Claude session conducts Cursor (`agent`) as builder and Codex (`codex exec`, read-only) as reviewer via `worker.sh` / `review.sh`; owns the shared triage doc `ORCHESTRATOR.md` that `advance-roadmap`'s scheduler also reads |
 | [`babysit-pr`](skills/babysit-pr) | Iteratively address automated reviewer threads (Codex, CodeRabbit, etc.) on the current PR |
 | [`logo-gestalt`](skills/logo-gestalt) | Gestalt logo design: symbol inventory, shared-vector matching, SVG + raster preview board, vision critique |
 | [`cleanup-local-branches`](skills/cleanup-local-branches) | Phased cross-repo cleanup of stale branches + worktrees with reflog-recovery log |

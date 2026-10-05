@@ -32,7 +32,7 @@ The prompt names a request JSON file. Modes:
 - **bookkeeping** — full orchestrator result with `blocked_no_item` / `nothing_qualified`
   (request field `orchestrator`). Run Step 2b once per entry in `blockers[]`, perform `archives`,
   close out any recovered-deploy ticket `worker_brief` names (comment, `Done`, clear `Paused` —
-  see ORCHESTRATOR.md's *A repo left with a red deploy*), write Step 8; do not start a feature
+  see the conductor skill's `ORCHESTRATOR.md`, *A repo left with a red deploy*), write Step 8; do not start a feature
   branch unless an archive needs the Step 7 flow.
 
 ## Output protocol

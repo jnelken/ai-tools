@@ -35,6 +35,8 @@ fi
 # Children (worker.sh, lib/*.py) resolve the same dir without re-deciding.
 export PERSONAL_CODE_DIR="$CODE_DIR"
 SKILL_DIR="${ADVANCE_ROADMAP_SKILL_DIR:-/Users/jake/.claude/skills/advance-roadmap}"
+# ORCHESTRATOR.md lives in the conductor skill (skills/conductor); everything else stays in SKILL_DIR.
+CONDUCTOR_DIR="${ADVANCE_ROADMAP_CONDUCTOR_DIR:-$(dirname "$SKILL_DIR")/conductor}"
 USAGE_PY="$ROOT/lib/usage.py"
 RECORD_PY="$ROOT/lib/runrecord.py"
 PLAN_PY="$ROOT/lib/pendingplan.py"
@@ -318,10 +320,10 @@ fi
   cat "$RUN_DIR/verdict-check.txt" 2>/dev/null
   echo "orchestrator=$ORCH  workers=${WORKERS:-none}  cwd=$CODE_DIR"
   cd "$CODE_DIR" || { echo "FATAL: cannot cd to $CODE_DIR"; exit 1; }
-  [ -f "$SKILL_DIR/ORCHESTRATOR.md" ] || { echo "FATAL: missing ORCHESTRATOR.md"; exit 1; }
+  [ -f "$CONDUCTOR_DIR/ORCHESTRATOR.md" ] || { echo "FATAL: missing ORCHESTRATOR.md"; exit 1; }
   [ -f "$SKILL_DIR/SAFETY.md" ] || { echo "FATAL: missing SAFETY.md"; exit 1; }
 
-  ORCH_PROMPT="Read and follow $SKILL_DIR/ORCHESTRATOR.md and $SKILL_DIR/SAFETY.md exactly.
+  ORCH_PROMPT="Read and follow $CONDUCTOR_DIR/ORCHESTRATOR.md and $SKILL_DIR/SAFETY.md exactly.
 Step 2d's code-health fallback uses the rubric in $SKILL_DIR/CODE_HEALTH.md.
 
 This is an unattended scheduled ORCHESTRATOR run (stamp=$STAMP). You are READ-ONLY.

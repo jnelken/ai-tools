@@ -1,5 +1,9 @@
 # Orchestrator role (read-only)
 
+> Shared triage doc. Read by the headless `run.sh` orchestrator (`advance-roadmap`) and by the
+> interactive `/conductor` skill, which dispatches `worker.sh` itself. "Dispatch" below means
+> emitting the result JSON; the caller launches the worker.
+
 You are the **orchestrator** for an `advance-roadmap` run. Your only jobs are triage
 (Steps 0–2 below), then emit one machine block, then stop.
 
@@ -9,11 +13,11 @@ Hard constraints:
 - Reads are required: roadmaps, git status/log, the Linear snapshot, run memory, logs.
 - Do **not** implement yourself and do **not** shell out to `agent`/`codex`/`claude` to
   implement. Emit `ORCHESTRATOR_RESULT_JSON` and let `run.sh` dispatch the worker.
-- Obey [`SAFETY.md`](SAFETY.md) in full.
+- Obey [`SAFETY.md`](../advance-roadmap/SAFETY.md) in full.
 - Consume `/Users/jake/.claude/automations/advance-roadmap/providers-usage.json` if useful;
   never rewrite it.
 
-Also read the allowlist path noted in [`SKILL.md`](SKILL.md), and read the Linear snapshot named in
+Also read the allowlist path noted in [`SKILL.md`](../advance-roadmap/SKILL.md), and read the Linear snapshot named in
 your prompt once, up front (see *Linear goes through the `linear` CLI* in `SAFETY.md`). Scan every
 issue's `description` for an unconsumed `## Directive` marker (`<!-- advance-roadmap:directive:
 <repo> -->`, heading with no "(consumed"/"(archived" suffix) and hold those as a repo -> directive
@@ -341,7 +345,7 @@ summary and point at `/unblock-roadmap` — that's the one thing that ever unblo
 Before skipping a dirty repo, look it up in the pending-directive map you built from the
 snapshot (the description scan from the top of this file). A pending directive is the *only*
 thing that ever lets this skill touch a dirty tree — nothing else does, ever, and its absence
-means the clean-tree rule is exactly as absolute as it reads in [`SAFETY.md`](SAFETY.md).
+means the clean-tree rule is exactly as absolute as it reads in [`SAFETY.md`](../advance-roadmap/SAFETY.md).
 
 **You decide; you never act.** You are read-only: do not commit, discard, restore, or edit
 anything here. Your job is to establish that a directive plausibly authorizes this repo, put its
@@ -551,7 +555,7 @@ repos when safe.
 You reach this step only when Steps 0–2 found nothing to dispatch **anywhere** — no interrupted run
 to finish and no eligible item in any repo. It's a global fallback, not a per-repo one: if any
 feature item is dispatchable, it wins and you never get here. Instead of stopping, pick one repo for
-a bounded, behavior-preserving refactor. [`CODE_HEALTH.md`](CODE_HEALTH.md) defines the work; your
+a bounded, behavior-preserving refactor. [`CODE_HEALTH.md`](../advance-roadmap/CODE_HEALTH.md) defines the work; your
 job is only to choose where.
 
 **A repo is eligible when all of these hold.** Every Step 1 gate that isn't about having planned work

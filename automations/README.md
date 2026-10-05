@@ -82,7 +82,7 @@ Skipped runs never reach the Slack step, so only completed runs post.
 4. Records provider limits so the **next** run routes differently.
 
 Skill sources of truth: [`SKILL.md`](../skills/advance-roadmap/SKILL.md) (router),
-[`ORCHESTRATOR.md`](../skills/advance-roadmap/ORCHESTRATOR.md),
+[`ORCHESTRATOR.md`](../skills/conductor/ORCHESTRATOR.md),
 [`WORKER.md`](../skills/advance-roadmap/WORKER.md),
 [`SAFETY.md`](../skills/advance-roadmap/SAFETY.md).
 

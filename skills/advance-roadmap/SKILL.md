@@ -40,7 +40,8 @@ first run started. Anything else (blocked, failed, red deploy, no item, quota) e
 check happens between runs, so the last item may finish past 40 minutes. Scheduled runs chain in
 `run.sh` (`ADVANCE_ROADMAP_CHAIN_MINUTES`, default 40; `0` = one item). A code-health ship never chains — one
 refactor per tick at most. Interactive runs follow the same rule: after the worker reports a
-feature `shipped`, go back to `ORCHESTRATOR.md` Step 0 if under 40 minutes.
+feature `shipped`, go back to [`../conductor/ORCHESTRATOR.md`](../conductor/ORCHESTRATOR.md) Step 0 if
+under 40 minutes. (For one-off human-driven work, use [[conductor]] instead.)
 
 Candidate repos: direct children of the personal code dir, `CODE_DIR=$(~/.ai-tools/bin/personal-code-dir)` (`~/Dropbox/code` on
 the personal machines; if it exits non-zero, this machine has no personal repos — stop). Check
@@ -52,7 +53,7 @@ only (see `SAFETY.md`) — from [[unblock-roadmap]] (the only dirty-tree excepti
 
 | Role | Default | May mutate? | Doc |
 |---|---|---|---|
-| **Orchestrator** | Codex **Sol** high → Claude Opus high | **No** | [`ORCHESTRATOR.md`](ORCHESTRATOR.md) |
+| **Orchestrator** | Codex **Sol** high → Claude Opus high | **No** | [`../conductor/ORCHESTRATOR.md`](../conductor/ORCHESTRATOR.md) |
 | **Worker** | Cursor Auto → Codex Sol → Claude Opus | **Yes** | [`WORKER.md`](WORKER.md) |
 | **Reviewer** | a provider other than the worker's (Cursor ↔ Codex; Claude → Codex) | **No** | [`WORKER.md`](WORKER.md) Step 5b |
 | **Safety** | — | binds both | [`SAFETY.md`](SAFETY.md) |
@@ -71,20 +72,14 @@ Linear routing labels:
 - `do-next` is a priority tier above Urgent/P0: it puts an eligible ticket ahead of all fresh
   work in every repo on the next run, but never ahead of Step 0's interrupted-run reconciliation.
   Below it, work is taken in global Linear priority order (Urgent/P0 → High/P1 → Medium/P2 →
-  Low/P3 → no priority), across repos — see ORCHESTRATOR.md Step 1.
+  Low/P3 → no priority), across repos — see `../conductor/ORCHESTRATOR.md` Step 1.
 - `/goal` launches the selected worker through that provider's native durable goal command
   (`$goal` for Codex; `/goal` for Cursor and Claude).
 
-Interactive `/advance-roadmap`: you are the orchestrator — follow `ORCHESTRATOR.md`, emit the
-JSON fence, then run:
-
-```sh
-~/.claude/automations/advance-roadmap/worker.sh \
-  --stamp "$(date +%Y%m%d-%H%M%S)" \
-  --request-file /tmp/advance-req.json
-```
-
-**Do not implement in-process.**
+Interactive `/advance-roadmap`: you are the orchestrator — follow
+[`../conductor/ORCHESTRATOR.md`](../conductor/ORCHESTRATOR.md), emit the JSON fence, then dispatch
+the worker as [[conductor]] describes (`worker.sh --request-file …`). **Do not implement in-process.**
+For human-driven work on an item you name, call `/conductor` directly.
 
 ## How this differs from `wrapup-repos`
 
@@ -97,6 +92,6 @@ JSON fence, then run:
 ## What to read next
 
 1. [`SAFETY.md`](SAFETY.md)
-2. [`ORCHESTRATOR.md`](ORCHESTRATOR.md) — Steps 0–2d + JSON protocol
+2. [`../conductor/ORCHESTRATOR.md`](../conductor/ORCHESTRATOR.md) — Steps 0–2d + JSON protocol (lives in the [[conductor]] skill)
 3. [`WORKER.md`](WORKER.md) — Steps 3–8 (including Step 5b's cross-model review, Step 7b's deploy watch and Step 7c's retrospective) + worker result fence
 4. [`CODE_HEALTH.md`](CODE_HEALTH.md) — the code-health rubric, retrospective, and refactor pass

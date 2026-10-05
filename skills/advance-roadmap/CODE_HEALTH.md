@@ -6,7 +6,7 @@ Three things share this file because they share one definition of "unhealthy":
 - **The retrospective** — after every clean ship, the worker looks at the repo it just worked in and
   files what it saw as `code-health` tickets. It reports; it never fixes.
 - **The code-health pass** — when the orchestrator finds nothing else to ship, it dispatches one
-  bounded, behavior-preserving refactor instead of stopping (ORCHESTRATOR.md Step 2d).
+  bounded, behavior-preserving refactor instead of stopping (`../conductor/ORCHESTRATOR.md` Step 2d).
 
 The principles are not news to any model. This file exists because three different providers run
 this unattended, and they need the **same thresholds, the same severity order, and the same
