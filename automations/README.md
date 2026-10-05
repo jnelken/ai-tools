@@ -158,6 +158,23 @@ Turn tailnet access off with `tailscale serve reset`. That leaves the local serv
 The `:45` slots stay offset from `wrapup-repos` so this job never starts on a tree that job
 just dirtied.
 
+### Token accounting
+
+Every model call a run makes appends a line to `runs/<stamp>/model-usage.jsonl` (`lib/tokens.py`):
+the orchestrator (`run.sh`), the worker (`worker.sh`) and each reviewer (`review.sh`, tagged with its
+review round). `runrecord.py` folds them into the `tokens` field of the run's `runs.jsonl` row — one
+entry per (step, review round, model) — and the dashboard shows them per run (drawer) and per model
+over 24h / 7d / all tracked runs. Nothing here gates routing.
+
+| Provider | Source |
+| --- | --- |
+| Claude | `--output-format json` → `modelUsage` (per model, subagents included, plus list-price cost); `tokens.py` turns the JSON back into plain text so the limit-banner grep and fence extraction are unchanged |
+| Codex | the rollout under `~/.codex/sessions` matching the `session id:` header (full in / cached / out split); falls back to the closing `tokens used` total |
+| Cursor | `--output-format json` → `usage`. Reports the Auto pool, not the model it routed to |
+
+`total` = new input + cache writes + output; cache reads are kept apart (they dwarf the rest and bill far
+lower). Runs before this was added have no token data. Codex subagent rollouts are not summed.
+
 ### Provider usage sources
 
 `lib/usage.py refresh` reads live quota for every provider before routing, so a hot provider is

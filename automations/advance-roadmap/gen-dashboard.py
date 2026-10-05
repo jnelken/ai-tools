@@ -980,7 +980,7 @@ def build():
         cadence=base_cadence(),
         total=n, shipped=shipped, blocked=blocked, skipped=skipped, errored=errored,
         last_line=last_line, run_cards=run_cards, run_panels=run_panels, repo_cards=repo_cards,
-        waiting=waiting, quota_html=quota_html, missed_html=missed_html, **{f"n_{k}": v for k, v in counts.items()},
+        waiting=waiting, quota_html=quota_html, token_html=token_html, missed_html=missed_html, **{f"n_{k}": v for k, v in counts.items()},
     )
 
 
