@@ -127,6 +127,19 @@ hygiene_scan_repo() {
   for f in PRODUCT.md DESIGN.md CLAUDE.md README.md; do
     if [ -f "$repo_root/$f" ]; then echo "PRESENT:$f"; else echo "MISSING:$f"; fi
   done
+  # --- Tier 2: `$impeccable document` has been run (frontend repos only) ------
+  # `document` (scan mode) writes DESIGN.md plus the .impeccable/design.json
+  # sidecar; seed mode and hand-written files leave no sidecar, so both files
+  # together are the evidence it ran. Gated on a UI signal so backend/CLI repos
+  # never nag. The label prefix "impeccable document" is matched by the sync hook.
+  if [ -f "$repo_root/index.html" ] || { [ -f "$repo_root/package.json" ] \
+      && grep -qE '"(react|vue|next|svelte|solid-js|astro|@angular/core)"' "$repo_root/package.json" 2>/dev/null; }; then
+    if [ -f "$repo_root/DESIGN.md" ] && [ -f "$repo_root/.impeccable/design.json" ]; then
+      echo "PRESENT:impeccable document"
+    else
+      echo "MISSING:impeccable document"
+    fi
+  fi
   if [ -f "$repo_root/.superset/config.json" ]; then
     echo "PRESENT:.superset/config.json"
   else

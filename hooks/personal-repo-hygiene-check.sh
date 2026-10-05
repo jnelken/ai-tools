@@ -50,7 +50,8 @@ hygiene_is_personal_repo "$repo_root" || exit 0
 # --- live check of THIS repo ------------------------------------------------
 out=$(hygiene_scan_repo "$repo_root" 2>/dev/null)
 problems=$(printf '%s\n' "$out" | sed -n 's/^PROBLEM://p')
-missing=$(printf '%s\n' "$out" | sed -n 's/^MISSING://p' | paste -sd, - | sed 's/,/, /g')
+missing=$(printf '%s\n' "$out" | sed -n 's/^MISSING://p' | grep -v '^impeccable document$' | paste -sd, - | sed 's/,/, /g')
+no_impeccable=$(printf '%s\n' "$out" | grep -c '^MISSING:impeccable document$')
 
 # --- cooldown applies to advisory notes only, never to real problems --------
 show_advisory=1
@@ -76,6 +77,10 @@ if [ -n "$problems" ]; then
     [ -n "$p" ] && notes="$notes
 - $p"
   done <<< "$problems"
+fi
+if [ "$show_advisory" -eq 1 ] && [ "${no_impeccable:-0}" -gt 0 ]; then
+  notes="$notes
+- \`\$impeccable document\` has not been run in this repo (needs both DESIGN.md and .impeccable/design.json). Tell the user in your first reply; don't run it unprompted."
 fi
 if [ "$show_advisory" -eq 1 ] && [ -n "$missing" ]; then
   notes="$notes
