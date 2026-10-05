@@ -14,6 +14,7 @@ set -u
 
 ROOT="${ADVANCE_ROADMAP_ROOT:-/Users/jake/.claude/automations/advance-roadmap}"
 USAGE_PY="$ROOT/lib/usage.py"
+TOKENS_PY="$ROOT/lib/tokens.py"
 
 CLAUDE="${ADVANCE_ROADMAP_CLAUDE_BIN:-/Users/jake/.local/bin/claude}"
 AGENT="${ADVANCE_ROADMAP_AGENT_BIN:-/Users/jake/.local/bin/agent}"
@@ -41,6 +42,8 @@ while [ $# -gt 0 ]; do
 done
 [ -n "$REPO" ] && [ -d "$REPO/.git" ] || { echo "FATAL: --repo must be a git checkout" >&2; exit 2; }
 [ -n "$ROUND" ] && [ -n "$LOG" ] || { echo "FATAL: --round and --log required" >&2; exit 2; }
+# Beside reviews.jsonl, i.e. in the run dir — the same file run.sh and worker.sh append to.
+USAGE_LOG="${LOG:h}/model-usage.jsonl"
 
 case "$WORKER" in
   cursor) reviewers=(codex claude) ;;
@@ -87,22 +90,34 @@ run_reviewer() {
       "$CODEX" exec -o "$out.last" -m "$CODEX_REVIEW_MODEL" -c model_reasoning_effort="$REVIEW_EFFORT" \
         -s read-only -C "$REPO" "$PROMPT" >"$out" 2>&1 </dev/null
       local rc=$?
+      python3 "$TOKENS_PY" codex "$out" --role reviewer --round "$ROUND" --model "$CODEX_REVIEW_MODEL" \
+        --log "$USAGE_LOG" >/dev/null 2>&1
       [ -s "$out.last" ] && { cat "$out.last" >> "$out"; }
       return $rc ;;
     cursor)
       [ -x "$AGENT" ] || return 127
       "$AGENT" -p --mode ask --trust --model "$CURSOR_REVIEW_MODEL" --workspace "$REPO" \
-        --output-format text "$PROMPT" >"$out" 2>&1 ;;
+        --output-format json "$PROMPT" >"$out.json" 2>&1
+      local rc=$?
+      python3 "$TOKENS_PY" cursor-json "$out.json" "$out" --role reviewer --round "$ROUND" \
+        --model "$CURSOR_REVIEW_MODEL" --log "$USAGE_LOG" >/dev/null 2>&1
+      [ -s "$out" ] || cp "$out.json" "$out" 2>/dev/null
+      return $rc ;;
     claude)
       [ -x "$CLAUDE" ] || return 127
       ( cd "$REPO" && "$CLAUDE" -p "$PROMPT" --model "$CLAUDE_REVIEW_MODEL" --effort "$REVIEW_EFFORT" \
         --permission-mode plan --disallowedTools "Edit,Write,NotebookEdit" \
-        --output-format text ) >"$out" 2>&1 ;;
+        --output-format json ) >"$out.json" 2>&1
+      local rc=$?
+      python3 "$TOKENS_PY" claude-json "$out.json" "$out" --role reviewer --round "$ROUND" \
+        --model "$CLAUDE_REVIEW_MODEL" --log "$USAGE_LOG" >/dev/null 2>&1
+      [ -s "$out" ] || cp "$out.json" "$out" 2>/dev/null
+      return $rc ;;
   esac
 }
 
 out="$(mktemp "${TMPDIR:-/tmp}/advance-roadmap-review.XXXXXX")"
-trap 'rm -f "$out" "$out.last"' EXIT INT TERM
+trap 'rm -f "$out" "$out.last" "$out.json"' EXIT INT TERM
 used="" verdict="unavailable"
 for who in "${reviewers[@]}"; do
   rc=0

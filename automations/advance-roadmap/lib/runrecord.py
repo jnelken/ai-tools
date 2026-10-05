@@ -8,7 +8,7 @@ from result files the agents wrote; nothing here reads the run log.
 
   runrecord.py --root R append --stamp S --status ran|skipped-backoff|skipped-quota|skipped-lock|skipped-unchanged|aborted
                [--detail TEXT] [--orch-provider P] [--orch-exit N] [--orch-result FILE]
-               [--worker-status FILE] [--worker-result FILE] [--exit N]
+               [--worker-status FILE] [--worker-result FILE] [--usage-log FILE] [--exit N]
   runrecord.py --root R alert        # prints a Slack line when the error streak warrants one
 """
 import argparse
@@ -17,6 +17,9 @@ import os
 import sys
 import time
 from datetime import datetime
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import tokens  # noqa: E402
 
 ERROR_OUTCOMES = ("error", "failed", "incomplete", "shipped-deploy-failed")
 SKIP_OUTCOMES = ("skipped-backoff", "skipped-quota", "skipped-lock", "skipped-unchanged")
@@ -140,6 +143,8 @@ def cmd_append(a):
         "review_unresolved": (w.get("review") or {}).get("unresolved"),
         "summary": (w.get("summary") or o.get("summary") or "")[:1000],
         "slack_summary": (w.get("slack_summary") or "")[:400] or None,
+        # Tokens this run spent, per (role, review round, model): see lib/tokens.py.
+        "tokens": tokens.summarize(a.usage_log),
     }
     path = os.path.join(a.root, "runs.jsonl")
     with open(path, "a", encoding="utf-8") as f:
@@ -212,6 +217,7 @@ def main(argv=None):
     ap.add_argument("--orch-result", default="")
     ap.add_argument("--worker-status", default="")
     ap.add_argument("--worker-result", default="")
+    ap.add_argument("--usage-log", default="")
     sub.add_parser("alert")
     a = p.parse_args(argv)
     {"append": cmd_append, "alert": cmd_alert}[a.cmd](a)

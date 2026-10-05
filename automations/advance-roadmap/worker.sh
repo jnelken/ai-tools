@@ -18,6 +18,7 @@ CODE_DIR="${PERSONAL_CODE_DIR:-$("${0:A:h:h:h}/bin/personal-code-dir" 2>/dev/nul
 SKILL_DIR="${ADVANCE_ROADMAP_SKILL_DIR:-/Users/jake/.claude/skills/advance-roadmap}"
 USAGE_PY="$ROOT/lib/usage.py"
 REVIEW_SH="$ROOT/review.sh"
+TOKENS_PY="$ROOT/lib/tokens.py"
 
 CLAUDE="${ADVANCE_ROADMAP_CLAUDE_BIN:-/Users/jake/.local/bin/claude}"
 AGENT="${ADVANCE_ROADMAP_AGENT_BIN:-/Users/jake/.local/bin/agent}"
@@ -34,6 +35,7 @@ REQUEST_FILE=""
 PROVIDERS_STR=""
 RESULT_FILE=""
 STATUS_FILE=""
+USAGE_LOG=""   # set once --result-file is known: model-usage.jsonl beside it, shared with run.sh and review.sh
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -58,6 +60,7 @@ json.dump({"used": used or None, "exit": int(rc) if rc.lstrip("-").isdigit() els
 PY2
 }
 
+[ -n "$RESULT_FILE" ] && USAGE_LOG="${RESULT_FILE:h}/model-usage.jsonl"
 [ -n "$STAMP" ] || { echo "FATAL: --stamp required" >&2; exit 2; }
 [ -n "$REQUEST_FILE" ] && [ -f "$REQUEST_FILE" ] || { echo "FATAL: --request-file required" >&2; exit 2; }
 [ -f "$USAGE_PY" ] || { echo "FATAL: missing $USAGE_PY" >&2; exit 2; }
@@ -140,8 +143,13 @@ run_cursor() {
   "$AGENT" -p --force --trust --model "$CURSOR_WORKER_MODEL" \
     --workspace "$CODE_DIR" \
     --add-dir "$ROOT" \
-    --output-format text \
-    "$prompt" >"$out" 2>&1
+    --output-format json \
+    "$prompt" >"$out.json" 2>&1
+  local rc=$?
+  python3 "$TOKENS_PY" cursor-json "$out.json" "$out" --role worker --model "$CURSOR_WORKER_MODEL" \
+    --log "$USAGE_LOG" 2>&1
+  [ -s "$out" ] || cp "$out.json" "$out" 2>/dev/null   # tokens.py missing or broken: keep the raw output
+  return $rc
 }
 
 run_codex() {
@@ -159,6 +167,9 @@ run_codex() {
     --skip-git-repo-check \
     --dangerously-bypass-approvals-and-sandbox \
     "$prompt" >"$out" 2>&1 </dev/null
+  local rc=$?
+  python3 "$TOKENS_PY" codex "$out" --role worker --model "$CODEX_WORKER_MODEL" --log "$USAGE_LOG" 2>&1
+  return $rc
 }
 
 run_claude() {
@@ -172,7 +183,12 @@ run_claude() {
     --dangerously-skip-permissions \
     --add-dir "$CODE_DIR" \
     --add-dir "$ROOT" \
-    --output-format text >"$out" 2>&1
+    --output-format json >"$out.json" 2>&1
+  local rc=$?
+  python3 "$TOKENS_PY" claude-json "$out.json" "$out" --role worker --model "$CLAUDE_WORKER_MODEL" \
+    --log "$USAGE_LOG" 2>&1
+  [ -s "$out" ] || cp "$out.json" "$out" 2>/dev/null   # tokens.py missing or broken: keep the raw output
+  return $rc
 }
 
 tmpdir="$(mktemp -d "${TMPDIR:-/tmp}/advance-roadmap-worker.XXXXXX")"

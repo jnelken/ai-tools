@@ -40,6 +40,7 @@ CONDUCTOR_DIR="${ADVANCE_ROADMAP_CONDUCTOR_DIR:-$(dirname "$SKILL_DIR")/conducto
 USAGE_PY="$ROOT/lib/usage.py"
 RECORD_PY="$ROOT/lib/runrecord.py"
 PLAN_PY="$ROOT/lib/pendingplan.py"
+TOKENS_PY="$ROOT/lib/tokens.py"
 LINEAR_SNAP_PY="$ROOT/lib/linearsnap.py"
 VERDICT_PY="$ROOT/lib/verdict.py"
 LAST_VERDICT="${ADVANCE_ROADMAP_LAST_VERDICT:-$CODE_DIR/.advance-roadmap/last-verdict.json}"
@@ -92,6 +93,9 @@ find "$ROOT/runs" -mindepth 1 -maxdepth 1 -type d -mtime +30 -exec rm -rf {} + 2
 ORCH_RESULT="$RUN_DIR/orchestrator-result.json"
 WORKER_RESULT="$RUN_DIR/worker-result.json"
 WORKER_STATUS="$RUN_DIR/worker-status.json"
+# Every model call this run makes (orchestrator here, worker and reviewers in worker.sh /
+# review.sh) appends a line; runrecord.py folds it into the run row.
+USAGE_LOG="$RUN_DIR/model-usage.jsonl"
 
 RECORDED=0
 ORCH=""
@@ -107,7 +111,8 @@ record() {
     --detail "${2:-}" "${extra[@]}" \
     --orch-provider "$ORCH" \
     --orch-result "$ORCH_RESULT" \
-    --worker-status "$WORKER_STATUS" --worker-result "$WORKER_RESULT" >> "$LOG" 2>&1 || true
+    --worker-status "$WORKER_STATUS" --worker-result "$WORKER_RESULT" \
+    --usage-log "$USAGE_LOG" >> "$LOG" 2>&1 || true
 }
 on_exit() {
   local rc=$?
@@ -272,6 +277,9 @@ run_orchestrator_codex() {
     --add-dir "$CODE_DIR" \
     --skip-git-repo-check \
     "$prompt" >"$out" 2>&1 </dev/null
+  local rc=$?
+  python3 "$TOKENS_PY" codex "$out" --role orchestrator --model "$ORCH_CODEX_MODEL" --log "$USAGE_LOG" >> "$LOG" 2>&1
+  return $rc
 }
 
 run_orchestrator_claude() {
@@ -283,7 +291,13 @@ run_orchestrator_claude() {
     --permission-prompts none \
     --disallowedTools "Edit,Write,NotebookEdit" \
     --add-dir "$CODE_DIR" \
-    --output-format text >"$out" 2>&1
+    --output-format json >"$out.json" 2>&1
+  local rc=$?
+  # json carries the per-model token counts; tokens.py turns it back into plain text at $out.
+  python3 "$TOKENS_PY" claude-json "$out.json" "$out" --role orchestrator --model "$ORCH_CLAUDE_MODEL" \
+    --log "$USAGE_LOG" >> "$LOG" 2>&1
+  [ -s "$out" ] || cp "$out.json" "$out" 2>/dev/null   # tokens.py missing or broken: keep the raw output
+  return $rc
 }
 
 # ── Unchanged-world gate ──────────────────────────────────────────────────────

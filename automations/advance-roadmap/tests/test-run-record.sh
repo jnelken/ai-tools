@@ -10,7 +10,7 @@ trap 'rm -rf "$TMP"' EXIT INT TERM
 ROOT="$TMP/root"; SKILLS="$TMP/skills"; BIN="$TMP/bin"
 mkdir -p "$ROOT/lib" "$SKILLS" "$BIN" "$TMP/code"
 cp "$HERE/run.sh" "$HERE/worker.sh" "$ROOT/"
-cp "$HERE/lib/runrecord.py" "$ROOT/lib/"
+cp "$HERE/lib/runrecord.py" "$HERE/lib/tokens.py" "$ROOT/lib/"
 for f in ORCHESTRATOR.md SAFETY.md WORKER.md; do echo stub > "$SKILLS/$f"; done
 
 cat > "$ROOT/lib/usage.py" <<'PY'
@@ -29,6 +29,8 @@ print -r -- '```ORCHESTRATOR_RESULT_JSON'
 print -r -- '{ "action": <decoy from echoed prompt> }'
 print -r -- '```'
 print -r -- "=== advance-roadmap exit=2 finished (quoted from an old log) ==="
+# Codex's closing line (no rollout under this fake home, so tokens.py uses the total).
+print -r -- "tokens used"; print -r -- "12,345"
 [ "$FAKE_ORCH" = "garbage" ] && { print "no fence here"; exit 0; }
 kind=feature; [ "$FAKE_ORCH" = "health" ] && kind=code_health
 cat > "$last" <<EOF
@@ -45,7 +47,8 @@ prompt="${@[-1]}"
 rf="$(print -r -- "$prompt" | sed -n 's/^(raw JSON, no fence) to: //p')"
 res='{"outcome":"shipped","provider":"cursor","repo":"demo","item":"DEV-1 thing","merge_commit":"abc1234","summary":"ok","slack_summary":"Did the thing. DEV-1 Done."}'
 case "$FAKE_WORKER" in
-  file)  print -r -- "$res" > "$rf"; print "=== advance-roadmap exit=2 finished (decoy) ===" ;;
+  file)  print -r -- "$res" > "$rf"; print "=== advance-roadmap exit=2 finished (decoy) ==="
+         print -r -- '{"type":"result","result":"done","usage":{"inputTokens":100,"outputTokens":50,"cacheReadTokens":900,"cacheWriteTokens":10}}' ;;
   fence) print -r -- '```WORKER_RESULT_JSON'; print -r -- "$res"; print -r -- '```' ;;
   fail)  print "boom"; exit 1 ;;
   reviewed) print -r -- "$prompt" | grep -q -- '--worker cursor --round <N> --log .*/reviews.jsonl' || exit 9
@@ -81,6 +84,11 @@ run good file;    check "agent-written result → shipped"       "$(last outcome
                   check "merge commit carried through"          "$(last merge_commit)" abc1234
                   check "slack summary carried through"         "$(last slack_summary)" "Did the thing. DEV-1 Done."
                   check "unreviewed ship is flagged"            "$(last detail)" "merged without a logged review"
+                  check "run tokens = orchestrator total + worker new in/out" \
+                        "$(python3 -c "import json; print(json.loads(open('$ROOT/runs.jsonl').readlines()[-1])['tokens']['total'])")" 12505
+                  check "worker tokens carry provider/model" \
+                        "$(python3 -c "import json; c=json.loads(open('$ROOT/runs.jsonl').readlines()[-1])['tokens']['calls']; print(sorted((x['role'],x['provider'],x['model']) for x in c))")" \
+                        "[('orchestrator', 'codex', 'gpt-5.6-sol'), ('worker', 'cursor', 'auto')]"
 run good reviewed; check "reviewed ship → shipped"             "$(last outcome)" shipped
                   check "review rounds recorded"                "$(last review_rounds)" 2
                   check "reviewer recorded"                     "$(last reviewer)" codex

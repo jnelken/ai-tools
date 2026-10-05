@@ -315,6 +315,7 @@ def parse_runs(ledger, records=None):
             "repo": repo,
             "fields": fields,
             "linear_id": (rec or {}).get("linear_id") or "",
+            "tokens": (rec or {}).get("tokens"),
             "push": pm.group(0).strip() if pm else "",
             "duration": duration,
             "log_tail": body[-LOG_TAIL_CHARS:],
@@ -772,6 +773,75 @@ def badge(outcome):
     return f'<span class="badge {cls}">{esc(label)}</span>'
 
 
+def fmt_tok(n):
+    n = int(n or 0)
+    if n >= 1_000_000:
+        return f"{n / 1_000_000:.1f}M"
+    return f"{n / 1000:.0f}k" if n >= 10_000 else f"{n / 1000:.1f}k" if n >= 1000 else str(n)
+
+
+def call_label(c):
+    role = c.get("role") or "?"
+    return f"review round {c['round']}" if role == "reviewer" and c.get("round") else role
+
+
+def tokens_table(t):
+    """Per-call token breakdown for one run: orchestrator, worker, each review round."""
+    order = {"orchestrator": 0, "worker": 1, "reviewer": 2}
+    calls = sorted(t.get("calls") or [], key=lambda c: (order.get(c.get("role"), 9), c.get("round") or 0))
+    body = "".join(
+        f'<tr><td>{esc(call_label(c))}</td><td class=mono>{esc(c.get("provider") or "")}/{esc(c.get("model") or "?")}</td>'
+        f'<td class=num>{fmt_tok(c["input"] + c["cache_write"])}</td><td class=num>{fmt_tok(c["cache_read"])}</td>'
+        f'<td class=num>{fmt_tok(c["output"])}</td><td class=num><b>{fmt_tok(c["total"])}</b></td></tr>'
+        for c in calls)
+    cost = f' · ${t["cost_usd"]:.2f} Claude list cost' if t.get("cost_usd") else ""
+    return (f'<h4>Tokens</h4><div class=tablewrap><table class=tok><tr><th>Step</th><th>Model</th>'
+            f'<th class=num>New in</th><th class=num>Cached in</th><th class=num>Out</th><th class=num>Total</th></tr>'
+            f'{body}<tr><td colspan=5><b>Run total</b></td><td class=num><b>{fmt_tok(t["total"])}</b></td></tr>'
+            f'</table></div><p class=dim>Total = new input + output. Cached in = cache reads, not counted in the total{esc(cost)}.</p>')
+
+
+def token_summary(runs):
+    """Per-model token totals over 24h / 7d / all tracked runs, from runs.jsonl rows."""
+    now = datetime.now()
+    windows = (("24h", 86400), ("7d", 7 * 86400), ("all", None))
+    models, first, tracked = {}, None, 0
+    for r in runs:
+        t = r.get("tokens")
+        if not t or not r["started"]:
+            continue
+        tracked += 1
+        first = min(first, r["started"]) if first else r["started"]
+        age = (now - r["started"]).total_seconds()
+        for c in t.get("calls") or []:
+            m = models.setdefault((c.get("provider"), c.get("model")),
+                                  {k: {"total": 0, "input": 0, "cache": 0, "output": 0, "cost": 0.0} for k, _ in windows})
+            for k, span in windows:
+                if span is None or age <= span:
+                    w = m[k]
+                    w["total"] += c["total"]; w["input"] += c["input"] + c["cache_write"]
+                    w["cache"] += c["cache_read"]; w["output"] += c["output"]
+                    w["cost"] += c.get("cost_usd") or 0
+    if not models:
+        return ('<p class=dim>No token data yet — runs record tokens per model from the first run after this '
+                'was added.</p>')
+    def cell(w):
+        tip = (f'new in {fmt_tok(w["input"])} · cached in {fmt_tok(w["cache"])} · out {fmt_tok(w["output"])}'
+               + (f' · ${w["cost"]:.2f} list' if w["cost"] else ""))
+        return f'<td class=num title="{esc(tip)}">{fmt_tok(w["total"]) if w["total"] else "—"}</td>'
+    rows = "".join(
+        f'<tr><td class=mono>{esc(p or "?")}/{esc(m or "?")}</td>' + "".join(cell(v[k]) for k, _ in windows) + '</tr>'
+        for (p, m), v in sorted(models.items(), key=lambda kv: -kv[1]["all"]["total"]))
+    grand = {k: sum(v[k]["total"] for v in models.values()) for k, _ in windows}
+    rows += ('<tr><td><b>All models</b></td>'
+             + "".join(f'<td class=num><b>{fmt_tok(grand[k])}</b></td>' for k, _ in windows) + '</tr>')
+    return (f'<div class=tablewrap><table class=tok><tr><th>Model</th><th class=num>Last 24h</th>'
+            f'<th class=num>Last 7d</th><th class=num>All tracked</th></tr>{rows}</table></div>'
+            f'<p class=dim>Tokens = new input + output (cache reads excluded), across orchestrator, worker and reviewers. '
+            f'{tracked} run(s) tracked since {first.strftime("%b %-d")}; earlier runs have no token data. '
+            f'Hover a cell for the split. Cursor reports its Auto pool, not the model it routed to.</p>')
+
+
 def build():
     ledger = merge_cache(read_ledger())
     runs = parse_runs(ledger, read_records())
@@ -801,7 +871,9 @@ def build():
         started = r["started"]
         day = started.strftime("%a %d") if started else ""
         hm = started.strftime("%H:%M") if started else esc(r["stamp"])
-        meta = " · ".join(x for x in (r["repo"], r["duration"], r["model"] if r["model"] != "—" else "") if x)
+        tk = r.get("tokens")
+        meta = " · ".join(x for x in (r["repo"], r["duration"], r["model"] if r["model"] != "—" else "",
+                                      f'{fmt_tok(tk["total"])} tok' if tk else "") if x)
         summary = f.get("Summary") or (r["detail"] if f.get("Item") else "")
         rid = f'run-{r["stamp"]}'
         cards.append(
@@ -832,6 +904,7 @@ def build():
             + (f'<h4>Summary</h4><p class=psum>{esc(summary)}</p>' if summary else "")
             + (f'<div class=pushnote>{esc(r["push"])}</div>' if r["push"] else "")
             + (f'<div class=plinks>{links}</div>' if links else "")
+            + (tokens_table(r["tokens"]) if r.get("tokens") else "")
             + log
             + '</template>')
     run_cards = "\n".join(cards) or '<p class=dim style="padding:14px">No runs logged yet.</p>'
@@ -889,6 +962,8 @@ def build():
     else:
         quota_html = '<p class=dim>No usage reading available — the gate would let a run proceed.</p>'
 
+    token_html = token_summary(runs)
+
     missed_html = ('<p class=dim>None — every scheduled slot since the first run produced a log.</p>'
                    if not missed else
                    '<div class=card><p class=dim style="margin-top:0">Slots with no log at all — the '
@@ -942,6 +1017,7 @@ TEMPLATE = """<!doctype html>
   th,td {{ text-align:left; padding:9px 12px; border-bottom:1px solid var(--line); vertical-align:top; }}
   th {{ color:var(--dim); font-weight:600; font-size:12px; text-transform:uppercase; letter-spacing:.04em; }}
   tr:last-child td {{ border-bottom:0; }}
+  th.num, td.num {{ text-align:right; font-variant-numeric:tabular-nums; white-space:nowrap; }}
   tr.r-fail {{ background:var(--failbg); }}
   .badge {{ display:inline-block; padding:2px 9px; border-radius:20px; font-size:12px; font-weight:600; white-space:nowrap; }}
   .badge.ok {{ background:var(--okbg); color:var(--ok); }}
@@ -1053,6 +1129,9 @@ TEMPLATE = """<!doctype html>
 
   <h2>Quota gate</h2>
   {quota_html}
+
+  <h2>Token usage</h2>
+  {token_html}
 
   <h2>Waiting on you</h2>
   {waiting}
