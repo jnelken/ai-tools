@@ -28,6 +28,31 @@ No argument: this session.
 
 **Invoked vs self-started.** The `## Session Retrospectives` section of `~/.claude/CLAUDE.md` self-starts the *note* — after a session that hit tooling friction, the gaps get written up without anyone asking. That self-started note is **report-only**: it never applies a change, because editing shared tooling is licensed by explicit invocation, not by a standing trigger. Reaching this skill by name unlocks steps 5–7. If you arrived here from the CLAUDE.md trigger rather than a `/session-hardening` call, run steps 1–4, emit the findings, and stop.
 
+## Execution — run in a forked subagent
+
+The sweep reads docs, skills, hooks and `memory.md`, runs searches and reproduces failures — none of which the main session needs afterwards. **Do steps 1–5 and 7 in a fork, not in the main session**, so only the report lands in main context.
+
+Use `subagent_type: "fork"` (never a fresh agent): the fork inherits the session transcript, which *is* the corpus — a cold agent can't see the friction moments. Forks run on the main model.
+
+**Main session does:**
+1. The **Skip when** check (trivial session, Datadog-only gaps, sweep already ran). If it applies, say so and stop — don't spawn.
+2. Launch **one** fork, prompt below. Forks run in the background — wait for its completion notice rather than polling or doing the sweep yourself.
+3. When it reports, relay the report as-is. Don't re-run searches or re-read files the fork already read.
+4. Step 6 — the user's reply to the offer list. Only the main session can wait on that. Apply accepted Tier 2 items directly, or hand a large batch to another fork. File the bundled Linear ticket via [[linear-ticket-gen]] for accepted gaps.
+
+**Fork does:** steps 1–5 and 7 — establish the session, read `memory.md`, run the six recognition tests, tier findings, apply Tier 1 (invoked runs only), append the `memory.md` entry. It never asks the user anything and never waits.
+
+**Fork prompt** (fill `<mode>`):
+
+```
+Run the session-hardening sweep (steps 1–5 and 7 of the skill) over this session.
+Mode: <invoked | self-started — report-only, apply nothing, no Tier 1>.
+Do not ask questions or wait for input. Do not do step 6.
+Return ONLY the report in the skill's "Output format" (findings table, Applied,
+Working correctly, Awaiting your call) — no narration, no tool output, no preamble.
+If there is no friction, return one line saying so.
+```
+
 ## When NOT to use
 
 - **"Is this new code clean?"** — `/simplify` (over the diff, applies fixes) or [[tighten]] (TS structural wins). They look *at* the diff.
@@ -84,10 +109,10 @@ Per the table in [`docs/session-retrospectives.md`](../../docs/session-retrospec
 **Invoked runs only.** Make the Tier 1 changes and say what you did, with a recovery handle for each (SHA, path, restore command).
 
 ### 6. Offer Tiers 2 and 3
-Numbered, with the house prompt. Wait. A report is not approval. File one bundled Linear ticket (via [[linear-ticket-gen]], duplicate check first) for accepted gaps that can't be fixed in-session.
+**Main session** (not the fork). Numbered, with the house prompt. Wait. A report is not approval. File one bundled Linear ticket (via [[linear-ticket-gen]], duplicate check first) for accepted gaps that can't be fixed in-session.
 
 ### 7. Append to `memory.md`
-One dated entry. Never rewrite prior entries. The log is local per machine and gitignored — do not commit it.
+Fork writes this with the report. One dated entry. Never rewrite prior entries. The log is local per machine and gitignored — do not commit it.
 
 ## Output format
 
