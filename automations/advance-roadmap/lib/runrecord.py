@@ -107,6 +107,9 @@ def cmd_append(a):
     wresult = load_json(a.worker_result)
     outcome, detail = derive(a, orch, wstatus, wresult)
     reviews = read_reviews(a.worker_result)
+    if outcome in ("shipped", "shipped-deploy-failed") and a.expect_pr and not (wresult or {}).get("pr_url"):
+        # Only a merged PR from the workspace counts on the leaderboard; flag a ship without one.
+        detail = "shipped without a PR URL — not credited"
     if outcome in ("shipped", "shipped-deploy-failed") and not detail:
         if not reviews:
             detail = "merged without a logged review"
@@ -220,6 +223,8 @@ def main(argv=None):
     ap.add_argument("--worker-status", default="")
     ap.add_argument("--worker-result", default="")
     ap.add_argument("--usage-log", default="")
+    ap.add_argument("--expect-pr", action="store_true",
+                    help="the worker ran in a Superset workspace, so a ship must name its PR")
     sub.add_parser("alert")
     a = p.parse_args(argv)
     {"append": cmd_append, "alert": cmd_alert}[a.cmd](a)

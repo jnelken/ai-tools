@@ -114,6 +114,7 @@ record() {
   RECORDED=1
   local -a extra=()
   [ -n "${3:-}" ] && extra+=(--exit "$3")
+  [ -f "$RUN_DIR/workspace.json" ] && extra+=(--expect-pr)  # a workspace run must ship a PR
   [ -n "${orch_rc:-}" ] && extra+=(--orch-exit "$orch_rc")
   python3 "$RECORD_PY" --root "$ROOT" append --stamp "$STAMP" --status "$1" \
     --detail "${2:-}" "${extra[@]}" \
@@ -270,6 +271,7 @@ run_worker_in_workspace() {
     print -r -- '#!/bin/zsh'
     local v
     for v in ${(k)parameters[(I)ADVANCE_ROADMAP_*]} PERSONAL_CODE_DIR; do
+      case "$v" in *WEBHOOK*|*SECRET*|*TOKEN*|*KEY*) continue ;; esac  # secrets stay in secrets.env
       [ -n "${(P)v-}" ] && print -r -- "export $v=${(q)${(P)v}}"
     done
     print -r -- "print -r -- \$\$ > ${(q)RUN_DIR}/worker.pid; print -r -- \$\$ > ${(q)inflight}"
@@ -279,7 +281,7 @@ run_worker_in_workspace() {
     # tick would relaunch an item this worker already shipped.
     print -r -- "python3 ${(q)PLAN_PY} --file ${(q)PENDING_PLAN} settle --worker-result ${(q)WORKER_RESULT} --worker-rc \$rc --request-file ${(q)req} >/dev/null 2>&1"
   } > "$launcher"
-  chmod +x "$launcher"
+  chmod 700 "$launcher"
   rm -f "$RUN_DIR/worker.pid" "$RUN_DIR/worker.exit"
   if ! python3 "$WORKSPACES_PY" launch --repo "$CODE_DIR/$repo" --branch "$branch" --name "${name//  / }" \
        --command "/bin/zsh ${(q)launcher}" --out "$RUN_DIR/workspace.json" >> "$LOG" 2>&1; then

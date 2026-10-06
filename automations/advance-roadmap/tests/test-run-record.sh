@@ -93,7 +93,7 @@ run() {
     ADVANCE_ROADMAP_ROOT="$ROOT" ADVANCE_ROADMAP_SKILL_DIR="$SKILLS" ADVANCE_ROADMAP_CONDUCTOR_DIR="$SKILLS" \
     ADVANCE_ROADMAP_SECRETS=/dev/null ADVANCE_ROADMAP_NOTIFY=0 \
     ADVANCE_ROADMAP_SUPERSET="${SUPERSET:-0}" ADVANCE_ROADMAP_SUPERSET_BIN="$BIN/superset" ADVANCE_ROADMAP_WORKER_POLL_S=1 \
-    FAKE_SUPERSET="${FAKE_SUPERSET:-up}" FAKE_CODE="$TMP/code" FAKE_WS="$TMP/ws" \
+    FAKE_SUPERSET="${FAKE_SUPERSET:-up}" FAKE_CODE="$TMP/code" FAKE_WS="$TMP/ws" ADVANCE_ROADMAP_TEST_TOKEN=s3cret \
     ADVANCE_ROADMAP_CODEX_BIN="$BIN/codex" ADVANCE_ROADMAP_AGENT_BIN="$BIN/agent" \
     ADVANCE_ROADMAP_CADENCE_HOURS="${CADENCE_HOURS:-1}" \
     ADVANCE_ROADMAP_CHAIN_MINUTES="${CHAIN_MINUTES:-0}" CHAIN_COUNT="$TMP/chain-count" \
@@ -152,6 +152,9 @@ check "no chain past the time cap"            "$(wc -l < "$ROOT/runs.jsonl" | tr
 # Superset mode: the worker runs in the item's workspace terminal, not in-process.
 SUPERSET=1 run good ws
 check "workspace run → shipped"               "$(last outcome)" shipped
+check "a workspace ship with no PR is flagged" "$(last detail)" "shipped without a PR URL — not credited"
+grep -q ADVANCE_ROADMAP_ROOT "$ROOT"/runs/*/worker-launch.zsh || { echo "FAIL: launcher lost the run's env"; exit 1; }
+grep -q s3cret "$ROOT"/runs/*/worker-launch.zsh && { echo "FAIL: launcher carries a secret"; exit 1; } || echo "ok   launcher carries no secrets"
 grep -q "worker running in Superset workspace w1" "$ROOT/logs/latest.log" \
   && echo "ok   worker ran in the workspace" || { echo "FAIL: no workspace launch"; tail -40 "$ROOT/logs/latest.log"; exit 1; }
 # Superset down: no worker runs, the tick is a skip (not an error), and nothing alerts.
