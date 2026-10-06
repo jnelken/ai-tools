@@ -188,19 +188,23 @@ def cmd_launch(a):
 
 
 def merged_workspaces():
-    """advance-roadmap workspace ids whose linked PR Superset has seen merged."""
+    """advance-roadmap workspace ids with a PR Superset has seen merged and none still open
+    (a fix-forward PR from the same workspace may be in flight after the first merges)."""
     rows = db_query(
         """select w.id, max(p.merged_at), max(coalesce(b.last_event_at, 0)),
-                  sum(case when b.last_event_type in (?, ?) and b.ended_at is null then 1 else 0 end)
+                  sum(case when b.last_event_type in (?, ?) and b.ended_at is null then 1 else 0 end),
+                  sum(case when p.merged_at is null and p.state = 'open' then 1 else 0 end)
              from workspaces w
              join workspace_pull_requests wp on wp.workspace_id = w.id
              join pull_requests p on p.id = wp.pull_request_id
              left join terminal_agent_bindings b on b.workspace_id = w.id
-            where w.archived_at is null and p.merged_at is not null
-            group by w.id""",
+            where w.archived_at is null
+            group by w.id
+           having max(p.merged_at) is not null""",
         BUSY_EVENTS,
     )
-    return {r[0]: {"merged_at": r[1], "last_event_at": r[2], "busy": r[3]} for r in rows or []}
+    return {r[0]: {"merged_at": r[1], "last_event_at": r[2], "busy": r[3], "open_prs": r[4]}
+            for r in rows or []}
 
 
 def cmd_cleanup(a):
@@ -215,8 +219,8 @@ def cmd_cleanup(a):
         info = merged.get(w.get("id"))
         if not info:
             continue  # unmerged: in flight, or a branch left for Jake — keep it
-        if info["busy"]:
-            continue  # an agent is still working in it (a fix-forward, say)
+        if info["busy"] or info["open_prs"]:
+            continue  # an agent is still working in it, or a fix-forward PR is still open
         idle_min = (now_ms - max(info["last_event_at"] or 0, info["merged_at"] or 0)) / 60000
         if idle_min < a.min_idle_minutes:
             continue

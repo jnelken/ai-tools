@@ -13,6 +13,7 @@ them. That parent is not a git checkout, so the file never dirties a repo.
     pendingplan.py --file F save   --result R --stamp S
     pendingplan.py --file F reuse  --out R [--max-age-hours N] [--max-attempts N]
     pendingplan.py --file F settle --worker-result W --worker-rc N
+    pendingplan.py --file F refund   (a reused plan whose worker never launched: give the attempt back)
     pendingplan.py --file F clear
 """
 import argparse
@@ -148,6 +149,16 @@ def cmd_settle(a):
     return 0
 
 
+def cmd_refund(a):
+    plan = load(a.file)
+    if not plan or plan.get("attempts", 0) <= 0:
+        return 0
+    plan["attempts"] -= 1
+    write(a.file, plan)
+    print(f"pending plan: attempt refunded (no worker launched) — {plan['attempts']} used")
+    return 0
+
+
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--file", required=True)
@@ -157,11 +168,12 @@ def main():
     s.add_argument("--max-age-hours", type=int, default=36); s.add_argument("--max-attempts", type=int, default=2)
     s = sub.add_parser("settle"); s.add_argument("--worker-result", required=True); s.add_argument("--worker-rc", type=int, default=0)
     sub.add_parser("clear")
+    sub.add_parser("refund")
     a = p.parse_args()
     if a.cmd == "clear":
         clear(a.file)
         return 0
-    return {"save": cmd_save, "reuse": cmd_reuse, "settle": cmd_settle}[a.cmd](a)
+    return {"save": cmd_save, "reuse": cmd_reuse, "settle": cmd_settle, "refund": cmd_refund}[a.cmd](a)
 
 
 if __name__ == "__main__":

@@ -229,6 +229,16 @@ mkdir "$LOCK" 2>/dev/null || {
 }
 HOLDS_LOCK=1
 
+# Workers run in Superset workspace terminals, so with the app down there's nothing to
+# dispatch into: skip before spending an orchestrator pass. Any pending plan waits.
+if [ "$SUPERSET_MODE" = "1" ] && ! python3 "$WORKSPACES_PY" available >> "$LOG" 2>&1; then
+  echo "=== advance-roadmap $STAMP: skipping — Superset app or host service not reachable ===" >> "$LOG"
+  record skipped-superset "Superset app or host service not reachable"
+  ln -sf "$LOG" "$LOGDIR/latest.log"
+  regen_dashboard
+  exit 0
+fi
+
 # Workspaces whose PR Superset has seen merged are done; delete them so the sidebar and
 # ~/.superset/worktrees don't pile up. Never earlier — see lib/workspaces.py.
 if [ "$SUPERSET_MODE" = "1" ] && [ -f "$WORKSPACES_PY" ]; then
@@ -248,8 +258,12 @@ run_worker_in_workspace() {
   [ -n "$branch" ] || branch="roadmap/$STAMP"
   slug="${branch#roadmap/}"
   name="roadmap $repo $(jq -r '.orchestrator.linear_id // empty' "$req") ${slug}"
-  if ! python3 "$WORKSPACES_PY" available >> "$LOG" 2>&1; then
-    superset_skip="Superset app or host service not reachable"; return 1
+  # A worker an earlier run timed out on may still be going in this branch's workspace;
+  # never start a second one beside it.
+  local inflight="$ROOT/inflight/${repo}--${slug//\//-}.pid"
+  mkdir -p "$ROOT/inflight"
+  if [ -s "$inflight" ] && kill -0 "$(cat "$inflight")" 2>/dev/null; then
+    superset_skip="a worker from an earlier run is still running on $branch"; return 1
   fi
   # The terminal runs the user's shell, not launchd's env: carry over what this run set.
   {
@@ -258,9 +272,9 @@ run_worker_in_workspace() {
     for v in ${(k)parameters[(I)ADVANCE_ROADMAP_*]} PERSONAL_CODE_DIR; do
       [ -n "${(P)v-}" ] && print -r -- "export $v=${(q)${(P)v}}"
     done
-    print -r -- "print -r -- \$\$ > ${(q)RUN_DIR}/worker.pid"
+    print -r -- "print -r -- \$\$ > ${(q)RUN_DIR}/worker.pid; print -r -- \$\$ > ${(q)inflight}"
     print -r -- "${(q)WORKER_SH} --stamp ${(q)STAMP} --request-file ${(q)req} --providers ${(q)WORKERS} --result-file ${(q)WORKER_RESULT} --status-file ${(q)WORKER_STATUS} 2>&1 | tee ${(q)RUN_DIR}/worker-output.log"
-    print -r -- "print -r -- \${pipestatus[1]} > ${(q)RUN_DIR}/worker.exit"
+    print -r -- "print -r -- \${pipestatus[1]} > ${(q)RUN_DIR}/worker.exit; rm -f ${(q)inflight}"
   } > "$launcher"
   chmod +x "$launcher"
   rm -f "$RUN_DIR/worker.pid" "$RUN_DIR/worker.exit"
@@ -563,8 +577,10 @@ PY
       --result-file "$WORKER_RESULT" --status-file "$WORKER_STATUS" || worker_rc=$?
   fi
   if [ -n "$superset_skip" ]; then
-    # No worker ran: keep the pending plan for the next run and save no verdict.
+    # No worker ran: keep the pending plan for the next run, give back a reused plan's
+    # attempt (nothing was tried), and save no verdict.
     echo "=== worker not launched: $superset_skip ==="
+    [ "$reused" -eq 1 ] && python3 "$PLAN_PY" --file "$PENDING_PLAN" refund
     final_rc=0
     echo "=== advance-roadmap exit=0 finished $(date) (skipped: $superset_skip) ==="
   else

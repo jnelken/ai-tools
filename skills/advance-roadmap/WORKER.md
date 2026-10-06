@@ -371,7 +371,10 @@ gh pr view <number> -R jnelken/<github-repo> --json mergeCommit,url --jq '.merge
 - The merge commit's SHA is `merge_commit` and the PR's URL is `pr_url` in the result JSON.
 - Afterwards, keep the root checkout's `main` current when you can: if `git -C <repo> status
   --porcelain` is empty and it's on the default branch, `git -C <repo> pull --ff-only`. If not, just
-  `git -C <repo> fetch origin`. Never touch a dirty root checkout beyond that.
+  `git -C <repo> fetch origin`. Never touch a dirty root checkout beyond that. An interactive run
+  that built in the root checkout (no workspace) first switches that clean checkout back:
+  `git -C <repo> checkout <default-branch>`, then pulls — otherwise the next run finds the repo
+  parked on `roadmap/*`.
 - Do **not** close the Linear issue yet — that waits for Step 7b.
 
 ## Step 7b — Watch the deploy until it's green
@@ -396,8 +399,8 @@ sometimes Netlify). A push isn't shipped until that build succeeds.
    run `vercel inspect <url> --logs`; fall back to the check-run's `output` via `gh api`. Never
    paste env values or secrets from the logs anywhere.
 4. **Fix forward, through a PR.** Diagnose from the logs. In your checkout, bring the branch up to
-   the merged state (`git fetch origin && git merge --ff-only origin/<default-branch>`), make a
-   focused `fix:` commit, re-run Step 5's verification in full, push, and open and merge a new PR
+   the merged state (`git fetch origin && git merge origin/<default-branch>` — a plain merge, since
+   after a squash-merge the branch tip isn't an ancestor of `main`), make a focused `fix:` commit, re-run Step 5's verification in full, push, and open and merge a new PR
    from the same branch exactly as in Step 7. Never force `main`, never revert published history,
    never change Vercel/Netlify project settings or env vars. Then go back to 1 for the new merge SHA.
 5. **Cap: 3 fix-and-redeploy attempts.** If the deploy is still failing after the third, leave `main`
