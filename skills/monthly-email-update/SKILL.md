@@ -121,6 +121,42 @@ search window if a lookup comes back empty.
 Because Claude-authored work is counted, the Numbers row is **`Commits landed`**,
 not "Human commits landed" — the label would misdescribe what is being counted.
 
+## Claudio (AI teammate) section
+
+Claudio is the in-house Claude triage bot in Slack (`internal-tools/services/claudio-slack-bot`,
+live since 2026-09-14). It writes no PRs, so none of the commit or PR numbers above see its work.
+Include a short section for it whenever it was active in the month. The time-saved figure comes
+from a script so the number is computed the same way every month:
+
+```bash
+cd /Users/jake/code/internal-tools   # or any worktree with the branch from internal-tools#42
+SLACK_BOT_TOKEN="$(koyeb secrets reveal CLAUDIO_SLACK_BOT_TOKEN)" \
+  npm run impact:monthly -w claudio-slack-bot -- --month YYYY-MM \
+  --dms <D…,D…> --cache /tmp/claudio-YYYY-MM.json
+```
+
+- **DM ids:** the token can read DMs but not list them. Get the ids from Datadog
+  (`service:claudio-slack-bot @channel:D*`, grouped by `@channel`); September 2026 had only
+  `D0C1QHCKYMC`.
+- **Duplicates need a hand check.** The script prints candidate threads. Open each one, and
+  re-run with the confirmed roots in `--duplicates <ts,…>` (the cache makes re-runs free).
+- **Unit and rates** live in the script (`MINUTES` in `monthlyImpact.ts`): one unit per thread,
+  not per message. Alert triage 15 min, bug/feedback triage 20, fix handoff 30 (added on top of
+  its triage), question answered 10, sweep 10, repeat or duplicate linked 15. Rates were agreed
+  2026-10 ("Moderate"). Change them in the script, not in the email, so months stay comparable.
+- **Shipped handoffs:** "at least N have shipped" counts distinct fixes whose PRs trace back to a
+  Claudio handoff thread. Check them by hand: open the handoff threads and match them to merged PRs.
+- **Baseline, September 2026** (Sep 14–30): 30 alerts, 12 bug reports, 8 handoffs, 7 questions,
+  2 sweeps, 11 linked (7 repeat alerts plus 4 confirmed duplicates) → 19.8 h ≈ 2.5 dev-days.
+  Earlier Slack-search estimates counted messages and roughly doubled this; don't compare
+  against them.
+
+Copy rule: one paragraph (about 55–70 words, a little longer than `Behind The Scenes`). Say what
+Claudio is in one clause, give the headline counts and shipped handoffs with 1–2 PR links, then
+"We estimate that saved about H hours of engineering time, roughly D working days (at 10–30
+minutes per item)." Round hours to the nearest 5 and days to the nearest half. Claudio is not
+an MVP, and its numbers stay out of `Numbers`.
+
 ## Writing rules
 
 - Use an executive-style internal update: clear, plainspoken, and grounded in both what shipped and why it matters.
@@ -164,6 +200,10 @@ not "Human commits landed" — the label would misdescribe what is being counted
 
 - **[Theme title]**: [1-2 sentence explanation of how this helped the team move faster, reduced risk, or improved quality, with inline PR links.]
 
+## Claudio's [First Month | Month]
+
+[One paragraph per the Claudio section rules — optional, include when Claudio was active.]
+
 ## Numbers
 
 - **Active developers**: [N]
@@ -186,8 +226,9 @@ not "Human commits landed" — the label would misdescribe what is being counted
   1. `What We Shipped`
   2. `Foundations`
   3. `Behind The Scenes`
-  4. `Numbers`
-  5. `MVPs`
+  4. `Claudio's Month` (optional — see "Claudio (AI teammate) section")
+  5. `Numbers`
+  6. `MVPs`
 - Omit empty sections.
 - `What We Shipped` is for visible product work and meaningful workflow improvements employees would recognize as progress.
 - `Foundations` is for substantial engineering work with no demoable surface: data standardization and correctness projects, platform and job-system reliability, access-control and permission hardening, environment isolation, performance work. **Always include this section** — platform reliability matters increasingly to the company, and because this work has nothing to show on screen, a format organized around features drops it even in months where it was the single largest investment. Omit it only when the month genuinely contains none of it, never because it was hard to phrase.
