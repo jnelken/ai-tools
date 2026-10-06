@@ -113,4 +113,6 @@ never retry silently in a loop. Don't clean up the builder's branch.
 ## What this skill does not do
 
 No chaining, no provider-usage gating, no scheduling, no run dashboard — that's
-[[advance-roadmap]]'s `run.sh`. It also never opens a PR (SAFETY.md).
+[[advance-roadmap]]'s `run.sh`. It ships through the same PR flow (WORKER.md Step 7), but from a
+branch in the root checkout rather than a Superset workspace, so its PRs aren't credited on the
+Production Run leaderboard.

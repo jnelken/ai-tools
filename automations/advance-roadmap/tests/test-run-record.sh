@@ -8,9 +8,9 @@ TMP="$(mktemp -d "${TMPDIR:-/tmp}/advance-roadmap-record-test.XXXXXX")"
 trap 'rm -rf "$TMP"' EXIT INT TERM
 
 ROOT="$TMP/root"; SKILLS="$TMP/skills"; BIN="$TMP/bin"
-mkdir -p "$ROOT/lib" "$SKILLS" "$BIN" "$TMP/code"
+mkdir -p "$ROOT/lib" "$SKILLS" "$BIN" "$TMP/code/demo"
 cp "$HERE/run.sh" "$HERE/worker.sh" "$ROOT/"
-cp "$HERE/lib/runrecord.py" "$HERE/lib/tokens.py" "$ROOT/lib/"
+cp "$HERE/lib/runrecord.py" "$HERE/lib/tokens.py" "$HERE/lib/workspaces.py" "$ROOT/lib/"
 for f in ORCHESTRATOR.md SAFETY.md WORKER.md; do echo stub > "$SKILLS/$f"; done
 
 cat > "$ROOT/lib/usage.py" <<'PY'
@@ -57,10 +57,32 @@ case "$FAKE_WORKER" in
          print -r -- "$res" > "$rf" ;;
   chain) n=$(( $(cat "$CHAIN_COUNT" 2>/dev/null || echo 0) + 1 )); print $n > "$CHAIN_COUNT"
          [ $n -le 2 ] && print -r -- "$res" > "$rf" || { print "boom"; exit 1; } ;;
+  ws)    # Superset mode: must run in the workspace, pointed at it, under Cursor's agent identity.
+         [ "${PWD:A}" = "${SUPERSET_WORKSPACE_PATH:A}" ] && [ "$SUPERSET_AGENT_ID" = cursor-agent ] \
+           && [[ " $* " == *" --workspace $SUPERSET_WORKSPACE_PATH "* ]] \
+           || { print "not in the workspace: pwd=$PWD agent=$SUPERSET_AGENT_ID"; exit 9; }
+         print -r -- "$res" > "$rf" ;;
   deploy) print -r -- '{"outcome":"shipped-deploy-failed","provider":"cursor","repo":"demo","item":"DEV-1 thing","merge_commit":"abc1234","deploy":{"status":"failed","url":"https://demo.vercel.app","attempts":3},"summary":"red"}' > "$rf" ;;
 esac
 SH
-chmod +x "$BIN/codex" "$BIN/agent"
+# Fake Superset CLI: runs a new workspace's --command in the background, in the "worktree",
+# with the env a Superset terminal sets. FAKE_SUPERSET=down fails every call.
+cat > "$BIN/superset" <<'SH'
+#!/bin/zsh
+[ "$FAKE_SUPERSET" = "down" ] && { print "host service not running" >&2; exit 1; }
+case "$1 $2" in
+  "auth whoami") print '{"organizationId":"org"}' ;;
+  "projects list") print -r -- "[{\"id\":\"p1\",\"path\":\"$FAKE_CODE/demo\"}]" ;;
+  "workspaces list") print '[]' ;;
+  "workspaces create")
+    cmd=""; while [ $# -gt 0 ]; do [ "$1" = "--command" ] && { cmd="$2"; shift; }; shift; done
+    mkdir -p "$FAKE_WS"
+    ( cd "$FAKE_WS" && SUPERSET_WORKSPACE_PATH="$FAKE_WS" SUPERSET_TERMINAL_ID=t1 zsh -c "$cmd" ) >/dev/null 2>&1 &!
+    print '{"workspace":{"id":"w1"},"terminals":[{"terminalId":"t1"}],"alreadyExists":false}' ;;
+  *) print '{}' ;;
+esac
+SH
+chmod +x "$BIN/codex" "$BIN/agent" "$BIN/superset"
 
 # The results path must be on its own line for the fake to find it.
 grep -q '^(raw JSON, no fence) to: ' "$ROOT/worker.sh" || { echo "FAIL: prompt format changed"; exit 1; }
@@ -70,6 +92,8 @@ run() {
     ADVANCE_ROADMAP_SLACKAGENT_DIR="$TMP/no-slackagent" PERSONAL_CODE_DIR="$TMP/code" DOTFILES_PERSONAL_MACHINE=1 \
     ADVANCE_ROADMAP_ROOT="$ROOT" ADVANCE_ROADMAP_SKILL_DIR="$SKILLS" ADVANCE_ROADMAP_CONDUCTOR_DIR="$SKILLS" \
     ADVANCE_ROADMAP_SECRETS=/dev/null ADVANCE_ROADMAP_NOTIFY=0 \
+    ADVANCE_ROADMAP_SUPERSET="${SUPERSET:-0}" ADVANCE_ROADMAP_SUPERSET_BIN="$BIN/superset" ADVANCE_ROADMAP_WORKER_POLL_S=1 \
+    FAKE_SUPERSET="${FAKE_SUPERSET:-up}" FAKE_CODE="$TMP/code" FAKE_WS="$TMP/ws" ADVANCE_ROADMAP_TEST_TOKEN=s3cret \
     ADVANCE_ROADMAP_CODEX_BIN="$BIN/codex" ADVANCE_ROADMAP_AGENT_BIN="$BIN/agent" \
     ADVANCE_ROADMAP_CADENCE_HOURS="${CADENCE_HOURS:-1}" \
     ADVANCE_ROADMAP_CHAIN_MINUTES="${CHAIN_MINUTES:-0}" CHAIN_COUNT="$TMP/chain-count" \
@@ -125,11 +149,24 @@ check "code-health ship is still shipped"    "$(last outcome)" shipped
 # Past the time cap, a shipped run does not chain.
 ADVANCE_ROADMAP_CHAIN_START=$(( $(date +%s) - 2401 )) CHAIN_MINUTES=40 run good file
 check "no chain past the time cap"            "$(wc -l < "$ROOT/runs.jsonl" | tr -d ' ')" 12
+# Superset mode: the worker runs in the item's workspace terminal, not in-process.
+SUPERSET=1 run good ws
+check "workspace run → shipped"               "$(last outcome)" shipped
+check "a workspace ship with no PR is flagged" "$(last detail)" "shipped without a PR URL — not credited"
+grep -q ADVANCE_ROADMAP_ROOT "$ROOT"/runs/*/worker-launch.zsh || { echo "FAIL: launcher lost the run's env"; exit 1; }
+grep -q s3cret "$ROOT"/runs/*/worker-launch.zsh && { echo "FAIL: launcher carries a secret"; exit 1; } || echo "ok   launcher carries no secrets"
+grep -q "worker running in Superset workspace w1" "$ROOT/logs/latest.log" \
+  && echo "ok   worker ran in the workspace" || { echo "FAIL: no workspace launch"; tail -40 "$ROOT/logs/latest.log"; exit 1; }
+# Superset down: no worker runs, the tick is a skip (not an error), and nothing alerts.
+FAKE_SUPERSET=down SUPERSET=1 run good ws
+check "Superset down → skipped-superset"      "$(last outcome)" skipped-superset
+check "skip names why"                        "$(last detail)" "Superset app or host service not reachable"
+check "a skip does not alert"                 "$(python3 "$ROOT/lib/runrecord.py" --root "$ROOT" alert)" ""
 # Cadence: a tick off the base grid leaves no trace at all (24h grid = 03:45 only).
 if [ "$(date +%H)" != "03" ]; then
   logs_before=$(ls "$ROOT"/logs | wc -l)
   CADENCE_HOURS=24 run good file
-  check "off-grid tick records nothing"        "$(wc -l < "$ROOT/runs.jsonl" | tr -d ' ')" 12
+  check "off-grid tick records nothing"        "$(wc -l < "$ROOT/runs.jsonl" | tr -d ' ')" 14
   check "off-grid tick leaves no log"          "$(ls "$ROOT"/logs | wc -l)" "$logs_before"
 fi
 echo "all passed"

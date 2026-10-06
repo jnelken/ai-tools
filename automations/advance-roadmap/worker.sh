@@ -61,6 +61,18 @@ PY2
 }
 
 [ -n "$RESULT_FILE" ] && USAGE_LOG="${RESULT_FILE:h}/model-usage.jsonl"
+
+# Superset workspace mode: run.sh launched us in a workspace terminal (SAFETY.md, "Ship as
+# PRs"). Build in that worktree, never the repo's root checkout — Superset only credits a
+# merged PR to a workspace that ran an agent, and the worktree lives outside Dropbox.
+WORKTREE="${SUPERSET_WORKSPACE_PATH:-}"
+if [ -n "$WORKTREE" ]; then
+  cd "$WORKTREE" || { echo "FATAL: cannot cd to workspace $WORKTREE" >&2; write_status "" 2 "cannot cd to workspace $WORKTREE"; exit 2; }
+fi
+WORKDIR="${WORKTREE:-$CODE_DIR}"
+# The root checkouts stay readable/writable for Step 2c and Step 7's post-merge pull.
+extra_dirs=()
+[ -n "$WORKTREE" ] && extra_dirs=(--add-dir "$CODE_DIR")
 [ -n "$STAMP" ] || { echo "FATAL: --stamp required" >&2; exit 2; }
 [ -n "$REQUEST_FILE" ] && [ -f "$REQUEST_FILE" ] || { echo "FATAL: --request-file required" >&2; exit 2; }
 [ -f "$USAGE_PY" ] || { echo "FATAL: missing $USAGE_PY" >&2; exit 2; }
@@ -113,6 +125,14 @@ When you are finished — whatever the outcome — write that same WORKER_RESULT
 (raw JSON, no fence) to: $RESULT_FILE
 run.sh records this run from that file. Without it the run is recorded as incomplete."
 fi
+if [ -n "$WORKTREE" ]; then
+  BASE_PROMPT="$BASE_PROMPT
+
+Your checkout is the Superset workspace $WORKTREE (a git worktree, already on the assigned
+branch). Build, commit, review (review.sh --repo $WORKTREE) and open/merge the PR from there,
+per WORKER.md Steps 3 and 7. Touch the repo's root checkout under $CODE_DIR only for Step 2c's
+directive commit and Step 7's post-merge pull."
+fi
 
 # Step 5b's cross-model review. The log is what run.sh reads to prove it ran.
 REVIEW_LOG="${RESULT_FILE:+${RESULT_FILE:h}/reviews.jsonl}"
@@ -141,7 +161,8 @@ run_cursor() {
   prompt="$(prompt_for_provider cursor)" || return 2
   [ -x "$AGENT" ] || return 127
   "$AGENT" -p --force --trust --model "$CURSOR_WORKER_MODEL" \
-    --workspace "$CODE_DIR" \
+    --workspace "$WORKDIR" \
+    "${extra_dirs[@]}" \
     --add-dir "$ROOT" \
     --output-format json \
     "$prompt" >"$out.json" 2>&1
@@ -157,11 +178,11 @@ run_codex() {
   local prompt
   prompt="$(prompt_for_provider codex)" || return 2
   command -v "$CODEX" >/dev/null 2>&1 || return 127
-  # CODE_DIR is a multi-repo parent, not a git checkout — skip the repo check.
+  # WORKDIR may be the multi-repo parent, not a git checkout — skip the repo check.
   "$CODEX" exec \
     -m "$CODEX_WORKER_MODEL" \
     -c model_reasoning_effort=high \
-    -C "$CODE_DIR" \
+    -C "$WORKDIR" \
     --add-dir "$CODE_DIR" \
     --add-dir "$ROOT" \
     --skip-git-repo-check \
@@ -202,6 +223,11 @@ for provider in "${providers[@]}"; do
   rc=0
   [ -n "$RESULT_FILE" ] && rm -f "$RESULT_FILE"   # a failed-over attempt's result must not count
   rm -f "$REVIEW_LOG"                              # nor its review rounds
+  if [ -n "${SUPERSET_TERMINAL_ID:-}" ]; then
+    # What Superset's own wrappers export: names this terminal's agent, so the nested
+    # review.sh reviewer's hook events are dropped instead of relabeling the binding.
+    case "$provider" in cursor) export SUPERSET_AGENT_ID=cursor-agent ;; *) export SUPERSET_AGENT_ID="$provider" ;; esac
+  fi
   case "$provider" in
     cursor) run_cursor "$out" || rc=$? ;;
     codex)  run_codex "$out"  || rc=$? ;;

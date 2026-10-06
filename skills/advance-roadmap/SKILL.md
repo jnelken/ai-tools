@@ -3,13 +3,14 @@ name: advance-roadmap
 description: >-
   Ship planned items end-to-end, one per run, from a personal repo's ROADMAP.md, from docs/plans/ when the
   repo has no roadmap, or from a Linear issue carrying a repo label. Pick a qualifying repo under
-  the personal code dir, implement the item on a branch, verify with the repo's test/build, move it to
-  Shipped, then merge to main locally and push. No PR. When nothing is actionable anywhere, runs one
+  the personal code dir, implement the item in its own Superset workspace, verify with the repo's
+  test/build, move it to Shipped, then open a PR and merge it. Never pushes code to main directly.
+  When nothing is actionable anywhere, runs one
   bounded, behavior-preserving code-health refactor instead; after each clean ship, files what it
   noticed as code-health tickets. Use on-demand ("/advance-roadmap", "work a
   roadmap item", "advance the roadmap", "ship something off the roadmap") or via an unattended
-  scheduled run. After pushing, watches the production deploy (usually Vercel) and fixes forward
-  until it's green, within a bounded number of attempts. Sibling of [[wrapup-repos]] but NOT the same: this one pushes. Sibling of
+  scheduled run. After merging, watches the production deploy (usually Vercel) and fixes forward
+  until it's green, within a bounded number of attempts. Sibling of [[wrapup-repos]] but NOT the same: this one merges to main. Sibling of
   [[unblock-roadmap]] too: that skill only asks Jake questions and records his answers as
   directives; this is the only skill that ever acts on them.
 ---
@@ -20,6 +21,14 @@ description: >-
 # Advance the roadmap
 
 Take exactly ONE item from planned → shipped on `main` per run, or stop cleanly with blockers recorded.
+
+**Every item ships as a merged PR from its own Superset workspace.** `run.sh` creates a workspace
+(a git worktree under `~/.superset/worktrees/`, outside Dropbox) on the item's branch and runs the
+worker in its terminal; the worker pushes the branch, opens a PR, and merges it once the review
+passes. That's the only output Superset's Production Run leaderboard credits — a direct push to
+`main` counts for nothing. With the Superset app down, a dispatch is skipped (`skipped-superset`)
+and its plan kept for the next run. Merged workspaces are deleted by the next run, once Superset
+has recorded the merge (`lib/workspaces.py`). Why and how: [`../../docs/plans/production-run.md`](../../docs/plans/production-run.md).
 
 **Every item is reviewed by a second model before it merges.** The worker calls `review.sh`, which
 has a different provider review the branch diff read-only; the worker fixes findings and re-reviews,
@@ -63,7 +72,8 @@ only (see `SAFETY.md`) — from [[unblock-roadmap]] (the only dirty-tree excepti
 1. Refresh usage (Claude statusline, Codex app-server/session log, Cursor dashboard API ∪ prior limit hits).
 2. Launch read-only orchestrator (**Sol first**).
 3. Parse the `ORCHESTRATOR_RESULT_JSON` fence.
-4. Dispatch `worker.sh` (Cursor → Codex → Claude) with same-run failover on limits.
+4. Dispatch `worker.sh` (Cursor → Codex → Claude) in the item's Superset workspace terminal, with
+   same-run failover on limits.
 5. Persist usage for the next tick. Skip only when **no orchestrator** remains.
 6. On a clean ship under 40 minutes into the tick, re-exec for the next item.
 
@@ -87,7 +97,7 @@ For human-driven work on an item you name, call `/conductor` directly.
 |---|---|---|
 | Input | dirty / recent | roadmap / Linear / plans item |
 | Tree | expects dirty | **requires clean** (directive exception) |
-| Remote | never | **pushes `main`** |
+| Remote | never | **merges a PR into `main`** |
 
 ## What to read next
 

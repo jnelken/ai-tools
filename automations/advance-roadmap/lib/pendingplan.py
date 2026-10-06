@@ -12,7 +12,8 @@ them. That parent is not a git checkout, so the file never dirties a repo.
 
     pendingplan.py --file F save   --result R --stamp S
     pendingplan.py --file F reuse  --out R [--max-age-hours N] [--max-attempts N]
-    pendingplan.py --file F settle --worker-result W --worker-rc N
+    pendingplan.py --file F settle --worker-result W --worker-rc N [--request-file Q]
+    pendingplan.py --file F refund   (a reused plan whose worker never launched: give the attempt back)
     pendingplan.py --file F clear
 """
 import argparse
@@ -137,14 +138,32 @@ def cmd_reuse(a):
 
 
 def cmd_settle(a):
-    if not load(a.file):
+    plan = load(a.file)
+    if not plan:
         return 0
+    if a.request_file:
+        # A worker finishing after run.sh gave up on it settles its own plan — and only that one.
+        want = (load(a.request_file) or {}).get("orchestrator") or {}
+        have = plan.get("orchestrator") or {}
+        if (want.get("repo"), want.get("item")) != (have.get("repo"), have.get("item")):
+            print("pending plan: belongs to another item — left alone")
+            return 0
     outcome = (load(a.worker_result) or {}).get("outcome")
     if outcome is None or outcome in RETRY_OUTCOMES:
         print(f"pending plan: kept for next run (worker outcome={outcome or 'none'}, rc={a.worker_rc})")
     else:
         clear(a.file)
         print(f"pending plan: cleared (worker outcome={outcome})")
+    return 0
+
+
+def cmd_refund(a):
+    plan = load(a.file)
+    if not plan or plan.get("attempts", 0) <= 0:
+        return 0
+    plan["attempts"] -= 1
+    write(a.file, plan)
+    print(f"pending plan: attempt refunded (no worker launched) — {plan['attempts']} used")
     return 0
 
 
@@ -156,12 +175,14 @@ def main():
     s = sub.add_parser("reuse"); s.add_argument("--out", required=True)
     s.add_argument("--max-age-hours", type=int, default=36); s.add_argument("--max-attempts", type=int, default=2)
     s = sub.add_parser("settle"); s.add_argument("--worker-result", required=True); s.add_argument("--worker-rc", type=int, default=0)
+    s.add_argument("--request-file", help="settle only if the plan is still this request's item")
     sub.add_parser("clear")
+    sub.add_parser("refund")
     a = p.parse_args()
     if a.cmd == "clear":
         clear(a.file)
         return 0
-    return {"save": cmd_save, "reuse": cmd_reuse, "settle": cmd_settle}[a.cmd](a)
+    return {"save": cmd_save, "reuse": cmd_reuse, "settle": cmd_settle, "refund": cmd_refund}[a.cmd](a)
 
 
 if __name__ == "__main__":

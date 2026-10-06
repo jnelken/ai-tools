@@ -3,6 +3,7 @@
 # (WORKER.md Step 5b); a model from a different provider reads the branch diff.
 #
 #   review.sh --repo PATH --worker cursor|codex|claude --round N --log FILE [--base REF]
+#   (--base defaults to origin's default branch: origin/main, or origin/master where that's it)
 #
 # Reviewer: Cursor's work → Codex, Codex's → Cursor, Claude's → Codex; the
 # remaining provider is the fallback when the first is limited or missing. The
@@ -29,7 +30,7 @@ REVIEW_EFFORT="${ADVANCE_ROADMAP_REVIEW_EFFORT:-low}"
 
 export PATH="/opt/homebrew/bin:/opt/homebrew/opt/node@22/bin:/usr/bin:/bin:/usr/sbin:/sbin:/Users/jake/.local/bin"
 
-REPO="" WORKER="" ROUND="" LOG="" BASE="origin/main"
+REPO="" WORKER="" ROUND="" LOG="" BASE=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --repo) REPO="$2"; shift 2 ;;
@@ -40,8 +41,14 @@ while [ $# -gt 0 ]; do
     *) echo "unknown arg: $1" >&2; exit 2 ;;
   esac
 done
-[ -n "$REPO" ] && [ -d "$REPO/.git" ] || { echo "FATAL: --repo must be a git checkout" >&2; exit 2; }
+# A worktree (Superset workspace) has a .git file, not a directory.
+[ -n "$REPO" ] && [ -e "$REPO/.git" ] || { echo "FATAL: --repo must be a git checkout" >&2; exit 2; }
 [ -n "$ROUND" ] && [ -n "$LOG" ] || { echo "FATAL: --round and --log required" >&2; exit 2; }
+# Default: origin's default branch — some repos (roaddmap, wav-explorer) are on master.
+if [ -z "$BASE" ]; then
+  BASE="$(git -C "$REPO" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null)"
+  [ -n "$BASE" ] || { git -C "$REPO" rev-parse --verify --quiet origin/main >/dev/null && BASE=origin/main || BASE=origin/master; }
+fi
 # Beside reviews.jsonl, i.e. in the run dir — the same file run.sh and worker.sh append to.
 USAGE_LOG="${LOG:h}/model-usage.jsonl"
 

@@ -16,6 +16,7 @@
     "item": { "type": ["string", "null"] },
     "branch": { "type": ["string", "null"] },
     "merge_commit": { "type": ["string", "null"] },
+    "pr_url": { "type": ["string", "null"] },
     "linear_id": { "type": ["string", "null"] },
     "worker_mode": {
       "type": "string",

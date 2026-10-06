@@ -2,7 +2,7 @@
 """Carry a no-work verdict forward so an unchanged world isn't re-triaged.
 
 A blocked-no-item run costs ~6 min of Codex planning plus ~9 min of a bookkeeping
-worker, and the next run six hours later usually reaches the identical verdict.
+worker, and the next run a couple of hours later usually reaches the identical verdict.
 This fingerprints everything that verdict was derived from — each repo's HEAD,
 branches, working tree and session files; the Linear snapshot; the allowlist and
 the skill docs — and stores it with the verdict in the provider-neutral

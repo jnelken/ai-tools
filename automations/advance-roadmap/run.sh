@@ -4,7 +4,8 @@
 # Architecture:
 #   1. Refresh providers-usage.json (lib/usage.py — Claude/Codex/Cursor quota probes ∪ prior limits).
 #   2. Read-only orchestrator: Codex Sol (high) default; Claude Opus (high) fallback.
-#   3. Parse ORCHESTRATOR_RESULT_JSON; dispatch worker.sh (Cursor → Codex → Claude).
+#   3. Parse ORCHESTRATOR_RESULT_JSON; dispatch worker.sh (Cursor → Codex → Claude) in the
+#      item's own Superset workspace terminal, so the PR it merges is credited (lib/workspaces.py).
 #   4. Record limit hits for the next tick.
 #   5. Append exactly one row to runs.jsonl (lib/runrecord.py) — the run record the
 #      dashboard, state.json, Slack and the failure alert all read. Built from exit
@@ -47,6 +48,13 @@ LAST_VERDICT="${ADVANCE_ROADMAP_LAST_VERDICT:-$CODE_DIR/.advance-roadmap/last-ve
 # Provider-neutral: the plan belongs to the repos, not to whichever CLI orchestrates.
 PENDING_PLAN="${ADVANCE_ROADMAP_PENDING_PLAN:-$CODE_DIR/.advance-roadmap/pending-plan.json}"
 WORKER_SH="$ROOT/worker.sh"
+WORKSPACES_PY="$ROOT/lib/workspaces.py"
+# 1 = each dispatched item runs in its own Superset workspace and ships as a merged PR
+# (the only output the Production Run leaderboard credits). 0 = run worker.sh in-process,
+# for tests. With 1 and the Superset app down, a dispatch is skipped and its plan kept.
+SUPERSET_MODE="${ADVANCE_ROADMAP_SUPERSET:-1}"
+WORKER_TIMEOUT_MIN="${ADVANCE_ROADMAP_WORKER_TIMEOUT_MIN:-360}"
+WORKER_POLL_S="${ADVANCE_ROADMAP_WORKER_POLL_S:-10}"
 
 CLAUDE="${ADVANCE_ROADMAP_CLAUDE_BIN:-/Users/jake/.local/bin/claude}"
 CODEX="${ADVANCE_ROADMAP_CODEX_BIN:-/opt/homebrew/bin/codex}"
@@ -106,6 +114,7 @@ record() {
   RECORDED=1
   local -a extra=()
   [ -n "${3:-}" ] && extra+=(--exit "$3")
+  [ -f "$RUN_DIR/workspace.json" ] && extra+=(--expect-pr)  # a workspace run must ship a PR
   [ -n "${orch_rc:-}" ] && extra+=(--orch-exit "$orch_rc")
   python3 "$RECORD_PY" --root "$ROOT" append --stamp "$STAMP" --status "$1" \
     --detail "${2:-}" "${extra[@]}" \
@@ -220,6 +229,84 @@ mkdir "$LOCK" 2>/dev/null || {
   exit 0
 }
 HOLDS_LOCK=1
+
+# Workers run in Superset workspace terminals, so with the app down there's nothing to
+# dispatch into: skip before spending an orchestrator pass. Any pending plan waits.
+if [ "$SUPERSET_MODE" = "1" ] && ! python3 "$WORKSPACES_PY" available >> "$LOG" 2>&1; then
+  echo "=== advance-roadmap $STAMP: skipping — Superset app or host service not reachable ===" >> "$LOG"
+  record skipped-superset "Superset app or host service not reachable"
+  ln -sf "$LOG" "$LOGDIR/latest.log"
+  regen_dashboard
+  exit 0
+fi
+
+# Workspaces whose PR Superset has seen merged are done; delete them so the sidebar and
+# ~/.superset/worktrees don't pile up. Never earlier — see lib/workspaces.py.
+if [ "$SUPERSET_MODE" = "1" ] && [ -f "$WORKSPACES_PY" ]; then
+  python3 "$WORKSPACES_PY" cleanup >> "$LOG" 2>&1 || echo "(workspace cleanup failed — non-fatal)" >> "$LOG"
+fi
+
+# run_worker_in_workspace REQ — run worker.sh in a Superset workspace terminal for the
+# request's repo/branch and wait for it. Sets worker_rc. Returns 0 when the worker ran,
+# 1 when Superset couldn't host it (sets superset_skip to why; the plan is kept).
+run_worker_in_workspace() {
+  local req="$1" repo branch slug name launcher="$RUN_DIR/worker-launch.zsh"
+  repo="$(jq -r '.orchestrator.repo // empty' "$req")"
+  branch="$(jq -r '.orchestrator.branch // empty' "$req")"
+  if [ -z "$repo" ] || [ ! -d "$CODE_DIR/$repo" ]; then
+    superset_skip="dispatch names no repo directory ($repo)"; return 1
+  fi
+  [ -n "$branch" ] || branch="roadmap/$STAMP"
+  slug="${branch#roadmap/}"
+  name="roadmap $repo $(jq -r '.orchestrator.linear_id // empty' "$req") ${slug}"
+  # A worker an earlier run timed out on may still be going in this branch's workspace;
+  # never start a second one beside it.
+  local inflight="$ROOT/inflight/${repo}--${slug//\//-}.pid"
+  mkdir -p "$ROOT/inflight"
+  if [ -s "$inflight" ] && kill -0 "$(cat "$inflight")" 2>/dev/null; then
+    superset_skip="a worker from an earlier run is still running on $branch"; return 1
+  fi
+  # The terminal runs the user's shell, not launchd's env: carry over what this run set.
+  {
+    print -r -- '#!/bin/zsh'
+    local v
+    for v in ${(k)parameters[(I)ADVANCE_ROADMAP_*]} PERSONAL_CODE_DIR; do
+      case "$v" in *WEBHOOK*|*SECRET*|*TOKEN*|*KEY*) continue ;; esac  # secrets stay in secrets.env
+      [ -n "${(P)v-}" ] && print -r -- "export $v=${(q)${(P)v}}"
+    done
+    print -r -- "print -r -- \$\$ > ${(q)RUN_DIR}/worker.pid; print -r -- \$\$ > ${(q)inflight}"
+    print -r -- "${(q)WORKER_SH} --stamp ${(q)STAMP} --request-file ${(q)req} --providers ${(q)WORKERS} --result-file ${(q)WORKER_RESULT} --status-file ${(q)WORKER_STATUS} 2>&1 | tee ${(q)RUN_DIR}/worker-output.log"
+    print -r -- "rc=\${pipestatus[1]}; print -r -- \$rc > ${(q)RUN_DIR}/worker.exit; rm -f ${(q)inflight}"
+    # Settle here too: if run.sh timed out and moved on, nothing else would, and the next
+    # tick would relaunch an item this worker already shipped.
+    print -r -- "python3 ${(q)PLAN_PY} --file ${(q)PENDING_PLAN} settle --worker-result ${(q)WORKER_RESULT} --worker-rc \$rc --request-file ${(q)req} >/dev/null 2>&1"
+  } > "$launcher"
+  chmod 700 "$launcher"
+  rm -f "$RUN_DIR/worker.pid" "$RUN_DIR/worker.exit"
+  if ! python3 "$WORKSPACES_PY" launch --repo "$CODE_DIR/$repo" --branch "$branch" --name "${name//  / }" \
+       --command "/bin/zsh ${(q)launcher}" --out "$RUN_DIR/workspace.json" >> "$LOG" 2>&1; then
+    superset_skip="could not create the Superset workspace for $repo ($branch)"; return 1
+  fi
+  echo "(worker running in Superset workspace $(jq -r '.workspace_id' "$RUN_DIR/workspace.json") on $branch)"
+  local waited=0 pid=""
+  while [ ! -f "$RUN_DIR/worker.exit" ]; do
+    sleep "$WORKER_POLL_S"; waited=$(( waited + WORKER_POLL_S ))
+    [ -z "$pid" ] && [ -s "$RUN_DIR/worker.pid" ] && pid="$(cat "$RUN_DIR/worker.pid")"
+    if [ -z "$pid" ] && [ "$waited" -ge 180 ]; then
+      echo "(the workspace terminal never started the worker)"; worker_rc=1; return 0
+    fi
+    if [ -n "$pid" ] && ! kill -0 "$pid" 2>/dev/null && [ ! -f "$RUN_DIR/worker.exit" ]; then
+      echo "(worker terminal exited without an exit code — closed or killed)"; worker_rc=1; break
+    fi
+    if [ "$waited" -ge $(( WORKER_TIMEOUT_MIN * 60 )) ]; then
+      echo "(worker still running after ${WORKER_TIMEOUT_MIN}m — leaving it, recording a timeout)"; worker_rc=124; break
+    fi
+  done
+  [ -f "$RUN_DIR/worker.exit" ] && worker_rc="$(cat "$RUN_DIR/worker.exit")"
+  case "$worker_rc" in ''|*[!0-9]*) worker_rc=1 ;; esac
+  cat "$RUN_DIR/worker-output.log" 2>/dev/null
+  return 0
+}
 
 extract_json_fence() {
   # extract_json_fence LABEL infile outfile
@@ -485,8 +572,23 @@ open(sys.argv[2], "a").write("\n")
 PY
   fi
 
-  "$WORKER_SH" --stamp "$STAMP" --request-file "$req" --providers "${WORKERS:-}" \
-    --result-file "$WORKER_RESULT" --status-file "$WORKER_STATUS" || worker_rc=$?
+  superset_skip=""
+  if [ "$SUPERSET_MODE" = "1" ] && [ -n "${WORKERS:-}" ] && [ "$action" = "dispatch_worker" -o "$action" = "resume_worker" ]; then
+    # Keep the request where the workspace terminal can read it after this block's cleanup.
+    cp "$req" "$RUN_DIR/worker-request.json"; req="$RUN_DIR/worker-request.json"
+    run_worker_in_workspace "$req" || true
+  else
+    "$WORKER_SH" --stamp "$STAMP" --request-file "$req" --providers "${WORKERS:-}" \
+      --result-file "$WORKER_RESULT" --status-file "$WORKER_STATUS" || worker_rc=$?
+  fi
+  if [ -n "$superset_skip" ]; then
+    # No worker ran: keep the pending plan for the next run, give back a reused plan's
+    # attempt (nothing was tried), and save no verdict.
+    echo "=== worker not launched: $superset_skip ==="
+    [ "$reused" -eq 1 ] && python3 "$PLAN_PY" --file "$PENDING_PLAN" refund
+    final_rc=0
+    echo "=== advance-roadmap exit=0 finished $(date) (skipped: $superset_skip) ==="
+  else
   echo "=== worker exit=$worker_rc ==="
   python3 "$PLAN_PY" --file "$PENDING_PLAN" settle --worker-result "$WORKER_RESULT" --worker-rc "$worker_rc"
   # Re-fingerprint after the worker, not before: a bookkeeping worker's own Step 2b can flip a
@@ -505,11 +607,17 @@ PY
   final_rc=0
   [ "$orch_rc" -eq 0 ] || final_rc=$orch_rc
   [ "$worker_rc" -eq 0 ] || final_rc=$worker_rc
-  rm -f "$result" "$req"
   echo "=== advance-roadmap exit=$final_rc finished $(date) ==="
+  fi
+  rm -f "$result"
+  [ "$req" = "$RUN_DIR/worker-request.json" ] || rm -f "$req"
 } >> "$LOG" 2>&1
 # zsh runs a redirected { } in this shell, so final_rc is still set here.
-record ran "" "${final_rc:-1}"
+if [ -n "${superset_skip:-}" ]; then
+  record skipped-superset "$superset_skip"
+else
+  record ran "" "${final_rc:-1}"
+fi
 
 ln -sf "$LOG" "$LOGDIR/latest.log"
 regen_dashboard
