@@ -274,7 +274,10 @@ run_worker_in_workspace() {
     done
     print -r -- "print -r -- \$\$ > ${(q)RUN_DIR}/worker.pid; print -r -- \$\$ > ${(q)inflight}"
     print -r -- "${(q)WORKER_SH} --stamp ${(q)STAMP} --request-file ${(q)req} --providers ${(q)WORKERS} --result-file ${(q)WORKER_RESULT} --status-file ${(q)WORKER_STATUS} 2>&1 | tee ${(q)RUN_DIR}/worker-output.log"
-    print -r -- "print -r -- \${pipestatus[1]} > ${(q)RUN_DIR}/worker.exit; rm -f ${(q)inflight}"
+    print -r -- "rc=\${pipestatus[1]}; print -r -- \$rc > ${(q)RUN_DIR}/worker.exit; rm -f ${(q)inflight}"
+    # Settle here too: if run.sh timed out and moved on, nothing else would, and the next
+    # tick would relaunch an item this worker already shipped.
+    print -r -- "python3 ${(q)PLAN_PY} --file ${(q)PENDING_PLAN} settle --worker-result ${(q)WORKER_RESULT} --worker-rc \$rc --request-file ${(q)req} >/dev/null 2>&1"
   } > "$launcher"
   chmod +x "$launcher"
   rm -f "$RUN_DIR/worker.pid" "$RUN_DIR/worker.exit"

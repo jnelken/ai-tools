@@ -221,6 +221,12 @@ def cmd_cleanup(a):
             continue  # unmerged: in flight, or a branch left for Jake — keep it
         if info["busy"] or info["open_prs"]:
             continue  # an agent is still working in it, or a fix-forward PR is still open
+        path = w.get("worktreePath") or w.get("worktree_path")
+        if path and os.path.isdir(path):
+            st = subprocess.run(["git", "-C", path, "status", "--porcelain"], capture_output=True, text=True)
+            if st.returncode != 0 or st.stdout.strip():
+                print(f"cleanup: keeping {w.get('name') or w['id']} — uncommitted work in {path}")
+                continue
         idle_min = (now_ms - max(info["last_event_at"] or 0, info["merged_at"] or 0)) / 60000
         if idle_min < a.min_idle_minutes:
             continue
