@@ -20,7 +20,7 @@ commit, merge, or push (see WORKER.md).
   unattended run can finish — a GUI installer or wizard, a vendor sign-in, a purchase, a physical
   device, a credential only Jake holds. Drop those issues from the candidate batch entirely, and
   do it **silently**: a `human-only` issue is not *blocked* on anything this skill could resolve,
-  it simply isn't this skill's work, so Step 2b does not apply and an `@jnelks` ping every six
+  it simply isn't this skill's work, so Step 2b does not apply and an `@jnelks` ping every couple of
   hours is pure noise. Record it in run memory as `skipped-human-only` with its `DEV-N` id and
   move on. It's a flat workspace label, not a child of the `repo` group, so an issue carries both
   it and its own `repo/*` label.
@@ -63,14 +63,27 @@ commit, merge, or push (see WORKER.md).
 - **Skip live sessions.** If any `.claude-sessions/*.md` at the repo root has `updated_at_epoch`
   within the last 15 minutes, someone is working there right now. Pick a different repo.
 - **Never force anything.** No `--force`, no `--force-with-lease`, no `git reset --hard`, no
-  `git clean -fd`, no rewriting published history. If the final `git push` is rejected as
+  `git clean -fd`, no rewriting published history. If a `git push` is rejected as
   non-fast-forward, STOP — leave the branch and its commits in place, and report it.
-- **Deploy fixes are bounded fix-forward commits.** After a failed production deploy, the worker
-  may push focused `fix:` commits to `main`, but only inside Step 7b: at most 3 attempts, full
-  Step 5 verification before each push, and no force-push or revert of published history. Never
-  change Vercel/Netlify project settings, env vars, or billing to get a build green. That's a
-  blocker for Jake.
-- **Never open a PR** and never delete a branch the user created.
+- **Ship as PRs from a Superset workspace; never push code to `main`.** Scheduled runs build in the
+  item's own Superset workspace (a worktree `run.sh` creates), push the branch with `-u`, open a
+  PR with `gh pr create`, and merge it at once with `gh pr merge --merge` (`--squash` only where
+  the repo forbids merge commits; never `--admin` or `--auto`). Step 5b's cross-model review is the
+  gate, as it was for the old direct push. The Production Run leaderboard credits only merged PRs
+  from a workspace that ran an agent — a direct push to `main` does the same work and counts for
+  nothing. The only direct pushes left are bookkeeping that carries no code this run wrote: Step
+  2c's directive commit of Jake's own WIP and an archive-only run's plan-doc moves, both from the
+  root checkout.
+- **Don't delete a workspace before Superset has seen its PR merged.** Its PR sync skips archived
+  workspaces, so an early `superset workspaces delete` strands the PR as open in Superset's DB and
+  it is never counted. `run.sh` deletes merged workspaces itself (`lib/workspaces.py cleanup`).
+- **Deploy fixes are bounded fix-forward PRs.** After a failed production deploy, the worker may
+  open and merge focused `fix:` PRs, but only inside Step 7b: at most 3 attempts, full Step 5
+  verification before each push, and no force-push or revert of published history. Never change
+  Vercel/Netlify project settings, env vars, or billing to get a build green. That's a blocker for
+  Jake.
+- **Never delete a branch the user created**, and never leave a PR open on purpose: an unmerged PR
+  is a `blocked-branch-left` with its URL in the result.
 - **Never commit secrets or build junk** (`.env`, `*.pem`, tokens, `node_modules/`, `dist/`,
   `.next/`, `build/`, `*.log`). Respect `.gitignore`.
 - **Honor `.noroadmap`.** A repo with a `.noroadmap` file at its root has opted out. Never create,

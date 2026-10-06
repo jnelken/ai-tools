@@ -6,7 +6,7 @@ an EXIT trap for aborts — so runs.jsonl has a row even when an agent crashed o
 was killed before reporting. Outcomes come from exit codes run.sh observed and
 from result files the agents wrote; nothing here reads the run log.
 
-  runrecord.py --root R append --stamp S --status ran|skipped-backoff|skipped-quota|skipped-lock|skipped-unchanged|aborted
+  runrecord.py --root R append --stamp S --status ran|skipped-backoff|skipped-quota|skipped-lock|skipped-unchanged|skipped-superset|aborted
                [--detail TEXT] [--orch-provider P] [--orch-exit N] [--orch-result FILE]
                [--worker-status FILE] [--worker-result FILE] [--usage-log FILE] [--exit N]
   runrecord.py --root R alert        # prints a Slack line when the error streak warrants one
@@ -22,7 +22,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import tokens  # noqa: E402
 
 ERROR_OUTCOMES = ("error", "failed", "incomplete", "shipped-deploy-failed")
-SKIP_OUTCOMES = ("skipped-backoff", "skipped-quota", "skipped-lock", "skipped-unchanged")
+SKIP_OUTCOMES = ("skipped-backoff", "skipped-quota", "skipped-lock", "skipped-unchanged", "skipped-superset")
 # Alert on the 2nd consecutive error, then again every 4 more (~8h at the 2h cadence).
 ALERT_FIRST, ALERT_EVERY = 2, 4
 
@@ -136,6 +136,8 @@ def cmd_append(a):
         "work_kind": o.get("work_kind") or "feature",
         "branch": w.get("branch") or o.get("branch"),
         "merge_commit": w.get("merge_commit"),
+        # The merged PR (Superset credits it to the workspace the worker ran in).
+        "pr_url": w.get("pr_url"),
         "linear_id": w.get("linear_id") or o.get("linear_id"),
         "review_rounds": len(reviews),
         "reviewer": reviews[-1].get("reviewer") if reviews else None,

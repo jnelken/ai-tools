@@ -497,7 +497,7 @@ def write_state(runs):
     """Consecutive-blocked count → cadence, plus a one-line summary for Slack."""
     streak = 0
     for r in runs:                      # newest first
-        if r["outcome"] in ("skipped-quota", "skipped-lock", "skipped-backoff", "skipped-unchanged", "running"):
+        if r["outcome"] in ("skipped-quota", "skipped-lock", "skipped-backoff", "skipped-unchanged", "skipped-superset", "running"):
             continue                    # a skipped tick is not evidence either way
         if r["outcome"] in BLOCKED_OUTCOMES:
             streak += 1
@@ -760,6 +760,7 @@ BADGE = {
     "blocked-no-item": ("unk", "◦ blocked"), "blocked": ("unk", "◦ blocked"),
     "skipped-quota": ("off", "⏸ quota skip"), "skipped-lock": ("off", "⏸ lock skip"),
     "skipped-backoff": ("off", "⏸ backoff skip"),
+    "skipped-superset": ("off", "⏸ Superset down"),
     "skipped-unchanged": ("off", "⏸ unchanged skip"),
     "error": ("fail", "✗ error"), "failed": ("fail", "✗ failed"), "incomplete": ("fail", "⚠ incomplete"),
     "archive-only": ("ok", "✓ archive-only"),

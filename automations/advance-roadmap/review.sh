@@ -40,7 +40,8 @@ while [ $# -gt 0 ]; do
     *) echo "unknown arg: $1" >&2; exit 2 ;;
   esac
 done
-[ -n "$REPO" ] && [ -d "$REPO/.git" ] || { echo "FATAL: --repo must be a git checkout" >&2; exit 2; }
+# A worktree (Superset workspace) has a .git file, not a directory.
+[ -n "$REPO" ] && [ -e "$REPO/.git" ] || { echo "FATAL: --repo must be a git checkout" >&2; exit 2; }
 [ -n "$ROUND" ] && [ -n "$LOG" ] || { echo "FATAL: --round and --log required" >&2; exit 2; }
 # Beside reviews.jsonl, i.e. in the run dir — the same file run.sh and worker.sh append to.
 USAGE_LOG="${LOG:h}/model-usage.jsonl"

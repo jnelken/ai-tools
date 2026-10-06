@@ -49,6 +49,7 @@ print the same object in a fence:
   "item": "DEV-35 …",
   "branch": "roadmap/triage-analytics",
   "merge_commit": "abc1234",
+  "pr_url": "https://github.com/jnelken/mailcruxh/pull/12",
   "linear_id": "DEV-35",
   "limit_text": null,
   "deploy": {"status": "success", "url": "https://mailcruxh-abc123.vercel.app", "attempts": 0},
@@ -71,8 +72,8 @@ rewrite on master; Vercel deploy succeeded. DEV-87 Done."
 
 `outcome`: `shipped` | `shipped-deploy-failed` | `blocked-branch-left` | `failed` | `limit_hit` |
 `archive-only` | `bookkeeping` (bookkeeping mode only — `run.sh` then records the orchestrator's
-`outcome_token`). `shipped` means pushed **and** the deploy is green (or there is no deploy);
-`shipped-deploy-failed` means pushed but Step 7b's cap was hit with production still red.
+`outcome_token`). `shipped` means the PR merged **and** the deploy is green (or there is no deploy);
+`shipped-deploy-failed` means it merged but Step 7b's cap was hit with production still red.
 
 ---
 
@@ -99,8 +100,11 @@ Only when the request carries a `directive_ticket`. This is the dirty-tree excep
    - **No-op** — a commit-shaped instruction whose named paths are already clean means Jake handled
      it himself. Do the bookkeeping in step 4 and carry on; this is not an error.
 3. **Write commit messages in the repo's own convention** (`git log -5`), using the intent Jake
-   described rather than his words as a literal subject line. This commit lands on `main` through
-   Step 7's flow like any other.
+   described rather than his words as a literal subject line. This is the one commit you make in
+   the repo's **root checkout**, because that's where Jake's WIP is: `git -C <repo> pull --ff-only`
+   first, commit on `main` there, and `git -C <repo> push origin main`. It's his own work landing,
+   not code this run wrote, so it is the bookkeeping exception to Step 7's PR rule. Then bring your
+   workspace branch up to date (Step 3) so the feature builds on it.
 4. **Retire the directive, but never destroy it.** `patch` the description so the section header
    records the outcome in place — `## Directive` becomes `## Directive (consumed <date>)`, or
    `## Directive (archived unconsumed <date> — tree changed)` when you stopped. Anchor the patch
@@ -183,16 +187,31 @@ fix cap.
    clean or the deploy's live check came back green, so the marker is stale. `Needs Input`
    never needs this from you — `/unblock-roadmap` is what moves it off, per its own design.
 
-## Step 3 — Branch off fresh `origin/main`
+## Step 3 — Start from fresh `origin/main` in your workspace
+
+**Scheduled runs build in a Superset workspace, never the root checkout.** `run.sh` created the
+item's workspace (a git worktree under `~/.superset/worktrees/`, outside Dropbox) on the assigned
+branch, and launched you in its terminal; the prompt names its path, and that is your `<checkout>`
+for every step below. The leaderboard credits a merged PR only when it came from a workspace that
+ran an agent, which is why the work happens there. Don't switch branches in it — one workspace is
+one branch.
+
+The workspace branched from the root checkout's local default branch, which can trail `origin`
+(merges happen on GitHub now). Bring it up to date before building:
 
 ```
-git -C <repo> fetch origin
-git -C <repo> checkout -b roadmap/<short-slug> origin/main
+git -C <checkout> fetch origin
+git -C <checkout> rebase origin/<default-branch>
 ```
 
-Fetch first, always. Branching off a stale local `main` means the push at the end of the run gets
-rejected *after* all the work is done. If a suitable branch for this item already exists, reuse it
-— but rebase it onto fresh `origin/main` before building on it.
+Fetch first, always. Building on a stale base means the PR conflicts *after* all the work is done.
+A resumed item's branch already has commits: the same rebase applies — unless the branch is already
+on the remote (`git ls-remote --heads origin <branch>`), in which case `git merge
+origin/<default-branch>` instead, so nothing ever needs a force-push.
+
+**Interactive runs with no workspace** ([[conductor]], an attended `/advance-roadmap`) branch in the
+root checkout the old way — `git -C <repo> checkout -b roadmap/<short-slug> origin/main` — and
+still ship through Step 7's PR. That PR just isn't credited on the leaderboard.
 
 ## Step 4 — Implement
 
@@ -301,21 +320,58 @@ Then, only when relevant:
   follow-up you couldn't do headlessly), add or update its checklist entry so the user knows what
   to confirm. Say so in your final summary too.
 
-## Step 7 — Commit, merge, push
+## Step 7 — Commit, open the PR, merge it
+
+Code reaches `main` only through a merged PR from your checkout. Never push `main` directly (the
+exceptions are bookkeeping: Step 2c's directive commit and an archive-only run's doc moves).
 
 - Focused commits with clear messages: the feature, its tests, roadmap bookkeeping, and any drive-by
   work as logically distinct commits. Conventional-commit style matching the repo's log.
-- Merge locally into `main` — no PR:
+- Push with an upstream (Superset links the PR to the workspace through it), then open the PR:
 
 ```
-git -C <repo> checkout main
-git -C <repo> merge --ff-only roadmap/<short-slug>   # fast-forward; it was branched off fresh origin/main
-git -C <repo> push origin main
+git -C <checkout> push -u origin <branch>
+gh pr create -R jnelken/<github-repo> --head <branch> --base <default-branch> \
+  --title "<DEV-N>: <what changed>" --body-file <f>
 ```
 
-- If `--ff-only` refuses because `origin/main` moved during the run, `git fetch` and rebase the
-  branch onto the new `origin/main`, **re-run Step 5's verification**, then retry. Never force.
-- If the push is rejected, stop and report. Don't force, don't retry with a different flag.
+  `<github-repo>` comes from `git remote get-url origin`, not the directory name (they can
+  differ). The body uses Jake's PR format, built from `git diff origin/<default-branch>...HEAD`:
+
+  ```markdown
+  ## Summary
+  <problem, one sentence (if any)> <what this does, one sentence> <why it matters, one sentence>
+
+  ## Changes
+  - <behavior-level change, not code mechanics>
+
+  ## Validation
+  - [ ] <manual check a human would click through>
+
+  Linear: <DEV-N> · Shipped by advance-roadmap (stamp <stamp>), reviewed by <reviewer> in <N> round(s).
+  ```
+
+  Keep it skimmable: no file names or function names unless the change is about them, and no "all
+  tests pass" in Validation. A code-health PR says it preserves behavior.
+- Merge it right away; Step 5b's review was the gate. Use a merge commit:
+
+```
+gh pr merge <number> -R jnelken/<github-repo> --merge
+gh pr view <number> -R jnelken/<github-repo> --json mergeCommit,url --jq '.mergeCommit.oid, .url'
+```
+
+  Only when the repo disallows merge commits (the error says so; tailwind-quiz is squash-only), use
+  `--squash`. Never `--admin`, never `--auto` (it would leave the merge to a later moment no one
+  watches). Leave the branch on the remote, and don't delete the workspace: Superset must see the
+  merge before the workspace goes, and `run.sh` cleans merged workspaces up.
+- If the PR can't merge because `origin/<default-branch>` moved and now conflicts, merge it into
+  your branch (`git merge origin/<default-branch>`, not a rebase — the branch is published now, and
+  SAFETY.md forbids forcing), resolve, **re-run Step 5's verification**, push, and retry the merge.
+  If it still won't merge, stop and report `blocked-branch-left` with the PR URL.
+- The merge commit's SHA is `merge_commit` and the PR's URL is `pr_url` in the result JSON.
+- Afterwards, keep the root checkout's `main` current when you can: if `git -C <repo> status
+  --porcelain` is empty and it's on the default branch, `git -C <repo> pull --ff-only`. If not, just
+  `git -C <repo> fetch origin`. Never touch a dirty root checkout beyond that.
 - Do **not** close the Linear issue yet — that waits for Step 7b.
 
 ## Step 7b — Watch the deploy until it's green
@@ -323,7 +379,7 @@ git -C <repo> push origin main
 Pushing `main` deploys production in most of these repos (usually Vercel's GitHub integration,
 sometimes Netlify). A push isn't shipped until that build succeeds.
 
-1. **Find the deploy for the pushed SHA** through GitHub, which is provider-agnostic:
+1. **Find the deploy for the merge commit's SHA** through GitHub, which is provider-agnostic:
 
    ```
    gh api repos/<owner>/<repo>/commits/<sha>/status        # Vercel posts a "Vercel" context here
@@ -339,9 +395,11 @@ sometimes Netlify). A push isn't shipped until that build succeeds.
 3. **On failure, fetch the build logs.** Take the deployment URL from the status's `target_url` and
    run `vercel inspect <url> --logs`; fall back to the check-run's `output` via `gh api`. Never
    paste env values or secrets from the logs anywhere.
-4. **Fix forward.** Diagnose from the logs, make a focused `fix:` commit on `main`, re-run Step 5's
-   verification in full, and `git push origin main`. Never force, never revert published history,
-   never change Vercel/Netlify project settings or env vars. Then go back to 1 for the new SHA.
+4. **Fix forward, through a PR.** Diagnose from the logs. In your checkout, bring the branch up to
+   the merged state (`git fetch origin && git merge --ff-only origin/<default-branch>`), make a
+   focused `fix:` commit, re-run Step 5's verification in full, push, and open and merge a new PR
+   from the same branch exactly as in Step 7. Never force `main`, never revert published history,
+   never change Vercel/Netlify project settings or env vars. Then go back to 1 for the new merge SHA.
 5. **Cap: 3 fix-and-redeploy attempts.** If the deploy is still failing after the third, leave `main`
    as it is and run Step 2b above with this shape (dedup rules apply):
 
@@ -361,14 +419,15 @@ sometimes Netlify). A push isn't shipped until that build succeeds.
    this step — fix attempts can't help.
 
 **Close out** only once the deploy is green (or `deploy: none` is confirmed): if the item came from a
-Linear issue, comment the merge commit and deploy URL on it
+Linear issue, comment the PR URL, merge commit and deploy URL on it
 (`linear issue comment add DEV-N --body-file <f>`) and move it to `Done`
 (`linear issue update DEV-N --state Done`). Linear is CLI-only — see `SAFETY.md`. Put the deploy
 result in the result JSON's `deploy` object (`status`: `success` | `failed` | `timeout` | `none`,
 `url`, `attempts`).
 
-Bookkeeping-only pushes (archives, directive commits with no feature) still get watched, but a
-failure there is reported rather than fixed, since the push didn't change built code.
+Bookkeeping-only pushes (archives, directive commits with no feature — the two kinds that still go
+straight to `main` from the root checkout) still get watched, but a failure there is reported rather
+than fixed, since the push didn't change built code.
 
 ## Step 7c — Code-health retrospective
 
@@ -425,8 +484,8 @@ archive plus cross-repo notes; don't write to it.)
    same stamp rather than duplicating it.
 
 The **outcome token** is exactly one of:
-- `shipped` — an item went to `main` and its deploy is green (or the repo has none);
-- `shipped-deploy-failed` — an item went to `main` but Step 7b ran out of fix attempts and production is
+- `shipped` — an item's PR merged to `main` and its deploy is green (or the repo has none);
+- `shipped-deploy-failed` — an item's PR merged to `main` but Step 7b ran out of fix attempts and production is
   still red. **Name the repo, the failing SHA, and the deployment URL** in the notes — the next run's
   orchestrator skips new work in that repo until its deploy is green again;
 - `blocked-branch-left` — an item was picked and its work is parked on a branch (verification failed, or a
@@ -446,8 +505,8 @@ lookup never loses the row it needs.
 
 ## Final output
 
-End with a 5-line plain-text summary: repo, item shipped (or why none), test/build result, merge
-commit hash and deploy result, and anything left for the user to confirm by hand. Say up front whether this run
+End with a 5-line plain-text summary: repo, item shipped (or why none), test/build result, PR URL,
+merge commit hash and deploy result, and anything left for the user to confirm by hand. Say up front whether this run
 finished an interrupted previous run or started fresh, and name the outcome token you recorded in
 Step 8. If Step 2b reported blockers, say so
 with the issue IDs and whether `@jnelks` was mentioned or an unchanged comment was suppressed. In

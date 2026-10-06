@@ -160,8 +160,8 @@ terminal `=== claude exit=` line yet); the one below it is the previous run.
 
 **Do not use "an unmerged `roadmap/*` branch exists" as the resume signal.** Step 5's
 all-or-nothing rule leaves exactly such a branch behind *on purpose* every time verification fails,
-and nothing about the branch itself distinguishes that from a crash. Re-attempting one every 6
-hours is how a run that correctly gave up becomes an infinite loop.
+and nothing about the branch itself distinguishes that from a crash. Re-attempting one every
+couple of hours is how a run that correctly gave up becomes an infinite loop.
 
 The real discriminator is **whether Step 8 ran**. A run that stopped deliberately — shipped,
 blocked, or nothing qualified — appended a row to its repo's run ledger (`runmemory.py append-ledger`) before exiting. A
@@ -202,17 +202,20 @@ If the interrupted log never names a repo, it died before Step 1 picked one — 
 reconcile, so go to Step 1. Otherwise work only in the repo it names, and only while it still
 passes the safety rules:
 
-1. `git -C <repo> branch --show-current`. An interrupted run usually leaves the repo on
-   `roadmap/<slug>` rather than `main`. `git-safe-to-autocommit` won't flag that — it's neither a
-   detached HEAD nor a stuck rebase — and Step 3 assumes it starts from `main`, so check directly.
+1. Find the run's branch. A scheduled run builds in a Superset workspace (a worktree under
+   `~/.superset/worktrees/`), so its `roadmap/<slug>` branch is checked out *there* and the root
+   checkout stays on `main`: `git -C <repo> worktree list` shows it. An older or interactive run
+   built in the root checkout and left it on the branch (`git -C <repo> branch --show-current`).
+   `git-safe-to-autocommit` flags neither, so check directly. Dispatch a resume with that `branch`;
+   `run.sh` reuses the branch's existing workspace.
 2. **The clean-tree rule still applies, unchanged.** A dirty tree there could be the dead run's
    scratch work or Jake's; you cannot tell, so don't guess. Leave it, report it, pick another repo.
 3. If the branch carries commits that aren't in `origin/main`, that half-finished item **is this
    run's one item**. Resume at Step 4, finish what the item's scope calls for, then run Step 5's
    verification in full — never inherit the dead run's results — and continue through Steps 6–8.
    Don't start anything new; the one-item budget is spent. The branch was cut from an `origin/main`
-   that has since moved on, so expect Step 7's `merge --ff-only` to refuse: that's the ordinary
-   fetch, rebase, re-verify path documented there, not a hard stop. A `roadmap/health-*` branch is
+   that has since moved on, so expect Step 3's rebase (or merge, once the branch is pushed) to
+   have real work in it: that's the ordinary path, not a hard stop. A `roadmap/health-*` branch is
    an interrupted code-health pass: resume it with `"work_kind": "code_health"`.
 4. If verification fails and the fix isn't clean and contained, stop per the all-or-nothing rule and
    record the outcome as `blocked-branch-left` in Step 8, naming the branch. That token is what
@@ -543,7 +546,7 @@ which repo it belongs to.
 
 ### Deduplicate scheduled-run pings
 
-This job runs every six hours. Find the newest comment containing
+This job runs every couple of hours in its scheduled windows. Find the newest comment containing
 `<!-- advance-roadmap:blocker -->`, normalize whitespace in its visible body, and compare it with
 the proposed comment. If the repo, blocker type, details, and requested action are unchanged, do
 not add another comment and record `blocker-comment-unchanged` in run memory. If any of those facts
