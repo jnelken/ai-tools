@@ -1,6 +1,6 @@
 ---
 name: monthly-retro
-description: Generate a monthly retrospective for one team member from woodrow and api commit history — group commits into named themes, weight each theme by lines changed, and write stakeholder-facing summaries under What Went Well, Not So Well, and What Could Have Gone Better. Use when asked for a monthly retro, a per-person month in review, or a themed write-up of what someone shipped. For the raw commit numbers instead, see monthly-retro-commits.
+description: Generate a monthly retrospective for one team member from woodrow, api, folio-platform and internal-tools commit history — group commits into named themes, weight each theme by lines changed, and write stakeholder-facing summaries under What Went Well, Not So Well, and What Could Have Gone Better. Use when asked for a monthly retro, a per-person month in review, or a themed write-up of what someone shipped. For the raw commit numbers instead, see monthly-retro-commits.
 ---
 
 # Monthly Retrospective Skill
@@ -11,12 +11,15 @@ Use this skill when asked to generate a monthly retrospective for a single team 
 
 - `/Users/jake/code/woodrow` — frontend repo
 - `/Users/jake/code/api` — backend repo
-- `fp retro:commits` — commit + line-stat fetch command
+- `/Users/jake/code/folio-platform` — platform/infra, Datadog config, shared CI
+- `/Users/jake/code/internal-tools` — internal Slack bots (Claudio, slack-pr-reaction-bot) and the Datadog→Linear webhook
+- `fp retro:commits` — commit + line-stat fetch command; with no `--repo` it scans all four repos above
 
 ## Standard run command
 
 ```bash
-fp retro:commits --repo /Users/jake/code/woodrow --author "Jake Nelken" --since "YYYY-MM-01" --until "YYYY-MM-31"
+git -C ~/code/<repo> fetch   # for each repo — the script reads the checkout's HEAD, not origin/main
+fp retro:commits --author "Jake Nelken" --since "YYYY-MM-01" --until "YYYY-MM-31"
 ```
 
 The script outputs TSV sorted by lines changed descending:

@@ -14,7 +14,7 @@ Use this skill when asked to export commit-level effort data for monthly retrosp
 ## Standard run command
 
 ```bash
-fp retro:commits --repo /Users/jake/code/woodrow --author "Jake Nelken" --since "YYYY-MM-01" --until "YYYY-MM-31"
+fp retro:commits --author "Jake Nelken" --since "YYYY-MM-01" --until "YYYY-MM-31"
 ```
 
 ## Required behavior
@@ -40,4 +40,4 @@ The script emits:
 ## Notes
 
 - Defaults to the previous full month when `--since`/`--until` are omitted.
-- Supports overriding repo paths via `--woodrow` and `--api`.
+- With no `--repo`, scans woodrow, api, folio-platform and internal-tools. Passing `--repo` (repeatable) replaces that default list rather than adding to it.
