@@ -63,6 +63,7 @@ Each skill is a directory with a `SKILL.md` (required) plus optional `scripts/`,
 | [`post-yesterdays-ccusage.sh`](hooks/post-yesterdays-ccusage.sh) | SessionStart | Post daily Claude + Codex token-usage summaries to Slack, catching up missed days |
 | [`pick-up-nudge.sh`](hooks/pick-up-nudge.sh) | SessionStart | Nudge to run `/pick-up` when the repo has an `IN_PROGRESS.md` with open checklist items; asks for a background `/pick-up sweep` once per ISO week; resets a file with nothing open to the empty template |
 | [`block-push-to-main.sh`](hooks/block-push-to-main.sh) | PreToolUse (Bash) | Block a Claude-issued `git push` that would target `main`, with a per-repo allowlist |
+| [`zsh-word-split-guard.sh`](hooks/zsh-word-split-guard.sh) | PreToolUse (Bash) | Block Bash commands that hit zsh traps: unquoted `$VAR` in `set --`/`for … in` (no word-split) and bare `===` words (`=` expansion); bypass with `# zsh-ok` |
 | [`enforce-claude-symlinks.sh`](hooks/enforce-claude-symlinks.sh) | git `pre-commit` hook (not a `settings.json` hook — runs only from the dev checkout) | Reject a commit that adds an unsymlinked regular file under `~/.claude/` |
 | [`claude-symlink-hygiene.sh`](hooks/claude-symlink-hygiene.sh) | SessionStart | Nudge about new unsymlinked files in `~/.claude/{hooks,commands,agents}/` before they become a blocker |
 | [`personal-repo-hygiene-check.sh`](hooks/personal-repo-hygiene-check.sh) | SessionStart | Nudge personal-repo conventions — misplaced plan files, malformed ADRs, missing `PRODUCT.md`/`DESIGN.md`, missing `.superset/config.json` |

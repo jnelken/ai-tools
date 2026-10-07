@@ -339,3 +339,16 @@ Wire it in `~/.claude/settings.json` under `hooks.SessionStart`:
 ```json
 { "hooks": [ { "type": "command", "command": "bash \"$HOME/.claude/hooks/model-router-pointer.sh\"" } ] }
 ```
+
+## zsh-word-split-guard.sh
+
+A **PreToolUse hook on Bash** for machines whose login shell is zsh, which is what the Bash tool runs. It blocks (exit 2) two bash habits that silently misbehave there: an unquoted `$VAR` in `set -- $VAR` or `for x in $VAR` (zsh does not word-split it), and a bare `===`-style word (zsh `=` command-path expansion: `=== not found`). Quoted text and `[[ … ]]`/`[ … ]` tests are ignored; append `# zsh-ok` to bypass. No-op when `$SHELL` is not zsh. Tests: `bash hooks/tests/zsh-word-split-guard.test.sh`.
+
+### settings.json wiring
+
+```json
+{ "hooks": { "PreToolUse": [ { "matcher": "Bash", "hooks": [ { "type": "command", "command": "bash \"$HOME/.claude/hooks/zsh-word-split-guard.sh\"" } ] } ] } }
+```
+
+Append to an existing `PreToolUse` array rather than replacing it.
+
