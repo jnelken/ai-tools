@@ -1,6 +1,6 @@
 ---
 name: pick-up
-description: Resume where a previous session left off — read this repo's IN_PROGRESS.md in Plan mode, present a plan to finish the work it lists, and reconcile the file with anything found already done or stale.
+description: Resume where a previous session left off — read this repo's IN_PROGRESS.md in Plan mode, present a plan to finish the work it lists, and reconcile the file with anything found already done or stale. With the argument `sweep`, runs unattended instead: verifies each item and deletes only the ones with hard evidence they're done or now tracked, starting no work (the weekly sweep the pick-up-nudge hook requests).
 ---
 
 # pick-up
@@ -12,6 +12,9 @@ runs.
 
 The only thing this skill writes is the handoff file itself, and only to reconcile it
 with what it finds (step 5). It touches no other state before the plan is approved.
+
+**Invoked with `sweep`?** Jump to [Sweep mode](#sweep-mode-pick-up-sweep). It skips plan mode and
+approval because it only reconciles the file and never resumes work.
 
 ## 1. Enter Plan mode first
 
@@ -113,9 +116,47 @@ is the one that goes in the file.
 - Leave still-open, untracked items, and the reasoning behind them, exactly as they are.
 - Update `_Last updated:_`, and append a `_Picked up:_` line with the date and session id
   so the provenance of the edit is visible next to close-out's own record.
+- **If nothing open remains, reset instead.** When no `- [ ]` item and no urgent tracked
+  pointer survives the reconcile, replace the whole file with exactly the empty template —
+  no context line, no `_Last updated:_`, no `## Close-out sessions` history:
+
+  ```markdown
+  # In Progress
+  
+  _Nothing outstanding._
+  ```
+
+  The session history only exists to trace open items back to the sessions that wrote them;
+  with nothing open it's noise. The `pick-up-nudge` SessionStart hook applies the same reset.
 
 Then start the work. What this skill owns is reconciling the file with reality;
 [[close-out]] still owns adding new open items and decisions at the end of a session.
+
+## Sweep mode (`/pick-up sweep`)
+
+The weekly, unattended version of this skill. The `pick-up-nudge` SessionStart hook asks for it
+(in a background agent) when a repo's file has open items and its `_Last updated:_` date isn't
+in the current ISO week. The job is to keep the file honest, not to resume work, so:
+
+- **No plan mode, no approval, no work.** Skip steps 1 and 4. Never start, edit, or run any item;
+  the only write is the handoff file.
+- **Steps 2–3 as normal**, following pointers only as far as verification needs.
+- **Delete only on hard evidence.** An item goes when it's verifiably done, such as:
+  - a commit on the default branch that does the work;
+  - a Linear ticket in a completed or canceled state;
+  - the named branch, worktree, or file is gone *and* the work landed.
+
+  It also goes when it's now tracked by a ticket or an open PR (close-out's filter, including its
+  urgent-pointer exception). Anything that takes judgment stays exactly as written. That includes
+  every `## Decisions needed` item, unless the evidence shows the decision was made and acted on,
+  because only the human resolves a decision. Leave `## Ticket candidates` for close-out to file.
+- **Write per step 5**, with one difference: set `_Last updated: <date +%F> (pick-up sweep)_` and
+  append `- <date> — $CLAUDE_CODE_SESSION_ID (pick-up sweep)` to `## Close-out sessions` **even
+  when nothing was removed**. That date is how the hook knows this week's sweep ran. If nothing
+  open remains, write the empty template instead (step 5's reset rule).
+- **Report every deletion with its evidence** in the final message ("removed 2: X (landed in
+  a1b2c3d), Y (CON-1234 Done); 3 still open"). The file is gitignored, so that message is the only
+  record of what was dropped.
 
 ## Notes
 

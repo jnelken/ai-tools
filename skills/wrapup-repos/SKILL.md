@@ -139,7 +139,9 @@ file first; delete items that are resolved (remove the line, never leave `- [x]`
 now tracked in Linear or an open PR; keep every other session's still-open item; set
 `_Last updated: <date +%F> (wrapup-repos)_` from the system clock; append
 `- <date> — $CLAUDE_CODE_SESSION_ID (wrapup-repos)` to `## Close-out sessions`; create `.claude/`
-if needed. Never overwrite the file wholesale.
+if needed. Never overwrite the file wholesale, with one exception: if nothing open remains
+(no `- [ ]` item and no urgent tracked pointer), write close-out's empty template instead, which
+drops the context line and the `## Close-out sessions` history.
 
 What this skill contributes, by section:
 

@@ -157,10 +157,18 @@ None of this blocks the close on its own anymore — it gets written to `.claude
 4. Keep anything still open **and untracked** that this session didn't touch — a previous session's unresolved item is not yours to drop just because you didn't get to it.
 5. Append this session's new items, after running them through the filter above.
 6. Get today's actual date from the system clock (e.g. `date +%F`) — never reuse the file's previous date and never guess or infer it from conversation context. Set the `_Last updated:_` line to that date on every write, even if nothing else changed.
-7. Get this session's id from the `$CLAUDE_CODE_SESSION_ID` env var (e.g. `echo $CLAUDE_CODE_SESSION_ID`) and append a line to `## Close-out sessions` — date + session id. Append, never overwrite: this list is the full history of every session that has reconciled this file, and it's how a future session finds the `claude --resume <id>` (or Superset agent) that did the work described above.
+7. Get this session's id from the `$CLAUDE_CODE_SESSION_ID` env var (e.g. `echo $CLAUDE_CODE_SESSION_ID`) and append a line to `## Close-out sessions` — date + session id. Append, never overwrite: this list is the full history of every session that has reconciled this file, and it's how a future session finds the `claude --resume <id>` (or Superset agent) that did the work described above. The one exception is the reset below: once nothing is open, the history goes too.
 8. Create the `.claude/` directory first if it doesn't exist yet, then write the merged result to `.claude/IN_PROGRESS.md`.
 
-If the filter leaves nothing open, the file still gets written — a context line saying so plus the sessions list — so the next session knows the last close-out found nothing untracked, rather than wondering whether the file was ever reconciled.
+If the filter leaves nothing open (no `- [ ]` item and no urgent tracked pointer), replace the whole file with exactly the empty template. That means no context line, no `_Last updated:_`, and no `## Close-out sessions` history:
+
+```markdown
+# In Progress
+
+_Nothing outstanding._
+```
+
+The session history only exists to trace open items back to the sessions that wrote them; with nothing open it's noise. The file's presence with that one line is the signal that the last reconcile found nothing untracked. The `pick-up-nudge` SessionStart hook applies the same reset.
 
 Suggested shape (note: no checked items, no ticketed items, no PR list — those live elsewhere):
 

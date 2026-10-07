@@ -143,7 +143,9 @@ The hook will reject a commit from `ai-tools` if any regular files (not symlinks
 
 A **SessionStart hook** that surfaces unresolved `IN_PROGRESS.md` content at the top of a fresh session, so it isn't missed until someone remembers to check. The counterpart to the `pick-up` skill's own lookup order (lives in `~/.claude/skills/pick-up`, not this repo).
 
-"Unresolved" means at least one open checklist item (`- [ ]`), not just file presence — `close-out` clears resolved entries in place, so a file left with only a header/close-out-log has nothing to pick up and stays silent.
+"Unresolved" means at least one open checklist item (`- [ ]`), not just file presence. Once a file holds no open item and no `## Urgent, tracked elsewhere` pointer, the hook resets it to the empty template (`# In Progress` / `_Nothing outstanding._`), wiping the `## Close-out sessions` history; close-out, pick-up and wrapup-repos write that same template themselves when they leave nothing open.
+
+It also runs the **weekly sweep**: when open items exist but the file's `_Last updated:` date falls outside the current ISO week, it asks the session to run `/pick-up sweep` in a background agent. That re-verifies every item and deletes only the ones with hard evidence they're done or now tracked, without starting any work. Every reconcile bumps `_Last updated:`, so the sweep runs at most once per repo per week, and only in repos you actually open.
 
 ### Requirements
 
@@ -171,8 +173,10 @@ Add to `~/.claude/settings.json` (alongside any existing `SessionStart` entries 
 
 - Looks for `.claude/IN_PROGRESS.md` first, then repo-root `IN_PROGRESS.md` — same order `pick-up` uses.
 - Bails silently outside a git repo, if neither file exists, or if `jq` is missing.
-- Counts open (`- [ ]`) checklist lines; if zero, stays silent even when the file exists.
-- Emits via `hookSpecificOutput.additionalContext` telling the assistant to mention the open-item count and offer `/pick-up` — explicitly instructed not to read the file or act on its items itself, since `pick-up` owns that flow (plan-mode read, verification against current state, then user approval).
+- Counts open (`- [ ]`) checklist lines and `## Urgent` pointer lines. With neither, it resets the file to the empty template (once; an already-empty file stays silent). With only urgent pointers, it stays silent and leaves the file alone.
+- With open items reconciled this ISO week, emits via `hookSpecificOutput.additionalContext` telling the assistant to mention the open-item count and offer `/pick-up` — explicitly instructed not to read the file or act on its items itself, since `pick-up` owns that flow (plan-mode read, verification against current state, then user approval).
+- With open items last reconciled before this ISO week (or never dated), asks instead for a background `/pick-up sweep` and a relay of its result. `PICK_UP_NUDGE_TODAY=YYYY-MM-DD` overrides today's date for testing.
+- Tests: `bash hooks/tests/pick-up-nudge.test.sh`.
 - No cooldown, unlike the hygiene nudges below — every session start in a repo with real open work should surface it, not just once a day.
 
 ### Disabling
