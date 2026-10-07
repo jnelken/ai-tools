@@ -1,88 +1,104 @@
 ---
 name: datadog-add-log-facets
-description: Create Datadog Logs facets (string or measure) from a list of attribute paths by driving the Logs Explorer in Claude in Chrome, leaving every facet's display name empty so the label defaults to the path. Use when asked to "add facets", "create the Datadog facets", "make the @ai.* facets", or when a PR promotes log fields into a new namespace and the cut-over checklist says facets must exist before deploy. Needs a browser already signed in to Datadog; there is no public API for creating log facets.
+description: Create Datadog Logs facets (string or measure) from a list of attribute paths by driving the Logs Explorer in a Superset workspace browser pane (or Claude in Chrome), leaving every facet's display name empty so the label defaults to the path. Use when asked to "add facets", "create the Datadog facets", "make the @ai.* facets", or when a PR promotes log fields into a new namespace and its cut-over checklist says facets must exist before deploy. There is no public API for creating log facets.
 ---
 
 # Datadog: add log facets
 
 Facets are not in code and have no public API, so this skill creates them in the
-Datadog UI through Claude in Chrome. A missing facet silently empties
-log-based metrics and group-by monitors, which is why this step sits before a
-log-field rename deploys.
+Datadog UI. A missing facet silently empties log-based metrics and group-by
+monitors, which is why this step sits before a log-field rename deploys.
 
 ## Hard rules
 
-- **Never type into the display-name / label field.** Leave it empty so the
-  facet is labelled with its path (`@ai.span_kind`). No descriptions, no groups,
-  unless the user asked for them in this request.
-- **Never enter credentials.** If Chrome lands on a Datadog login page (or SSO
-  prompt), stop and tell the user to sign in in that tab, then continue.
-- **Only create what was asked.** The input is an explicit list of paths and
-  types. Don't add "while we're here" facets.
-- **Don't delete or edit existing facets.** If one already exists with the
-  right type, skip it. If it exists with the wrong type (string vs measure),
-  stop and report it; changing the type is the user's call.
+- **Never type into the Display Name field.** In the Add facet dialog it is
+  disabled and "Use path as display name" is checked by default: leave both
+  alone, so the label is the path. No Group, no Description unless the user asked
+  for them in this request (Datadog groups new facets by namespace on its own).
+- **Never enter credentials.** If the pane lands on a login page, stop and tell
+  the user to sign in there, then continue.
+- **Only create what was asked.** Input is an explicit list of paths and types.
+- **Don't delete or edit existing facets.** The dialog refuses duplicates
+  ("A facet with path @x already exists."): report it as already existing and
+  Cancel. A wrong type on an existing facet is the user's call.
+- **Check before creating.** Another session or the user may have created some
+  already; filter the facet panel first (step 3).
 
 ## Input
 
-A list of `path → type`, where type is `string` (default) or `measure`
-(numeric; you will also pick a unit of `none` unless told otherwise). Paths are
-written with the leading `@` as in a search query: `@ai.skill.id`,
-`@rollup.occurrences`.
+`path → type` per line, type `string` (default) or `measure`. Paths carry the
+leading `@`: `@ai.skill.id`, `@rollup.occurrences`. Resolve the Datadog site
+(`DD_SITE` in the repo `.env`, else ask) and use `https://<site>/logs`.
 
-Also resolve the Datadog site: the org's own site (check `DD_SITE` in the repo's
-`.env`, or ask). Use `https://app.<site>/logs`; never assume `app.datadoghq.com`.
+## Driver: Superset workspace browser pane (preferred)
+
+The pane shares the user's signed-in Datadog session, and `superset browser`
+exposes everything needed. Workspace id: `superset workspaces list --local -s
+<slug> --json`.
+
+```bash
+superset browser open --workspace $W --show --target new-tab --url 'https://app.<site>/logs?query=...'
+superset browser list --workspace $W            # pane id + current URL (the app redirects off app.<site>)
+superset browser screenshot --workspace $W --pane $P --out shot.png   # then Read the PNG
+superset browser eval --workspace $W --pane $P --code '<js expression>'   # read DOM, simple clicks
+superset browser cdp --workspace $W --pane $P   # JSON {url: ws://...} for scripts/cdp.mjs
+```
+
+**Use real input for the form.** `eval` clicks and native-setter value writes are
+flaky on Datadog's React select (the value reverts, the suggestion list never
+mounts). `scripts/cdp.mjs` sends real events over the pane's CDP socket:
+
+```bash
+U=$(superset browser cdp --workspace $W --pane $P | python3 -c "import json,sys;print(json.load(sys.stdin)['url'])")
+node scripts/cdp.mjs "$U" Input.insertText '{"text":"@ai.span_kind"}'        # type into the focused element
+node scripts/cdp.mjs "$U" Input.dispatchMouseEvent '{"type":"mousePressed","x":300,"y":290,"button":"left","clickCount":1}'  # + mouseMoved before, mouseReleased after
+```
+
+Take a screenshot before every click: the pane can be resized by the user, so
+coordinates are not stable; find elements with `eval` (`getBoundingClientRect`)
+and click their centre.
+
+Fallback driver: Claude in Chrome (`mcp__claude-in-chrome__*`, load per the
+`claude-in-chrome` skill) in a tab you open yourself, closed when done.
 
 ## Procedure
 
-1. **Load tools** in one ToolSearch call (see the `claude-in-chrome` skill):
-   `tabs_context_mcp`, `navigate`, `computer`, `read_page`, `find`,
-   `form_input`, `tabs_create_mcp`, `tabs_close_mcp`. Call
-   `tabs_context_mcp` first, then open **your own new tab**; close it when done.
-2. **Open Logs Explorer** on a query that returns logs carrying the new
-   fields, so the attributes appear in the side panel and autofill:
-   `https://app.<site>/logs?query=<url-encoded query>&from_ts=now-1h`
-   (e.g. `env:stage @logger:ai-span`). Take a screenshot. Login page → stop.
-3. **Check what already exists** before creating anything: use the facet panel's
-   filter box (left rail, "Filter facets") for each path's top-level namespace
-   (`ai`, `rollup`) and note which paths already appear and with what type.
-4. **Create each missing facet.** Two routes; prefer A.
-   - **A. From a log (autofills path and type).** Click a log row to open its
-     side panel, find the attribute under the log's attributes (expand the
-     `ai` / `rollup` object), click the attribute value or its `⋮`/hover menu,
-     and choose **Create facet for @<path>**.
-   - **B. By path (no log has the field yet, e.g. `@ai.skill.id`,
-     `@rollup.occurrences`).** At the bottom of the facet panel click
-     **+ Add** (or the panel's "Add a facet" action), and enter the path in the
-     field/path input.
-   In the dialog:
-   - Confirm the path is exactly the requested one, with the `@`.
-   - Set **Type**: String, or Measure (Number) with unit `none`.
-   - **Leave Display name / Label empty.** Don't touch Group or Description.
-   - Click **Add**.
-5. **Verify each facet** — don't trust the dialog closing. Reload the explorer
-   and either (a) find the path in the facet panel, or (b) run
-   `@<path>:*` in the search bar and confirm the facet autocompletes.
-   For a measure, confirm it appears under measures, not as a string facet.
-6. **Close your tab** and report per path: `created`, `already existed (ok)`,
-   `wrong type (left alone)`, or `failed (why)`.
+1. **Open Logs Explorer** on a query whose logs carry the new fields (e.g.
+   `env:stage @logger:ai-span`, range wide enough to include them). Screenshot.
+   Login page → stop.
+2. **Dismiss overlays** (e.g. a "Got It" popover) so they don't eat clicks.
+3. **Check what exists.** Click the facet panel's "Search facets" input, type the
+   namespace (`ai.`, `rollup`) with `Input.insertText`, screenshot. Each existing
+   path shows as `namespace.field` under a group header. A measure facet expands
+   to a Min/Max slider; a string facet to a value list. Skip existing ones.
+4. **Create each missing facet.** Click **+ Add** beside "Showing N of M" in the
+   panel. The **Add facet** dialog has tabs **Facet** and **Measure**, a **Path**
+   select, and a collapsed **Advanced options** (Display Name, Type, Group,
+   Description) you do not need to open.
+   - Click the Path select, focus its combobox input (it renders outside the
+     dialog element; id like `371`), `Input.insertText` the path.
+   - A suggestion row **"New path: <path>"** (or an existing log attribute) appears
+     under the input. Click it with a real mouse event. The select then shows the
+     path.
+   - **Facet tab** (string): nothing else to set. **Measure tab** (numeric): switch
+     tab first, then do the same; leave the unit at its default unless told.
+     (The Measure tab was not walked end to end when this was written.)
+   - If the dialog shows "already exists", **Cancel**. Otherwise click **Add**.
+5. **Verify.** Re-filter the facet panel for the namespace and confirm each path
+   is listed; for a measure, expand it and check for the Min/Max slider.
+6. **Report** per path: `created`, `already existed`, `wrong type (left alone)`,
+   or `failed (why)`. Close any tab you opened.
 
 ## Gotchas
 
-- The explorer's time range matters for route A: the attribute only shows in the
-  side panel if a log in range carries it. Widen to 4h or run the producing
-  action again (e.g. dispatch the stage canary) rather than guessing.
-- Facets are per Datadog org, not per environment or index, so creating them off
-  a stage log covers prod.
-- A measure facet needs the value to be numeric in the log; if the attribute is
-  a string, route A offers only a string facet. Create it by path (route B) as a
-  measure instead.
-- Don't use browser alerts/dialog-triggering controls; if the page stops
-  responding, stop and ask.
-- This skill has not been run end to end against the live UI yet. The labels
-  above ("Create facet for…", "+ Add", "Display name") are from memory of
-  Datadog's UI; if a step doesn't match, take a screenshot, adapt, and update
-  this file with what you saw.
+- Facets are per Datadog org, not per environment or index: creating them off a
+  stage log covers prod.
+- Facet creation by path works with no matching logs in range ("New path:").
+- Leftover open dialogs break later steps: always Cancel before moving on.
+- Don't trigger browser alert/confirm dialogs; if the pane stops responding, stop
+  and ask.
+- A concurrent human or session may be creating the same facets; "already exists"
+  is the signal, not an error.
 
 ## Example input (CON-3995 cut-over)
 
