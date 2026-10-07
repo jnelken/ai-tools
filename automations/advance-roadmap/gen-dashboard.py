@@ -370,6 +370,46 @@ def missed_slots(runs):
     return [s for s in expected if s not in covered]
 
 
+# ── leaderboard ───────────────────────────────────────────────────────────────
+
+def leaderboard_html():
+    """Jake's Production Run ranks, refreshed by lib/leaderboard.py when older than 10 minutes."""
+    script = os.path.join(os.path.dirname(os.path.realpath(__file__)), "lib", "leaderboard.py")
+    if os.path.exists(script):
+        try:
+            subprocess.run([sys.executable, script, "snapshot"], capture_output=True, timeout=90,
+                           env={**os.environ, "ADVANCE_ROADMAP_ROOT": ROOT})
+        except subprocess.SubprocessError:
+            pass
+    try:
+        lb = json.load(open(os.path.join(ROOT, "leaderboard.json")))
+    except (OSError, ValueError):
+        return ""
+
+    def tile(label, r, note=""):
+        if not r or not r.get("rank"):
+            return (f'<div class=stat><div class="n dim">—</div><div class=l>{esc(label)}</div></div>')
+        total = f'{r["total"]:,}' if isinstance(r.get("total"), int) else "?"
+        return (f'<div class=stat><div class=n>#{r["rank"]:,}<span class=dim style="font-size:14px;font-weight:500">'
+                f' / {total}</span></div><div class=l>{esc(label)}</div>'
+                + (f'<div class=dim style="font-size:12px">{esc(note)}</div>' if note else "") + '</div>')
+
+    best = lb.get("best_7d") or {}
+    best_note = ""
+    if best.get("day"):
+        best_note = f'{best["day"]} · {best.get("days_recorded", 0)} of 7 days recorded'
+    roll = lb.get("rolling_7d") or {}
+    tiles = (tile("all-time rank", lb.get("all_time"))
+             + tile("7-day best (daily)", best, best_note)
+             + tile("today (UTC day)", lb.get("today"))
+             + tile("rolling 7 days", roll))
+    when = lb.get("fetched_at") or ""
+    stale = "" if lb.get("ok") else f' · <span style="color:var(--fail)">last fetch failed: {esc(lb.get("error") or "?")}</span>'
+    return (f'<div class=stats>{tiles}</div>'
+            f'<div class=sub style="margin:4px 0 18px">Superset Production Run · @{esc(lb.get("handle") or "?")}'
+            f' · fetched {esc(when[:16].replace("T", " "))} UTC{stale}</div>')
+
+
 # ── repos ─────────────────────────────────────────────────────────────────────
 
 def find_roadmap(repo):
@@ -992,7 +1032,7 @@ def build():
                  if last else '<span class=dim>no runs yet</span>')
 
     return TEMPLATE.format(
-        gen=esc(datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
+        gen=esc(datetime.now().strftime("%Y-%m-%d %H:%M:%S")), rank_html=leaderboard_html(),
         cadence=base_cadence(), windows=esc(SPRINT_WINDOWS),
         total=n, shipped=shipped, blocked=blocked, skipped=skipped, errored=errored,
         last_line=last_line, run_cards=run_cards, run_panels=run_panels, repo_cards=repo_cards,
@@ -1133,6 +1173,7 @@ TEMPLATE = """<!doctype html>
   <span class=rstatus id=rstatus role=status></span>
   <h1>Roadmap automation</h1>
   <div class=sub>Generated {gen} · runs hourly in sprint windows {windows} · ↻ refresh re-reads usage and Linear (via serve.py)</div>
+  {rank_html}
 
   <div class=stats>
     <div class=stat><div class=n>{total}</div><div class=l>runs logged</div></div>

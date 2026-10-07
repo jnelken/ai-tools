@@ -4,7 +4,7 @@
     serve.py [--port 8421]
 
 GET  /          the dashboard
-POST /refresh   re-read provider usage, take a fresh Linear snapshot, regenerate the page
+POST /refresh   re-read provider usage, take a fresh Linear snapshot and leaderboard rank, regenerate the page
 
 A static file:// page can't run anything, so this is the only way the dashboard's
 refresh button can do real work. Bound to 127.0.0.1, and /refresh checks Host and
@@ -46,6 +46,7 @@ def refresh():
     else:
         steps.append(step("usage", [py, os.path.join(HERE, "lib/usage.py"), "--root", ROOT, "refresh"], 120))
         steps.append(step("linear", [py, os.path.join(HERE, "lib/linearsnap.py"), "--out", LIVE_SNAPSHOT], 120))
+    steps.append(step("leaderboard", [py, os.path.join(HERE, "lib/leaderboard.py"), "snapshot", "--force"], 90))
     steps.append(step("dashboard", [py, os.path.join(HERE, "gen-dashboard.py")], 120))
     return steps
 
