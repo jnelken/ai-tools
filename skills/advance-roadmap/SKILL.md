@@ -43,11 +43,24 @@ after every clean ship, the worker runs a short code-health retrospective on the
 touched and files up to 2 deduped `code-health` tickets. Those tickets rank below all feature work.
 Rubric, retrospective and refactor caps: [`CODE_HEALTH.md`](CODE_HEALTH.md).
 
+**Scheduled in two daily sprint windows: 10:30–15:30 and 16:00–21:00.** launchd ticks once an
+hour inside each window and never overnight (the tick list is in `com.jake.advance-roadmap.plist`).
+Lone overnight runs add one-session slots that drag Superset's width median down; work packed into
+the windows overlaps with Jake's own sessions, including his work-org Superset sessions under the
+same username. Parallel lanes (one launch per window, as many repos as are available) are the next
+step: [`../../docs/plans/production-run.md`](../../docs/plans/production-run.md), Phase 4.
+
+**Never depends on Claude.** Every role has a non-Claude first choice: Codex orchestrates, Cursor
+builds, the reviewer is never Claude first, and the scheduling around them is plain shell and
+Python. Claude is only ever a fallback, so the job keeps shipping when Jake's Claude usage is spent.
+Anything added here (a supervisor, a slicer) must keep that true.
+
 **Keep going while there's time.** A run that ships a feature cleanly (`shipped`, deploy green) starts another
-run — fresh orchestrator pass, fresh item — as long as fewer than 40 minutes have passed since the
-first run started. Anything else (blocked, failed, red deploy, no item, quota) ends the chain. The
-check happens between runs, so the last item may finish past 40 minutes. Scheduled runs chain in
-`run.sh` (`ADVANCE_ROADMAP_CHAIN_MINUTES`, default 40; `0` = one item). A code-health ship never chains — one
+run — fresh orchestrator pass, fresh item — as long as fewer than `ADVANCE_ROADMAP_CHAIN_MINUTES`
+have passed since the first run started (the plist sets 55, about one tick; `run.sh`'s default is
+40; `0` = one item). Anything else (blocked, failed, red deploy, no item, quota) ends the chain. The
+check happens between runs, so the last item may finish past the limit; launchd skips the ticks a
+running chain overlaps. A code-health ship never chains — one
 refactor per tick at most. Interactive runs follow the same rule: after the worker reports a
 feature `shipped`, go back to [`../conductor/ORCHESTRATOR.md`](../conductor/ORCHESTRATOR.md) Step 0 if
 under 40 minutes. (For one-off human-driven work, use [[conductor]] instead.)
@@ -75,7 +88,7 @@ only (see `SAFETY.md`) — from [[unblock-roadmap]] (the only dirty-tree excepti
 4. Dispatch `worker.sh` (Cursor → Codex → Claude) in the item's Superset workspace terminal, with
    same-run failover on limits.
 5. Persist usage for the next tick. Skip only when **no orchestrator** remains.
-6. On a clean ship under 40 minutes into the tick, re-exec for the next item.
+6. On a clean ship under the chain limit, re-exec for the next item.
 
 Linear routing labels:
 

@@ -6,10 +6,12 @@
 > scheduled runs now ship as merged PRs from Superset workspaces, and Superset credits them (ai-tools#1 and
 > wav-explorer#1 are linked with `merged_at` set; roaddmap#1 shipped during the code swap without a workspace,
 > so it isn't credited). Phase 1 step 8 was a no-op: mailcrush's review bot is already manual-only.
-> **Phases 3–4 are on hold pending Jake's decision:** Claude Code's auto-mode classifier refused to create
-> `supervisor.py` ("create unsafe agents"). The lane-mode edits (`run.sh` lane mode, per-repo pending plans,
-> locked `usage.py` writes, ORCHESTRATOR *Parallel lanes*) sit uncommitted in the Superset workspace
-> `~/.superset/worktrees/ai-tools/advance-roadmap/parallel-lanes`. Phase 2 (supply) is not started.
+> **Phase 3 shipped as serial sprint windows:** hourly ticks inside 10:30–15:30 and 16:00–21:00, daily, no
+> overnight runs. **Phase 4 (lanes) is Jake's to unblock:** Claude Code's auto-mode classifier refused to
+> create `supervisor.py` ("create unsafe agents"), and Jake will sort that out. The lane-mode edits (`run.sh`
+> lane mode, per-repo pending plans, locked `usage.py` writes, ORCHESTRATOR *Parallel lanes*) sit
+> uncommitted in the Superset workspace `~/.superset/worktrees/ai-tools/advance-roadmap/parallel-lanes`.
+> Phase 2 (supply) is not started.
 
 ## Context
 
@@ -89,22 +91,32 @@ This takes credited PRs from 0 to the existing ship rate. It also moves builds o
    - typey.site's Netlify publish and PostHog env settings
 4. **Code-health per lane.** Code-health stops being a single global fallback that never chains. An idle lane may take its own repo's code-health ticket, capped at 1 code-health PR per repo per day, with the existing 24-hour cooldown kept. That cap guards against churn that looks manufactured on a flaggable public board.
 
-## Phase 3: Wide-burst schedule (idea 1)
+## Phase 3: Sprint windows (idea 1)
 
-1. Replace the hourly :45 plist and the 2-hour grid with launchd `StartCalendarInterval` in local time:
-   - weekdays, opening at 09:00 local;
-   - Saturday and Sunday, opening at 10:00 local.
+Jake's spec (2026-10-06): **two sprints a day, every day — 10:30–15:30 and 16:00–21:00 local** —
+across as many repos as are available. His work-org Superset sessions run under the same username,
+so they count toward the same board, and the windows overlap his working day.
 
-   The supervisor runs until 18:00 on weekdays and 13:00 on weekends. Both windows fall inside one UTC day, which rolls over at 8pm ET.
+**Shipped (serial, until lanes land):** the plist ticks hourly inside the windows (10:30, 11:30, …,
+14:30, 16:00, …, 20:00) with a 1-hour base cadence, and each tick chains feature ships for up to 55
+minutes. Nothing fires overnight. Note: the 16:00 window crosses the UTC day boundary (8pm EDT).
+
+**With lanes (Phase 4):** the plist launches `supervisor.py` once at 10:30 and once at 16:00, each
+running its window to the end:
 2. **No overnight runs.** No new dispatch in the last 45 minutes of the window; lanes already running finish.
 3. The supervisor holds `caffeinate -i` while it runs. It skips the window, logging `skipped-superset-down`, if the Superset app isn't running.
 4. **An empty queue ends the window early** instead of trickling bookkeeping runs that cost tokens and produce no PR. Keep the unchanged-verdict gate. A Linear ticket change reopens dispatch.
 
 ## Phase 4: Parallel lanes plus the deterministic supervisor (ideas 2, 3 and 4)
 
+**Hard requirement (Jake): the job must keep working when Claude's usage is spent.** The
+supervisor is plain Python with no model call; every role keeps a non-Claude first choice
+(Codex orchestrates, Cursor builds, the reviewer is never Claude first). Claude stays a fallback only.
+
 1. **New `supervisor.py`** in `~/.ai-tools/automations/advance-roadmap/`, launched by the Phase 3 plist:
    - singleton `flock`;
-   - N lanes, starting at N=3, with at most one lane per repo;
+   - lanes: one per available repo — as many as there are dispatchable repos, with at most one
+     lane per repo — capped only by provider headroom (step 4), not a fixed N;
    - a lane is done when its worker result file exists, its binding's `last_event_type` is `Stop` or `Failed`, and its PR is merged or a blocker is recorded;
    - when a lane frees, it pops the next queued item, re-checks that the repo is clean and not busy, and dispatches.
 2. **Orchestrator multi-dispatch:**

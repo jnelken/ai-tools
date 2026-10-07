@@ -162,11 +162,27 @@ FAKE_SUPERSET=down SUPERSET=1 run good ws
 check "Superset down → skipped-superset"      "$(last outcome)" skipped-superset
 check "skip names why"                        "$(last detail)" "Superset app or host service not reachable"
 check "a skip does not alert"                 "$(python3 "$ROOT/lib/runrecord.py" --root "$ROOT" alert)" ""
+# Sprint windows: a tick outside every window (a catch-up fire on wake) leaves no trace.
+now_min=$(( 10#$(date +%H) * 60 + 10#$(date +%M) ))
+if [ "$now_min" -ge 5 ] && [ "$now_min" -lt 1430 ]; then
+  rows_before=$(wc -l < "$ROOT/runs.jsonl" | tr -d ' ')
+  ADVANCE_ROADMAP_WINDOWS="23:55-23:59" run good file
+  check "out-of-window tick records nothing"   "$(wc -l < "$ROOT/runs.jsonl" | tr -d ' ')" "$rows_before"
+  ADVANCE_ROADMAP_WINDOWS="00:00-00:01 00:02-23:59" run good file
+  check "in-window tick runs"                  "$(wc -l < "$ROOT/runs.jsonl" | tr -d ' ')" $(( rows_before + 1 ))
+  # A chain link that lands after the window closes finishes its item but starts no more.
+  rm -f "$TMP/chain-count"
+  ADVANCE_ROADMAP_CHAIN_LINK=2 ADVANCE_ROADMAP_WINDOWS="23:55-23:59" CHAIN_MINUTES=40 run good chain
+  check "link past the window runs once"       "$(wc -l < "$ROOT/runs.jsonl" | tr -d ' ')" $(( rows_before + 2 ))
+  grep -q "past the sprint window" "$ROOT/logs/latest.log" \
+    && echo "ok   no chaining past the window" || { echo "FAIL: chained past the window"; exit 1; }
+fi
 # Cadence: a tick off the base grid leaves no trace at all (24h grid = 03:45 only).
 if [ "$(date +%H)" != "03" ]; then
   logs_before=$(ls "$ROOT"/logs | wc -l)
+  rows_before=$(wc -l < "$ROOT/runs.jsonl" | tr -d ' ')
   CADENCE_HOURS=24 run good file
-  check "off-grid tick records nothing"        "$(wc -l < "$ROOT/runs.jsonl" | tr -d ' ')" 14
+  check "off-grid tick records nothing"        "$(wc -l < "$ROOT/runs.jsonl" | tr -d ' ')" "$rows_before"
   check "off-grid tick leaves no log"          "$(ls "$ROOT"/logs | wc -l)" "$logs_before"
 fi
 echo "all passed"

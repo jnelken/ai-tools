@@ -134,18 +134,17 @@ trap on_exit EXIT
 trap 'exit 143' INT TERM
 
 # ── Cadence ───────────────────────────────────────────────────────────────────
-# launchd fires every hour at :45; the cadence is enforced here, so changing it
-# never means rewriting the plist. ADVANCE_ROADMAP_CADENCE_HOURS (set in the plist,
-# default 2) is the base. gen-dashboard.py owns the backoff and writes cadence_hours
-# to state.json: the base normally, 2× after 4 consecutive blocked runs, 4× after 8,
-# capped at 24h. Any run that ships resets it.
-# Slots are hours where (hour - 3) is a multiple of the cadence, so the 2h grid is
-# 01:45 03:45 … 23:45 — never 02:45, when wrapup-repos commits WIP on Sundays.
-# Pick a divisor of 24 or the grid drifts at midnight.
+# launchd fires once an hour inside two daily sprint windows (10:30–15:30, 16:00–21:00;
+# the tick list is in the plist). ADVANCE_ROADMAP_CADENCE_HOURS (plist: 1, so every tick
+# runs) is the base. gen-dashboard.py owns the backoff and writes cadence_hours to
+# state.json: the base normally, 2× after 4 consecutive blocked runs, 4× after 8, capped at
+# 24h. Any run that ships resets it. A tick runs when (hour - 3) is a multiple of the
+# cadence, so backoff thins the window's ticks (2× keeps the odd hours) rather than
+# moving them. Pick a divisor of 24 or the grid drifts at midnight.
 # A Linear ticket edit since the last no-work verdict bypasses the backoff (below).
-export ADVANCE_ROADMAP_CADENCE_HOURS="${ADVANCE_ROADMAP_CADENCE_HOURS:-2}"
+export ADVANCE_ROADMAP_CADENCE_HOURS="${ADVANCE_ROADMAP_CADENCE_HOURS:-1}"
 BASE_CADENCE="$ADVANCE_ROADMAP_CADENCE_HOURS"
-case "$BASE_CADENCE" in ''|0|*[!0-9]*) BASE_CADENCE=2 ;; esac
+case "$BASE_CADENCE" in ''|0|*[!0-9]*) BASE_CADENCE=1 ;; esac
 CADENCE="$BASE_CADENCE"
 if [ -r "$STATE_FILE" ] && command -v jq >/dev/null 2>&1; then
   CADENCE="$(jq -r ".cadence_hours // $BASE_CADENCE" "$STATE_FILE" 2>/dev/null || echo "$BASE_CADENCE")"
@@ -154,6 +153,22 @@ case "$CADENCE" in ''|0|*[!0-9]*) CADENCE="$BASE_CADENCE" ;; esac
 [ "$CADENCE" -lt "$BASE_CADENCE" ] && CADENCE="$BASE_CADENCE"  # state.json from an older, faster base
 HOUR_NOW=$(( 10#$(date +%H) ))
 on_grid() { [ $(( (HOUR_NOW - 3 + 24) % $1 )) -eq 0 ]; }
+# Sprint windows ("HH:MM-HH:MM …", set in the plist; unset = always). launchd fires a tick
+# missed during sleep when the Mac wakes, so a 2am wake would otherwise start a run.
+in_window() {
+  [ -n "${ADVANCE_ROADMAP_WINDOWS:-}" ] || return 0
+  local now=$(( 10#$(date +%H) * 60 + 10#$(date +%M) )) w a b
+  for w in ${=ADVANCE_ROADMAP_WINDOWS}; do
+    a="${w%-*}"; b="${w#*-}"
+    [ "$now" -ge $(( 10#${a%:*} * 60 + 10#${a#*:} )) ] && [ "$now" -lt $(( 10#${b%:*} * 60 + 10#${b#*:} )) ] && return 0
+  done
+  return 1
+}
+if [ "$CHAIN_LINK" -eq 1 ] && ! in_window; then
+  # A catch-up fire outside the windows: not a run, so no record, log or dashboard churn.
+  rm -f "$LOG"; rm -rf "$RUN_DIR"; RECORDED=1
+  exit 0
+fi
 if [ "$CHAIN_LINK" -eq 1 ] && ! on_grid "$BASE_CADENCE"; then
   # An hourly tick between slots: not a run, so no record, log or dashboard churn.
   rm -f "$LOG"; rm -rf "$RUN_DIR"; RECORDED=1
@@ -677,6 +692,8 @@ last_outcome="$(python3 -c 'import json,sys; r=json.loads(open(sys.argv[1]).read
 elapsed=$(( $(date +%s) - CHAIN_START ))
 if [ "$last_outcome" = "shipped code_health" ]; then
   echo "=== chain: code-health pass shipped — not chaining ===" >> "$LOG"
+elif [ "$last_outcome" = "shipped feature" ] && ! in_window; then
+  echo "=== chain: past the sprint window — not chaining ===" >> "$LOG"
 elif [ "$last_outcome" = "shipped feature" ] && [ "$elapsed" -lt $(( CHAIN_MINUTES * 60 )) ]; then
   echo "=== chain: shipped at $(( elapsed / 60 ))m of ${CHAIN_MINUTES}m — starting link $(( CHAIN_LINK + 1 )) ===" >> "$LOG"
   trap - EXIT
