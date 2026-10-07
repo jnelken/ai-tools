@@ -14,6 +14,7 @@ Personal AI coding tools — Claude Code and Cursor skills, slash commands, hook
 | [`logo-gestalt`](skills/logo-gestalt) | Gestalt logo design: symbol inventory, shared-vector matching, SVG + raster preview board, vision critique |
 | [`cleanup-local-branches`](skills/cleanup-local-branches) | Phased cross-repo cleanup of stale branches + worktrees with reflog-recovery log |
 | [`datadog-tool-selection`](skills/datadog-tool-selection) | Guide for picking the right Datadog tool for an observability question |
+| [`datadog-add-log-facets`](skills/datadog-add-log-facets) | Create Datadog Logs facets from a path list via Claude in Chrome, leaving display names empty |
 | [`deploy-koyeb`](skills/deploy-koyeb) | Deploy a local service directory to a Koyeb app/service from a worktree or branch |
 | [`handoff`](skills/handoff) | Close out the session, then spawn a successor agent in the right Superset workspace with state, not transcript |
 | [`kosha-triage`](skills/kosha-triage) | Migrate stale ClickUp captures into the markdown vault, then delete the originals |
