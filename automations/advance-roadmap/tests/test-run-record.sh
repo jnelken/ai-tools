@@ -170,6 +170,12 @@ if [ "$now_min" -ge 5 ] && [ "$now_min" -lt 1430 ]; then
   check "out-of-window tick records nothing"   "$(wc -l < "$ROOT/runs.jsonl" | tr -d ' ')" "$rows_before"
   ADVANCE_ROADMAP_WINDOWS="00:00-00:01 00:02-23:59" run good file
   check "in-window tick runs"                  "$(wc -l < "$ROOT/runs.jsonl" | tr -d ' ')" $(( rows_before + 1 ))
+  # A chain link that lands after the window closes finishes its item but starts no more.
+  rm -f "$TMP/chain-count"
+  ADVANCE_ROADMAP_CHAIN_LINK=2 ADVANCE_ROADMAP_WINDOWS="23:55-23:59" CHAIN_MINUTES=40 run good chain
+  check "link past the window runs once"       "$(wc -l < "$ROOT/runs.jsonl" | tr -d ' ')" $(( rows_before + 2 ))
+  grep -q "past the sprint window" "$ROOT/logs/latest.log" \
+    && echo "ok   no chaining past the window" || { echo "FAIL: chained past the window"; exit 1; }
 fi
 # Cadence: a tick off the base grid leaves no trace at all (24h grid = 03:45 only).
 if [ "$(date +%H)" != "03" ]; then

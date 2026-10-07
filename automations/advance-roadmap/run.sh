@@ -692,6 +692,8 @@ last_outcome="$(python3 -c 'import json,sys; r=json.loads(open(sys.argv[1]).read
 elapsed=$(( $(date +%s) - CHAIN_START ))
 if [ "$last_outcome" = "shipped code_health" ]; then
   echo "=== chain: code-health pass shipped — not chaining ===" >> "$LOG"
+elif [ "$last_outcome" = "shipped feature" ] && ! in_window; then
+  echo "=== chain: past the sprint window — not chaining ===" >> "$LOG"
 elif [ "$last_outcome" = "shipped feature" ] && [ "$elapsed" -lt $(( CHAIN_MINUTES * 60 )) ]; then
   echo "=== chain: shipped at $(( elapsed / 60 ))m of ${CHAIN_MINUTES}m — starting link $(( CHAIN_LINK + 1 )) ===" >> "$LOG"
   trap - EXIT
