@@ -81,8 +81,13 @@ Fallback driver: Claude in Chrome (`mcp__claude-in-chrome__*`, load per the
      under the input. Click it with a real mouse event. The select then shows the
      path.
    - **Facet tab** (string): nothing else to set. **Measure tab** (numeric): switch
-     tab first, then do the same; leave the unit at its default unless told.
-     (The Measure tab was not walked end to end when this was written.)
+     tab first. Its Path input is **prefilled with `@`**: select all (`cmd+a`)
+     before typing, or you get `@@path`. Type defaults to **Double**; for counts
+     (e.g. `@rollup.occurrences`) open Advanced options and pick **Integer**.
+     Leave Unit at None unless told.
+   - Optional **Group** (Advanced options) files the facet under a panel header.
+     Typing a new name offers "New group: X"; an existing group matches
+     case-insensitively and keeps its stored casing (`AI` → `Ai`).
    - If the dialog shows "already exists", **Cancel**. Otherwise click **Add**.
 5. **Verify.** Re-filter the facet panel for the namespace and confirm each path
    is listed; for a measure, expand it and check for the Min/Max slider.
@@ -95,6 +100,14 @@ Fallback driver: Claude in Chrome (`mcp__claude-in-chrome__*`, load per the
   stage log covers prod.
 - Facet creation by path works with no matching logs in range ("New path:").
 - Leftover open dialogs break later steps: always Cancel before moving on.
+- **The Add facet dialog fades in over 3–6s, and input during the fade is lost
+  silently** (the click lands on nothing, typed text goes nowhere, and a later
+  click outside the still-small dialog closes it). Screenshot until the dialog is
+  fully opaque before the first click. The first **+ Add** click right after a
+  "successfully created" toast often doesn't open the dialog; screenshot-confirm
+  rather than assume. With Claude in Chrome, keep `browser_batch` calls short:
+  long batches with waits can time out mid-dialog. Confirm each create from the
+  toast ("Facet @x has been successfully created").
 - Don't trigger browser alert/confirm dialogs; if the pane stops responding, stop
   and ask.
 - A concurrent human or session may be creating the same facets; "already exists"
