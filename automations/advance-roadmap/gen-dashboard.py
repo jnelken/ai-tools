@@ -70,20 +70,33 @@ MAX_CURSOR_PCT = 95
 # worker.sh draws Cursor usage from the Auto pool unless a named model is pinned;
 # only that pool is gated (lib/usage.py cursor_quota_ok).
 CURSOR_WORKER_MODEL = os.environ.get("ADVANCE_ROADMAP_CURSOR_WORKER_MODEL", "auto")
-# Before GRID_SINCE launchd fired at fixed 6h slots; after it, hourly with run.sh keeping
-# the base-cadence grid ((hour - 3) % base == 0). Old history is judged by the old slots.
+# Before GRID_SINCE launchd fired at fixed 6h slots; from it, hourly at :45 with run.sh keeping
+# the base-cadence grid ((hour - 3) % base == 0); from SPRINT_SINCE, hourly ticks inside two
+# daily sprint windows (keep SPRINT_TICKS in step with com.jake.advance-roadmap.plist). Old
+# history is judged by the slots that applied then.
 LEGACY_SLOTS = [(4, 45), (10, 45), (16, 45), (22, 45)]
 GRID_SINCE = datetime(2026, 9, 27, 22, 0)
+GRID_BASE = 2  # the :45 grid's base cadence, for judging that era's history
+SPRINT_SINCE = datetime(2026, 10, 7, 0, 0)
+SPRINT_TICKS = [(10, 30), (11, 30), (12, 30), (13, 30), (14, 30), (16, 0), (17, 0), (18, 0), (19, 0), (20, 0)]
+SPRINT_WINDOWS = "10:30–15:30 and 16:00–21:00"
 
 
 def slots_on(day):
-    """Scheduled slot datetimes on this calendar day, under whichever grid applied then."""
+    """Scheduled slot datetimes on this calendar day, under whichever schedule applied then."""
     base = base_cadence()
-    grid = [(h, 45) for h in range(24) if (h - 3) % base == 0]
-    return ([day.replace(hour=h, minute=m) for h, m in LEGACY_SLOTS
-             if day.replace(hour=h, minute=m) < GRID_SINCE]
-            + [day.replace(hour=h, minute=m) for h, m in grid
-               if day.replace(hour=h, minute=m) >= GRID_SINCE])
+    grid = [(h, 45) for h in range(24) if (h - 3) % GRID_BASE == 0]
+    out = []
+    for h, m in LEGACY_SLOTS:
+        if day.replace(hour=h, minute=m) < GRID_SINCE:
+            out.append(day.replace(hour=h, minute=m))
+    for h, m in grid:
+        if GRID_SINCE <= day.replace(hour=h, minute=m) < SPRINT_SINCE:
+            out.append(day.replace(hour=h, minute=m))
+    for h, m in SPRINT_TICKS:
+        if day.replace(hour=h, minute=m) >= SPRINT_SINCE and (h - 3) % base == 0:
+            out.append(day.replace(hour=h, minute=m))
+    return sorted(out)
 
 QUOTA_RE = re.compile(r"skipping — (\S+) usage (\d+)% >= (\d+)%")
 NO_ORCH_RE = re.compile(r"skipping — no orchestrator available")
@@ -348,7 +361,7 @@ def missed_slots(runs):
     for st in stamps:
         best = None
         for s in expected:
-            window = timedelta(hours=4 if s < GRID_SINCE else min(4, base_cadence()))
+            window = timedelta(hours=4 if s < GRID_SINCE else min(4, GRID_BASE if s < SPRINT_SINCE else base_cadence()))
             if s <= st + timedelta(minutes=5) and (st - s) <= window:
                 if best is None or s > best:
                     best = s
@@ -485,8 +498,10 @@ BLOCKED_OUTCOMES = ("blocked-no-item", "blocked", "nothing-qualified")
 # day of finding nothing, 8 is two.
 # run.sh exports the base; the backoff multiplies it: (blocked streak, multiplier).
 def base_cadence():
-    v = os.environ.get("ADVANCE_ROADMAP_CADENCE_HOURS", "2")
-    return int(v) if v.isdigit() and int(v) > 0 else 2
+    # Must match the plist's default: serve.py regenerates this without the plist's env, and
+    # run.sh obeys the cadence_hours this writes to state.json.
+    v = os.environ.get("ADVANCE_ROADMAP_CADENCE_HOURS", "1")
+    return int(v) if v.isdigit() and int(v) > 0 else 1
 
 
 BACKOFF_STEPS = ((8, 4), (4, 2))
@@ -978,7 +993,7 @@ def build():
 
     return TEMPLATE.format(
         gen=esc(datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
-        cadence=base_cadence(),
+        cadence=base_cadence(), windows=esc(SPRINT_WINDOWS),
         total=n, shipped=shipped, blocked=blocked, skipped=skipped, errored=errored,
         last_line=last_line, run_cards=run_cards, run_panels=run_panels, repo_cards=repo_cards,
         waiting=waiting, quota_html=quota_html, token_html=token_html, missed_html=missed_html, **{f"n_{k}": v for k, v in counts.items()},
@@ -1117,7 +1132,7 @@ TEMPLATE = """<!doctype html>
   <button class="toggle refresh" id=refresh title="Re-read provider usage, take a fresh Linear snapshot, rebuild this page">↻ refresh</button>
   <span class=rstatus id=rstatus role=status></span>
   <h1>Roadmap automation</h1>
-  <div class=sub>Generated {gen} · runs every {cadence}h at :45 · ↻ refresh re-reads usage and Linear (via serve.py)</div>
+  <div class=sub>Generated {gen} · runs hourly in sprint windows {windows} · ↻ refresh re-reads usage and Linear (via serve.py)</div>
 
   <div class=stats>
     <div class=stat><div class=n>{total}</div><div class=l>runs logged</div></div>

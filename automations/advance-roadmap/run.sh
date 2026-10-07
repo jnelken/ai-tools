@@ -134,18 +134,17 @@ trap on_exit EXIT
 trap 'exit 143' INT TERM
 
 # ── Cadence ───────────────────────────────────────────────────────────────────
-# launchd fires every hour at :45; the cadence is enforced here, so changing it
-# never means rewriting the plist. ADVANCE_ROADMAP_CADENCE_HOURS (set in the plist,
-# default 2) is the base. gen-dashboard.py owns the backoff and writes cadence_hours
-# to state.json: the base normally, 2× after 4 consecutive blocked runs, 4× after 8,
-# capped at 24h. Any run that ships resets it.
-# Slots are hours where (hour - 3) is a multiple of the cadence, so the 2h grid is
-# 01:45 03:45 … 23:45 — never 02:45, when wrapup-repos commits WIP on Sundays.
-# Pick a divisor of 24 or the grid drifts at midnight.
+# launchd fires once an hour inside two daily sprint windows (10:30–15:30, 16:00–21:00;
+# the tick list is in the plist). ADVANCE_ROADMAP_CADENCE_HOURS (plist: 1, so every tick
+# runs) is the base. gen-dashboard.py owns the backoff and writes cadence_hours to
+# state.json: the base normally, 2× after 4 consecutive blocked runs, 4× after 8, capped at
+# 24h. Any run that ships resets it. A tick runs when (hour - 3) is a multiple of the
+# cadence, so backoff thins the window's ticks (2× keeps the odd hours) rather than
+# moving them. Pick a divisor of 24 or the grid drifts at midnight.
 # A Linear ticket edit since the last no-work verdict bypasses the backoff (below).
-export ADVANCE_ROADMAP_CADENCE_HOURS="${ADVANCE_ROADMAP_CADENCE_HOURS:-2}"
+export ADVANCE_ROADMAP_CADENCE_HOURS="${ADVANCE_ROADMAP_CADENCE_HOURS:-1}"
 BASE_CADENCE="$ADVANCE_ROADMAP_CADENCE_HOURS"
-case "$BASE_CADENCE" in ''|0|*[!0-9]*) BASE_CADENCE=2 ;; esac
+case "$BASE_CADENCE" in ''|0|*[!0-9]*) BASE_CADENCE=1 ;; esac
 CADENCE="$BASE_CADENCE"
 if [ -r "$STATE_FILE" ] && command -v jq >/dev/null 2>&1; then
   CADENCE="$(jq -r ".cadence_hours // $BASE_CADENCE" "$STATE_FILE" 2>/dev/null || echo "$BASE_CADENCE")"

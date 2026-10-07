@@ -11,21 +11,37 @@
 		<string>/Users/jake/.claude/automations/advance-roadmap/run.sh</string>
 	</array>
 
-	<!-- Fires every hour at :45; run.sh decides which ticks run. The base cadence is
-	     ADVANCE_ROADMAP_CADENCE_HOURS below (a divisor of 24): slots are the hours where
-	     (hour - 3) is a multiple of it, so 2h → 1:45, 3:45 … 11:45pm. That grid never lands on
-	     2:45, when wrapup-repos commits WIP on Sundays — this job requires a clean tree.
-	     Off-slot ticks exit silently. If the Mac is asleep at a scheduled time, launchd runs
-	     the missed job on wake. Edit the value, then reload:
+	<!-- Two sprint windows a day, every day: 10:30–15:30 and 16:00–21:00 local. One tick an hour
+	     inside each; a tick that ships a feature chains the next item for up to
+	     ADVANCE_ROADMAP_CHAIN_MINUTES, and while it runs launchd skips the ticks it overlaps.
+	     Nothing fires overnight: lone runs then add one-session slots that drag Superset's
+	     width median down (docs/plans/production-run.md). Keep this tick list in step with
+	     SPRINT_TICKS in gen-dashboard.py. When supervisor.py (parallel lanes) lands, it replaces
+	     the ticks: one launch at each window's start. After editing, reload:
+	       cp com.jake.advance-roadmap.plist ~/Library/LaunchAgents/
 	       launchctl bootout gui/$(id -u)/com.jake.advance-roadmap
 	       launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.jake.advance-roadmap.plist -->
 	<key>StartCalendarInterval</key>
-	<dict><key>Minute</key><integer>45</integer></dict>
+	<array>
+		<dict><key>Hour</key><integer>10</integer><key>Minute</key><integer>30</integer></dict>
+		<dict><key>Hour</key><integer>11</integer><key>Minute</key><integer>30</integer></dict>
+		<dict><key>Hour</key><integer>12</integer><key>Minute</key><integer>30</integer></dict>
+		<dict><key>Hour</key><integer>13</integer><key>Minute</key><integer>30</integer></dict>
+		<dict><key>Hour</key><integer>14</integer><key>Minute</key><integer>30</integer></dict>
+		<dict><key>Hour</key><integer>16</integer><key>Minute</key><integer>0</integer></dict>
+		<dict><key>Hour</key><integer>17</integer><key>Minute</key><integer>0</integer></dict>
+		<dict><key>Hour</key><integer>18</integer><key>Minute</key><integer>0</integer></dict>
+		<dict><key>Hour</key><integer>19</integer><key>Minute</key><integer>0</integer></dict>
+		<dict><key>Hour</key><integer>20</integer><key>Minute</key><integer>0</integer></dict>
+	</array>
 
 	<key>EnvironmentVariables</key>
 	<dict>
+		<!-- Every tick is on run.sh's grid; its no-work backoff (2×/4× after blocked runs) still applies. -->
 		<key>ADVANCE_ROADMAP_CADENCE_HOURS</key>
-		<string>2</string>
+		<string>1</string>
+		<key>ADVANCE_ROADMAP_CHAIN_MINUTES</key>
+		<string>55</string>
 	</dict>
 
 	<key>RunAtLoad</key>
