@@ -91,16 +91,15 @@ If the monthly window has very little activity, say so plainly and keep the upda
 ## Attributing Claude-generated work
 
 Claude opens PRs under the `app/claude` author and authors commits as `Claude` /
-`claude[bot]`. That work is real and belongs to a human. Resolve the owner with this
-cascade, stopping at the first rule that applies:
+`claude[bot]`. That work is real and belongs to a human:
 
-1. **Branch prefix.** A branch starting with a person's handle is theirs —
-   `jake/...`, `jake-agent/...` → Jake; `tom/...` → Tom. This wins even when
-   somebody else merged it.
-2. **Merger.** Any other branch prefix (`fix/`, `claude/`, `ci/`, `con-...`, or no
-   prefix) belongs to the human who merged it.
-3. **Reviewer.** If the merge was programmatic (`mergedBy` is `app/claude` or a bot,
-   i.e. auto-merge), fall back to the human who reviewed it.
+1. **Merger.** A Claude-opened PR belongs to the human who merged it, whatever the
+   branch is called — a `jake/...` branch merged by Tom counts for Tom.
+2. **Reviewer.** Only if the merge was programmatic (`mergedBy` is `app/claude` or a
+   bot, i.e. auto-merge), fall back to the human who reviewed it.
+
+(Before 2026-10 a person's branch prefix won over the merger; Jake changed the rule on
+2026-10-07. September 2026 under the new rule: Jake 181 PRs, Tom 129.)
 
 ```bash
 gh pr list --repo Concentro-Inc/<repo> --state merged --limit 400 \
