@@ -2,7 +2,14 @@
 
 > **Suggested execution:** Sonnet 5 with high reasoning: the plan names every file and the order of changes, so it's mostly careful shell and Python edits plus skill-doc rewrites. Step up to Opus 5 for Phase 4's concurrency and state rework and the orchestrator's change to dispatching several items at once. Step down to Haiku 4.5 for the stale-doc fixes and launchd plist edits.
 
-> **Status (2026-10-06):** Phase 1 shipped (PRs from Superset workspaces). Phases 2–4 in progress.
+> **Status (2026-10-06):** Phase 1 shipped and verified ([ai-tools#1](https://github.com/jnelken/ai-tools/pull/1)):
+> scheduled runs now ship as merged PRs from Superset workspaces, and Superset credits them (ai-tools#1 and
+> wav-explorer#1 are linked with `merged_at` set; roaddmap#1 shipped during the code swap without a workspace,
+> so it isn't credited). Phase 1 step 8 was a no-op: mailcrush's review bot is already manual-only.
+> **Phases 3–4 are on hold pending Jake's decision:** Claude Code's auto-mode classifier refused to create
+> `supervisor.py` ("create unsafe agents"). The lane-mode edits (`run.sh` lane mode, per-repo pending plans,
+> locked `usage.py` writes, ORCHESTRATOR *Parallel lanes*) sit uncommitted in the Superset workspace
+> `~/.superset/worktrees/ai-tools/advance-roadmap/parallel-lanes`. Phase 2 (supply) is not started.
 
 ## Context
 
