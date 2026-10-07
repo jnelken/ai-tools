@@ -42,6 +42,9 @@
 		<string>1</string>
 		<key>ADVANCE_ROADMAP_CHAIN_MINUTES</key>
 		<string>55</string>
+		<!-- A tick that launchd fires late (on wake) outside these runs nothing. -->
+		<key>ADVANCE_ROADMAP_WINDOWS</key>
+		<string>10:30-15:30 16:00-21:00</string>
 	</dict>
 
 	<key>RunAtLoad</key>

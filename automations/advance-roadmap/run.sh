@@ -153,6 +153,22 @@ case "$CADENCE" in ''|0|*[!0-9]*) CADENCE="$BASE_CADENCE" ;; esac
 [ "$CADENCE" -lt "$BASE_CADENCE" ] && CADENCE="$BASE_CADENCE"  # state.json from an older, faster base
 HOUR_NOW=$(( 10#$(date +%H) ))
 on_grid() { [ $(( (HOUR_NOW - 3 + 24) % $1 )) -eq 0 ]; }
+# Sprint windows ("HH:MM-HH:MM …", set in the plist; unset = always). launchd fires a tick
+# missed during sleep when the Mac wakes, so a 2am wake would otherwise start a run.
+in_window() {
+  [ -n "${ADVANCE_ROADMAP_WINDOWS:-}" ] || return 0
+  local now=$(( 10#$(date +%H) * 60 + 10#$(date +%M) )) w a b
+  for w in ${=ADVANCE_ROADMAP_WINDOWS}; do
+    a="${w%-*}"; b="${w#*-}"
+    [ "$now" -ge $(( 10#${a%:*} * 60 + 10#${a#*:} )) ] && [ "$now" -lt $(( 10#${b%:*} * 60 + 10#${b#*:} )) ] && return 0
+  done
+  return 1
+}
+if [ "$CHAIN_LINK" -eq 1 ] && ! in_window; then
+  # A catch-up fire outside the windows: not a run, so no record, log or dashboard churn.
+  rm -f "$LOG"; rm -rf "$RUN_DIR"; RECORDED=1
+  exit 0
+fi
 if [ "$CHAIN_LINK" -eq 1 ] && ! on_grid "$BASE_CADENCE"; then
   # An hourly tick between slots: not a run, so no record, log or dashboard churn.
   rm -f "$LOG"; rm -rf "$RUN_DIR"; RECORDED=1
