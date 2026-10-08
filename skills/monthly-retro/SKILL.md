@@ -12,7 +12,7 @@ Use this skill when asked to generate a monthly retrospective for a single team 
 - `/Users/jake/code/woodrow` — frontend repo
 - `/Users/jake/code/api` — backend repo
 - `/Users/jake/code/folio-platform` — platform/infra, Datadog config, shared CI
-- `/Users/jake/code/internal-tools` — internal Slack bots (Claudio, slack-pr-reaction-bot) and the Datadog→Linear webhook
+- `/Users/jake/code/internal-tools` — internal Slack bots (Claudio, sparky) and the Datadog→Linear webhook
 - `fp retro:commits` — commit + line-stat fetch command; with no `--repo` it scans all four repos above
 
 ## Standard run command

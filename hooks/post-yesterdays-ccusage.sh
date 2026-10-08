@@ -68,10 +68,10 @@ while [[ ! "$current" > "$yesterday" ]]; do
   # ccusage demands YYYYMMDD (no dashes)
   compact="${current//-/}"
   # Pretty-printed date for display, e.g. "Wed, May 14". internal-tools'
-  # slack-pr-reaction-bot parses this header back out of Slack (weekday
+  # sparky parses this header back out of Slack (weekday
   # prefix optional there, for backward compat with already-posted messages
   # in this old no-weekday shape) — see resolveUsageDate in
-  # services/slack-pr-reaction-bot/src/ccusageLeaderboard.ts.
+  # services/sparky/src/ccusageLeaderboard.ts.
   pretty=$(date -j -f "%Y-%m-%d" "$current" "+%a, %b %-d" 2>/dev/null \
         || date -d "$current" "+%a, %b %-d" 2>/dev/null \
         || printf '%s' "$current")

@@ -33,7 +33,7 @@ scripts/deploy.sh /path/to/repo/services/my-svc personal-services/my-svc https:/
 
 Example (WORKER, no health URL):
 ```bash
-scripts/deploy.sh /path/to/repo/services/slack-pr-reaction-bot personal-services/slack-pr-reaction-bot
+scripts/deploy.sh /path/to/repo/services/sparky personal-services/sparky
 ```
 
 ## Prerequisites
