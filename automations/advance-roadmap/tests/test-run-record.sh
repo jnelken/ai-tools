@@ -154,6 +154,8 @@ ADVANCE_ROADMAP_LANE=2 ADVANCE_ROADMAP_BUSY_REPOS="demo" run good file
 check "busy repo is not dispatched"            "$(last action)" blocked_no_item
 grep -q "which another lane holds" "$ROOT/logs/latest.log" && echo "ok   refusal logged" || { echo "FAIL: no refusal line"; exit 1; }
 check "lane recorded"                          "$(last lane)" 2
+check "a refused dispatch runs no worker"      "$(last worker)" none
+check "and records no work"                    "$(last outcome)" blocked-no-item
 # Superset mode: the worker runs in the item's workspace terminal, not in-process.
 SUPERSET=1 run good ws
 check "workspace run → shipped"               "$(last outcome)" shipped

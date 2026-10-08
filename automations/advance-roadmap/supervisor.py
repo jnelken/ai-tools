@@ -131,6 +131,7 @@ class Lane:
         self.repo = None      # known once the lane's orchestrator (or a reused plan) decides
         self.decided = False
         self.no_work = False  # decided not to dispatch (no work it could take)
+        self.no_work_seen = False  # its no-work decision already paused dispatch once
 
     def alive(self):
         if self.proc:
@@ -213,9 +214,7 @@ class Supervisor:
         orch = py("usage.py", "--root", str(ROOT), "pick-orchestrator", timeout=120)
         if orch.returncode != 0 or orch.stdout.strip() in ("", "none"):
             return False, "no orchestrator available"
-        work = py("usage.py", "--root", str(ROOT), "pick-worker-chain", timeout=120)
-        if work.returncode != 0 or not work.stdout.strip():
-            return False, "no worker available"
+        # No worker is fine: run.sh still does no-worker bookkeeping, and records why.
         return True, ""
 
     def world_changed(self):
@@ -319,7 +318,8 @@ class Supervisor:
             lane = Lane(l["lane"], l["stamp"], pid=l.get("pid"),
                         started=datetime.fromisoformat(l["started"]).timestamp())
             if lane.pid and lane.alive():
-                lane.repo, lane.decided = l.get("repo"), True
+                lane.repo = l.get("repo")  # undecided until its orchestrator result says so
+                lane.poll_decision()
                 self.lanes[lane.n] = lane
                 self.used_stamps.add(lane.stamp)
                 log(f"adopted lane {lane.n} [{lane.stamp}] {lane.repo or ''} from a previous supervisor")
@@ -339,7 +339,8 @@ class Supervisor:
             self.reap()
             for l in self.lanes.values():
                 l.poll_decision()
-                if l.no_work and not self.queue_empty:
+                if l.no_work and not l.no_work_seen:
+                    l.no_work_seen = True  # once: a repo freed later may clear this
                     # Don't fill the other slots with runs that would find the same nothing.
                     self.queue_empty = True
                     self.next_idle_check = time.time() + IDLE_CHECK_MIN * 60
@@ -376,19 +377,30 @@ def take_run_lock():
     lone run for up to an hour."""
     lock = ROOT / "run.lock"
     for _ in range(240):
-        live = False
-        if lock.is_dir():
-            try:
-                holder = int((lock / "pid").read_text().strip())
-                os.kill(holder, 0)
-                live = holder != os.getpid()
-            except (OSError, ValueError):
-                live = not (lock / "pid").exists() and time.time() - lock.stat().st_mtime < 4 * 3600
-        if not live:
-            shutil.rmtree(lock, ignore_errors=True)
-            lock.mkdir()
+        try:
+            lock.mkdir()  # atomic: whoever creates it holds it
             (lock / "pid").write_text(f"{os.getpid()}\n")
             return lock
+        except FileExistsError:
+            pass
+        live = True
+        try:
+            holder = int((lock / "pid").read_text().strip())
+            os.kill(holder, 0)
+        except (OSError, ValueError):
+            try:
+                live = not (lock / "pid").exists() and time.time() - lock.stat().st_mtime < 4 * 3600
+            except OSError:
+                live = False  # vanished meanwhile: just retry
+        if not live:
+            # Move a dead holder's lock aside atomically, so a racing run.sh can't lose its own.
+            stale = lock.with_name(f"run.lock.stale.{os.getpid()}")
+            try:
+                os.rename(lock, stale)
+                shutil.rmtree(stale, ignore_errors=True)
+            except OSError:
+                pass
+            continue
         time.sleep(15)
     return None
 

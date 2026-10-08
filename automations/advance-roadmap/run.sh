@@ -257,7 +257,8 @@ if [ -z "$LANE" ]; then
     regen_dashboard
     exit 0
   fi
-  rm -rf "$LOCK" 2>/dev/null
+  # Move a stale lock aside atomically (a racing supervisor may be taking it), then create ours.
+  [ -d "$LOCK" ] && mv "$LOCK" "$LOCK.stale.$$" 2>/dev/null && rm -rf "$LOCK.stale.$$"
   mkdir "$LOCK" 2>/dev/null || {
     echo "=== advance-roadmap $STAMP: could not take lock — skipping ===" >> "$LOG"
     record skipped-lock "could not take lock"
@@ -584,7 +585,7 @@ PY
 
   # The repo name becomes a path and a lock: it must be a top-level repo directory, and in lane
   # mode one no other lane holds. Anything else is turned into a no-dispatch decision.
-  python3 - "$result" "$CODE_DIR" "$BUSY_REPOS" <<'PY'
+  ORCH_RESULT="$ORCH_RESULT" python3 - "$result" "$CODE_DIR" "$BUSY_REPOS" <<'PY'
 import json, os, re, sys
 path, code, busy = sys.argv[1], sys.argv[2], sys.argv[3].split()
 r = json.load(open(path))
@@ -596,9 +597,13 @@ if r.get("action") in ("dispatch_worker", "resume_worker"):
     elif repo in busy:
         why = f"orchestrator picked {repo}, which another lane holds"
     if why:
-        r.update(action="blocked_no_item", outcome_token="blocked-no-item", repo=None,
+        # Every actionable field goes too: no worker may touch another lane's repo.
+        r.update(action="blocked_no_item", outcome_token="blocked-no-item", repo=None, item=None,
+                 branch=None, linear_id=None, directive_ticket=None, worker_brief=None,
+                 archives=[], blockers=[],
                  summary=(r.get("summary") or "") + f"\n({why} — not dispatched)")
         json.dump(r, open(path, "w"), indent=2)
+        open(os.path.join(os.path.dirname(os.environ["ORCH_RESULT"]), "dispatch-rejected"), "w").write(why)
         print(f"WARNING: {why} — not dispatched")
 PY
   echo "(orchestrator result)"
@@ -653,7 +658,12 @@ PY
   fi
 
   superset_skip=""
-  if [ "$SUPERSET_MODE" = "1" ] && [ -n "${WORKERS:-}" ] && [ "$action" = "dispatch_worker" -o "$action" = "resume_worker" ]; then
+  if [ -f "$RUN_DIR/dispatch-rejected" ]; then
+    # A refused dispatch is a no-op: no worker, nothing written to any repo or ticket.
+    echo "(dispatch refused: $(cat "$RUN_DIR/dispatch-rejected") — no worker)"
+    print -r -- '{"used":"none","exit":0,"fatal":null}' > "$WORKER_STATUS"
+    jq -n --arg s "$(cat "$RUN_DIR/dispatch-rejected")" '{outcome:"bookkeeping",provider:"cursor",summary:$s}' > "$WORKER_RESULT"
+  elif [ "$SUPERSET_MODE" = "1" ] && [ -n "${WORKERS:-}" ] && [ "$action" = "dispatch_worker" -o "$action" = "resume_worker" ]; then
     # Keep the request where the workspace terminal can read it after this block's cleanup.
     cp "$req" "$RUN_DIR/worker-request.json"; req="$RUN_DIR/worker-request.json"
     run_worker_in_workspace "$req" || true
@@ -723,7 +733,14 @@ fi
 # Fallback: one short line per run. state.json was just rewritten by regen_dashboard,
 # so it describes THIS run. No webhook configured = no-op, not an error.
 if [ "$slackagent_posted" -eq 0 ] && [ -n "$SLACK_WEBHOOK" ] && [ -r "$STATE_FILE" ] && command -v jq >/dev/null 2>&1; then
-  summary="$(jq -r '.last_summary // ""' "$STATE_FILE" 2>/dev/null)"
+  # This run's own record: with parallel lanes, state.json may already describe another run.
+  summary="$(python3 -c 'import json,sys
+s = ""
+for l in open(sys.argv[1]):
+    r = json.loads(l)
+    if r.get("stamp") == sys.argv[2]:
+        s = r.get("slack_summary") or r.get("summary") or r.get("outcome") or ""
+print(" ".join(s.split())[:300])' "$ROOT/runs.jsonl" "$STAMP" 2>/dev/null)"
   cadence="$(jq -r ".cadence_hours // $BASE_CADENCE" "$STATE_FILE" 2>/dev/null)"
   [ -n "$summary" ] && {
     text="*advance-roadmap* $(date '+%a %H:%M') — ${summary}"
