@@ -10,7 +10,7 @@ description: 'Drive a PR the rest of the way to review-ready — run Codex revie
 The last mile of a PR: review it until it's quiet, confirm CI is green, announce it, and flip the two signals that tell humans it's ready for eyes.
 
 ```
-/loop /peer-review  →  gh pr checks --watch  →  base is the default branch?
+/loop /peer-review  →  resolve base conflicts  →  gh pr checks --watch  →  base is the default branch?
                                                 ├─ yes → Slack #pr-review → badge → gh pr ready
                                                 └─ no  → gh pr merge --merge into the trunk
 ```
@@ -66,6 +66,24 @@ Automatic review is disabled at all PR stages in these repos, so start the loop 
 
 Never post `@codex review` to trigger a round yourself — that's [[cycle-review-pr]]'s job, and only when asked.
 
+### 2.5. Resolve merge conflicts with the base
+
+```bash
+gh pr view <PR_NUMBER> --repo <OWNER/REPO> --json mergeable,mergeStateStatus -q '.'
+```
+
+If `mergeable` is `CONFLICTING` (`mergeStateStatus` `DIRTY`), resolve it here, in the PR's worktree. Don't stop and report it. GitHub can report `UNKNOWN` for a few seconds after a push, so re-read until it settles.
+
+1. `git fetch origin <base> && git merge origin/<base>`. Merge, don't rebase: the branch is already shared.
+2. Resolve each conflict to keep **both** intents: the branch's change applied on top of what the base added. When the branch renamed or moved something that the base edited, carry the base's edit into the new name or location. Don't take one side wholesale. [[resolve-conflict]] has the procedure.
+3. After an auto-merge, check for stale references to anything the branch renamed or deleted. Regenerate generated files, since they conflict or drift silently.
+4. Verify before committing: typecheck every touched file (git auto-merge is not type-safe), and run the tests.
+5. Commit the merge, push, and say in the report what the base brought in and how each conflict was resolved.
+
+The re-push restarts CI, so step 3 watches the merge commit. Re-check mergeability whenever this skill runs again on the same PR, including for an already-approved PR. Main moves while a PR waits for review.
+
+Stop and report only when a conflict needs a product or design decision: both sides changed the same behavior in incompatible ways. A conflict in imports, renames or neighboring edits is mechanical, so resolve it.
+
 ### 3. Watch CI
 
 Wait 5 seconds after the last push settles before reading checks, or you will pick up stale results from the previous push and declare a red PR green.
@@ -120,7 +138,7 @@ gh pr merge <PR_NUMBER> --repo <OWNER/REPO> --merge --delete-branch=false
 - **Merge commit, never squash.** Squashing a sub-PR rewrites its commits and orphans the base of anything stacked on it (the restack pain [[rebase-after-squash]] exists to undo). The trunk is squashed into main at the end, so intermediate history never reaches main anyway.
 - **Keep the branch.** Superset autoprunes a workspace whose branch disappears; deleting it mid-session pulls the worktree out from under whoever is working in it. Let [[clean-sswts]] / [[cleanup-local-branches]] reap it later.
 - **The undraft here is a merge prerequisite, not a signal.** No human reviews a sub-PR, so its draft pill was never load-bearing. Do it immediately before the merge and never badge the PR.
-- **Conflicts** (`CONFLICTING` / `DIRTY`): stop and report "merge blocked — conflicts with `<trunk>`". Don't resolve them automatically; that is a judgment call for the session that owns the branch (see [[resolve-conflict]]).
+- **Conflicts** (`CONFLICTING` / `DIRTY`): resolve them as in step 2.5, with the trunk as the base. Stop and report "merge blocked — conflicts with `<trunk>`" only for a conflict that needs a product or design decision.
 - After the merge the trunk PR's diff has grown — say so in the report, and pull the trunk in the worktree if the next piece of work starts from it. Nothing is written to `pr-review-posted.jsonl`; there was no post to dedup.
 
 ### 4. Post to Slack
