@@ -12,6 +12,7 @@ from result files the agents wrote; nothing here reads the run log.
   runrecord.py --root R alert        # prints a Slack line when the error streak warrants one
 """
 import argparse
+import fcntl
 import json
 import os
 import sys
@@ -125,6 +126,7 @@ def cmd_append(a):
         "finished_at": datetime.fromtimestamp(now).isoformat(timespec="seconds"),
         "duration_s": int(now - started) if started else None,
         "status": a.status,
+        "lane": a.lane,  # set when supervisor.py ran this as one of several parallel lanes
         "outcome": outcome,
         "detail": detail,
         "exit": a.exit,
@@ -152,8 +154,11 @@ def cmd_append(a):
         "tokens": tokens.summarize(a.usage_log),
     }
     path = os.path.join(a.root, "runs.jsonl")
-    with open(path, "a", encoding="utf-8") as f:
-        f.write(json.dumps(rec) + "\n")
+    # Parallel lanes append concurrently; one writer at a time keeps every record whole.
+    with open(path + ".lock", "w") as lk:
+        fcntl.lockf(lk, fcntl.LOCK_EX)
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(rec) + "\n")
     print(f"recorded {a.stamp}: {outcome}" + (f" ({detail})" if detail else ""))
 
 
@@ -223,6 +228,7 @@ def main(argv=None):
     ap.add_argument("--worker-status", default="")
     ap.add_argument("--worker-result", default="")
     ap.add_argument("--usage-log", default="")
+    ap.add_argument("--lane", type=int, default=None)
     ap.add_argument("--expect-pr", action="store_true",
                     help="the worker ran in a Superset workspace, so a ship must name its PR")
     sub.add_parser("alert")

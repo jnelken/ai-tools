@@ -6,12 +6,10 @@
 > scheduled runs now ship as merged PRs from Superset workspaces, and Superset credits them (ai-tools#1 and
 > wav-explorer#1 are linked with `merged_at` set; roaddmap#1 shipped during the code swap without a workspace,
 > so it isn't credited). Phase 1 step 8 was a no-op: mailcrush's review bot is already manual-only.
-> **Phase 3 shipped as serial sprint windows:** hourly ticks inside 10:30–15:30 and 16:00–21:00, daily, no
-> overnight runs. **Phase 4 (lanes) is Jake's to unblock:** Claude Code's auto-mode classifier refused to
-> create `supervisor.py` ("create unsafe agents"), and Jake will sort that out. The lane-mode edits (`run.sh`
-> lane mode, per-repo pending plans, locked `usage.py` writes, ORCHESTRATOR *Parallel lanes*) sit
-> uncommitted in the Superset workspace `~/.superset/worktrees/ai-tools/advance-roadmap/parallel-lanes`.
-> Phase 2 (supply) is not started.
+> **Phases 3–4 shipped (2026-10-08):** `supervisor.py` runs the two daily sprint windows (10:30–15:30,
+> 16:00–21:00) as parallel lanes, one per available repo (cap 8), with no Claude dependency; the hourly
+> window ticks are its watchdog. Dashboard shows Production Run ranks (ai-tools#3). Phase 2 (supply)
+> is not started.
 
 ## Context
 
