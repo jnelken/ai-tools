@@ -190,7 +190,6 @@ while [[ ! "$current" > "$yesterday" ]]; do
       # the Cost column blank; the Codex total row carries the dollar figure.
       (if $xhas then
         ($xr.models // {}) as $xm |
-        ($xr.cachedInputTokens // 0) as $xcache |
         "Codex\n" +
         row("Model"; "Cost"; "Input"; "Output"; "Cache") + "\n" +
         (if ($xm | length) > 0
@@ -199,14 +198,14 @@ while [[ ! "$current" > "$yesterday" ]]; do
                 "";
                 .value.inputTokens // 0 | fmt;
                 .value.outputTokens // 0 | fmt;
-                .value.cachedInputTokens // 0 | fmt)
+                .value.cacheReadTokens // 0 | fmt)
           ) | join("\n")) + "\n" + sep + "\n"
           else "" end) +
         row("Codex";
             $xcost | money;
             $xr.inputTokens // 0 | fmt;
             $xr.outputTokens // 0 | fmt;
-            $xr.cachedInputTokens // 0 | fmt)
+            $xr.cacheReadTokens // 0 | fmt)
        else "Codex: no activity" end) +
       "\n```"
     end
