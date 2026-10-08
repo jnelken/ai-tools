@@ -123,9 +123,9 @@ Specifically audit `Single Neon Compute metrics (with dropdown)`.
 ## Safety and implementation boundaries (investigation phase)
 
 - Default to **read-only** for steps 1–7. Nothing gets mutated until the report is out and the user has approved specific remediations (see below).
-- Do not apply broad OpenTofu plans.
-- If proposing monitor or catalog changes, draft them as JSON in `/Users/jake/code/folio-platform/monitors/` or `catalog/` (managed with `pup`; see that repo's `CLAUDE.md`). Only logs metrics, the logs index and synthetics tests are still OpenTofu (`infra/datadog`, `datadog-tofu-sync` conventions; never run `tofu apply` autonomously).
-- If `pup monitors diff` or OpenTofu shows unrelated drift while you're in there, report it separately — do not fold it into the hygiene fix.
+- Do not run `npm run stuffy-pup -- apply --yes` or `prune --yes` during the investigation: `apply` writes every file in the working tree, including other sessions' uncommitted edits.
+- If proposing monitor or catalog changes, draft them as JSON in `/Users/jake/code/folio-platform/monitors/` or `catalog/` (managed with `pup`; see that repo's `CLAUDE.md`). Logs metrics, the logs index and synthetics tests are JSON under `logs/` and `synthetics/`, applied with `npm run stuffy-pup` (see `infra/datadog/README.md`); never run `apply --yes` or `prune --yes` autonomously.
+- If `pup monitors diff` or `npm run stuffy-pup -- diff` shows unrelated drift while you're in there, report it separately — do not fold it into the hygiene fix.
 - Durable Datadog dependency docs belong in folio-platform alongside the IaC, not in this skill's output.
 
 ## Output format
