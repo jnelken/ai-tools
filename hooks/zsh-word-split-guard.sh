@@ -28,9 +28,40 @@ cmd=$(jq -r '.tool_input.command // empty' 2>/dev/null) || exit 0
 [[ -n "$cmd" ]] || exit 0
 [[ "$cmd" == *"# zsh-ok"* ]] && exit 0
 
-# Drop single-quoted spans, then double-quoted spans, so quoted text
+# Drop heredoc bodies first. A body is data fed to stdin, never shell words,
+# so neither trap can fire inside one (quoted or not), and its own quotes
+# (`don't`, a TS `"a" === b`) would otherwise unbalance the span-stripping
+# below. Handles `<<EOF`, `<<-EOF` (tab-indented close), `<<'EOF'`,
+# `<<"EOF"` and several heredocs opened on one line; skips `<<<` here-strings.
+strip_heredocs() {
+  awk '
+    function queue(line,   rest, m, d) {
+      rest = line
+      while (match(rest, /<<-?[ \t]*["\047]?[A-Za-z_][A-Za-z0-9_]*["\047]?/)) {
+        m = substr(rest, RSTART, RLENGTH)
+        if (RSTART > 1 && substr(rest, RSTART - 1, 1) == "<") { rest = substr(rest, RSTART + RLENGTH); continue }
+        dash[n] = (m ~ /^<<-/)
+        d = m; sub(/^<<-?[ \t]*/, "", d); gsub(/["\047]/, "", d)
+        delim[n++] = d
+        rest = substr(rest, RSTART + RLENGTH)
+      }
+    }
+    BEGIN { n = 0; cur = 0 }
+    {
+      if (cur < n) {
+        line = $0
+        if (dash[cur]) sub(/^\t+/, "", line)
+        if (line == delim[cur]) cur++
+        next
+      }
+      print
+      queue($0)
+    }'
+}
+
+# Then drop single-quoted spans, then double-quoted spans, so quoted text
 # (commit messages, jq programs, echo '===') cannot match.
-bare=$(printf '%s' "$cmd" | sed -E "s/'[^']*'//g; s/\"([^\"\\\\]|\\\\.)*\"//g")
+bare=$(printf '%s\n' "$cmd" | strip_heredocs | sed -E "s/'[^']*'//g; s/\"([^\"\\\\]|\\\\.)*\"//g")
 
 problems=()
 if printf '%s' "$bare" | grep -Eq '(^|[;&|[:space:]])set[[:space:]]+--[[:space:]]+\$[A-Za-z_]'; then

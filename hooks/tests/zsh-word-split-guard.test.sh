@@ -32,6 +32,17 @@ expect PASS  "var=value"               'FOO=bar baz'
 expect PASS  "flag --x=y"              'pup logs --from=15m'
 expect PASS  "set -- literal"          'set -- a b c'
 expect PASS  "bypass comment"          'echo === # zsh-ok'
+
+# Heredoc bodies are stdin data, not shell words (2026-10-08 false positives)
+nl=$'\n'; tab=$'\t'
+expect PASS  "=== in quoted heredoc"   "cat > x.ts <<'EOF'${nl}if (a === b) {}${nl}EOF${nl}node x.ts"
+expect PASS  "== in python heredoc"    "python3 - <<'EOF'${nl}assert s.count(old)==1${nl}x = \"select(.event == \$ev)\"${nl}EOF${nl}actionlint a.yml && echo OK"
+expect PASS  "unbalanced ' in body"    "cat <<EOF${nl}don't ===${nl}EOF"
+expect PASS  "<<- tab-indented close"  "cat <<-\"EOF\"${nl}${tab}a === b${nl}${tab}EOF${nl}ls"
+expect PASS  "two heredocs one line"   "paste <(cat <<A${nl}===${nl}A${nl}) - <<B${nl}===${nl}B"
+expect BLOCK "trap after heredoc"      "cat <<'EOF'${nl}fine${nl}EOF${nl}echo ==="
+expect BLOCK "set -- after heredoc"    "cat <<EOF${nl}x${nl}EOF${nl}set -- \$m"
+expect BLOCK "here-string not body"    'cat <<< "x"; echo ==='
 expect PASS  "empty"                   ''
 
 # Non-zsh shells are left alone
