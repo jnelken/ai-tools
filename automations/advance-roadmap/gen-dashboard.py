@@ -160,7 +160,7 @@ def merge_cache(current):
     cache.update(current)
     try:
         os.makedirs(os.path.dirname(CACHE), exist_ok=True)
-        json.dump(cache, open(CACHE, "w", encoding="utf-8"), indent=1, sort_keys=True)
+        atomic_write(CACHE, json.dumps(cache, indent=1, sort_keys=True))
     except OSError:
         pass
     return cache
@@ -585,7 +585,7 @@ def write_state(runs):
         "last_summary": summary,
     }
     try:
-        json.dump(state, open(STATE, "w", encoding="utf-8"), indent=1)
+        atomic_write(STATE, json.dumps(state, indent=1))
     except OSError:
         pass
     return state
@@ -1298,7 +1298,18 @@ TEMPLATE = """<!doctype html>
 </html>"""
 
 
+def atomic_write(path, text):
+    tmp = f"{path}.{os.getpid()}.tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        f.write(text)
+    os.replace(tmp, path)
+
+
 if __name__ == "__main__":
+    import fcntl
     os.makedirs(os.path.dirname(OUT), exist_ok=True)
-    open(OUT, "w", encoding="utf-8").write(build())
+    # Parallel lanes each regenerate this page when they finish; one writer at a time.
+    with open(os.path.join(os.path.dirname(OUT), "dashboard.lock"), "w") as lockf:
+        fcntl.flock(lockf, fcntl.LOCK_EX)
+        atomic_write(OUT, build())
     print(f"wrote {OUT}")

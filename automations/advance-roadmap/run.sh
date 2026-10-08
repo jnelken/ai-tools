@@ -582,6 +582,25 @@ PY
 
   fi
 
+  # The repo name becomes a path and a lock: it must be a top-level repo directory, and in lane
+  # mode one no other lane holds. Anything else is turned into a no-dispatch decision.
+  python3 - "$result" "$CODE_DIR" "$BUSY_REPOS" <<'PY'
+import json, os, re, sys
+path, code, busy = sys.argv[1], sys.argv[2], sys.argv[3].split()
+r = json.load(open(path))
+repo = r.get("repo")
+if r.get("action") in ("dispatch_worker", "resume_worker"):
+    why = None
+    if not repo or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", repo) or not os.path.isdir(os.path.join(code, repo)):
+        why = f"orchestrator named an invalid repo {repo!r}"
+    elif repo in busy:
+        why = f"orchestrator picked {repo}, which another lane holds"
+    if why:
+        r.update(action="blocked_no_item", outcome_token="blocked-no-item", repo=None,
+                 summary=(r.get("summary") or "") + f"\n({why} — not dispatched)")
+        json.dump(r, open(path, "w"), indent=2)
+        print(f"WARNING: {why} — not dispatched")
+PY
   echo "(orchestrator result)"
   cat "$result"
   cp "$result" "$ORCH_RESULT"

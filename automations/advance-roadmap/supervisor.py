@@ -49,6 +49,9 @@ NEXT_WINDOW_WAIT_MIN = 60  # between windows, stay up when the next one opens th
 # Outcomes that mean "nothing for this lane to do" — no new lane until something changes.
 NO_WORK = {"blocked-no-item", "nothing-qualified", "skipped-unchanged", "archive-only"}
 SHIPPED = {"shipped", "shipped-deploy-failed"}
+# Outcomes that count toward the consecutive-error breaker (runrecord.ERROR_OUTCOMES minus a red
+# deploy, which shipped; plus a lane that died before recording anything).
+ERRORS = {"error", "failed", "incomplete", "aborted", "unrecorded"}
 
 LOG = None
 
@@ -121,11 +124,22 @@ def code_dir():
 
 
 class Lane:
-    def __init__(self, n, stamp, proc):
+    def __init__(self, n, stamp, proc=None, pid=None, started=None):
         self.n, self.stamp, self.proc = n, stamp, proc
-        self.started = time.time()
+        self.pid = proc.pid if proc else pid
+        self.started = started or time.time()
         self.repo = None      # known once the lane's orchestrator (or a reused plan) decides
         self.decided = False
+        self.no_work = False  # decided not to dispatch (no work it could take)
+
+    def alive(self):
+        if self.proc:
+            return self.proc.poll() is None
+        try:  # adopted from a supervisor that crashed: not our child, so poll by pid
+            os.kill(self.pid, 0)
+            return True
+        except OSError:
+            return False
 
     def poll_decision(self):
         if self.decided:
@@ -135,6 +149,8 @@ class Lane:
             self.decided = True
             if r.get("action") in ("dispatch_worker", "resume_worker"):
                 self.repo = r.get("repo")
+            else:
+                self.no_work = True
             log(f"lane {self.n} [{self.stamp}] decided: {r.get('action')} {self.repo or ''} "
                 f"{r.get('linear_id') or ''}".rstrip())
 
@@ -175,7 +191,7 @@ class Supervisor:
             "phase": phase,
             "windows": WINDOWS,
             "lanes_max": self.a.lanes,
-            "lanes": [{"lane": l.n, "stamp": l.stamp, "repo": l.repo,
+            "lanes": [{"lane": l.n, "stamp": l.stamp, "repo": l.repo, "pid": l.pid,
                        "started": datetime.fromtimestamp(l.started).isoformat(timespec="seconds")}
                       for l in sorted(self.lanes.values(), key=lambda x: x.n)],
             "finished": len(self.results),
@@ -229,7 +245,7 @@ class Supervisor:
         log(f"lane {n} [{stamp}] started (busy: {' '.join(busy) or 'none'})")
 
     def reap(self):
-        done = [l for l in self.lanes.values() if l.proc.poll() is not None]
+        done = [l for l in self.lanes.values() if not l.alive()]
         if not done:
             return
         recs = run_records({l.stamp for l in done})
@@ -253,7 +269,7 @@ class Supervisor:
                 self.queue_empty = False  # a repo just freed up, and a ship may unblock others
             if outcome == "skipped-quota":
                 self.quota_until = time.time() + QUOTA_PAUSE_MIN * 60
-            if outcome in ("error", "aborted", "unrecorded"):
+            if outcome in ERRORS:
                 self.consecutive_errors += 1
             elif outcome not in ("skipped-superset", "skipped-quota", "skipped-lock"):
                 self.consecutive_errors = 0
@@ -296,8 +312,21 @@ class Supervisor:
         nxt = next_window_start(now)
         return not (nxt and nxt - now <= timedelta(minutes=NEXT_WINDOW_WAIT_MIN))
 
+    def adopt(self):
+        """Lanes a crashed supervisor left running: track them so no lane doubles up on their repos."""
+        prior = read_json(ROOT / "supervisor-state.json") or {}
+        for l in prior.get("lanes") or []:
+            lane = Lane(l["lane"], l["stamp"], pid=l.get("pid"),
+                        started=datetime.fromisoformat(l["started"]).timestamp())
+            if lane.pid and lane.alive():
+                lane.repo, lane.decided = l.get("repo"), True
+                self.lanes[lane.n] = lane
+                self.used_stamps.add(lane.stamp)
+                log(f"adopted lane {lane.n} [{lane.stamp}] {lane.repo or ''} from a previous supervisor")
+
     def run(self):
         log(f"supervisor up: windows {WINDOWS}, up to {self.a.lanes} lanes")
+        self.adopt()
         if self.should_exit():
             log("outside the sprint windows — nothing to do")
             return 0
@@ -310,6 +339,10 @@ class Supervisor:
             self.reap()
             for l in self.lanes.values():
                 l.poll_decision()
+                if l.no_work and not self.queue_empty:
+                    # Don't fill the other slots with runs that would find the same nothing.
+                    self.queue_empty = True
+                    self.next_idle_check = time.time() + IDLE_CHECK_MIN * 60
             now = time.time()
             ok, why = self.can_dispatch(now)
             if ok and not self.superset_up():

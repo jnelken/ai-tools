@@ -22,6 +22,7 @@ repo=""
 for r in ${=FAKE_REPOS}; do [[ " $ADVANCE_ROADMAP_BUSY_REPOS " == *" $r "* ]] || { repo=$r; break; }; done
 if [ -z "$repo" ]; then
   print -r -- '{"action":"blocked_no_item","repo":null}' > "$root/runs/$stamp/orchestrator-result.json"
+  sleep "${FAKE_SLEEP:-3}"   # bookkeeping takes a while before the run is recorded
   print -r -- "{\"stamp\":\"$stamp\",\"outcome\":\"blocked-no-item\"}" >> "$root/runs.jsonl"
   exit 0
 fi

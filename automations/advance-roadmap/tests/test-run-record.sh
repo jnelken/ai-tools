@@ -149,6 +149,11 @@ check "code-health ship is still shipped"    "$(last outcome)" shipped
 # Past the time cap, a shipped run does not chain.
 ADVANCE_ROADMAP_CHAIN_START=$(( $(date +%s) - 2401 )) CHAIN_MINUTES=40 run good file
 check "no chain past the time cap"            "$(wc -l < "$ROOT/runs.jsonl" | tr -d ' ')" 12
+# Lane mode: a dispatch to a repo another lane holds is refused, not trusted to the prompt.
+ADVANCE_ROADMAP_LANE=2 ADVANCE_ROADMAP_BUSY_REPOS="demo" run good file
+check "busy repo is not dispatched"            "$(last action)" blocked_no_item
+grep -q "which another lane holds" "$ROOT/logs/latest.log" && echo "ok   refusal logged" || { echo "FAIL: no refusal line"; exit 1; }
+check "lane recorded"                          "$(last lane)" 2
 # Superset mode: the worker runs in the item's workspace terminal, not in-process.
 SUPERSET=1 run good ws
 check "workspace run → shipped"               "$(last outcome)" shipped
