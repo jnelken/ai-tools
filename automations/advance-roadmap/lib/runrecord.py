@@ -12,6 +12,7 @@ from result files the agents wrote; nothing here reads the run log.
   runrecord.py --root R alert        # prints a Slack line when the error streak warrants one
 """
 import argparse
+import fcntl
 import json
 import os
 import sys
@@ -153,8 +154,11 @@ def cmd_append(a):
         "tokens": tokens.summarize(a.usage_log),
     }
     path = os.path.join(a.root, "runs.jsonl")
-    with open(path, "a", encoding="utf-8") as f:
-        f.write(json.dumps(rec) + "\n")
+    # Parallel lanes append concurrently; one writer at a time keeps every record whole.
+    with open(path + ".lock", "w") as lk:
+        fcntl.lockf(lk, fcntl.LOCK_EX)
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(rec) + "\n")
     print(f"recorded {a.stamp}: {outcome}" + (f" ({detail})" if detail else ""))
 
 

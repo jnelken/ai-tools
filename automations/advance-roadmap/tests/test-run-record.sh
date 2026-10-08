@@ -149,6 +149,15 @@ check "code-health ship is still shipped"    "$(last outcome)" shipped
 # Past the time cap, a shipped run does not chain.
 ADVANCE_ROADMAP_CHAIN_START=$(( $(date +%s) - 2401 )) CHAIN_MINUTES=40 run good file
 check "no chain past the time cap"            "$(wc -l < "$ROOT/runs.jsonl" | tr -d ' ')" 12
+# The run lock is a kernel lock shared with supervisor.py: while it's held, a lone run skips.
+: >> "$ROOT/run.lock.f"
+python3 -c 'import fcntl,sys,time; f=open(sys.argv[1],"a"); fcntl.lockf(f,fcntl.LOCK_EX); time.sleep(6)' "$ROOT/run.lock.f" &
+holder=$!; sleep 1
+run good file
+check "a held run lock skips the run"         "$(last outcome)" skipped-lock
+wait $holder
+run good file
+check "a released run lock runs again"         "$(last outcome)" shipped
 # Lane mode: a dispatch to a repo another lane holds is refused, not trusted to the prompt.
 ADVANCE_ROADMAP_LANE=2 ADVANCE_ROADMAP_BUSY_REPOS="demo" run good file
 check "busy repo is not dispatched"            "$(last action)" blocked_no_item

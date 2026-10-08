@@ -372,37 +372,30 @@ class Supervisor:
         return 0
 
 
+RUN_LOCK_FH = None
+
+
 def take_run_lock():
-    """run.lock (a dir holding its holder's pid), the lock a lone run.sh takes. Waits out a live
-    lone run for up to an hour."""
-    lock = ROOT / "run.lock"
+    """The kernel fcntl lock on run.lock.f that a lone run.sh takes (zsystem flock), held for
+    the supervisor's life; the kernel drops it if we die. Waits out a lone run for up to an
+    hour. Then (re)creates the run.lock marker directory serve.py reads."""
+    global RUN_LOCK_FH
+    fh = open(ROOT / "run.lock.f", "a")
     for _ in range(240):
         try:
-            lock.mkdir()  # atomic: whoever creates it holds it
-            (lock / "pid").write_text(f"{os.getpid()}\n")
-            return lock
-        except FileExistsError:
-            pass
-        live = True
-        try:
-            holder = int((lock / "pid").read_text().strip())
-            os.kill(holder, 0)
-        except (OSError, ValueError):
-            try:
-                live = not (lock / "pid").exists() and time.time() - lock.stat().st_mtime < 4 * 3600
-            except OSError:
-                live = False  # vanished meanwhile: just retry
-        if not live:
-            # Move a dead holder's lock aside atomically, so a racing run.sh can't lose its own.
-            stale = lock.with_name(f"run.lock.stale.{os.getpid()}")
-            try:
-                os.rename(lock, stale)
-                shutil.rmtree(stale, ignore_errors=True)
-            except OSError:
-                pass
-            continue
-        time.sleep(15)
-    return None
+            fcntl.lockf(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            break
+        except OSError:
+            time.sleep(15)
+    else:
+        fh.close()
+        return None
+    RUN_LOCK_FH = fh
+    lock = ROOT / "run.lock"
+    shutil.rmtree(lock, ignore_errors=True)
+    lock.mkdir()
+    (lock / "pid").write_text(f"{os.getpid()}\n")
+    return lock
 
 
 def main(argv=None):

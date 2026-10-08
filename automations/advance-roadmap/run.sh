@@ -240,25 +240,22 @@ fi
 WORKERS="$(python3 "$USAGE_PY" --root "$ROOT" pick-worker-chain 2>/dev/null | tr -d '\r' || true)"
 
 # One scheduler at a time: a lone run holds this lock, and so does supervisor.py for its whole
-# window (its lanes run under it). The holder's pid is inside, so a crashed holder's lock is
-# recognisably stale; a pid-less lock (older runs) goes stale after 4h.
+# window (its lanes run under it). The real lock is a kernel fcntl lock on run.lock.f — released
+# by the kernel when its holder dies, so never stale, and shared with supervisor.py
+# (fcntl.lockf). -e keeps it across a chain link's exec. The run.lock directory beside it is only
+# the "a run is in flight" marker serve.py reads; whoever holds the kernel lock owns the marker.
+zmodload zsh/system
 LOCK="$ROOT/run.lock"
-lock_held() {
-  [ -d "$LOCK" ] || return 1
-  local holder; holder="$(cat "$LOCK/pid" 2>/dev/null)"
-  if [ -n "$holder" ]; then kill -0 "$holder" 2>/dev/null; return; fi
-  [ -z "$(find "$LOCK" -maxdepth 0 -mmin +240 2>/dev/null)" ]
-}
 if [ -z "$LANE" ]; then
-  if lock_held; then
+  : >> "$ROOT/run.lock.f"  # zsystem flock won't create its file
+  if ! zsystem flock -t 0 -e -f RUN_LOCK_FD "$ROOT/run.lock.f" 2>/dev/null; then
     echo "=== advance-roadmap $STAMP: another run holds $LOCK — skipping ===" >> "$LOG"
     record skipped-lock "another run held the lock"
     ln -sf "$LOG" "$LOGDIR/latest.log"
     regen_dashboard
     exit 0
   fi
-  # Move a stale lock aside atomically (a racing supervisor may be taking it), then create ours.
-  [ -d "$LOCK" ] && mv "$LOCK" "$LOCK.stale.$$" 2>/dev/null && rm -rf "$LOCK.stale.$$"
+  rm -rf "$LOCK"  # a dead holder's marker; the kernel lock says it's ours now
   mkdir "$LOCK" 2>/dev/null || {
     echo "=== advance-roadmap $STAMP: could not take lock — skipping ===" >> "$LOG"
     record skipped-lock "could not take lock"
@@ -585,6 +582,14 @@ PY
 
   # The repo name becomes a path and a lock: it must be a top-level repo directory, and in lane
   # mode one no other lane holds. Anything else is turned into a no-dispatch decision.
+  # Hold a kernel lock on the repo for the rest of this run (released when run.sh exits), so
+  # even a supervisor that crashed and lost track can't put two lanes on one repo.
+  pick="$(jq -r 'select(.action=="dispatch_worker" or .action=="resume_worker") | .repo // empty' "$result" 2>/dev/null)"
+  if [[ "$pick" =~ '^[A-Za-z0-9][A-Za-z0-9._-]*$' ]]; then
+    mkdir -p "$ROOT/repo-locks"; : >> "$ROOT/repo-locks/$pick.lock"
+    zsystem flock -t 0 -e -f REPO_LOCK_FD "$ROOT/repo-locks/$pick.lock" 2>/dev/null \
+      || BUSY_REPOS="$BUSY_REPOS $pick"
+  fi
   ORCH_RESULT="$ORCH_RESULT" python3 - "$result" "$CODE_DIR" "$BUSY_REPOS" <<'PY'
 import json, os, re, sys
 path, code, busy = sys.argv[1], sys.argv[2], sys.argv[3].split()
@@ -758,6 +763,16 @@ fi
 # A routine summary line saying "error" went unnoticed for 4.5 days (Sep 20–24).
 # Consecutive failures get a louder, separate message plus a local notification.
 alert="$(python3 "$RECORD_PY" --root "$ROOT" alert 2>>"$LOG" || true)"
+# Lanes finishing together would each raise the same alert: send each distinct one once.
+[ -n "$alert" ] && : >> "$ROOT/alert.lock"
+if [ -n "$alert" ] && zsystem flock -t 30 -f ALERT_FD "$ROOT/alert.lock" 2>/dev/null; then
+  if [ "$(cat "$ROOT/last-alert.txt" 2>/dev/null)" = "$alert" ]; then
+    alert=""
+  else
+    print -r -- "$alert" > "$ROOT/last-alert.txt"
+  fi
+  zsystem flock -u "$ALERT_FD"
+fi
 if [ -n "$alert" ]; then
   echo "=== alert: $alert ===" >> "$LOG"
   [ "${ADVANCE_ROADMAP_NOTIFY:-1}" = "1" ] && osascript -e "display notification $(jq -rn --arg t "$alert" '$t|@json') with title \"advance-roadmap\" sound name \"Basso\"" >/dev/null 2>&1 || true
