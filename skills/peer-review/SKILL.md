@@ -199,7 +199,9 @@ Fewer lenses than that: merge 4 into 3, then 2 into 1. Persist the slices to `$G
 
 When *not* to fan out: a diff confined to one file or one concern, a round that is only verifying the previous round's fixes (drop to 1 lens — the prior round's report tells you which slice to keep), or a `low`-effort mop-up round.
 
-If `codex` exits non-zero, release the lock (`rm -f "$LOCK"`), surface the stderr verbatim to the user, and stop. Common causes: not logged in (`codex login`), config error, network. Don't try to work around.
+If `codex` exits non-zero, release the lock (`rm -f "$LOCK"`) and surface the stderr verbatim to the user. Common causes: not logged in (`codex login`), config error, network. Don't try to work around those.
+
+**Exception — usage limit / out of credits** (stderr says the workspace is out of credits or has hit its usage limit): fall back to the GitHub review action. Comment `/codex-action-review` on the PR (`gh pr comment <PR> --body "/codex-action-review"`), then continue the workflow with [[babysit-pr]] until the review lands and its findings are addressed. **Never use `@codex review` for this fallback**: it bills the same Codex account as the local CLI, so it hits the same limit (it replies "You have reached your Codex usage limits"). `/codex-action-review` is handled by `.github/workflows/codex-review.yml`, which runs on separate credentials. If the PR doesn't exist yet, stop and report instead.
 
 On a successful run (regardless of finding count), record the round and both sides' model metadata:
 ```bash
