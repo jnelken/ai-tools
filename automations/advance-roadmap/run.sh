@@ -45,8 +45,10 @@ TOKENS_PY="$ROOT/lib/tokens.py"
 LINEAR_SNAP_PY="$ROOT/lib/linearsnap.py"
 VERDICT_PY="$ROOT/lib/verdict.py"
 LAST_VERDICT="${ADVANCE_ROADMAP_LAST_VERDICT:-$CODE_DIR/.advance-roadmap/last-verdict.json}"
-# Provider-neutral: the plan belongs to the repos, not to whichever CLI orchestrates.
-PENDING_PLAN="${ADVANCE_ROADMAP_PENDING_PLAN:-$CODE_DIR/.advance-roadmap/pending-plan.json}"
+# Provider-neutral: the plan belongs to the repos, not to whichever CLI orchestrates. One file
+# per repo (pending-plan-<repo>.json), so parallel lanes never pick up each other's plan.
+PENDING_DIR="${ADVANCE_ROADMAP_PENDING_DIR:-$CODE_DIR/.advance-roadmap}"
+PENDING_PLAN=""
 WORKER_SH="$ROOT/worker.sh"
 WORKSPACES_PY="$ROOT/lib/workspaces.py"
 # 1 = each dispatched item runs in its own Superset workspace and ships as a merged PR
@@ -81,6 +83,13 @@ SLACK_WEBHOOK="${ADVANCE_ROADMAP_SLACK_WEBHOOK:-${SLACK_CCUSAGE_WEBHOOK_URL:-}}"
 # passes this many minutes. The check is at the end of a link, so the last item
 # can run past it. 0 = one item per tick.
 CHAIN_MINUTES="${ADVANCE_ROADMAP_CHAIN_MINUTES:-40}"
+# Lane mode: supervisor.py runs several of these at once in a scheduled window. It decides when
+# a lane starts (no cadence gate here), holds the global lock itself, refills lanes instead of
+# chaining, and tells each lane which repos the others are in.
+LANE="${ADVANCE_ROADMAP_LANE:-}"
+BUSY_REPOS="${ADVANCE_ROADMAP_BUSY_REPOS:-}"
+INFLIGHT_STAMPS="${ADVANCE_ROADMAP_INFLIGHT_STAMPS:-}"
+[ -n "$LANE" ] && CHAIN_MINUTES=0
 CHAIN_START="${ADVANCE_ROADMAP_CHAIN_START:-$(date +%s)}"
 CHAIN_LINK="${ADVANCE_ROADMAP_CHAIN_LINK:-1}"
 
@@ -90,7 +99,7 @@ regen_dashboard() {
 }
 
 mkdir -p "$LOGDIR"
-STAMP="$(date +%Y%m%d-%H%M%S)"
+STAMP="${ADVANCE_ROADMAP_STAMP:-$(date +%Y%m%d-%H%M%S)}"  # the supervisor picks unique lane stamps
 LOG="$LOGDIR/run-$STAMP.log"
 find "$LOGDIR" -name 'run-*.log' -mtime +30 -delete 2>/dev/null
 
@@ -114,6 +123,7 @@ record() {
   RECORDED=1
   local -a extra=()
   [ -n "${3:-}" ] && extra+=(--exit "$3")
+  [ -n "$LANE" ] && extra+=(--lane "$LANE")
   [ -f "$RUN_DIR/workspace.json" ] && extra+=(--expect-pr)  # a workspace run must ship a PR
   [ -n "${orch_rc:-}" ] && extra+=(--orch-exit "$orch_rc")
   python3 "$RECORD_PY" --root "$ROOT" append --stamp "$STAMP" --status "$1" \
@@ -164,18 +174,20 @@ in_window() {
   done
   return 1
 }
-if [ "$CHAIN_LINK" -eq 1 ] && ! in_window; then
+if [ -z "$LANE" ] && [ "$CHAIN_LINK" -eq 1 ] && ! in_window; then  # the supervisor owns lane timing
   # A catch-up fire outside the windows: not a run, so no record, log or dashboard churn.
   rm -f "$LOG"; rm -rf "$RUN_DIR"; RECORDED=1
   exit 0
 fi
-if [ "$CHAIN_LINK" -eq 1 ] && ! on_grid "$BASE_CADENCE"; then
+if [ -n "$LANE" ]; then
+  :  # the supervisor's window replaces the cadence grid and its backoff
+elif [ "$CHAIN_LINK" -eq 1 ] && ! on_grid "$BASE_CADENCE"; then
   # An hourly tick between slots: not a run, so no record, log or dashboard churn.
   rm -f "$LOG"; rm -rf "$RUN_DIR"; RECORDED=1
   exit 0
 fi
 run_this_tick=1
-if [ "$CHAIN_LINK" -gt 1 ]; then
+if [ -n "$LANE" ] || [ "$CHAIN_LINK" -gt 1 ]; then
   :  # the tick already passed this gate; a shipped link resets cadence anyway
 elif ! on_grid "$CADENCE"; then
   run_this_tick=0  # a base slot the backoff skips
@@ -227,23 +239,35 @@ fi
 
 WORKERS="$(python3 "$USAGE_PY" --root "$ROOT" pick-worker-chain 2>/dev/null | tr -d '\r' || true)"
 
+# One scheduler at a time: a lone run holds this lock, and so does supervisor.py for its whole
+# window (its lanes run under it). The holder's pid is inside, so a crashed holder's lock is
+# recognisably stale; a pid-less lock (older runs) goes stale after 4h.
 LOCK="$ROOT/run.lock"
-if [ -d "$LOCK" ] && [ -z "$(find "$LOCK" -maxdepth 0 -mmin +240 2>/dev/null)" ]; then
-  echo "=== advance-roadmap $STAMP: another run holds $LOCK — skipping ===" >> "$LOG"
-  record skipped-lock "another run held the lock"
-  ln -sf "$LOG" "$LOGDIR/latest.log"
-  regen_dashboard
-  exit 0
-fi
-rm -rf "$LOCK" 2>/dev/null
-mkdir "$LOCK" 2>/dev/null || {
-  echo "=== advance-roadmap $STAMP: could not take lock — skipping ===" >> "$LOG"
-  record skipped-lock "could not take lock"
-  ln -sf "$LOG" "$LOGDIR/latest.log"
-  regen_dashboard
-  exit 0
+lock_held() {
+  [ -d "$LOCK" ] || return 1
+  local holder; holder="$(cat "$LOCK/pid" 2>/dev/null)"
+  if [ -n "$holder" ]; then kill -0 "$holder" 2>/dev/null; return; fi
+  [ -z "$(find "$LOCK" -maxdepth 0 -mmin +240 2>/dev/null)" ]
 }
-HOLDS_LOCK=1
+if [ -z "$LANE" ]; then
+  if lock_held; then
+    echo "=== advance-roadmap $STAMP: another run holds $LOCK — skipping ===" >> "$LOG"
+    record skipped-lock "another run held the lock"
+    ln -sf "$LOG" "$LOGDIR/latest.log"
+    regen_dashboard
+    exit 0
+  fi
+  rm -rf "$LOCK" 2>/dev/null
+  mkdir "$LOCK" 2>/dev/null || {
+    echo "=== advance-roadmap $STAMP: could not take lock — skipping ===" >> "$LOG"
+    record skipped-lock "could not take lock"
+    ln -sf "$LOG" "$LOGDIR/latest.log"
+    regen_dashboard
+    exit 0
+  }
+  print -r -- $$ > "$LOCK/pid"
+  HOLDS_LOCK=1
+fi
 
 # Workers run in Superset workspace terminals, so with the app down there's nothing to
 # dispatch into: skip before spending an orchestrator pass. Any pending plan waits.
@@ -257,7 +281,7 @@ fi
 
 # Workspaces whose PR Superset has seen merged are done; delete them so the sidebar and
 # ~/.superset/worktrees don't pile up. Never earlier — see lib/workspaces.py.
-if [ "$SUPERSET_MODE" = "1" ] && [ -f "$WORKSPACES_PY" ]; then
+if [ "$SUPERSET_MODE" = "1" ] && [ -z "$LANE" ] && [ -f "$WORKSPACES_PY" ]; then  # lanes: the supervisor cleans up
   python3 "$WORKSPACES_PY" cleanup >> "$LOG" 2>&1 || echo "(workspace cleanup failed — non-fatal)" >> "$LOG"
 fi
 
@@ -421,7 +445,7 @@ python3 "$VERDICT_PY" fingerprint --snapshot "$LINEAR_SNAPSHOT" --out "$FINGERPR
 # The last run found no work and its bookkeeping landed. If no repo, issue, allowlist or skill
 # doc has moved since, this run would re-derive the same verdict — skip planning and worker both.
 # A pending plan always runs: it is work, not a verdict.
-if [ ! -f "$PENDING_PLAN" ] && python3 "$VERDICT_PY" check --file "$LAST_VERDICT" \
+if [ -z "$(print -l "$PENDING_DIR"/pending-plan*.json(N))" ] && python3 "$VERDICT_PY" check --file "$LAST_VERDICT" \
      --fingerprint "$FINGERPRINT" --changes "$VERDICT_CHANGES" > "$RUN_DIR/verdict-check.txt" 2>&1; then
   echo "=== advance-roadmap $STAMP: skipping — $(cat "$RUN_DIR/verdict-check.txt") ===" >> "$LOG"
   record skipped-unchanged "$(cat "$RUN_DIR/verdict-check.txt")"
@@ -446,6 +470,13 @@ This is an unattended scheduled ORCHESTRATOR run (stamp=$STAMP). You are READ-ON
 Emit one \`\`\`ORCHESTRATOR_RESULT_JSON fence per ORCHESTRATOR.md. Do not implement.
 
 providers-usage.json (consume only): $ROOT/providers-usage.json"
+  if [ -n "$LANE" ]; then
+    ORCH_PROMPT="$ORCH_PROMPT
+
+This is lane $LANE of a parallel window (ORCHESTRATOR.md, *Parallel lanes*).
+Busy repos — other lanes are working in them right now; skip them entirely: ${BUSY_REPOS:-none}
+In-flight run stamps — still running, never interrupted: ${INFLIGHT_STAMPS:-none}"
+  fi
 
   if [ ! -f "$PROBE_FLAG" ]; then
     echo "(one-time Dispatch probe armed — flag absent: $PROBE_FLAG)"
@@ -457,9 +488,18 @@ If a PushNotification probe would have been useful, set a note in summary; the w
   result="$(mktemp "${TMPDIR:-/tmp}/advance-roadmap-result.XXXXXX")"
   req="$(mktemp "${TMPDIR:-/tmp}/advance-roadmap-req.XXXXXX")"
   # A plan whose worker died last run is handed straight to a worker — no second planning pass.
+  # Oldest first; another lane's repo is not ours to resume. A plan that can't be reused is
+  # dead (too old, retried out, repo unsafe) — drop it, as a fresh plan would have replaced it.
   reused=0
-  if python3 "$PLAN_PY" --file "$PENDING_PLAN" reuse --out "$result"; then
-    reused=1
+  for f in "$PENDING_DIR"/pending-plan*.json(N.Om); do
+    prepo="$(jq -r '.orchestrator.repo // empty' "$f" 2>/dev/null)"
+    [[ " $BUSY_REPOS " == *" $prepo "* ]] && continue
+    if python3 "$PLAN_PY" --file "$f" reuse --out "$result"; then
+      PENDING_PLAN="$f"; reused=1; break
+    fi
+    python3 "$PLAN_PY" --file "$f" clear
+  done
+  if [ "$reused" -eq 1 ]; then
     orch_rc=0
     ORCH=pending-plan  # the run record shows no planning pass ran
   else
@@ -545,7 +585,13 @@ PY
   echo "(orchestrator result)"
   cat "$result"
   cp "$result" "$ORCH_RESULT"
-  [ "$reused" -eq 1 ] || python3 "$PLAN_PY" --file "$PENDING_PLAN" save --result "$result" --stamp "$STAMP"
+  if [ "$reused" -eq 0 ]; then
+    plan_repo="$(jq -r '.repo // empty' "$result" 2>/dev/null)"
+    if [ -n "$plan_repo" ]; then
+      PENDING_PLAN="$PENDING_DIR/pending-plan-$plan_repo.json"
+      python3 "$PLAN_PY" --file "$PENDING_PLAN" save --result "$result" --stamp "$STAMP"
+    fi
+  fi
 
   action="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("action",""))' "$result")"
   case "$action" in
@@ -601,11 +647,12 @@ PY
     # attempt (nothing was tried), and save no verdict.
     echo "=== worker not launched: $superset_skip ==="
     [ "$reused" -eq 1 ] && python3 "$PLAN_PY" --file "$PENDING_PLAN" refund
+    # A fresh plan made for a worker that never launched stays for the next run to reuse.
     final_rc=0
     echo "=== advance-roadmap exit=0 finished $(date) (skipped: $superset_skip) ==="
   else
   echo "=== worker exit=$worker_rc ==="
-  python3 "$PLAN_PY" --file "$PENDING_PLAN" settle --worker-result "$WORKER_RESULT" --worker-rc "$worker_rc"
+  [ -n "$PENDING_PLAN" ] && python3 "$PLAN_PY" --file "$PENDING_PLAN" settle --worker-result "$WORKER_RESULT" --worker-rc "$worker_rc"
   # Re-fingerprint after the worker, not before: a bookkeeping worker's own Step 2b can flip a
   # ticket to Needs Input or Paused, and saving the pre-worker $FINGERPRINT would make the next
   # tick's backoff peek see that as "Jake changed something" and bypass the backoff for no reason. Never
@@ -614,7 +661,9 @@ PY
   POST_FINGERPRINT="$RUN_DIR/fingerprint-post.json"
   python3 "$LINEAR_SNAP_PY" --out "$POST_SNAPSHOT" >> "$LOG" 2>&1
   python3 "$VERDICT_PY" fingerprint --snapshot "$POST_SNAPSHOT" --out "$POST_FINGERPRINT" >> "$LOG" 2>&1
-  python3 "$VERDICT_PY" save --file "$LAST_VERDICT" --fingerprint "$POST_FINGERPRINT" \
+  # A no-work verdict reached while other lanes hold repos only covers the rest, so it isn't
+  # one the next run may carry forward.
+  [ -z "$BUSY_REPOS" ] && python3 "$VERDICT_PY" save --file "$LAST_VERDICT" --fingerprint "$POST_FINGERPRINT" \
     --orch-result "$ORCH_RESULT" --worker-result "$WORKER_RESULT" --stamp "$STAMP"
 
   [ -f "$PROBE_FLAG" ] || { touch "$PROBE_FLAG"; echo "(Dispatch probe flag set)"; }

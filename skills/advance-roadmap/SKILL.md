@@ -43,25 +43,28 @@ after every clean ship, the worker runs a short code-health retrospective on the
 touched and files up to 2 deduped `code-health` tickets. Those tickets rank below all feature work.
 Rubric, retrospective and refactor caps: [`CODE_HEALTH.md`](CODE_HEALTH.md).
 
-**Scheduled in two daily sprint windows: 10:30–15:30 and 16:00–21:00.** launchd ticks once an
-hour inside each window and never overnight (the tick list is in `com.jake.advance-roadmap.plist`).
-Lone overnight runs add one-session slots that drag Superset's width median down; work packed into
-the windows overlaps with Jake's own sessions, including his work-org Superset sessions under the
-same username. Parallel lanes (one launch per window, as many repos as are available) are the next
-step: [`../../docs/plans/production-run.md`](../../docs/plans/production-run.md), Phase 4.
+**Sprints in parallel lanes, twice a day: 10:30–15:30 and 16:00–21:00.** launchd starts
+`supervisor.py` at a window's first tick; the later hourly ticks are a watchdog that exits while
+it's alive. The supervisor keeps one **lane** busy per available repo (`run.sh` in lane mode, at
+most `ADVANCE_ROADMAP_LANES`, never two on one repo): lanes start one at a time, each told which
+repos the others hold; a finished lane's slot refills; a lane that finds no work stops new lanes
+until a repo frees up or a no-model fingerprint check sees the world change. No new lane in a
+window's last 30 minutes, and nothing overnight — lone overnight runs add one-session slots that
+drag Superset's width median down, while work packed into the windows overlaps Jake's own
+sessions (including his work org's, same username). Lanes don't chain; the supervisor refills
+instead. Why: [`../../docs/plans/production-run.md`](../../docs/plans/production-run.md).
 
 **Never depends on Claude.** Every role has a non-Claude first choice: Codex orchestrates, Cursor
 builds, the reviewer is never Claude first, and the scheduling around them is plain shell and
 Python. Claude is only ever a fallback, so the job keeps shipping when Jake's Claude usage is spent.
 Anything added here (a supervisor, a slicer) must keep that true.
 
-**Keep going while there's time.** A run that ships a feature cleanly (`shipped`, deploy green) starts another
-run — fresh orchestrator pass, fresh item — as long as fewer than `ADVANCE_ROADMAP_CHAIN_MINUTES`
-have passed since the first run started (the plist sets 55, about one tick; `run.sh`'s default is
-40; `0` = one item). Anything else (blocked, failed, red deploy, no item, quota) ends the chain. The
-check happens between runs, so the last item may finish past the limit; launchd skips the ticks a
-running chain overlaps. A code-health ship never chains — one
-refactor per tick at most. Interactive runs follow the same rule: after the worker reports a
+**Keep going while there's time (lone runs).** A `run.sh` outside lane mode — a manual run — that
+ships a feature cleanly (`shipped`, deploy green) starts another run — fresh orchestrator pass,
+fresh item — as long as fewer than `ADVANCE_ROADMAP_CHAIN_MINUTES` (default 40; `0` = one item)
+have passed since the first run started. Anything else (blocked, failed, red deploy, no item,
+quota) ends the chain, and so does leaving the sprint window. A code-health ship never chains.
+Interactive runs follow the same rule: after the worker reports a
 feature `shipped`, go back to [`../conductor/ORCHESTRATOR.md`](../conductor/ORCHESTRATOR.md) Step 0 if
 under 40 minutes. (For one-off human-driven work, use [[conductor]] instead.)
 
@@ -88,7 +91,8 @@ only (see `SAFETY.md`) — from [[unblock-roadmap]] (the only dirty-tree excepti
 4. Dispatch `worker.sh` (Cursor → Codex → Claude) in the item's Superset workspace terminal, with
    same-run failover on limits.
 5. Persist usage for the next tick. Skip only when **no orchestrator** remains.
-6. On a clean ship under the chain limit, re-exec for the next item.
+6. On a clean ship under the chain limit, re-exec for the next item (lone runs only; in lane mode
+   `supervisor.py` refills the lane instead, and owns the lock, the window and workspace cleanup).
 
 Linear routing labels:
 

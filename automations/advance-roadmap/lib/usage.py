@@ -24,6 +24,8 @@ Every source is best-effort; observed limit hits remain the fallback.
 from __future__ import annotations
 
 import argparse
+import contextlib
+import fcntl
 import json
 import os
 import queue
@@ -142,8 +144,24 @@ def save(root: Path, state: dict[str, Any]) -> Path:
     root.mkdir(parents=True, exist_ok=True)
     state["updated_at"] = now_iso()
     path = usage_path(root)
-    path.write_text(json.dumps(state, indent=2) + "\n", encoding="utf-8")
+    # Atomic: parallel lanes read this file while others write it.
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+    tmp.write_text(json.dumps(state, indent=2) + "\n", encoding="utf-8")
+    os.replace(tmp, path)
     return path
+
+
+@contextlib.contextmanager
+def state_lock(root: Path):
+    """Serialize load-modify-save across processes: a refresh that loaded before a parallel
+    lane's record-limit and saved after it would silently drop that limit hit."""
+    root.mkdir(parents=True, exist_ok=True)
+    with open(root / "providers-usage.lock", "w") as fh:
+        fcntl.flock(fh, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(fh, fcntl.LOCK_UN)
 
 
 def window_exhausted(used_pct: Any, reset_epoch: Any, max_pct: int, now: float) -> bool:
@@ -585,12 +603,13 @@ def recompute_flags(state: dict[str, Any]) -> None:
 
 
 def refresh(root: Path) -> dict[str, Any]:
-    state = load(root)
-    probe_claude(state)
-    probe_codex(state)
-    probe_cursor_into(state)
-    recompute_flags(state)
-    save(root, state)
+    with state_lock(root):
+        state = load(root)
+        probe_claude(state)
+        probe_codex(state)
+        probe_cursor_into(state)
+        recompute_flags(state)
+        save(root, state)
     return state
 
 
@@ -633,6 +652,11 @@ def record_limit(
     text: str,
     scope: str = "unknown",
 ) -> dict[str, Any]:
+    with state_lock(root):
+        return _record_limit_locked(root, provider, text, scope)
+
+
+def _record_limit_locked(root: Path, provider: str, text: str, scope: str) -> dict[str, Any]:
     state = load(root)
     if provider not in state["providers"]:
         raise SystemExit(f"unknown provider: {provider}")

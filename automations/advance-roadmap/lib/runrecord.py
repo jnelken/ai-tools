@@ -125,6 +125,7 @@ def cmd_append(a):
         "finished_at": datetime.fromtimestamp(now).isoformat(timespec="seconds"),
         "duration_s": int(now - started) if started else None,
         "status": a.status,
+        "lane": a.lane,  # set when supervisor.py ran this as one of several parallel lanes
         "outcome": outcome,
         "detail": detail,
         "exit": a.exit,
@@ -223,6 +224,7 @@ def main(argv=None):
     ap.add_argument("--worker-status", default="")
     ap.add_argument("--worker-result", default="")
     ap.add_argument("--usage-log", default="")
+    ap.add_argument("--lane", type=int, default=None)
     ap.add_argument("--expect-pr", action="store_true",
                     help="the worker ran in a Superset workspace, so a ship must name its PR")
     sub.add_parser("alert")

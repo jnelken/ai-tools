@@ -115,12 +115,25 @@ that memory directory is the right one. Don't guess a different path.)
 
 ### A pending plan exists
 
-`$CODE_DIR/.advance-roadmap/pending-plan.json` holds the last dispatch decision whose
-worker never settled it (crash, limit, kill). `run.sh` reuses it without calling you when it is
-fresh (<36h), has been retried fewer than twice, and its repo is still safe — so if you are running
-and the file exists, `run.sh` declined it; the log line `pending plan: not reusing (…)` says why.
-Read it as the previous plan: re-check what made it stale, and prefer the same item if it still
-qualifies rather than re-deriving triage from scratch. Never edit or delete it — `run.sh` owns it.
+`$CODE_DIR/.advance-roadmap/pending-plan-<repo>.json` holds a dispatch decision for that repo whose
+worker never settled it (crash, limit, kill). `run.sh` reuses one without calling you when it is
+fresh (<36h), has been retried fewer than twice, and its repo is still safe and not busy in another
+lane — and drops it when it isn't. If you are running, the log lines `pending plan: not reusing (…)`
+say why any were declined; a plan for a busy repo is simply another lane's, so leave it alone.
+Never edit or delete these files — `run.sh` owns them.
+
+### Parallel lanes
+
+In a scheduled window, `supervisor.py` runs several of these runs at once, one per repo. Your
+prompt then names your lane, the **busy repos** (other lanes are working in them right now) and
+the **in-flight run stamps**:
+
+- **Skip every busy repo entirely** — for a feature, a resume, Step 2d's code-health pass and
+  bookkeeping alike. Don't list it in `blockers` or `considered`; another lane owns it.
+- **An in-flight stamp's log is never an interrupted run.** It has no exit line because it is still
+  running. When you look for the previous run below, skip in-flight logs and take the newest one
+  older than yours that isn't in flight.
+- Everything else is unchanged: you still emit exactly one decision, for one repo.
 
 ### A carried no-work verdict exists
 
@@ -140,8 +153,8 @@ Carry every other repo's and issue's prior verdict forward as-is into your `bloc
 
 ### Did the previous run finish?
 
-**An interrupted run gets finished before a new item is started.** This job fires every 2 hours
-under launchd and dies for reasons that have nothing to do with the work — a session limit hit
+**An interrupted run gets finished before a new item is started.** This job runs in scheduled
+windows, several lanes at a time, and dies for reasons that have nothing to do with the work — a session limit hit
 mid-build (`run-20260907-104501.log`), the machine sleeping, launchd killing the process. What it
 leaves behind is a repo sitting on `roadmap/<slug>` with real commits nobody will ever merge, while
 the next run cheerfully starts something else.
@@ -150,7 +163,8 @@ Classify the previous run from the logs in
 `/Users/jake/.claude/automations/advance-roadmap/logs/`. **Sort by filename and take the newest —
 do not use `latest.log`.** `run.sh` re-points that symlink as its final line, so it lags the run in
 flight, and the quota-skip path rewrites it immediately. The newest `run-*.log` is *this* run (no
-terminal `=== claude exit=` line yet); the one below it is the previous run.
+terminal `=== claude exit=` line yet); the one below it is the previous run — skipping any in-flight
+lane's log your prompt names (*Parallel lanes*, above).
 
 | Previous log | Meaning | Action |
 |---|---|---|
