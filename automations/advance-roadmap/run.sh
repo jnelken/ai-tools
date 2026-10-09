@@ -87,6 +87,12 @@ CHAIN_MINUTES="${ADVANCE_ROADMAP_CHAIN_MINUTES:-40}"
 # a lane starts (no cadence gate here), holds the global lock itself, refills lanes instead of
 # chaining, and tells each lane which repos the others are in.
 LANE="${ADVANCE_ROADMAP_LANE:-}"
+TARGET_REPO="${ADVANCE_ROADMAP_TARGET_REPO:-}"
+if [ -n "$TARGET_REPO" ]; then
+  LAST_VERDICT="${ADVANCE_ROADMAP_LAST_VERDICT:-$CODE_DIR/.advance-roadmap/last-verdict-$TARGET_REPO.json}"
+fi
+BATCH_PID="${ADVANCE_ROADMAP_BATCH_PID:-}"
+BATCH_SNAPSHOT="${ADVANCE_ROADMAP_BATCH_SNAPSHOT:-}"
 BUSY_REPOS="${ADVANCE_ROADMAP_BUSY_REPOS:-}"
 INFLIGHT_STAMPS="${ADVANCE_ROADMAP_INFLIGHT_STAMPS:-}"
 [ -n "$LANE" ] && CHAIN_MINUTES=0
@@ -224,7 +230,7 @@ if [ ! -f "$USAGE_PY" ]; then
   exit 1
 fi
 
-python3 "$USAGE_PY" --root "$ROOT" refresh >> "$LOG" 2>&1 || true
+[ -n "$BATCH_PID" ] || python3 "$USAGE_PY" --root "$ROOT" refresh >> "$LOG" 2>&1 || true
 
 ORCH="$(python3 "$USAGE_PY" --root "$ROOT" pick-orchestrator 2>/dev/null | tr -d '\r')"
 orch_pick_rc=$?
@@ -432,13 +438,17 @@ LINEAR_SNAPSHOT="$RUN_DIR/linear-snapshot.json"
 # (jnelken-linear skill). Before the snapshot, so they're plannable this run and their
 # label change moves the fingerprint. Resolved via SKILL_DIR so tests never reach Linear.
 JLIN_PY="$(dirname "$SKILL_DIR")/jnelken-linear/jlin.py"
-if [ -f "$JLIN_PY" ]; then
+if [ -f "$JLIN_PY" ] && [ -z "$BATCH_PID" ]; then
   echo "=== repo-label inference ===" >> "$LOG"
   python3 "$JLIN_PY" infer --apply >> "$LOG" 2>&1 || echo "(repo-label inference failed — non-fatal)" >> "$LOG"
 fi
 FINGERPRINT="$RUN_DIR/fingerprint.json"
 VERDICT_CHANGES="$RUN_DIR/verdict-changes.json"
-python3 "$LINEAR_SNAP_PY" --out "$LINEAR_SNAPSHOT" >> "$LOG" 2>&1
+if [ -n "$BATCH_SNAPSHOT" ]; then
+  cp "$BATCH_SNAPSHOT" "$LINEAR_SNAPSHOT" || exit 1
+else
+  python3 "$LINEAR_SNAP_PY" --out "$LINEAR_SNAPSHOT" >> "$LOG" 2>&1
+fi
 python3 "$VERDICT_PY" fingerprint --snapshot "$LINEAR_SNAPSHOT" --out "$FINGERPRINT" >> "$LOG" 2>&1
 # The last run found no work and its bookkeeping landed. If no repo, issue, allowlist or skill
 # doc has moved since, this run would re-derive the same verdict — skip planning and worker both.
@@ -475,6 +485,15 @@ This is lane $LANE of a parallel window (ORCHESTRATOR.md, *Parallel lanes*).
 Busy repos — other lanes are working in them right now; skip them entirely: ${BUSY_REPOS:-none}
 In-flight run stamps — still running, never interrupted: ${INFLIGHT_STAMPS:-none}"
   fi
+  if [ -n "$TARGET_REPO" ]; then
+    ORCH_PROMPT="$ORCH_PROMPT
+
+This is a finite daily batch. Your ONLY repository is $TARGET_REPO.
+Select at most ONE existing actionable ticket/roadmap item in that repo, or return no work.
+Do not choose another repo, invent a code-health task, reconcile another repo's prior run,
+or include another repo's archives, blockers, directives, or bookkeeping.
+Other batch planners own every other repo. Keep considered and summary scoped to $TARGET_REPO."
+  fi
 
   if [ ! -f "$PROBE_FLAG" ]; then
     echo "(one-time Dispatch probe armed — flag absent: $PROBE_FLAG)"
@@ -491,6 +510,7 @@ If a PushNotification probe would have been useful, set a note in summary; the w
   reused=0
   for f in "$PENDING_DIR"/pending-plan*.json(N.Om); do
     prepo="$(jq -r '.orchestrator.repo // empty' "$f" 2>/dev/null)"
+    [ -n "$TARGET_REPO" ] && [ "$prepo" != "$TARGET_REPO" ] && continue
     [[ " $BUSY_REPOS " == *" $prepo "* ]] && continue
     if python3 "$PLAN_PY" --file "$f" reuse --out "$result"; then
       PENDING_PLAN="$f"; reused=1; break
@@ -585,22 +605,34 @@ PY
   # Hold a kernel lock on the repo for the rest of this run (released when run.sh exits), so
   # even a supervisor that crashed and lost track can't put two lanes on one repo.
   pick="$(jq -r 'select(.action=="dispatch_worker" or .action=="resume_worker") | .repo // empty' "$result" 2>/dev/null)"
-  if [[ "$pick" =~ '^[A-Za-z0-9][A-Za-z0-9._-]*$' ]]; then
+  if [[ "$pick" =~ '^[A-Za-z0-9][A-Za-z0-9._-]*$' ]] && { [ -z "$TARGET_REPO" ] || [ "$pick" = "$TARGET_REPO" ]; }; then
     mkdir -p "$ROOT/repo-locks"; : >> "$ROOT/repo-locks/$pick.lock"
     zsystem flock -t 0 -e -f REPO_LOCK_FD "$ROOT/repo-locks/$pick.lock" 2>/dev/null \
       || BUSY_REPOS="$BUSY_REPOS $pick"
   fi
-  ORCH_RESULT="$ORCH_RESULT" python3 - "$result" "$CODE_DIR" "$BUSY_REPOS" <<'PY'
+  ORCH_RESULT="$ORCH_RESULT" python3 - "$result" "$CODE_DIR" "$BUSY_REPOS" "$TARGET_REPO" <<'PY'
 import json, os, re, sys
 path, code, busy = sys.argv[1], sys.argv[2], sys.argv[3].split()
+target = sys.argv[4]
 r = json.load(open(path))
 repo = r.get("repo")
+if target:
+    # A target-scoped planner cannot authorize bookkeeping in another repo either.
+    r["blockers"] = [b for b in r.get("blockers", []) if b.get("repo") == target]
+    r["archives"] = [a for a in r.get("archives", [])
+                     if a.startswith(target + "/") and ".." not in a.split("/")]
+    if r.get("action") not in ("dispatch_worker", "resume_worker") and repo not in (None, target):
+        r.update(repo=None, item=None, branch=None, linear_id=None, directive_ticket=None,
+                 worker_brief=None, archives=[], blockers=[], considered=[],
+                 summary=f"Planner returned bookkeeping outside assigned repo {target}; ignored")
 if r.get("action") in ("dispatch_worker", "resume_worker"):
     why = None
     if not repo or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", repo) or not os.path.isdir(os.path.join(code, repo)):
         why = f"orchestrator named an invalid repo {repo!r}"
     elif repo in busy:
         why = f"orchestrator picked {repo}, which another lane holds"
+    elif target and repo != target:
+        why = f"orchestrator picked {repo}, outside its assigned repo {target}"
     if why:
         # Every actionable field goes too: no worker may touch another lane's repo.
         r.update(action="blocked_no_item", outcome_token="blocked-no-item", repo=None, item=None,
@@ -610,6 +642,8 @@ if r.get("action") in ("dispatch_worker", "resume_worker"):
         json.dump(r, open(path, "w"), indent=2)
         open(os.path.join(os.path.dirname(os.environ["ORCH_RESULT"]), "dispatch-rejected"), "w").write(why)
         print(f"WARNING: {why} — not dispatched")
+if target:
+    json.dump(r, open(path, "w"), indent=2)
 PY
   echo "(orchestrator result)"
   cat "$result"
@@ -620,6 +654,27 @@ PY
       PENDING_PLAN="$PENDING_DIR/pending-plan-$plan_repo.json"
       python3 "$PLAN_PY" --file "$PENDING_PLAN" save --result "$result" --stamp "$STAMP"
     fi
+  fi
+
+  if [ -n "$BATCH_PID" ]; then
+    # Persist the plan before announcing readiness. No implementation/bookkeeping model runs
+    # until every planner finishes and the controller releases this slot in the finite batch.
+    touch "$RUN_DIR/batch-ready"
+    while [ ! -f "$RUN_DIR/batch-release" ]; do
+      if [ -f "$RUN_DIR/batch-cancel" ]; then
+        [ "$reused" -eq 1 ] && python3 "$PLAN_PY" --file "$PENDING_PLAN" refund
+        record skipped-quota "daily batch deferred before worker launch; pending plan retained"
+        exit 0
+      fi
+      if ! kill -0 "$BATCH_PID" 2>/dev/null; then
+        [ "$reused" -eq 1 ] && python3 "$PLAN_PY" --file "$PENDING_PLAN" refund
+        record aborted "daily batch controller exited before worker launch; pending plan retained"
+        exit 0
+      fi
+      sleep "${ADVANCE_ROADMAP_BATCH_POLL_S:-1}"
+    done
+    # The first plan may have waited for slower planners: route on the current pool state.
+    WORKERS="$(python3 "$USAGE_PY" --root "$ROOT" pick-worker-chain 2>/dev/null | tr -d '\r' || true)"
   fi
 
   action="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("action",""))' "$result")"
@@ -697,8 +752,11 @@ PY
   python3 "$VERDICT_PY" fingerprint --snapshot "$POST_SNAPSHOT" --out "$POST_FINGERPRINT" >> "$LOG" 2>&1
   # A no-work verdict reached while other lanes hold repos only covers the rest, so it isn't
   # one the next run may carry forward.
-  [ -z "$BUSY_REPOS" ] && python3 "$VERDICT_PY" save --file "$LAST_VERDICT" --fingerprint "$POST_FINGERPRINT" \
-    --orch-result "$ORCH_RESULT" --worker-result "$WORKER_RESULT" --stamp "$STAMP"
+  if [ -z "$BUSY_REPOS" ] || [ -n "$TARGET_REPO" ]; then
+    # Daily batches use a distinct verdict file for each target repo.
+    python3 "$VERDICT_PY" save --file "$LAST_VERDICT" --fingerprint "$POST_FINGERPRINT" \
+      --orch-result "$ORCH_RESULT" --worker-result "$WORKER_RESULT" --stamp "$STAMP"
+  fi
 
   [ -f "$PROBE_FLAG" ] || { touch "$PROBE_FLAG"; echo "(Dispatch probe flag set)"; }
 

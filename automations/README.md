@@ -2,13 +2,13 @@
 
 Scheduled headless `claude -p` runs, launched by macOS `launchd` on my machines.
 `install.sh` symlinks each automation's script(s) into `~/.claude/automations/<name>/`,
-but **the launchd plist is not symlinked or auto-loaded** — paths/usernames can differ
+but **launchd plists are not auto-loaded** — paths/usernames can differ
 per machine, and you don't want a stray automation running immediately on a fresh
 checkout. Wire it up manually per machine:
 
 ```bash
-cp ~/.ai-tools/automations/<name>/<plist>.plist ~/Library/LaunchAgents/
-# edit the plist if paths/username differ from this machine
+ln -s ~/.ai-tools/automations/<name>/<plist>.plist ~/Library/LaunchAgents/
+# Preserve an existing local plist before replacing it; customize paths in maintained source.
 launchctl load ~/Library/LaunchAgents/<plist>.plist
 ```
 
@@ -18,37 +18,61 @@ makes the deploy clone dirty.
 
 ## `advance-roadmap`
 
-Every 2 hours (1:45am, 3:45am … 11:45pm local time — see **Cadence** below),
-picks a personal repo under
-the personal code dir (`bin/personal-code-dir`; `~/Dropbox/code` on the personal machines) whose `ROADMAP.md` has real planned work, ships exactly ONE item on a
-branch, verifies with the repo's own `npm test` / `npm run build`, moves the item to Shipped,
-then merges to `main` locally and **pushes**. No PR.
+One finite batch every day at **10:30 local time** (Eastern on Jake's Mac), starting
+with `daily_batch.py`. It queues direct-child personal repos, excluding `.noroadmap`,
+non-`jnelken` origins, aliases, and repos with a worker still in flight. Each repo gets
+its own read-only planner, scoped to **one existing actionable ticket or roadmap item**.
+The existing clean-tree, live-session, directive, dependency, and review gates still apply.
+A repo with no actionable item does not get an implementation.
 
-### Cadence
+All planners finish before implementation begins. Ready plans are persisted and wait at
+a disk barrier; the controller releases workers together, up to the concurrency limit.
+Each worker uses the existing Superset workspace, verification, cross-model review, and
+PR merge flow. A repo's finished slot never queues another ticket from that repo.
 
-launchd fires every hour at :45; `run.sh` decides which ticks run, so the plist never has to be
-rewritten for a cadence change. The base cadence is `ADVANCE_ROADMAP_CADENCE_HOURS` in the plist's
-`EnvironmentVariables` (default **2**; use a divisor of 24). Slots are the hours where
-`(hour - 3) % cadence == 0`, so the 2h grid is 1:45, 3:45 … 11:45pm — never 2:45, when
-wrapup-repos commits WIP on Sundays. Ticks between slots exit silently: no log, no record.
-To change it, edit the plist value, copy it to `~/Library/LaunchAgents/`, and reload with
-`launchctl bootout gui/$(id -u)/com.jake.advance-roadmap` then
-`launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.jake.advance-roadmap.plist`.
+### Schedule, concurrency, and recovery
 
-**Backoff.** `gen-dashboard.py` already classifies every run, so it owns the arithmetic and
-writes `cadence_hours` to `state.json`:
+`com.jake.advance-roadmap.plist` has one `StartCalendarInterval`: 10:30 daily, with
+`RunAtLoad=false`. It replaces the two continuously refilled sprint windows and their
+hourly watchdog ticks. macOS may deliver a missed tick after waking; the dated manifest
+prevents a second batch that day. A batch already in progress can finish after 10:30.
 
-| Consecutive unproductive runs | Cadence | At the 2h base |
-|---|---|---|
-| 0–3 | base | every 2h |
-| 4–7 | 2× base | every 4h (3:45, 7:45 …) |
-| 8+ | 4× base, max 24h | every 8h (3:45, 11:45, 7:45pm) |
+`ADVANCE_ROADMAP_LANES=8` caps active planners and workers independently. Ready planners
+consume no model resources and free their planning slot, so a queue larger than eight
+still reaches the barrier. Raise the limit when resources allow; `0` means all repos.
+Planning times out after 30 minutes (`ADVANCE_ROADMAP_PLAN_TIMEOUT_S`); an individual
+failed or skipped planner does not block the rest. Worker timeouts remain in `run.sh`.
 
-"Unproductive" means `blocked-no-item` **or** `nothing-qualified` — a run that found no qualifying
-repo at all counts too, since an empty queue is exactly when backing off is worth the most. Four
-of them is a full day of finding nothing. **Any run that ships resets it.** Quota, lock
-and backoff skips don't count toward the streak — they're not evidence either way. A missing or
-corrupt `state.json` falls back to the base cadence, so a bad read can never wedge the job off.
+The shared kernel lock prevents overlapping schedulers. The durable queue and selected
+ticket IDs are in `~/.claude/automations/advance-roadmap/batches/YYYY-MM-DD/batch.json`;
+that directory also holds the batch's immutable Linear snapshot. Logs and lane run records
+remain in the usual `logs/`, `runs/`, and `runs.jsonl` paths. Plans not implemented remain
+in the existing per-repo pending-plan files for the next daily batch.
+
+Quota is checked before each implementation wave. Exhaustion defers the remaining plans
+and finishes the batch; there is **no 30-minute quota retry loop, refilling, chaining, or
+second batch that day**. A crashed controller is not automatically rerun that day either:
+waiting lanes exit when it disappears, while already dispatched workers can finish and
+remain protected by the existing repo/in-flight locks. A failed preflight is recorded in
+the manifest and waits for the next daily tick. Legacy cadence/backoff calculations apply
+only to manual `run.sh` use, not this daily schedule.
+
+Install the maintained source after committing/pushing and running `~/.ai-tools/install.sh`.
+Preserve any existing local plist before replacing it, then symlink the maintained plist
+and reload launchd (do this after an active legacy supervisor has finished):
+
+```sh
+ln -s ~/.ai-tools/automations/advance-roadmap/com.jake.advance-roadmap.plist ~/Library/LaunchAgents/com.jake.advance-roadmap.plist
+launchctl bootout gui/$(id -u)/com.jake.advance-roadmap
+launchctl enable gui/$(id -u)/com.jake.advance-roadmap
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.jake.advance-roadmap.plist
+python3 ~/.claude/automations/advance-roadmap/daily_batch.py --dry-run
+```
+
+`--dry-run` only lists candidate repos and the cap; it does not create a batch, call a
+provider, or launch implementation. Test with fake providers:
+`python3 -m unittest discover -s automations/advance-roadmap/tests` and
+`zsh automations/advance-roadmap/tests/test-run-record.sh`.
 
 ### Slack summary
 
@@ -90,7 +114,7 @@ Skip the tick only when **no orchestrator** remains (both Codex and Claude hot).
 exhaustion alone still lets the orchestrator report `blocked-no-item` / `nothing-qualified`.
 
 Guardrails (personal `jnelken` repos only, clean tree, no force, all-or-nothing verification)
-live in `SAFETY.md`. `run.sh` adds the single-instance lock.
+live in `SAFETY.md`. `daily_batch.py` and `run.sh` share the single-instance lock.
 
 ### Run memory
 
@@ -155,8 +179,7 @@ than posting to an absolute `/refresh`, which the `/roadmap` prefix would otherw
 Turn tailnet access off with `tailscale serve reset`. That leaves the local server running on
 `127.0.0.1:8421`.
 
-The `:45` slots stay offset from `wrapup-repos` so this job never starts on a tree that job
-just dirtied.
+The 10:30 batch stays separate from the Sunday 02:45 `wrapup-repos` schedule.
 
 ### Token accounting
 

@@ -166,6 +166,39 @@ check "lane recorded"                          "$(last lane)" 2
 check "a refused dispatch runs no worker"      "$(last worker)" none
 check "and records no work"                    "$(last outcome)" blocked-no-item
 # Superset mode: the worker runs in the item's workspace terminal, not in-process.
+ADVANCE_ROADMAP_LANE=1 ADVANCE_ROADMAP_TARGET_REPO=other run good file
+check "wrong target repo is not dispatched"    "$(last action)" blocked_no_item
+check "wrong target runs no worker"             "$(last worker)" none
+
+# Real run.sh must wait at the batch barrier before any worker starts.
+batch_stamp=20990101-000001
+ADVANCE_ROADMAP_LANE=1 ADVANCE_ROADMAP_TARGET_REPO=demo ADVANCE_ROADMAP_BATCH_PID=$$ \
+  ADVANCE_ROADMAP_STAMP=$batch_stamp ADVANCE_ROADMAP_BATCH_POLL_S=0.05 run good file &
+batch_pid=$!
+for n in {1..200}; do
+  [ -f "$ROOT/runs/$batch_stamp/batch-ready" ] && break
+  sleep .1
+done
+[ -f "$ROOT/runs/$batch_stamp/batch-ready" ] || { echo "FAIL: batch never reached barrier"; exit 1; }
+[ ! -f "$ROOT/runs/$batch_stamp/worker-result.json" ] || { echo "FAIL: worker ran before release"; exit 1; }
+touch "$ROOT/runs/$batch_stamp/batch-release"
+wait $batch_pid
+check "released batch plan ships" "$(last outcome)" shipped
+
+batch_stamp=20990101-000002
+ADVANCE_ROADMAP_LANE=1 ADVANCE_ROADMAP_TARGET_REPO=demo ADVANCE_ROADMAP_BATCH_PID=$$ \
+  ADVANCE_ROADMAP_STAMP=$batch_stamp ADVANCE_ROADMAP_BATCH_POLL_S=0.05 run good file &
+batch_pid=$!
+for n in {1..200}; do
+  [ -f "$ROOT/runs/$batch_stamp/batch-ready" ] && break
+  sleep .1
+done
+[ -f "$ROOT/runs/$batch_stamp/batch-ready" ] || { echo "FAIL: batch never reached barrier"; exit 1; }
+touch "$ROOT/runs/$batch_stamp/batch-cancel"
+wait $batch_pid
+check "quota defers batch worker" "$(last outcome)" skipped-quota
+[ ! -f "$ROOT/runs/$batch_stamp/worker-result.json" ] || { echo "FAIL: canceled batch ran worker"; exit 1; }
+
 SUPERSET=1 run good ws
 check "workspace run → shipped"               "$(last outcome)" shipped
 check "a workspace ship with no PR is flagged" "$(last detail)" "shipped without a PR URL — not credited"

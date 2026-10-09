@@ -79,7 +79,8 @@ GRID_SINCE = datetime(2026, 9, 27, 22, 0)
 GRID_BASE = 2  # the :45 grid's base cadence, for judging that era's history
 SPRINT_SINCE = datetime(2026, 10, 7, 0, 0)
 SPRINT_TICKS = [(10, 30), (11, 30), (12, 30), (13, 30), (14, 30), (16, 0), (17, 0), (18, 0), (19, 0), (20, 0)]
-SPRINT_WINDOWS = "10:30–15:30 and 16:00–21:00"
+BATCH_SINCE = datetime(2026, 10, 10, 0, 0)
+BATCH_DESCRIPTION = "10:30 daily; one item per repo"
 
 
 def slots_on(day):
@@ -94,8 +95,11 @@ def slots_on(day):
         if GRID_SINCE <= day.replace(hour=h, minute=m) < SPRINT_SINCE:
             out.append(day.replace(hour=h, minute=m))
     for h, m in SPRINT_TICKS:
-        if day.replace(hour=h, minute=m) >= SPRINT_SINCE and (h - 3) % base == 0:
+        slot = day.replace(hour=h, minute=m)
+        if SPRINT_SINCE <= slot < BATCH_SINCE and (h - 3) % base == 0:
             out.append(day.replace(hour=h, minute=m))
+    if day.replace(hour=10, minute=30) >= BATCH_SINCE:
+        out.append(day.replace(hour=10, minute=30))
     return sorted(out)
 
 QUOTA_RE = re.compile(r"skipping — (\S+) usage (\d+)% >= (\d+)%")
@@ -1004,12 +1008,9 @@ def build():
             checked_html = f'{ab} <span class=dim>(<time data-epoch="{int(ts)}">{rel}</time>)</span>'
         except (TypeError, ValueError):
             checked_html = '<span class=dim>unknown</span>'
-        cad = run_state["cadence_hours"]
         cad_html = (f'<div class=checkline style="border-bottom:0;padding-bottom:0;margin-bottom:0">'
-                    f'<strong>Cadence:</strong> every {cad}h'
-                    + (f' <span class=dim>— backed off from {base_cadence()}h after {run_state["blocked_streak"]} '
-                       f'consecutive blocked runs; resets on the next ship</span>' if cad > base_cadence()
-                       else ' <span class=dim>— normal</span>') + '</div>')
+                    '<strong>Schedule:</strong> one batch daily at 10:30'
+                    ' <span class=dim>— one item per repo; no automatic refill</span></div>')
         quota_html = (f'<div class=card><div class=checkline>{verdict} &nbsp;{route}</div>'
                       f'<div class=provs>{provider_rows(q["providers"])}</div>'
                       f'<div class="checkline dim" style="font-size:12.5px">Last usage check {checked_html} · '
@@ -1033,7 +1034,7 @@ def build():
 
     return TEMPLATE.format(
         gen=esc(datetime.now().strftime("%Y-%m-%d %H:%M:%S")), rank_html=leaderboard_html(),
-        cadence=base_cadence(), windows=esc(SPRINT_WINDOWS),
+        cadence=base_cadence(), windows=esc(BATCH_DESCRIPTION),
         total=n, shipped=shipped, blocked=blocked, skipped=skipped, errored=errored,
         last_line=last_line, run_cards=run_cards, run_panels=run_panels, repo_cards=repo_cards,
         waiting=waiting, quota_html=quota_html, token_html=token_html, missed_html=missed_html, **{f"n_{k}": v for k, v in counts.items()},
@@ -1172,7 +1173,7 @@ TEMPLATE = """<!doctype html>
   <button class="toggle refresh" id=refresh title="Re-read provider usage, take a fresh Linear snapshot, rebuild this page">↻ refresh</button>
   <span class=rstatus id=rstatus role=status></span>
   <h1>Roadmap automation</h1>
-  <div class=sub>Generated {gen} · runs hourly in sprint windows {windows} · ↻ refresh re-reads usage and Linear (via serve.py)</div>
+  <div class=sub>Generated {gen} · daily batch {windows} · ↻ refresh re-reads usage and Linear (via serve.py)</div>
   {rank_html}
 
   <div class=stats>

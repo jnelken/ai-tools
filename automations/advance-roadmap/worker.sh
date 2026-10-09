@@ -118,6 +118,13 @@ $REQUEST_FILE
 Print a \`\`\`WORKER_RESULT_JSON fence at the end per WORKER.md, plus the plain 5-line summary.
 EOF
 )"
+if [ -n "${ADVANCE_ROADMAP_TARGET_REPO:-}" ]; then
+  BASE_PROMPT="$BASE_PROMPT
+
+This daily batch assigns you ONLY repository $ADVANCE_ROADMAP_TARGET_REPO and the one
+item in the assignment JSON. Scope all implementation, reconciliation, archives, and
+bookkeeping to that repository. Do not start another ticket or fall back to another repo."
+fi
 if [ -n "$RESULT_FILE" ]; then
   BASE_PROMPT="$BASE_PROMPT
 
