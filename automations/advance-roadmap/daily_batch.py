@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """One daily batch: plan one item per personal repo, then run the plans in parallel.
 
-The queue is fixed before planning. --lanes bounds both planning and implementation;
-0 means all repos at once. Ready planners wait at a barrier without using a model.
+The queue is fixed before planning. --lanes bounds both planning and implementation
+to between one and five repos at once. Ready planners wait without using a model.
 No repo refills, quota retries, or second batch on the same calendar day.
 """
 import argparse
@@ -23,6 +23,7 @@ import supervisor as shared
 ROOT = shared.ROOT
 POLL_S = float(os.environ.get("ADVANCE_ROADMAP_BATCH_POLL_S", "1"))
 PLAN_TIMEOUT_S = float(os.environ.get("ADVANCE_ROADMAP_PLAN_TIMEOUT_S", "1800"))
+MAX_CONCURRENT_REPOS = 5
 
 
 def save(path, value):
@@ -50,8 +51,10 @@ def candidates(code):
 
 class Batch:
     def __init__(self, directory, repos, lanes):
+        if not 1 <= lanes <= MAX_CONCURRENT_REPOS:
+            raise ValueError("batch concurrency must be between 1 and 5 repos")
         self.directory = directory
-        self.limit = lanes or max(1, len(repos))
+        self.limit = lanes
         self.procs = {}
         self.state = {"date": directory.name, "phase": "preparing", "lanes_max": self.limit,
                       "started_at": datetime.now().isoformat(timespec="seconds"), "queue": []}
@@ -165,11 +168,11 @@ class Batch:
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--lanes", type=int, default=int(os.environ.get("ADVANCE_ROADMAP_LANES", "8")))
+    parser.add_argument("--lanes", type=int, default=int(os.environ.get("ADVANCE_ROADMAP_LANES", "5")))
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
-    if args.lanes < 0:
-        parser.error("--lanes must be 0 (all repos) or positive")
+    if not 1 <= args.lanes <= MAX_CONCURRENT_REPOS:
+        parser.error("--lanes must be between 1 and 5 repos")
     marker = Path.home() / "dotfiles/bin/is-personal-machine"
     if marker.exists() and subprocess.run([str(marker)]).returncode == 1:
         return 0
@@ -178,7 +181,7 @@ def main():
         return 0
     repos = candidates(Path(code))
     if args.dry_run:
-        print(json.dumps({"repos": repos, "concurrency": args.lanes or len(repos),
+        print(json.dumps({"repos": repos, "concurrency": args.lanes,
                           "schedule": "daily at 10:30 local time", "items_per_repo": 1}, indent=2))
         return 0
     ROOT.mkdir(parents=True, exist_ok=True)

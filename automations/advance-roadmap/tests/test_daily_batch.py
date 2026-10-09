@@ -78,7 +78,7 @@ class DailyBatchTest(unittest.TestCase):
                         f'git@github.com:{owner}/{name}.git'], check=True)
         return repo
 
-    def run_batch(self, lanes=8, extra=()):
+    def run_batch(self, lanes=5, extra=()):
         p = subprocess.run([sys.executable, str(HERE / 'daily_batch.py'), '--lanes', str(lanes), *extra],
                            env=self.env, capture_output=True, text=True, timeout=30)
         self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
@@ -93,7 +93,7 @@ class DailyBatchTest(unittest.TestCase):
     def test_barrier_and_one_item_per_repo(self):
         for name in 'abc':
             self.repo(name)
-        self.run_batch(lanes=0)
+        self.run_batch(lanes=5)
         events = self.events()
         ready = [e['time'] for e in events if e['kind'] == 'plan-ready']
         starts = [e for e in events if e['kind'] == 'work-start']
@@ -126,6 +126,21 @@ class DailyBatchTest(unittest.TestCase):
         before = self.events()
         self.run_batch()
         self.assertEqual(before, self.events())
+
+    def test_concurrency_cannot_exceed_five_or_be_unlimited(self):
+        for lanes in (0, 6, 8):
+            for override in ('argument', 'environment'):
+                with self.subTest(lanes=lanes, override=override):
+                    cmd = [sys.executable, str(HERE / 'daily_batch.py')]
+                    env = dict(self.env)
+                    if override == 'argument':
+                        cmd += ['--lanes', str(lanes)]
+                    else:
+                        env['ADVANCE_ROADMAP_LANES'] = str(lanes)
+                    p = subprocess.run(cmd, env=env, capture_output=True, text=True, timeout=10)
+                    self.assertEqual(p.returncode, 2)
+                    self.assertIn('between 1 and 5 repos', p.stderr)
+        self.assertFalse((self.root / 'batches').exists())
 
     def test_quota_defers_without_implementation_or_retry(self):
         self.repo('a')

@@ -21,7 +21,7 @@
 		<key>PATH</key>
 		<string>/opt/homebrew/bin:/opt/homebrew/opt/node@22/bin:/usr/bin:/bin:/usr/sbin:/sbin:/Users/jake/.local/bin</string>
 		<key>ADVANCE_ROADMAP_LANES</key>
-		<string>8</string>
+		<string>5</string>
 	</dict>
 	<key>RunAtLoad</key>
 	<false/>

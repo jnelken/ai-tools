@@ -170,10 +170,11 @@ ADVANCE_ROADMAP_LANE=1 ADVANCE_ROADMAP_TARGET_REPO=other run good file
 check "wrong target repo is not dispatched"    "$(last action)" blocked_no_item
 check "wrong target runs no worker"             "$(last worker)" none
 
-# Real run.sh must wait at the batch barrier before any worker starts.
+# A hygiene fallback uses the same batch barrier and never refills its repo's slot.
 batch_stamp=20990101-000001
+batch_rows_before=$(wc -l < "$ROOT/runs.jsonl" | tr -d ' ')
 ADVANCE_ROADMAP_LANE=1 ADVANCE_ROADMAP_TARGET_REPO=demo ADVANCE_ROADMAP_BATCH_PID=$$ \
-  ADVANCE_ROADMAP_STAMP=$batch_stamp ADVANCE_ROADMAP_BATCH_POLL_S=0.05 run good file &
+  ADVANCE_ROADMAP_STAMP=$batch_stamp ADVANCE_ROADMAP_BATCH_POLL_S=0.05 CHAIN_MINUTES=40 run health file &
 batch_pid=$!
 for n in {1..200}; do
   [ -f "$ROOT/runs/$batch_stamp/batch-ready" ] && break
@@ -183,7 +184,9 @@ done
 [ ! -f "$ROOT/runs/$batch_stamp/worker-result.json" ] || { echo "FAIL: worker ran before release"; exit 1; }
 touch "$ROOT/runs/$batch_stamp/batch-release"
 wait $batch_pid
-check "released batch plan ships" "$(last outcome)" shipped
+check "released batch hygiene plan ships" "$(last outcome)" shipped
+check "batch hygiene retains its work kind" "$(last work_kind)" code_health
+check "batch hygiene runs exactly once" "$(wc -l < "$ROOT/runs.jsonl" | tr -d ' ')" $(( batch_rows_before + 1 ))
 
 batch_stamp=20990101-000002
 ADVANCE_ROADMAP_LANE=1 ADVANCE_ROADMAP_TARGET_REPO=demo ADVANCE_ROADMAP_BATCH_PID=$$ \

@@ -489,8 +489,14 @@ In-flight run stamps — still running, never interrupted: ${INFLIGHT_STAMPS:-no
     ORCH_PROMPT="$ORCH_PROMPT
 
 This is a finite daily batch. Your ONLY repository is $TARGET_REPO.
-Select at most ONE existing actionable ticket/roadmap item in that repo, or return no work.
-Do not choose another repo, invent a code-health task, reconcile another repo's prior run,
+First select at most ONE existing actionable ticket/roadmap item in that repo.
+If none is actionable, apply Step 2d's bounded code-health (hygiene) fallback to this repo.
+For this daily batch the fallback is PER REPO: feature work in another repo does not block it.
+Prefer an existing code-health ticket; otherwise queue one ad-hoc pass under CODE_HEALTH.md.
+Keep every Step 2d eligibility gate, including the clean tree and 24-hour cooldown.
+Emit work_kind=code_health for a hygiene pass; if the repo is ineligible, return no work.
+The daily limit is ONE feature/resume OR hygiene pass for this repo, never both.
+Do not choose another repo, invent roadmap features, reconcile another repo's prior run,
 or include another repo's archives, blockers, directives, or bookkeeping.
 Other batch planners own every other repo. Keep considered and summary scoped to $TARGET_REPO."
   fi

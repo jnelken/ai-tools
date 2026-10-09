@@ -21,9 +21,14 @@ makes the deploy clone dirty.
 One finite batch every day at **10:30 local time** (Eastern on Jake's Mac), starting
 with `daily_batch.py`. It queues direct-child personal repos, excluding `.noroadmap`,
 non-`jnelken` origins, aliases, and repos with a worker still in flight. Each repo gets
-its own read-only planner, scoped to **one existing actionable ticket or roadmap item**.
+its own read-only planner, scoped to **one actionable ticket/roadmap item or one hygiene pass**.
 The existing clean-tree, live-session, directive, dependency, and review gates still apply.
-A repo with no actionable item does not get an implementation.
+When a repo has no actionable item, its planner uses the existing Step 2d code-health fallback:
+prefer a code-health ticket, otherwise queue one bounded, behavior-preserving hygiene pass.
+This fallback is evaluated per repo, even when other repos have feature work. All existing
+hygiene eligibility rules apply, including opt-in, a clean tree, verification, and the 24-hour
+cooldown. An ineligible repo is skipped. Each repo gets one feature/resume **or** hygiene run,
+never both in the same daily batch.
 
 All planners finish before implementation begins. Ready plans are persisted and wait at
 a disk barrier; the controller releases workers together, up to the concurrency limit.
@@ -37,9 +42,11 @@ PR merge flow. A repo's finished slot never queues another ticket from that repo
 hourly watchdog ticks. macOS may deliver a missed tick after waking; the dated manifest
 prevents a second batch that day. A batch already in progress can finish after 10:30.
 
-`ADVANCE_ROADMAP_LANES=8` caps active planners and workers independently. Ready planners
-consume no model resources and free their planning slot, so a queue larger than eight
-still reaches the barrier. Raise the limit when resources allow; `0` means all repos.
+`ADVANCE_ROADMAP_LANES=5` caps active planners and workers independently. The controller
+enforces a maximum of **five repos at once**, including command-line/environment overrides;
+use 1–5 to lower concurrency (`0`/unlimited and values over five are rejected). Ready planners
+consume no model resources and free their planning slot, so a queue larger than five
+still reaches the barrier.
 Planning times out after 30 minutes (`ADVANCE_ROADMAP_PLAN_TIMEOUT_S`); an individual
 failed or skipped planner does not block the rest. Worker timeouts remain in `run.sh`.
 
