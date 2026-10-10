@@ -349,7 +349,11 @@ if [[ -n "$BRANCH" && "$BRANCH" == "$SHORTENED_DIR" ]]; then
     DIR_DISPLAY="⽊ $(gradient_text "$SHORTENED_DIR" 223 142 29 64 160 43)"
     BRANCH_DISPLAY=""
 else
-    DIR_DISPLAY="⽊ $(latte_yellow)${SHORTENED_DIR}${RESET}"
+    # Escape backslashes: LINE2 is printed with `echo -e`, and a Windows path like
+    # D:\code\... contains `\c` ("stop output"), which truncated the line at `D:` and
+    # swallowed its newline so the context bar ran onto it. (The gradient branch above
+    # only fires when the dir equals a branch name, which can't contain backslashes.)
+    DIR_DISPLAY="⽊ $(latte_yellow)${SHORTENED_DIR//\\/\\\\}${RESET}"
     BRANCH_DISPLAY=""
     [[ -n "$BRANCH" ]] && BRANCH_DISPLAY=" $(latte_green)🌿(${BRANCH})${RESET}"
 fi
