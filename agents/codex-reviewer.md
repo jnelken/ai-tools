@@ -21,7 +21,7 @@ Run from the worktree (`cd <path>`). Set `LOG="$(git rev-parse --git-dir)/peer-r
 Choose the command:
 - Without focus or exclusion lines, use `codex review -c model_reasoning_effort=<effort> --base <branch>` for base scope, or `codex review -c model_reasoning_effort=<effort> --uncommitted` for uncommitted scope.
 - `--base <branch>` cannot be combined with a positional prompt (CLI errors). If focus text or do-not-re-report lines are present, drop `--base` and pass the prompt: "Review the changes on this branch relative to the merge-base with origin/<base>. Focus especially on: <focus>. <do-not-re-report lines>. Also report anything else you find." Normalize an existing `origin/` prefix so the remote ref is not doubled.
-- `--uncommitted` composes with a prompt normally. For that scope, ask to review uncommitted changes with the supplied focus and exclusion lines, and also report anything else found.
+- `--uncommitted` is ALSO mutually exclusive with a positional prompt (`the argument '--uncommitted' cannot be used with '[PROMPT]'`, exit 2). With focus or exclusion lines on uncommitted scope, drop `--uncommitted` and pass the prompt: "Review the uncommitted changes in this worktree (staged, unstaged and untracked files). Focus especially on: <focus>. <do-not-re-report lines>. Also report anything else you find."
 
 Detach and remain active until completion. A Claude Code Bash call is killed at about two minutes regardless of `timeout` or `run_in_background`; ending your turn abandons background work permanently. Use `nohup <cmd> > "$LOG" 2>&1 & echo $!` and record the PID. To capture the exit code across Bash calls, use a detached shell wrapper and a unique status file, for example (substitute the chosen Codex arguments after `codex review`):
 

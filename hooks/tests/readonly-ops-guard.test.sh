@@ -73,6 +73,47 @@ done <<'CASES'
 2|curl long data|curl --data 'x=1' https://x
 2|curl equals data|curl --data=x=1 https://x
 2|curl raw data|curl --data-raw 'x=1' https://x
+2|curl binary data|curl --data-binary @f https://x
+2|curl urlencode data|curl --data-urlencode q=1 https://x
+2|curl form|curl -F text=incident https://x
+2|curl attached form|curl -Ftext=incident https://x
+2|curl long form|curl --form text=incident https://x
+2|curl equals form|curl --form=text=incident https://x
+2|curl form-string|curl --form-string text=incident https://x
+2|curl json|curl --json '{"a":1}' https://x
+2|curl equals json|curl --json={} https://x
+2|curl upload short|curl -T file https://x
+2|curl upload attached|curl -Tfile https://x
+2|curl upload long|curl --upload-file file https://x
+2|curl get with form still writes|curl -G -F a=b https://x
+2|curl get with json still writes|curl -G --json '{}' https://x
+2|curl get with upload still writes|curl --get -T file https://x
+0|curl silent|curl -s https://x
+0|curl get with data|curl -G -d q=1 https://x
+0|curl long get with urlencode|curl --get --data-urlencode q=1 https://x
+0|curl bundled get with data|curl -sG -d q=1 https://x
+0|curl data then get|curl -d q=1 -G https://x
+0|curl get with long data|curl -G --data q=1 https://x
+0|GitHub API plain path|gh api repos/x/y/pulls/1
+0|GitHub API paginate with jq|gh api repos/x/y/issues --paginate -q '.[].title'
+0|GitHub API explicit GET with field|gh api -X GET repos/x/y/issues -f state=open
+0|GitHub API long GET with typed field|gh api --method GET repos/x/y/issues -F per_page=5
+0|GitHub API GraphQL query|gh api graphql -f query='query { viewer { login } }'
+0|GitHub API GraphQL typed field query|gh api graphql -F query='query { viewer { login } }'
+2|GitHub API implicit POST field|gh api repos/x/y/issues -f title=incident
+2|GitHub API raw field|gh api repos/x/y/issues --raw-field title=incident
+2|GitHub API typed field|gh api repos/x/y/issues -F title=incident
+2|GitHub API long field|gh api repos/x/y/issues --field title=incident
+2|GitHub API attached field|gh api repos/x/y/issues -ftitle=incident
+2|GitHub API equals field|gh api repos/x/y/issues --field=title=incident
+2|GitHub API field before path|gh api -f title=incident repos/x/y/issues
+2|GitHub API input file|gh api repos/x/y/issues --input body.json
+2|GitHub API equals input|gh api repos/x/y/issues --input=body.json
+2|GitHub API piped input|echo '{}' | gh api repos/x/y/issues --input -
+2|GitHub API method POST with field|gh api -X POST repos/x/y/issues -f title=incident
+2|GitHub API GraphQL mutation|gh api graphql -f query='mutation { addStar(input:{starrableId:"x"}) { clientMutationId } }'
+2|GitHub API GraphQL mutation with explicit GET|gh api -X GET graphql -f query='mutation { a }'
+2|GitHub API GraphQL input file|gh api graphql --input q.json
 CASES
 
 # Cover every remaining mutating verb rather than just one per CLI.
@@ -93,6 +134,8 @@ for method in POST PATCH PUT DELETE; do
   expect 2 "curl method $method" "curl -X $method https://x"
 done
 expect 2 'newline separator' $'git log --oneline\nkoyeb services delete x'
+expect 2 'GraphQL mutation on a later line' $'gh api graphql -f query=\'\nmutation {\n  addStar(input: {starrableId: "x"}) { clientMutationId }\n}\''
+expect 0 'multi-line GraphQL query' $'gh api graphql -f query=\'\nquery {\n  viewer { login }\n}\''
 
 # Malformed or missing command JSON must fail open.
 for input in 'not json' '{' '{}' '{"tool_input":{"command":null}}' '{"tool_input":{"command":123}}'; do

@@ -177,7 +177,7 @@ Pass the same `$EFFORT` to every reviewer agent this round.
 
 For either reviewer, pass the **absolute worktree path**, scope `base:<branch>` or `uncommitted` from step 1, `$EFFORT` (`high` or `medium`), the complete contents of `$GIT_DIR/peer-review-focus` (including every `Decided … — do not re-report` line), and lens text plus label (`main` for a single call). Request "Also report anything else you find" alongside the focus. Each agent returns one fenced block with `status: ok | usage_limited | failed`, `reviewer: codex|claude <model> / <effort>`, `lens: <label>`, `log: <absolute path>`, and a normalized findings table (`sev | file:line | claim | suggested fix`), or `findings: none`.
 
-**Gotcha:** `--base <branch>` and `[PROMPT]` are mutually exclusive; `codex-reviewer` handles that by putting the base scope inside the prompt when focus text is present.
+**Gotcha:** both `--base <branch>` and `--uncommitted` are mutually exclusive with `[PROMPT]` (CLI exit 2); `codex-reviewer` handles that by stating the scope inside the prompt whenever focus text is present.
 
 The reviewer agents own detach-and-poll until completion, so the orchestrator never waits on a raw process.
 

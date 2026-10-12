@@ -11,7 +11,7 @@ Read repository guidance and record the initial status and diff before changing 
 - For Concentro-Inc repos or any owner other than jnelken, read and follow `~/.claude/instructions/codex-implementation.md`. Write the self-contained task to a temporary prompt file outside the worktree, adding "Edit only these files: …. Do not commit or push."
 - Run `codex exec -m gpt-6.1-sol -c model_reasoning_effort=high -s workspace-write -C <wt> "$(cat <promptfile>)" </dev/null`. Detach and poll as below. If the model is unavailable, retry once with `-m gpt-5.6-luna`.
 - For jnelken-owned repos, read `/Users/jake/dotfiles/claude/MODEL_ROUTER.md` and follow its provider order. If missing, use the Concentro path. Apply the same waiting rules to any Codex invocation and any other long-running provider process.
-- For `mode: direct`, skip Codex and implement with your own Edit/Write tools.
+- For `mode: direct`, skip Codex and implement with your own Edit/Write tools. Without `mode: direct`, ALWAYS take the provider path first — never skip it on your own judgment of task size; the caller decides that.
 
 Detach every Codex launch: `nohup <cmd> > "$LOG" 2>&1 & echo $!`; record the PID. Claude Code kills any single Bash call at about two minutes regardless of `timeout` or `run_in_background`; ending your turn never resumes you for background completion. Capture exit status with a detached shell wrapper and unique temporary log/status files outside the worktree:
 

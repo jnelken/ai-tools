@@ -4,6 +4,12 @@
 # newline, strip quotes, then look for known mutating CLI words. Quoted echo
 # examples can be blocked; quoted separators can split data. Shell aliases,
 # variables, escapes, scripts, and indirect execution are not resolved.
+# Request bodies imply writes: gh api with -f/-F/--raw-field/--field/--input and
+# no explicit -X/--method (gh then POSTs), and curl with -d/--data*/--json/-F/
+# --form/-T/--upload-file (curl -G/--get turns -d/--data* into a query string).
+# gh api graphql is allowed for queries but blocked if "mutation" appears
+# anywhere in the unsplit command; query text read from a file (-F query=@f,
+# --input) is never inspected, so --input stays blocked.
 # Fail open (exit 0) if jq is missing or the hook JSON cannot be parsed.
 set -u
 
@@ -46,9 +52,27 @@ while IFS= read -r segment; do
        [[ "$args" =~ (^|[[:space:]])issue[[:space:]]+(create|comment|edit|close)([[:space:]]|$) ]]; then
       deny 'GitHub mutations are prohibited'
     fi
-    if [[ "$args" =~ (^|[[:space:]])api([[:space:]]|$) ]] &&
-       [[ "$args" =~ (^|[[:space:]])(-X[[:space:]]*|--method([[:space:]]+|=))(POST|PATCH|PUT|DELETE)([[:space:]]|$) ]]; then
-      deny 'GitHub API write methods are prohibited'
+    if [[ "$args" =~ (^|[[:space:]])api([[:space:]]|$) ]]; then
+      if [[ "$args" =~ (^|[[:space:]])(-X[[:space:]]*|--method([[:space:]]+|=))(POST|PATCH|PUT|DELETE)([[:space:]]|$) ]]; then
+        deny 'GitHub API write methods are prohibited'
+      fi
+      # Without an explicit method, gh api POSTs whenever a body is supplied.
+      # An explicit read method (e.g. -X GET) makes fields a query string.
+      if ! [[ "$args" =~ (^|[[:space:]])(-X|--method([[:space:]=]|$)) ]]; then
+        if [[ "$args" =~ (^|[[:space:]])--input([[:space:]=]|$) ]]; then
+          deny 'gh api --input implies a POST request body'
+        fi
+        if [[ "$args" =~ (^|[[:space:]])(-[fF]|--(raw-)?field([[:space:]=]|$)) ]] &&
+           ! [[ "$args" =~ (^|[[:space:]])graphql([[:space:]]|$) ]]; then
+          deny 'gh api request fields imply a POST; pass -X GET for a query'
+        fi
+      fi
+      # GraphQL queries are reads; check the whole command so a mutation on a
+      # later line of a multi-line query is not hidden by newline splitting.
+      if [[ "$args" =~ (^|[[:space:]])graphql([[:space:]]|$) ]] &&
+         [[ "$cmd" =~ (^|[^[:alnum:]_])mutation([^[:alnum:]_]|$) ]]; then
+        deny 'GraphQL mutations are prohibited'
+      fi
     fi
   fi
 
@@ -63,8 +87,15 @@ while IFS= read -r segment; do
 
   if [[ "$segment" =~ (^|[[:space:]/])curl[[:space:]](.*) ]]; then
     args="${BASH_REMATCH[2]}"
+    # -G/--get (also bundled, e.g. -sG) turns -d/--data* into a query string.
+    curl_get=0
+    if [[ "$args" =~ (^|[[:space:]])(--get|-[sSLkvfig]*G[sSLkvfig]*)([[:space:]]|$) ]]; then
+      curl_get=1
+    fi
     if [[ "$args" =~ (^|[[:space:]])(-X[[:space:]]*|--request([[:space:]]+|=))(POST|PATCH|PUT|DELETE)([[:space:]]|$) ]] ||
-       [[ "$args" =~ (^|[[:space:]])(--data([[:space:]=]|$|-)|-d) ]]; then
+       [[ "$args" =~ (^|[[:space:]])(--json|--form(-string)?|--upload-file)([[:space:]=]|$) ]] ||
+       [[ "$args" =~ (^|[[:space:]])-[FT] ]] ||
+       { ((curl_get == 0)) && [[ "$args" =~ (^|[[:space:]])(--data([[:space:]=]|$|-)|-d) ]]; }; then
       deny 'curl write methods and data payloads are prohibited'
     fi
   fi
