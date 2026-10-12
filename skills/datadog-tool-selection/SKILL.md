@@ -14,41 +14,49 @@ Pick the lowest-maintenance path that can reliably complete the task with verifi
 
 ## Decision Order
 
-1. **Start with `pup`.** It covers roughly 80% of Datadog work — monitors, logs, metrics,
-   traces, RUM, dashboards. It is a direct authenticated CLI, so it is faster than MCP and
-   costs no context loading tool schemas.
-2. **Use the Datadog REST API** when the operation is a write or config change `pup` does not
-   expose — log pipeline CRUD is the known case (see Known Findings).
+1. **Start with `pup`.** It covers most Datadog work — monitors, logs, metrics, traces, RUM,
+   dashboards, LLM Obs spans and evaluators, downtimes, audit logs. It is a direct
+   authenticated CLI, so it is faster than MCP and costs no context loading tool schemas.
+2. **Use the REST API through `pup api <path>`** when `pup` has no subcommand for the
+   operation (see Known Gaps). It reuses pup's auth and site, so prefer it to hand-written
+   `curl`.
 3. **Use the Datadog MCP connector (`mcp__claude_ai_Datadog__*`) last**, only for product
    surfaces with no `pup` equivalent.
+
+## Folio's Datadog config: use `datadog-researcher`
+
+In a folio-platform session, delegate read-only Datadog research (what a field or query
+does, file vs live drift, whether a query matches data) to the repo's
+`datadog-researcher` agent (`folio-platform/.claude/agents/datadog-researcher.md`). Its
+"Known traps" section is the maintained list of pup/API/MCP gotchas hit so far — rate
+limits, syntax, silent no-ops, validation blind spots. From another repo, read that
+section before a non-trivial Datadog lookup rather than re-learning it.
 
 ## What To Use
 
 ### Use `pup` When
 
-- Default for any lookup or investigation: logs, metrics, monitors, traces, RUM, dashboards,
-  incidents, services.
-- `DD_API_KEY`, `DD_APP_KEY`, and `DD_SITE` are already set in the environment, so no setup
-  is needed.
-- Prefer it over hand-written `curl` whenever a subcommand exists for the task.
+- Default for any lookup or investigation.
+- `DD_API_KEY`, `DD_APP_KEY`, and `DD_SITE` (`us5.datadoghq.com`) are already set in the
+  environment, so no setup is needed.
+- Always pass `--no-agent` when scripting, so output is the raw payload rather than the
+  agent envelope, and use `pup --no-agent <cmd> --help` (agent mode prints a JSON schema
+  instead of usage).
+- Pass `--read-only` for lookups: pup then refuses create/update/delete. It does **not**
+  cover `pup api -X POST|PUT|PATCH|DELETE` (verified 2026-10-12).
+- `pup docs ask "<question>"` queries Datadog's docs AI. Treat answers as leads and confirm
+  against `docs.datadoghq.com`.
 
-### Use Datadog REST API When
+### Use `pup api` (REST) When
 
-- You need to create/update log pipelines (`pup` has no custom-pipeline CRUD — see below).
-- You need endpoint coverage not available in `pup`.
-- You need precise control over full resource payloads.
-
-Common patterns:
-
-- List pipelines: `GET /api/v1/logs/config/pipelines`
-- Read one pipeline: `GET /api/v1/logs/config/pipelines/{id}`
-- Update one pipeline: `PUT /api/v1/logs/config/pipelines/{id}`
-
-Environment requirements:
-
-- `DD_SITE` (for this workspace: `us5.datadoghq.com`)
-- `DD_API_KEY`
-- `DD_APP_KEY`
+- Log pipeline CRUD and ordering: `pup api v1/logs/config/pipelines[/<id>]`,
+  `v1/logs/config/pipeline-order` (`-X POST|PUT --input -` to write).
+- Per-group monitor state: `pup api "v1/monitor/<id>?group_states=all"`.
+- Monitor definition validation: `pup api -X POST v1/monitor/validate --input - < file.json`
+  (returns `{}` when valid; checks schema, not notification handles).
+- Metric existence: `pup api v2/metrics/<m>/all-tags` (`/tags` 404s on metrics with no tag
+  configuration).
+- Any other endpoint pup lacks, or when you need the full resource payload.
 
 ### Use Datadog MCP When
 
@@ -59,29 +67,35 @@ Only when the task needs a product surface `pup` does not cover, for example:
 - LLM Observability datasets/experiments
 - CSPM/SBOM findings
 
+Known MCP pitfalls: `create_datadog_monitor` creates **draft** monitors that never notify;
+dashboard `validate` passes layouts the real API rejects; `ask_widget_expert` has given
+wrong answers.
+
 Note: the `datadog-api-claude-plugin` marketplace plugin is deliberately disabled — it only
 wraps the same API behind an extra sub-agent hop that `pup` already covers directly. Do not
 re-enable it for routine Datadog work.
 
-## Known Findings From Latest Use (2026-03-27)
+## Known Gaps (pup 1.10.3, 2026-10-12)
 
-- `pup` is installed (`0.19.1`) but does not expose a logs custom-pipeline CRUD command in
-  this environment.
-- `pup logs custom-pipeline list` is not a valid command here.
-- Datadog REST API is required for pipeline updates.
-- For Neon logs in this workspace, host is a shared collector host; endpoint identity is best
-  derived from:
-  - `endpoint_id`
-  - `endpoint_type`
-  - `compute_role`
+- No create/update for logs indexes, logs metrics (`get|list|delete` only), or synthetics
+  tests (`get|list|search|run`). folio-platform's `npm run stuffy-pup` wraps the REST API for
+  those three.
+- No log pipeline subcommand — use `pup api` (above).
+- No `pup monitors validate` — use `pup api` (above).
+- `pup integrations slack list` returns 400 regardless of config.
+- `pup llm-obs spans search` **does** exist (needs `--ml-app`; output is `.spans`, not
+  `.data`).
+- For Neon logs in this workspace, host is a shared collector host; endpoint identity is
+  best derived from `endpoint_id`, `endpoint_type`, `compute_role`.
 
-## Practical Workflow
+## Practical Workflow (config changes)
 
-1. Discover fields and explore the data with `pup`.
-2. Confirm target resource shape with API `GET`.
-3. Patch with API `PUT`.
-4. Re-read resource with API `GET` to verify applied processors/filters.
-5. Validate the new data path with a `pup` logs query after fresh events arrive.
+1. Discover fields and explore the data with `pup` (`--read-only`).
+2. Confirm target resource shape with a GET.
+3. Write with the pup subcommand, or `pup api -X PUT` when there is none.
+4. Re-read the resource with a GET to verify what was stored.
+5. Validate the data path with a `pup` query after fresh events arrive — many Datadog
+   writes succeed while changing nothing (an absent remapper source, stale metric points).
 
 ## Validation Checklist
 
@@ -92,9 +106,6 @@ re-enable it for routine Datadog work.
 
 ## Required Maintenance Note
 
-After every use of this skill, update this file with:
-
-- Date of run.
-- Which tool path succeeded (`pup`, `API`, `MCP`, or mixed).
-- Any newly discovered capability gaps or behavior changes.
-- Any revised recommendation for future runs.
+When a run finds a pup capability gap, a behavior change, or a new trap, update **Known
+Gaps** here (tool-path facts) and add the trap to
+`folio-platform/.claude/agents/datadog-researcher.md` (behavior facts), with the date.
