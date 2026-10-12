@@ -55,15 +55,15 @@ GIT_DIR=$(git rev-parse --git-dir)
 LOCK="$GIT_DIR/peer-review.lock"
 if [ -f "$LOCK" ]; then
   age=$(( $(date +%s) - $(cut -d' ' -f1 "$LOCK") ))
-  if [ "$age" -lt 1200 ]; then
+  if [ "$age" -lt 2400 ]; then
     cat "$LOCK"   # a live round holds the lock — do not start a new review
   else
-    rm -f "$LOCK"  # stale (>20min) — previous round crashed; self-heal
+    rm -f "$LOCK"  # stale (>40min, past the reviewers' 30min timeout) — previous round crashed; self-heal
   fi
 fi
 ```
 
-- **Lock held (age < 20min):** don't start a review this iteration.
+- **Lock held (age < 40min):** don't start a review this iteration.
   - Standalone (`/peer-review`): tell the user a round is already in progress in this worktree (report the lock's age and contents) and stop.
   - Under `/loop`: skip straight to `ScheduleWakeup(90s)` with reason `"waiting for in-progress peer-review round to finish"`, no review run. This does not count toward the anti-loop no-progress ceiling — you didn't run a review, so there's nothing to have converged or not.
 - **Lock free (or just cleared as stale):** claim it before invoking codex, recording the HEAD you're reviewing against:
@@ -198,9 +198,9 @@ When *not* to fan out: a diff confined to one file or one concern, a round that 
 
 For either path, `failed` from **any** agent makes the whole round failed: release the lock (`rm -f "$LOCK"`), surface the agent's error text verbatim to the user, and stop. Common causes: not logged in (`codex login`), config error, network. Don't try to work around those. If some lenses succeed and one fails, do not triage a partial union or record a completed round.
 
-`usage_limited` from any agent also prevents local triage or a completed-round record: release the lock and use the fallback below. In `local` mode, report the limit and stop without GitHub calls.
+`usage_limited` from any agent also prevents local triage or a completed-round record: release the lock. With the Codex reviewer, use the fallback below; with the Claude reviewer there is no GitHub equivalent, so report the limit and stop. In `local` mode, report the limit and stop without GitHub calls.
 
-**Exception — usage limit / out of credits** (an agent returns `usage_limited`): fall back to the GitHub review action. Comment `/codex-action-review` on the PR (`gh pr comment <PR> --body "/codex-action-review"`), then continue the workflow with [[babysit-pr]] until the review lands and its findings are addressed. **Never use `@codex review` for this fallback**: it bills the same Codex account as the local CLI, so it hits the same limit (it replies "You have reached your Codex usage limits"). `/codex-action-review` is handled by `.github/workflows/codex-review.yml`, which runs on separate credentials. If the PR doesn't exist yet, stop and report instead.
+**Exception — Codex usage limit / out of credits** (a `codex-reviewer` agent returns `usage_limited`; Codex path only): fall back to the GitHub review action. Comment `/codex-action-review` on the PR (`gh pr comment <PR> --body "/codex-action-review"`), then continue the workflow with [[babysit-pr]] until the review lands and its findings are addressed. **Never use `@codex review` for this fallback**: it bills the same Codex account as the local CLI, so it hits the same limit (it replies "You have reached your Codex usage limits"). `/codex-action-review` is handled by `.github/workflows/codex-review.yml`, which runs on separate credentials. If the PR doesn't exist yet, stop and report instead.
 
 Only when **all** agents return `ok` (regardless of finding count), record the round and both sides' model metadata. Read `REVIEWER_MODEL` and `REVIEWER_EFFORT` from their `reviewer:` lines, retaining the `codex`/`claude` identity with the model. For identical values across N lenses, record the model once and effort as `<effort> ×N`; if values differ, list each lens label with its model/effort in the corresponding columns of the same single row. Missing values are `unknown`.
 ```bash
@@ -432,7 +432,7 @@ The round counter (`$GIT_DIR/peer-review-rounds`) is cumulative for the life of 
 - **Forgetting `local` when the user wants the old no-push, no-`gh` behavior** — default mode now pushes and comments; `local` is the opt-out, not the other way around.
 - **Skipping the summary** — even on a clean review, report it. The user invoked the skill expecting output.
 - **Starting a review without checking the lock** — a round in flight elsewhere means your review's findings go stale mid-run. Check step 0 first, every iteration.
-- **Leaving the lock held on exit** — an orphaned lock blocks every future round in this worktree until it ages out (20min). Release it on every path out of an iteration, not just the happy one.
+- **Leaving the lock held on exit** — an orphaned lock blocks every future round in this worktree until it ages out (40min). Release it on every path out of an iteration, not just the happy one.
 
 ## Why this exists
 

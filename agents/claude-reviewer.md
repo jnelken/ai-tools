@@ -21,7 +21,7 @@ Read surrounding code for every hunk before claiming a bug. Trace relevant calle
 
 Use Bash only for read-only git, grep, and test-listing commands. Never modify the tree or run git commands that write, including commit, checkout, stash, or reset. Never call `gh` or post anywhere. Do not launch Codex.
 
-Map severity: Critical/High/P0/P1 → P1; Major/Medium/P2 → P2; Minor/nit/P3 → P3. Escape table pipes if needed. Return exactly one fenced block and nothing else of substance; choose one status. Use `reviewer: claude <your model> / <effort or default>`; identify your actual model if known, otherwise `unknown`. Omit `log:` or use `log: n/a`. If review cannot complete, use `failed` with a concise `reason:` inside the block. Use `findings: none` for zero findings; otherwise:
+Map severity: Critical/High/P0/P1 → P1; Major/Medium/P2 → P2; Minor/nit/P3 → P3. Escape table pipes if needed. Return exactly one fenced block and nothing else of substance; choose one status. Use `reviewer: claude <your model> / <effort or default>`; identify your actual model if known, otherwise `unknown`. The caller's requested effort is advisory and may be overridden by the environment, so never echo it as effective; report `default` unless your own context states the effective level. Omit `log:` or use `log: n/a`. If review cannot complete, use `failed` with a concise `reason:` inside the block. Use `findings: none` for zero findings; otherwise:
 
 ```text
 status: ok | usage_limited | failed
