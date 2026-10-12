@@ -17,7 +17,7 @@ Docs facts that shaped the design:
 - `model:` accepts aliases (`sonnet`, `opus`, `haiku`), and the Agent call's `model` parameter can still override it.
 - Subagents can spawn subagents (3 levels deep) and can use the Skill tool.
 - `tools:` takes bare tool names only. Restricting Bash to read-only needs a frontmatter `PreToolUse` hook.
-- A background task inside a subagent is not guaranteed to block. A foreground Bash call with a long timeout is the reliable way to wait.
+- A background task inside a subagent is not guaranteed to block, and the Bash tool kills any single call at about 2 minutes. As built, agents detach Codex with `nohup` and poll in bounded foreground calls under 100s until it exits.
 
 ## Roster: five agents
 
@@ -45,8 +45,8 @@ Source: `~/.ai-tools/agents/<name>.md`. `install.sh` (`section_agents`) symlinks
 - the findings as a table: `P1/P2/P3 | file:line | claim | suggested fix`.
 
 **Waiting rule:** the reviewer must wait for its review to finish before returning.
-- `codex-reviewer` runs `codex review -c model_reasoning_effort=$EFFORT [--base $BASE | "<focus prompt with base inlined>"]` in a **foreground** Bash call with `timeout: 600000`. The transcript is saved to `$GIT_DIR/peer-review-<lens>.log`.
-- If that call times out, it re-attaches and keeps polling in the foreground. It never ends its turn while Codex is still running.
+- `codex-reviewer` runs `codex review -c model_reasoning_effort=$EFFORT [--base $BASE | "<focus prompt with base inlined>"]` detached with `nohup` (never wrapped in `bash -c '…"$@"…'`, which background agents are denied even under bypassPermissions). Both `--base` and `--uncommitted` are mutually exclusive with a prompt, so scope goes inside the prompt when focus text is present. The transcript is saved to `$GIT_DIR/peer-review-<lens>.log`.
+- It polls in bounded foreground calls (under 100s each) until Codex exits, giving up after 30 minutes. It never ends its turn while Codex is still running.
 - Keep `codex review` rather than `codex exec`, since that subcommand is built for reviews. Keep the current "no `-m`" behavior so reviews don't change.
 - On a usage limit it reports `usage_limited` and stops. The `/codex-action-review` fallback stays in the skill.
 - Reviewers never edit files.
@@ -61,7 +61,7 @@ Source: `~/.ai-tools/agents/<name>.md`. `install.sh` (`section_agents`) symlinks
 
 **Steps:**
 1. Read the repo's `origin` owner.
-2. **Concentro repos:** follow `~/.claude/instructions/codex-implementation.md` exactly. The prompt goes in a file, then `codex exec -m gpt-6.1-sol -c model_reasoning_effort=high -s workspace-write -C <wt> "$(cat …)" </dev/null` runs in the foreground, then the agent reads the diff and runs that repo's checks.
+2. **Concentro repos:** follow `~/.claude/instructions/codex-implementation.md` exactly. The prompt goes in a file, then `codex exec -m gpt-6.1-sol -c model_reasoning_effort=high -s workspace-write -C <wt> "$(cat …)" </dev/null` runs detached and polled, then the agent reads the diff and runs that repo's checks.
 3. **`jnelken` repos:** follow `/Users/jake/dotfiles/claude/MODEL_ROUTER.md`.
 4. **On a Codex failure** (as defined in codex-implementation.md: non-zero exit, a limit, the Luna fallback also unavailable, a hang, or bad output after one re-prompt), do the work itself.
 5. Make a local checkpoint commit after each verified step, as the existing checkpoint-commit memory says. Never push.
