@@ -118,17 +118,19 @@ Keep the selected reviewer for the entire current `/loop` invocation, including 
 
 ### 2. Run the review — Claude path
 
-When step 1.5 selects Claude, invoke Claude Code's `/code-review` from the target worktree, passing the PR URL (when available), selected diff scope and current HEAD. Use a prompt file and `claude -p` to preserve literal content. Require findings with severity and evidence, or an explicit clean result for that HEAD.
+When step 1.5 selects Claude, dispatch one Agent call with `subagent_type: "claude-reviewer"` and lens label `main` for the target worktree. Pass the PR URL (when available) and current HEAD, plus the shared scope, effort and focus inputs below; prepare those before dispatch. The orchestrator never runs reviewer commands itself.
 
 - Ask Claude to perform the requested review even when the PR is draft, small, or previously reviewed. Those automatic eligibility skips are not a completed peer-review round. Do not undraft a PR to obtain a review.
-- In `local` mode, or when no PR exists yet, explicitly request review of the local diff instead of PR lookup; prohibit GitHub calls and posting. In push mode, request findings in the transcript without a PR comment; step 8 owns the cumulative notification.
-- Keep Claude as the reviewer and the orchestrating agent as the triage/apply side. Capture Claude's effective model and effort from the invocation evidence, or report `unknown`; do not parse it using the Codex transcript format or report a Claude round as `codex review`. Record the actual reviewer command/model in the per-round ledger and step-8 comment.
-- On a nonzero exit or a skipped review, release the lock, surface the error or skip reason, and stop. A skip is not a clean review and must not open the post-PR gates.
-- On a completed review, increment the same round counter and continue at step 3. Apply mechanical findings, then rerun Claude on the updated diff until clean or the existing ceiling is reached.
+- In `local` mode, or when no PR exists yet, explicitly request review of the local diff instead of PR lookup; prohibit GitHub calls and posting. In push mode, request findings in the returned block without a PR comment; step 8 owns the cumulative notification.
+- Keep Claude as the reviewer and the orchestrating agent as the triage/apply side. Use the agent's `reviewer:` line for Claude's effective model and effort, or report `unknown`; do not parse it using the Codex transcript format or report a Claude round as `codex review`. Record the actual reviewer command/model in the per-round ledger and step-8 comment.
+- A skipped review is not clean: release the lock, surface the skip reason, and stop without opening the post-PR gates. Handle returned statuses and record completed rounds using the shared rules below.
+- On a completed review, continue at step 3. Apply mechanical findings, then rerun Claude on the updated diff until clean or the existing ceiling is reached.
 
 ### 2. Run the review — Codex path
 
-**Select this round's reasoning effort before invoking Codex.** The step-down is driven by **what the last round found**, not by how many rounds have run — a round number is a proxy for convergence, while "the previous round surfaced no P1" is direct evidence of it.
+When Codex is selected, dispatch via the Agent tool with `subagent_type: "codex-reviewer"` — one call with label `main`, or the parallel lenses below. The effort selection, focus preparation, status handling and round recording here also apply to the Claude path.
+
+**Select this round's reasoning effort before dispatching the reviewer.** The step-down is driven by **what the last round found**, not by how many rounds have run — a round number is a proxy for convergence, while "the previous round surfaced no P1" is direct evidence of it.
 
 - **Rounds 1–2: always high.** Round 1 is the highest-yield pass, and a single clean look at a fresh diff is weak evidence. This floor is not overridable by the P1 signal.
 - **Round 3+: medium once the immediately preceding round found zero P1 findings**, high otherwise. A round that turned up a P1 means the diff is still yielding substantive defects and the next pass should reason just as hard.
@@ -161,9 +163,9 @@ fi
 signal existed) deliberately keeps the round at high — absence of a record is
 not evidence of a clean round.
 
-Pass `-c model_reasoning_effort=$EFFORT` on every `codex review` invocation this round — both the first attempt below and the detach-and-poll retry use the same `$EFFORT`.
+Pass the same `$EFFORT` to every reviewer agent this round.
 
-**First round on a branch: build a focus prompt before invoking Codex.** A bare `codex review` reports its top-confidence findings, not an exhaustive sweep — each new diff re-rolls its attention, so on a cross-cutting change it peels one layer per round and a review that should converge in 1–2 rounds takes 5+. `codex review` accepts custom instructions as a positional `[PROMPT]` argument; use it. **Gotcha: `--base <branch>` cannot be combined with `[PROMPT]`** — despite the usage string advertising both, the CLI errors out (`the argument '--base <BRANCH>' cannot be used with '[PROMPT]'`, verified on codex 2026-07). When passing a focus prompt, drop the `--base` flag and state the diff scope inside the prompt instead ("Review the changes on this branch relative to the merge-base with origin/<base>. …") — verified to scope the diff identically to `--base`. `--uncommitted` composes with `[PROMPT]` normally. Before the first round:
+**First round on a branch: build a focus prompt before dispatching the reviewer.** A bare `codex review` reports its top-confidence findings, not an exhaustive sweep — each new diff re-rolls its attention, so on a cross-cutting change it peels one layer per round and a review that should converge in 1–2 rounds takes 5+. Before the first round:
 
 1. **Enumerate the change's interaction matrix from the diff.** Which axes does it cut across? Typical axes: data types / value formats (enum, array, date, percent…), component or editor variants that share the behavior, permission/visibility states (unauthorized, masked, loading, read-only), and host contexts (inside buttons, tables, dashboards). A change that mirrors display state or adds a new affordance to existing values usually spans several.
 2. **Self-check the predictable cells yourself, first** — especially the security-shaped ones: *does the new affordance respect value masking / authorization in every state?* Fix what you find before spending a review round discovering it.
@@ -173,41 +175,13 @@ Pass `-c model_reasoning_effort=$EFFORT` on every `codex review` invocation this
    ```
    (That's an example — write the actual axes you enumerated.) Like the rounds file, this persists across iterations and is never cleaned up per-round.
 
-Then run every round with the focus appended — remember `--base` and a prompt are mutually exclusive, so the base goes inside the prompt:
+For either reviewer, pass the **absolute worktree path**, scope `base:<branch>` or `uncommitted` from step 1, `$EFFORT` (`high` or `medium`), the complete contents of `$GIT_DIR/peer-review-focus` (including every `Decided … — do not re-report` line), and lens text plus label (`main` for a single call). Request "Also report anything else you find" alongside the focus. Each agent returns one fenced block with `status: ok | usage_limited | failed`, `reviewer: codex|claude <model> / <effort>`, `lens: <label>`, `log: <absolute path>`, and a normalized findings table (`sev | file:line | claim | suggested fix`), or `findings: none`.
 
-```bash
-FOCUS=$(cat "$GIT_DIR/peer-review-focus" 2>/dev/null)
-TRANSCRIPT="/tmp/peer-review-$$.txt"
-if [ -n "$FOCUS" ]; then
-  codex review -c model_reasoning_effort=$EFFORT "Review the changes on this branch relative to the merge-base with origin/$BASE. Focus especially on: $FOCUS. Also report anything else you find." 2>&1 | tee "$TRANSCRIPT"
-else
-  codex review -c model_reasoning_effort=$EFFORT --base "$BASE" 2>&1 | tee "$TRANSCRIPT"
-fi
-```
+**Gotcha:** `--base <branch>` and `[PROMPT]` are mutually exclusive; `codex-reviewer` handles that by putting the base scope inside the prompt when focus text is present.
 
-(Or `--uncommitted` per step 1.) Pipe through `tee` so you have a stable transcript to refer to while planning — Codex's output can be long and you don't want to re-read it from your scrollback.
+The reviewer agents own detach-and-poll until completion, so the orchestrator never waits on a raw process.
 
-**Gotcha — the Bash tool kills long `codex review` calls at ~2 minutes regardless of timeout settings.** Leaving the timeout at default, passing it explicitly (even up to 590000ms), or adding `run_in_background: true` does not protect the call — the tool invocation itself gets killed at the ~2-minute mark, even though the underlying `codex` process would otherwise keep running to completion. Reconfirmed twice in the same session on a larger diff, so don't re-litigate it by trying `timeout`/`run_in_background` again — go straight to detach-and-poll:
-
-```bash
-# Same --base/[PROMPT] exclusivity applies here: with a focus prompt, name
-# the base inside the prompt; without one, use --base.
-TRANSCRIPT="/tmp/peer-review-$$.txt"
-if [ -n "$FOCUS" ]; then
-  nohup codex review -c model_reasoning_effort=$EFFORT "Review the changes on this branch relative to the merge-base with origin/$BASE. Focus especially on: $FOCUS. Also report anything else you find." > "$TRANSCRIPT" 2>&1 &
-else
-  nohup codex review -c model_reasoning_effort=$EFFORT --base "$BASE" > "$TRANSCRIPT" 2>&1 &
-fi
-CODEX_PID=$!
-```
-
-Then wait on it with the Monitor tool, not a blocking Bash polling loop — that loop also gets killed at 2 minutes even though the detached process underneath survives:
-```bash
-until ! ps -p $CODEX_PID >/dev/null 2>&1; do sleep 5; done; echo done
-```
-Once Monitor reports completion, read `$TRANSCRIPT` for the review output and continue at step 3.
-
-**Parallel lenses (`lenses=N`, or promoted automatically).** A single focus prompt spanning a dozen axes dilutes Codex's attention: one run peels one layer per round, and a review that should converge in 1–2 rounds takes 5+. When `lenses=N` was passed, **or** the matrix from the focus-prompt step spans 3+ axes and no `lenses=` was given, run N *concurrent* `codex review` invocations (default N=3 when promoted; clamp 2–4), each carrying one slice of the focus prompt, then triage the **union** in step 3. This still counts as one round — one lock, one triage, one apply pass, one commit, one increment of the rounds file, one TSV row (record the lens count in the reviewer-effort column, e.g. `high ×3`). It trades tokens for wall-clock rounds.
+**Parallel lenses (`lenses=N`, or promoted automatically).** A single focus prompt spanning a dozen axes dilutes Codex's attention: one run peels one layer per round, and a review that should converge in 1–2 rounds takes 5+. When `lenses=N` was passed, **or** the matrix from the focus-prompt step spans 3+ axes and no `lenses=` was given, dispatch N *concurrent* Agent calls with `subagent_type: "codex-reviewer"` in **one message** (default N=3 when promoted; clamp 2–4), one per lens slice, then triage the **union** in step 3. This still counts as one round — one lock, one triage, one apply pass, one commit, one increment of the rounds file, one TSV row (record the lens count in the reviewer-effort column, e.g. `high ×3`). It trades tokens for wall-clock rounds.
 
 Slice the focus prompt into lenses that a single reviewer would each hold in mind at once. The four that recur on UI/data changes, in order of value:
 
@@ -216,26 +190,26 @@ Slice the focus prompt into lenses that a single reviewer would each hold in min
 3. **Data and formatting** — every data type / variant / status cell of the matrix, display-vs-copy parity, formatter edge cases (suffixes, rounding, empty, arrays).
 4. **Tests and docs** — assertions on removed text, forbidden type casts, mutation-resistant guards, reference docs the diff made stale.
 
-Fewer lenses than that: merge 4 into 3, then 2 into 1. Persist the slices to `$GIT_DIR/peer-review-lenses` (one lens prompt per line) alongside the focus file so every `/loop` round reuses the same partition. Each lens gets its own transcript (`/tmp/peer-review-$$-lens<N>.txt`) and its own detached process; wait for all of them with one Monitor that exits when the last PID is gone. Every lens prompt still states the diff scope ("the changes on this branch relative to the merge-base with origin/<base>") and ends with "Also report anything else you find" so nothing falls between the slices. Dedupe the union by `file:line + summary` before triage — two lenses will occasionally report the same finding.
+Fewer lenses than that: merge 4 into 3, then 2 into 1. Persist the slices to `$GIT_DIR/peer-review-lenses` (one lens prompt per line) alongside the focus file so every `/loop` round reuses the same partition. Give each agent the same worktree, scope, effort and full focus contents including all do-not-re-report lines, plus its own lens text and label `lens<N>`. Codex logs live at `$GIT_DIR/peer-review-<label>.log`; use each agent's returned `log:` path. Every lens prompt still states the diff scope ("the changes on this branch relative to the merge-base with origin/<base>") and ends with "Also report anything else you find" so nothing falls between the slices. Wait for all agents to return, then dedupe the union by `file:line + summary` before triage — two lenses will occasionally report the same finding.
 
 When *not* to fan out: a diff confined to one file or one concern, a round that is only verifying the previous round's fixes (drop to 1 lens — the prior round's report tells you which slice to keep), or a `low`-effort mop-up round.
 
-If `codex` exits non-zero, release the lock (`rm -f "$LOCK"`) and surface the stderr verbatim to the user. Common causes: not logged in (`codex login`), config error, network. Don't try to work around those.
+For either path, `failed` from **any** agent makes the whole round failed: release the lock (`rm -f "$LOCK"`), surface the agent's error text verbatim to the user, and stop. Common causes: not logged in (`codex login`), config error, network. Don't try to work around those. If some lenses succeed and one fails, do not triage a partial union or record a completed round.
 
-**Exception — usage limit / out of credits** (stderr says the workspace is out of credits or has hit its usage limit): fall back to the GitHub review action. Comment `/codex-action-review` on the PR (`gh pr comment <PR> --body "/codex-action-review"`), then continue the workflow with [[babysit-pr]] until the review lands and its findings are addressed. **Never use `@codex review` for this fallback**: it bills the same Codex account as the local CLI, so it hits the same limit (it replies "You have reached your Codex usage limits"). `/codex-action-review` is handled by `.github/workflows/codex-review.yml`, which runs on separate credentials. If the PR doesn't exist yet, stop and report instead.
+`usage_limited` from any agent also prevents local triage or a completed-round record: release the lock and use the fallback below. In `local` mode, report the limit and stop without GitHub calls.
 
-On a successful run (regardless of finding count), record the round and both sides' model metadata:
+**Exception — usage limit / out of credits** (an agent returns `usage_limited`): fall back to the GitHub review action. Comment `/codex-action-review` on the PR (`gh pr comment <PR> --body "/codex-action-review"`), then continue the workflow with [[babysit-pr]] until the review lands and its findings are addressed. **Never use `@codex review` for this fallback**: it bills the same Codex account as the local CLI, so it hits the same limit (it replies "You have reached your Codex usage limits"). `/codex-action-review` is handled by `.github/workflows/codex-review.yml`, which runs on separate credentials. If the PR doesn't exist yet, stop and report instead.
+
+Only when **all** agents return `ok` (regardless of finding count), record the round and both sides' model metadata. Read `REVIEWER_MODEL` and `REVIEWER_EFFORT` from their `reviewer:` lines, retaining the `codex`/`claude` identity with the model. For identical values across N lenses, record the model once and effort as `<effort> ×N`; if values differ, list each lens label with its model/effort in the corresponding columns of the same single row. Missing values are `unknown`.
 ```bash
 GIT_DIR=$(git rev-parse --git-dir)
 ROUNDS_FILE="$GIT_DIR/peer-review-rounds"
 ROUND=$(( $(cat "$ROUNDS_FILE" 2>/dev/null || echo 0) + 1 ))
 echo "$ROUND" > "$ROUNDS_FILE"
 
-# Read these from the transcript produced by this exact run. They are the
-# effective settings after config/profile/CLI overrides, unlike a later read
-# of config.toml.
-REVIEWER_MODEL=$(sed -n 's/^model: //p' "$TRANSCRIPT" | head -1)
-REVIEWER_EFFORT=$(sed -n 's/^reasoning effort: //p' "$TRANSCRIPT" | head -1)
+# Fill these from this round's agents' reviewer: lines, aggregating lenses above.
+REVIEWER_MODEL="<reviewer identity and model>"
+REVIEWER_EFFORT="<reviewer effort, with lens count when applicable>"
 [ -n "$REVIEWER_MODEL" ] || REVIEWER_MODEL="unknown"
 [ -n "$REVIEWER_EFFORT" ] || REVIEWER_EFFORT="unknown"
 
@@ -248,13 +222,13 @@ printf '%s\t%s\t%s\t%s\t%s\n' \
   "$REVIEWEE_MODEL" "$REVIEWEE_EFFORT" \
   >> "$GIT_DIR/peer-review-models.tsv"
 ```
-`$TRANSCRIPT` means the `/tmp/peer-review-*.txt` path passed to `tee` or used as the detached process's output for this run; assign it when launching the review. The transcript header is the source of truth for the reviewer model/effort. Do **not** attribute the orchestrating agent's model or launch effort to Codex, and do not infer Codex's settings from a config file after the run. If either transcript header is unexpectedly absent, record `unknown` rather than guessing.
+The agents' `reviewer:` lines are the source of truth for the reviewer model/effort: Codex's values come from its transcript header, not the wrapper's model. Keep the returned `log:` paths for Codex and the returned block for Claude as this round's evidence. Do **not** attribute the orchestrating agent's model or launch effort to the reviewer, and do not infer reviewer settings from a config file after the run. If either value is absent, record `unknown` rather than guessing.
 
 Both files are scoped to the worktree the same way the lock, are keyed to the current PR (step 0 clears them when the PR changes), and survive between iterations. The rounds file is the running total for step 8; the TSV is an append-only, one-row-per-completed-round ledger with columns `round`, `reviewer model`, `reviewer effort`, `reviewee model`, and `reviewee effort`.
 
 ### 3. Triage findings — DO NOT edit yet
 
-Codex's review output is free-form prose, usually structured as numbered findings with severity hints (P1/P2/nit, or "Critical/Major/Minor", or just inline tone). Read the whole thing, then build a working list — one row per finding:
+Findings arrive as the agents' normalized tables (the deduped union across lenses). Read every row, and read the returned `log:` file when a finding's claim is terse or ambiguous, then build a working list — one row per finding:
 
 | # | severity | file:line | summary | action | reason |
 |---|---|---|---|---|---|
@@ -302,7 +276,7 @@ Write it on every completed round, including a round that found nothing (`0`). S
 
 Apply every `apply` row from the working list, in file order (one file at a time, multiple edits per file batched). After each file, re-read it to confirm the edit landed cleanly. If an edit fails because the surrounding code doesn't match Codex's description, downgrade that row to `skip` and continue — don't force it.
 
-**Parallel apply for a wide round.** When the `apply` rows partition into groups touching **disjoint files** (typical after a multi-lens round: row components, an editor, an API type, a doc), dispatch each group to its own Sonnet subagent in a single message so they run concurrently, and keep the triage table as the contract each one reports against. Rules that make this safe:
+**Parallel apply for a wide round.** When the `apply` rows partition into groups touching **disjoint files** (typical after a multi-lens round: row components, an editor, an API type, a doc), dispatch each group via Agent with `subagent_type: "implementer"` in a single message so they run concurrently. Pass the worktree path, `mode: direct`, **"do not commit"** (step 5 owns the single commit), the group's owned files (source + its test), and its triage rows as a self-contained task; keep the triage table as the contract each one reports against. Rules that make this safe:
 
 - A group owns every file it edits **and** the test file that covers it — mutation-checking a new test rewrites the source, so the source and its test must sit in the same group.
 - Two groups never share a file. If two findings touch one file, they are one group.
@@ -449,8 +423,8 @@ The round counter (`$GIT_DIR/peer-review-rounds`) is cumulative for the life of 
 - **Pushing (or notifying) with unresolved P1/P2 findings still outstanding** — step 8's first guard exists specifically to stop this. Skipped-but-unresolved findings need a human's eyes before reviewers get told "this is clean."
 - **Notifying a PR that doesn't exist** — `gh pr view` returning empty means there's genuinely nothing to notify yet; that's not an error, just report the push and stop. But don't forget about it permanently — if a PR opens later in the same session, go back and post the comment then.
 - **Posting the round-count line with no substance** — the comment must include a prose summary of what was actually found/fixed (or "No issues found"), not just the round/model/effort line. A bare round-count line makes reviewers ask "okay, but what did it find?"
-- **Calling the orchestrator the reviewer** — `codex review` is the reviewer; the Claude/Codex agent driving the skill is the reviewee and triage/apply side. Capture both independently and show them side by side.
-- **Reading reviewer settings from `config.toml` after the run** — that can miss project, profile, managed, or CLI overrides. Parse the effective `model:` and `reasoning effort:` headers from that round's transcript instead.
+- **Calling the orchestrator the reviewer** — the selected reviewer agent supplies the review; the Claude/Codex agent driving the skill is the reviewee and triage/apply side. Capture both independently and show them side by side; the Codex wrapper's model is not the Codex review model.
+- **Reading reviewer settings from `config.toml` after the run** — that can miss project, profile, managed, or CLI overrides. Use that round's agents' `reviewer:` lines instead; absent values stay `unknown`.
 - **Resetting the round counter** — it's cumulative per PR on purpose. Don't zero `$GIT_DIR/peer-review-rounds` after a successful notify; step 0's PR-change guard is the only place it resets.
 - **Reusing a worktree's review state for a new PR** — an earlier PR's round count and focus prompt carry into the next PR's comment and review unless step 0's PR-key guard clears them (seen on api #1461 and #1476: a 1-round PR reported "6 rounds").
 - **Forgetting `local` when the user wants the old no-push, no-`gh` behavior** — default mode now pushes and comments; `local` is the opt-out, not the other way around.

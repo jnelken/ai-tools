@@ -54,6 +54,11 @@ Each skill is a directory with a `SKILL.md` (required) plus optional `scripts/`,
 |---|---|
 | [`react-pro`](agents/react-pro.md) | React performance/architecture specialist agent |
 | [`typescript-pro`](agents/typescript-pro.md) | TypeScript advanced-types/full-stack specialist agent |
+| [`codex-reviewer`](agents/codex-reviewer.md) | Run one Codex review pass and return faithful normalized findings for caller triage |
+| [`claude-reviewer`](agents/claude-reviewer.md) | Independently review Codex-authored changes or a named review angle with code evidence |
+| [`implementer`](agents/implementer.md) | Implement one scoped task with Codex-first routing, Claude fallback, checks, and local checkpoints |
+| [`researcher`](agents/researcher.md) | Investigate code, prior decisions, documentation, branches, and PRs read-only with source evidence |
+| [`ops-investigator`](agents/ops-investigator.md) | Investigate Datadog, Koyeb, and GitHub Actions read-only with reproducible evidence and observability gaps |
 
 ### Hooks (`hooks/`)
 
@@ -63,6 +68,7 @@ Each skill is a directory with a `SKILL.md` (required) plus optional `scripts/`,
 | [`post-yesterdays-ccusage.sh`](hooks/post-yesterdays-ccusage.sh) | SessionStart | Post daily Claude + Codex token-usage summaries to Slack, catching up missed days |
 | [`pick-up-nudge.sh`](hooks/pick-up-nudge.sh) | SessionStart | Nudge to run `/pick-up` when the repo has an `IN_PROGRESS.md` with open checklist items; asks for a background `/pick-up sweep` once per ISO week; resets a file with nothing open to the empty template |
 | [`block-push-to-main.sh`](hooks/block-push-to-main.sh) | PreToolUse (Bash) | Block a Claude-issued `git push` that would target `main`, with a per-repo allowlist |
+| [`readonly-ops-guard.sh`](hooks/readonly-ops-guard.sh) | PreToolUse (ops-investigator frontmatter) | Block known mutating ops commands with a deliberately text-based, fail-open guardrail |
 | [`zsh-word-split-guard.sh`](hooks/zsh-word-split-guard.sh) | PreToolUse (Bash) | Block Bash commands that hit zsh traps: unquoted `$VAR` in `set --`/`for … in` (no word-split) and bare `===` words (`=` expansion); bypass with `# zsh-ok` |
 | [`enforce-claude-symlinks.sh`](hooks/enforce-claude-symlinks.sh) | git `pre-commit` hook (not a `settings.json` hook — runs only from the dev checkout) | Reject a commit that adds an unsymlinked regular file under `~/.claude/` |
 | [`claude-symlink-hygiene.sh`](hooks/claude-symlink-hygiene.sh) | SessionStart | Nudge about new unsymlinked files in `~/.claude/{hooks,commands,agents}/` before they become a blocker |
