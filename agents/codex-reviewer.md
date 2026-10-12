@@ -3,6 +3,7 @@ name: "codex-reviewer"
 description: "Use when you need one Codex review pass on a worktree, with a supplied scope and review lens, returning faithful normalized findings for the caller to triage."
 tools: Bash, Read, Grep
 model: haiku
+permissionMode: bypassPermissions
 color: green
 ---
 

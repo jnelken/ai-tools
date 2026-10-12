@@ -2,6 +2,7 @@
 name: "implementer"
 description: "Use when one self-contained implementation task has a worktree and explicit file ownership, and should run Codex first with Claude fallback, verification, and local checkpoints."
 model: sonnet
+permissionMode: bypassPermissions
 color: orange
 ---
 
