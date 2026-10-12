@@ -1,13 +1,13 @@
 ---
 name: peer-review
-description: Use when the user wants an independent code review of the current branch (or uncommitted changes), using Claude /code-review when Codex authored the last commit and Codex otherwise, mechanical findings applied as edits, and — by default — the branch pushed and the PR notified with the round count once review comes back clean; pass "local" for no-push, no-PR-contact behavior. Trigger phrases include "peer review", "run codex on this", "self-review before I push", "codex my changes", "do a local review first", "keep reviewing until clean", "cycle codex locally", "review and push when clean", "local review only".
+description: Use when the user wants an independent code review of the current branch (or uncommitted changes), using the claude-reviewer agent when Codex authored the last commit and Codex otherwise, mechanical findings applied as edits, and — by default — the branch pushed and the PR notified with the round count once review comes back clean; pass "local" for no-push, no-PR-contact behavior. Trigger phrases include "peer review", "run codex on this", "self-review before I push", "codex my changes", "do a local review first", "keep reviewing until clean", "cycle codex locally", "review and push when clean", "local review only".
 ---
 
 # Peer Review
 
 ## Overview
 
-Choose the reviewer from the last commit's authorship: Claude `/code-review` for Codex-authored work, `codex review` otherwise. Review the current branch's diff, triage the findings, apply the mechanical fixes, and commit. Two modes, chosen by the optional `local` argument (step 1):
+Choose the reviewer from the last commit's authorship: the `claude-reviewer` agent for Codex-authored work, the `codex-reviewer` agent otherwise. Review the current branch's diff, triage the findings, apply the mechanical fixes, and commit. Two modes, chosen by the optional `local` argument (step 1):
 
 - **Default (push mode):** once the review comes back clean (or the `/loop` ceiling is hit) with no unresolved P1/P2 findings, push the branch and — if a PR already exists for it — post a comment reporting how many review rounds ran before this push, plus the model and reasoning effort for both sides: the selected reviewer and the orchestrating reviewee that triaged/applied its findings. Gives human reviewers a signal for how much ground the independent reviewer already covered before they open the diff.
 - **`local` mode:** the original behavior — review → fix → commit, never push, never touch `gh`. Use this for a review pass with zero PR-side effects (e.g. reviewing someone else's branch, or you're not ready for this to be visible).
@@ -106,7 +106,7 @@ If both committed-branch-changes AND uncommitted changes exist, ask the user whi
 
 ### 1.5. Select an independent reviewer
 
-**If Codex authored the last implementation commit, use Claude `/code-review` instead of `codex review`.** Use the last commit as the simple routing rule; do not count the branch's commits. Ignore merge commits when locating that implementation commit:
+**If Codex authored the last implementation commit, use the `claude-reviewer` agent instead of `codex-reviewer`.** Use the last commit as the simple routing rule; do not count the branch's commits. Ignore merge commits when locating that implementation commit:
 
 ```bash
 git log -1 --no-merges --format=fuller
@@ -180,6 +180,8 @@ For either reviewer, pass the **absolute worktree path**, scope `base:<branch>` 
 **Gotcha:** `--base <branch>` and `[PROMPT]` are mutually exclusive; `codex-reviewer` handles that by putting the base scope inside the prompt when focus text is present.
 
 The reviewer agents own detach-and-poll until completion, so the orchestrator never waits on a raw process.
+
+**Fallback — agent type unavailable.** Agent definitions load at session start, so a session older than `~/.claude/agents/codex-reviewer.md` (or one without the Agent tool) gets an unknown-type error. That is not a reviewer `failed`: read the selected agent file (`~/.claude/agents/codex-reviewer.md` or `claude-reviewer.md`) and run its procedure yourself — same command, same detach-and-poll in bounded foreground calls under 100s, same output block — then continue as if the agent had returned it.
 
 **Parallel lenses (`lenses=N`, or promoted automatically).** A single focus prompt spanning a dozen axes dilutes Codex's attention: one run peels one layer per round, and a review that should converge in 1–2 rounds takes 5+. When `lenses=N` was passed, **or** the matrix from the focus-prompt step spans 3+ axes and no `lenses=` was given, dispatch N *concurrent* Agent calls with `subagent_type: "codex-reviewer"` in **one message** (default N=3 when promoted; clamp 2–4), one per lens slice, then triage the **union** in step 3. This still counts as one round — one lock, one triage, one apply pass, one commit, one increment of the rounds file, one TSV row (record the lens count in the reviewer-effort column, e.g. `high ×3`). It trades tokens for wall-clock rounds.
 
@@ -372,7 +374,7 @@ Otherwise:
 
 4. Post one comment (a fresh comment each time this step runs — not an edit-in-place). The body is three parts, in this order: the round-count line, a two-column model table with the reviewer and reviewee side by side, then a short prose **summary** — the same substance you'd give the user directly in chat, not the raw step-6 table. Reference the specific fix(es) (file:line or a one-line description of the bug) and the commit SHA(s); if a round found nothing, say so plainly ("No issues found."). If step 8 runs after multiple `/loop` rounds, the summary covers the cumulative set of fixes across *all* rounds since the last push/notify, not just the final one — synthesize from every round's step-6 report you generated this session, not only the last.
 
-   Use the actual reviewer command and name in the comment; the example below is for Codex rounds. For Claude rounds, write `Claude /code-review` and Claude's recorded model/effort. If both reviewers have run on this PR, report their rounds separately.
+   Use the actual reviewer command and name in the comment; the example below is for Codex rounds. For Claude rounds, write `claude-reviewer` and Claude's recorded model/effort. If both reviewers have run on this PR, report their rounds separately.
 
    ```bash
    gh pr comment "$PR_NUM" --body "$(cat <<EOF
