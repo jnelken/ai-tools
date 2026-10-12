@@ -114,20 +114,75 @@ done <<'CASES'
 2|GitHub API GraphQL mutation|gh api graphql -f query='mutation { addStar(input:{starrableId:"x"}) { clientMutationId } }'
 2|GitHub API GraphQL mutation with explicit GET|gh api -X GET graphql -f query='mutation { a }'
 2|GitHub API GraphQL input file|gh api graphql --input q.json
+2|GitHub API GraphQL query from file|gh api graphql -F query=@/tmp/q.graphql
+2|GitHub API lowercase method|gh api -X post repos/x/y/issues
+0|pup api default GET|pup api v1/monitor
+0|pup api GET with query fields|pup api v2/monitors -F tags=env:prod -F page=0
+0|pup api explicit GET|pup api --method GET v2/monitors
+2|pup api DELETE|pup api -X DELETE v1/monitor/123
+2|pup api equals method|pup api --method=POST v1/monitor --input /tmp/monitor.json
+2|pup api attached method|pup api -XPUT v1/monitor/1
+0|pup tags get|pup tags get myhost
+0|pup tags list|pup tags list
+2|pup tags add|pup tags add myhost env:prod
+2|pup tags remove|pup tags remove myhost env:prod
+2|pup tags flag before verb|pup tags --no-agent add myhost env:prod
+2|subshell git push|(git push origin main)
+2|spaced subshell|( git push)
+2|subshell koyeb delete|(koyeb services delete foo)
+2|command substitution|echo $(git push origin main)
+2|backtick substitution|echo `git push origin main`
+2|nested substitution|echo "$(gh run rerun 9)"
+2|brace group|{ git push; }
+0|read-only command substitution|echo $(git log --oneline)
+2|gh run flag before verb|gh run -R x/y rerun 9
+2|gh pr flag before verb|gh pr -R x/y merge 3
+2|gh pr long flag before verb|gh pr --repo=x/y merge 3
+2|gh workflow flag before verb|gh workflow -R x/y run ci.yml
+2|gh issue flag before verb|gh issue -R x/y close 3
+2|koyeb secrets flag before reveal|koyeb secrets -o json reveal K
+2|koyeb sec alias reveal|koyeb sec reveal K
+2|koyeb scale|koyeb services scale foo --instances 0
+2|koyeb deploy|koyeb deploy .
+2|gh workflow enable|gh workflow enable ci.yml
+2|gh workflow disable|gh workflow disable ci.yml
+2|gh run delete|gh run delete 9
+2|gh pr create|gh pr create --title x
+2|gh pr update-branch|gh pr update-branch 3
+0|gh pr view comments flag|gh pr view 5 --comments
+0|gh pr list closed state|gh pr list --state closed
+0|gh pr list search for mutating word|gh pr list --search merge
+0|gh pr list search for several mutating words|gh pr list --search 'review comment close'
+0|gh issue list search for mutating word|gh issue list --search create
+0|gh run list workflow filter|gh run list --workflow cancel
+0|gh run view flag before read verb|gh run -R x/y view 9
+0|koyeb secrets list|koyeb secrets list -o json
+2|curl bundled method|curl -sX POST https://x
+2|curl bundled attached method|curl -sSXDELETE https://x
+2|curl lowercase method|curl -X post https://x
+2|curl bundled data|curl -sd x=1 https://x
+2|curl bundled form|curl -sF a=b https://x
+2|curl bundled upload|curl -sT /tmp/body https://x
+0|curl read-only flags|curl -sSL -o /tmp/out.d https://x
+0|curl head request|curl -I https://x
+0|curl dump header|curl -D /tmp/h https://x
 CASES
 
 # Cover every remaining mutating verb rather than just one per CLI.
-for verb in update redeploy delete pause resume create; do
+for verb in update redeploy delete pause resume create scale deploy; do
   expect 2 "Koyeb $verb" "koyeb services $verb foo"
 done
 for verb in create update delete mute unmute patch cancel trigger; do
   expect 2 "Datadog $verb" "pup monitors $verb 1"
 done
-for verb in merge comment edit close review ready; do
+for verb in merge comment edit close review ready create reopen lock unlock update-branch; do
   expect 2 "PR $verb" "gh pr $verb 3"
 done
-for verb in create comment edit close; do
+for verb in create comment edit close reopen delete lock unlock transfer pin unpin; do
   expect 2 "issue $verb" "gh issue $verb 3"
+done
+for verb in rerun cancel delete; do
+  expect 2 "run $verb" "gh run $verb 9"
 done
 for method in POST PATCH PUT DELETE; do
   expect 2 "GitHub method $method" "gh api -X $method repos/x/y"
