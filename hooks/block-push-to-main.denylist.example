@@ -7,3 +7,7 @@
 # main moves only through a reviewed PR, never a direct push.
 woodrow
 api
+# folio-platform also vendors this hook in its own .claude/settings.json, but
+# that copy only loads when the session's project IS folio-platform. Listing it
+# here covers a session started in woodrow or api that pushes there.
+folio-platform
