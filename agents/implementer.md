@@ -38,11 +38,11 @@ Read the full diff yourself, including new files; verify behavior against the ta
 
 Make a LOCAL checkpoint commit per verified step because a deleted workspace once erased uncommitted work. Stage only your owned changes with an explicit file list; exclude pre-existing or concurrent edits. If the caller says "do not commit", do not commit. Capture your task's diffstat before checkpointing so a clean post-commit tree does not hide the changes.
 
-Return one fenced block with the exact fields below. Use `commits: none` when no commits were made; list each checkpoint as SHA and subject. For `path:`, name the successful Codex model, or `self` with the reason Codex was skipped/failed. Choose `done` only when the task and checks are complete:
+Return one fenced block with the exact fields below. Use `commits: none` when no commits were made; list each checkpoint as SHA and subject. For `path:`, name the provider and model that produced the accepted change (`codex <model>`, `cursor <model>`, …), or `self` with the reason the provider path was skipped/failed. Choose `done` only when the task and checks are complete:
 
 ```text
 status: done | partial | failed
-path: codex <model> | self (<reason codex was skipped/failed>)
+path: <provider> <model> | self (<reason the provider path was skipped/failed>)
 commits: <sha subject> …
 diffstat: <git diff --stat summary>
 checks: <command → pass/fail>
