@@ -309,7 +309,9 @@ def save_state(path, state):
 
 def decide(event, harness, data, existing, state):
     """Return (new_title or None, new_state). Pure, so tests can cover it."""
-    session_id = str(data.get("session_id") or data.get("resourceId") or data.get("resource_id") or "")
+    # No session key in the payload (Codex shape unverified): one terminal is one session.
+    session_id = str(data.get("session_id") or data.get("resourceId") or data.get("resource_id")
+                     or os.environ.get("SUPERSET_TERMINAL_ID", ""))
     glyph, base = split_glyph(existing or "")
     ours = state.get("slug", "")
     new_state = dict(state)
@@ -333,7 +335,11 @@ def decide(event, harness, data, existing, state):
         return None, new_state  # nothing was ever named; a stop alone names nothing
     text, tool = final_text_and_tool(data)
     if not text.strip() and not tool:
-        return None, new_state  # no information about how the turn ended
+        # No information about how the turn ended. Claude: a transcript hiccup,
+        # leave it. Codex: may be its normal Stop payload, so at least leave ◐.
+        if harness != "codex":
+            return None, new_state
+        return IDLE + " " + base, new_state
     run = signoff_glyphs(text)
     if not run:
         if tool in BLOCKING_TOOLS:

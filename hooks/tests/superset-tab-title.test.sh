@@ -63,7 +63,13 @@ expect "" "transcript: no glyph → wait"                  "$(tx "$A_BAD")"
 expect "🛑 ship-widget" "transcript: AskUserQuestion → blocked" "$(tx "$A_BAD"$'\n'"$A_ASK")"
 expect "○ ship-widget" "transcript: ends on plain tool_use → idle" "$(tx "$A_BAD"$'\n'"$A_TOOL")"
 expect "✅ ship-widget" "transcript: sidechain ignored"  "$(tx "$A_OK"$'\n'"$SIDE")"
-expect "" "transcript: missing file" "$(run stop claude "◐ ship-widget" '{"transcript_path":"/nonexistent/x.jsonl"}')"
+expect "" "transcript: missing file (claude waits)" "$(run stop claude "◐ ship-widget" '{"transcript_path":"/nonexistent/x.jsonl"}')"
+expect "○ ship-widget" "stop: codex with no text at all → idle" "$(run stop codex "◐ ship-widget" '{"hook_event_name":"Stop"}')"
+
+# ── no session key (Codex shape unverified): one terminal is one session ──
+reset
+expect "◐ first-prompt-wins" "no session id: first prompt" "$(run prompt codex "" '{"prompt":"the first prompt wins"}')"
+expect "◐ first-prompt-wins" "no session id: second prompt keeps slug" "$(run prompt codex "✅ first-prompt-wins" '{"prompt":"a completely different second prompt"}')"
 
 # ── tolerant prompt parsing (Codex shapes) ──
 reset
