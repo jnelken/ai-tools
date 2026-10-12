@@ -64,6 +64,25 @@ Reads `last_assistant_message` from the hook input, falling back to the last non
 
 Tests: `bash hooks/tests/status-glyph-check.test.sh`.
 
+## superset-tab-title.py
+
+A **UserPromptSubmit + Stop hook** (Claude Code and Codex) that names the Superset terminal tab after the work in it. First prompt of a session → `◐ <kebab-slug-of-the-prompt>` (stopwords stripped, ≤5 words, ≤32 chars; falls back to the git branch). Every later prompt flips the glyph back to `◐`; every Stop swaps in the sign-off glyph from the final assistant line (the `status-glyph-check.sh` legend: 🛑 ⚠️ ⏳ 💡 ✅ ⛏️ 💬, combos like `⏳💡` kept). A turn ending on `AskUserQuestion`/`ExitPlanMode` gets 🛑; a Codex stop with no glyph gets `○`. A name Jake typed in the app's rename dialog (or set with the host API by hand) is kept as the base — only the glyph moves — and a new session in the same terminal re-slugs.
+
+It writes through the Superset host service's loopback tRPC `terminal.rename` (unsupported internal API, Superset ≥1.35): endpoint + bearer token are read at call time from `~/.superset/host/<orgId>/manifest.json`, trying the env's org first and every other org manifest after, 2s timeout. Visible only on tabs without a pane title override — sessions created from the CLI/MCP (`superset terminals create`, `agents create`) and adopted by the desktop, which is where Claude-spawned sessions live. Desktop-launched agent tabs keep their launch label (e.g. "Fable") until the in-app rename dialog retires it (upstream: superset-sh/superset#4934, #6846).
+
+Gated on `SUPERSET_TERMINAL_ID` + `SUPERSET_WORKSPACE_ID`; always exits 0 and prints nothing (UserPromptSubmit stdout is injected into the agent's context). State per terminal in `~/.cache/superset-tab-title/`. `SUPERSET_TAB_TITLE_DEBUG=<file>` appends raw payloads + decisions; `SUPERSET_TAB_TITLE_DRY_RUN=1` prints the title instead of writing it (what the tests use). Tests: `bash hooks/tests/superset-tab-title.test.sh`.
+
+### settings.json wiring (Claude)
+
+```json
+"UserPromptSubmit": [{ "hooks": [{ "type": "command", "command": "python3 \"$HOME/.claude/hooks/superset-tab-title.py\" --event prompt --harness claude", "timeout": 5 }] }],
+"Stop":             [{ "hooks": [{ "type": "command", "command": "python3 \"$HOME/.claude/hooks/superset-tab-title.py\" --event stop --harness claude",   "timeout": 5 }] }]
+```
+
+### ~/.codex/hooks.json wiring (Codex)
+
+Same two entries with `--harness codex`. Codex pins hook trust per entry in `~/.codex/config.toml` (`[hooks.state]`, hashed on the command string), so after editing `hooks.json` the new entries must be re-trusted in Codex's hooks UI before they run. The Codex payload shape is unverified; the prompt parser tries `prompt`, `user_prompt`, `text`, `items[].text` and `payload.UserTurn.items[].text`, and the debug log shows what actually arrived.
+
 ## post-yesterdays-ccusage.sh
 
 Posts daily ccusage summaries (Claude + Codex token usage) to a Slack channel via incoming webhook. Triggered on every Claude Code session start; catches up any days missed since the last successful post.
