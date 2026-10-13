@@ -13,6 +13,8 @@ dev checkout — wherever this repo is cloned for editing (`~/code/ai-tools` on 
 the deploy guard's refusal message names the resolved path) — and push. Everything below
 describes that dev checkout.
 
+The `ai-tools-deploy-guard` hook now enforces this for Claude's file tools (Edit/Write/MultiEdit/NotebookEdit); Codex and other subprocesses must also target `~/code/ai-tools` (e.g. `codex exec -C ~/code/ai-tools`), never the deploy clone.
+
 **The dev checkout is dev-only.** `~/.claude/*` is symlinked from a separate deploy clone at `~/.ai-tools`, which tracks `origin/main` and is managed entirely by `install.sh` — never hand-edited. Concretely:
 
 - `git push` to `main` from this checkout **is** the deploy step — it doesn't reach any machine until something updates `~/.ai-tools` from origin.

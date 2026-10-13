@@ -220,7 +220,7 @@ run_section() {
 }
 
 # ensure_jq: jq is needed for every settings.json write (statusLine, the
-# ai-tools-sync wiring) and for the statusline itself. Try to install it, but
+# ai-tools-sync/deploy-guard wiring) and for the statusline itself. Try to install it, but
 # NEVER let that abort the installer: package managers may need a sudo
 # password nobody can type (cloud containers, `curl | bash` where stdin IS the
 # script), so every attempt is non-interactive (sudo -n, stdin from /dev/null)
@@ -505,6 +505,40 @@ wire_ai_tools_sync_hook() {
   fi
 }
 
+# wire_ai_tools_deploy_guard_hook: idempotently protect the deploy clone from
+# Claude file tools, unless a PreToolUse command already mentions this guard.
+wire_ai_tools_deploy_guard_hook() {
+  if ! command -v jq >/dev/null 2>&1; then
+    echo "  ⚠ jq unavailable — skipped settings.json PreToolUse wiring for ai-tools-deploy-guard.sh."
+    echo "     Add manually: matcher Edit|Write|MultiEdit|NotebookEdit, command bash \"\$HOME/.claude/hooks/ai-tools-deploy-guard.sh\"."
+    return
+  fi
+
+  mkdir -p "$CLAUDE_DIR"
+  # shellcheck disable=SC2016  # literal $HOME — meant for settings.json, not expanded here
+  local cmd_str='bash "$HOME/.claude/hooks/ai-tools-deploy-guard.sh"'
+  local matcher='Edit|Write|MultiEdit|NotebookEdit'
+
+  if [ -f "$SETTINGS" ]; then
+    if jq -e '(.hooks.PreToolUse // [])[]? | .hooks[]? | select(.command? and (.command | contains("ai-tools-deploy-guard.sh")))' \
+      "$SETTINGS" >/dev/null 2>&1; then
+      if [ "$QUIET" -eq 0 ]; then echo "  ✓ settings.json PreToolUse already wires ai-tools-deploy-guard.sh"; fi
+      return
+    fi
+    backup_settings_once
+    local real; real="$(settings_target)"
+    jq --arg cmd "$cmd_str" --arg matcher "$matcher" '
+      .hooks = (.hooks // {}) |
+      .hooks.PreToolUse = ((.hooks.PreToolUse // []) + [{"matcher":$matcher,"hooks":[{"type":"command","command":$cmd}]}])
+    ' "$real" > "$real.tmp" && mv "$real.tmp" "$real"
+    echo "  settings.json: wired ai-tools-deploy-guard.sh into hooks.PreToolUse"
+  else
+    jq -n --arg cmd "$cmd_str" --arg matcher "$matcher" \
+      '{hooks:{PreToolUse:[{"matcher":$matcher,"hooks":[{"type":"command","command":$cmd}]}]}}' > "$SETTINGS"
+    echo "  settings.json: created, with ai-tools-deploy-guard.sh wired into hooks.PreToolUse"
+  fi
+}
+
 # ── hooks/ ──
 section_hooks() {
   [ -d "$SRC_ROOT/hooks" ] || return 0
@@ -528,11 +562,12 @@ section_hooks() {
   fi
 
   wire_ai_tools_sync_hook
+  wire_ai_tools_deploy_guard_hook
 
   # Diff symlinked hook scripts against settings.json to flag ones that are
   # present on disk but not actually wired into any hooks.<EVENT> entry.
-  # Runs AFTER wire_ai_tools_sync_hook so a fresh ai-tools-sync.sh isn't
-  # flagged as unwired the moment it's added above.
+  # Runs AFTER both wiring functions so newly added hooks aren't flagged as
+  # unwired the moment they're added above.
   if command -v jq >/dev/null 2>&1 && [ -f "$SETTINGS" ]; then
     local NOT_WIRED=()
     for hook in "$SRC_ROOT/hooks"/*; do

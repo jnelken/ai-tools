@@ -52,8 +52,6 @@ Each skill is a directory with a `SKILL.md` (required) plus optional `scripts/`,
 
 | Agent | Purpose |
 |---|---|
-| [`react-pro`](agents/react-pro.md) | React performance/architecture specialist agent |
-| [`typescript-pro`](agents/typescript-pro.md) | TypeScript advanced-types/full-stack specialist agent |
 | [`codex-reviewer`](agents/codex-reviewer.md) | Run one Codex review pass and return faithful normalized findings for caller triage |
 | [`claude-reviewer`](agents/claude-reviewer.md) | Independently review Codex-authored changes or a named review angle with code evidence |
 | [`implementer`](agents/implementer.md) | Implement one scoped task with Codex-first routing, Claude fallback, checks, and local checkpoints |
@@ -65,6 +63,7 @@ Each skill is a directory with a `SKILL.md` (required) plus optional `scripts/`,
 | Hook | When | Purpose |
 |---|---|---|
 | [`ai-tools-sync.sh`](hooks/ai-tools-sync.sh) | SessionStart | Keep the deploy clone (`~/.ai-tools`) synced with `origin/main`, re-link on change, and nudge about a dirty deploy clone or leftover `--dev` links |
+| [`ai-tools-deploy-guard.sh`](hooks/ai-tools-deploy-guard.sh) | PreToolUse (Edit\|Write\|MultiEdit\|NotebookEdit) | Block edits into the deploy clone, including through installed symlinks; allow gitignored runtime files; wired by `install.sh` |
 | [`post-yesterdays-ccusage.sh`](hooks/post-yesterdays-ccusage.sh) | SessionStart | Post daily Claude + Codex token-usage summaries to Slack, catching up missed days |
 | [`pick-up-nudge.sh`](hooks/pick-up-nudge.sh) | SessionStart | Nudge to run `/pick-up` when the repo has an `IN_PROGRESS.md` with open checklist items; asks for a background `/pick-up sweep` once per ISO week; resets a file with nothing open to the empty template |
 | [`block-push-to-main.sh`](hooks/block-push-to-main.sh) | PreToolUse (Bash) | Block a Claude-issued `git push` that would target `main`, with a per-repo allowlist |
@@ -139,7 +138,7 @@ The installer creates symlinks at:
 
 It also prunes dangling `~/.claude/*` symlinks left behind by renamed or removed ai-tools content — only links whose target was inside an ai-tools checkout are touched; anything else is left alone.
 
-It also wires a `SessionStart` hook (`ai-tools-sync.sh`) into `~/.claude/settings.json` that keeps `~/.ai-tools` synced with `origin/main` automatically on future sessions — see [`hooks/README.md`](hooks/README.md#ai-tools-syncsh).
+It also wires a `SessionStart` hook (`ai-tools-sync.sh`) into `~/.claude/settings.json` that keeps `~/.ai-tools` synced with `origin/main` automatically on future sessions — see [`hooks/README.md`](hooks/README.md#ai-tools-syncsh) — and a `PreToolUse` hook (`ai-tools-deploy-guard.sh`) that blocks Claude's file tools from editing the deploy clone while allowing gitignored runtime files.
 
 Safety: it **refuses to overwrite** existing non-symlink files/directories — manually `rm -rf` the conflicting path first if you want this repo's version. If `~/.ai-tools` has been edited in place (uncommitted changes), the update step warns and skips the fetch/merge rather than resetting it — no local edit is ever silently dropped.
 
@@ -155,7 +154,7 @@ curl -fsSL https://raw.githubusercontent.com/jnelken/ai-tools/main/install.sh | 
 - **Cursor cloud agents**: put it in `.cursor/environment.json`'s `install` command.
 - **Superset workspaces**: put it in `.superset/config.json`'s `setup` command.
 
-What the bootstrap does **not** carry: `~/.claude/settings.json` is machine-local and not versioned, so beyond `statusLine` and the `ai-tools-sync.sh` `SessionStart` entry that `install.sh` writes, every other hook still needs wiring per [`hooks/README.md`](hooks/README.md) on each new environment. Secrets (webhook URLs, API keys) arrive via environment variables set on the environment itself — never from the repo.
+What the bootstrap does **not** carry: `~/.claude/settings.json` is machine-local and not versioned, so beyond `statusLine`, the `ai-tools-sync.sh` `SessionStart` entry, and the `ai-tools-deploy-guard.sh` `PreToolUse` entry that `install.sh` writes, every other hook still needs wiring per [`hooks/README.md`](hooks/README.md) on each new environment. Secrets (webhook URLs, API keys) arrive via environment variables set on the environment itself — never from the repo.
 
 ### Windows
 
