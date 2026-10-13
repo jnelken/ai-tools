@@ -209,6 +209,37 @@ def fallback_slug(cwd):
     return slugify(branch)
 
 
+def claude_session_name(session_id):
+    """(name, source) from ~/.claude/sessions/<pid>.json for this session.
+
+    Claude Code keeps every live session's display name there: source "user"
+    is /rename, "auto" is its own first-prompt title, "derived" is the branch
+    or cwd (noise — ignored). Mirroring it means /rename renames the tab too.
+    """
+    if not session_id:
+        return "", ""
+    d = os.environ.get("SUPERSET_TAB_TITLE_SESSIONS_DIR") or os.path.expanduser("~/.claude/sessions")
+    try:
+        names = os.listdir(d)
+    except OSError:
+        return "", ""
+    for n in names:
+        if not n.endswith(".json"):
+            continue
+        try:
+            with open(os.path.join(d, n), encoding="utf-8") as fh:
+                s = json.load(fh)
+        except (OSError, ValueError):
+            continue
+        if isinstance(s, dict) and s.get("sessionId") == session_id:
+            name = s.get("name")
+            source = s.get("nameSource")
+            if isinstance(name, str) and name.strip() and source in ("user", "auto"):
+                return name.strip(), source
+            return "", ""
+    return "", ""
+
+
 # ── host service ─────────────────────────────────────────────────────────────
 
 
@@ -307,6 +338,29 @@ def save_state(path, state):
 # ── main ─────────────────────────────────────────────────────────────────────
 
 
+def mirror_claude_name(harness, session_id, base, ours, data):
+    """Claude's session name to use as the tab's base, or ''.
+
+    A `/rename` ("user") always wins, including over a name typed in Superset's
+    dialog. Claude's own "auto" title replaces our slug but not a manual name.
+    A `/rename <name>` prompt is honoured immediately, before Claude Code has
+    written the sessions file.
+    """
+    if harness != "claude":
+        return ""
+    manual = bool(base) and base != ours
+    prompt = extract_prompt(data)
+    m = re.match(r"^/rename\s+(.+?)\s*$", prompt or "")
+    if m:
+        return m.group(1)
+    name, source = claude_session_name(session_id)
+    if not name:
+        return ""
+    if source == "user" or not manual:
+        return name
+    return ""
+
+
 def decide(event, harness, data, existing, state):
     """Return (new_title or None, new_state). Pure, so tests can cover it."""
     # No session key in the payload (Codex shape unverified): one terminal is one session.
@@ -329,7 +383,10 @@ def decide(event, harness, data, existing, state):
             return None, new_state
         same_session = session_id and not foreign
         manual = base and base != ours  # a name we didn't set: keep it
-        if manual or (base and same_session):
+        mirrored = mirror_claude_name(harness, raw_session, base, ours, data)
+        if mirrored:
+            slug = new_state["slug"] = mirrored
+        elif manual or (base and same_session):
             slug = base
         else:
             slug = slugify(extract_prompt(data)) or fallback_slug(data.get("cwd", "")) or base
@@ -341,10 +398,13 @@ def decide(event, harness, data, existing, state):
         return WORKING + " " + slug, new_state
 
     # stop
-    if not base:
-        return None, new_state  # nothing was ever named; a stop alone names nothing
     if foreign:
         return None, new_state  # a sub-agent finishing is not the session finishing
+    mirrored = mirror_claude_name(harness, raw_session, base, ours, data)
+    if mirrored:
+        base = new_state["slug"] = mirrored  # Claude's auto name often lands after turn 1
+    if not base:
+        return None, new_state  # nothing was ever named; a stop alone names nothing
     text, tool = final_text_and_tool(data)
     if not text.strip() and not tool:
         # No information about how the turn ended. Claude: a transcript hiccup,
@@ -366,6 +426,7 @@ def decide(event, harness, data, existing, state):
 def main(argv):
     event = "prompt"
     harness = "claude"
+    set_title = None
     args = list(argv)
     while args:
         a = args.pop(0)
@@ -373,9 +434,26 @@ def main(argv):
             event = args.pop(0)
         elif a == "--harness" and args:
             harness = args.pop(0)
+        elif a == "--set" and args:
+            set_title = args.pop(0).strip()  # direct rename, e.g. from a skill; keeps the glyph
     terminal_id = os.environ.get("SUPERSET_TERMINAL_ID", "")
     workspace_id = os.environ.get("SUPERSET_WORKSPACE_ID", "")
     if not terminal_id or not workspace_id:
+        return 0
+
+    if set_title is not None:
+        dry = os.environ.get("SUPERSET_TAB_TITLE_DRY_RUN") == "1"
+        spath = state_path(terminal_id)
+        state = load_state(spath) if spath else {}
+        existing = os.environ.get("SUPERSET_TAB_TITLE_EXISTING", "") if dry else (current_custom_title(terminal_id, workspace_id)[0] or state.get("last_title", ""))
+        glyph, _ = split_glyph(existing or "")
+        title = (glyph + " " + set_title).strip() if set_title else ""
+        if dry:
+            sys.stdout.write(title + "\n")
+        elif not rename(terminal_id, workspace_id, title):
+            return 0
+        state.update({"slug": set_title, "last_title": title})
+        save_state(spath, state)
         return 0
 
     data, raw = read_stdin()

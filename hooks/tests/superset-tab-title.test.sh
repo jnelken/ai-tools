@@ -96,6 +96,34 @@ expect "" "claude: stop from an unknown session ignored" \
 expect "◐ resume-other-thing" "claude: new session re-slugs" \
   "$(run prompt claude "◐ ship-widget" '{"session_id":"s2","prompt":"resume the other thing"}')"
 
+# ── Claude's own session name is mirrored (user > auto > our slug; auto never beats a manual name) ──
+export SUPERSET_TAB_TITLE_SESSIONS_DIR="$TMP/sessions"; mkdir -p "$SUPERSET_TAB_TITLE_SESSIONS_DIR"
+sess() { printf '{"pid":%s,"sessionId":"%s","name":"%s","nameSource":"%s"}\n' "$1" "$2" "$3" "$4" > "$SUPERSET_TAB_TITLE_SESSIONS_DIR/$1.json"; }
+reset; rm -f "$SUPERSET_TAB_TITLE_SESSIONS_DIR"/*.json
+expect "◐ ship-widget" "no sessions file yet → slug" "$(run prompt claude "" '{"session_id":"s1","prompt":"ship the widget"}')"
+sess 100 s1 "widget-shipping-plan" auto
+expect "✅ widget-shipping-plan" "auto name lands at stop" "$(run stop claude "◐ ship-widget" '{"session_id":"s1","last_assistant_message":"✅ done"}')"
+expect "◐ widget-shipping-plan" "auto name kept on next prompt" "$(run prompt claude "✅ widget-shipping-plan" '{"session_id":"s1","prompt":"and now the tests"}')"
+sess 100 s1 "my-chosen-name" user
+expect "◐ my-chosen-name" "/rename via sessions file" "$(run prompt claude "◐ widget-shipping-plan" '{"session_id":"s1","prompt":"keep going"}')"
+expect "◐ typed-now" "/rename prompt honoured immediately" "$(run prompt claude "◐ my-chosen-name" '{"session_id":"s1","prompt":"/rename typed-now"}')"
+sess 100 s1 "typed-now" user
+expect "◐ typed-now" "user name beats a Superset-dialog name" "$(run prompt claude "○ #1234 from-dialog" '{"session_id":"s1","prompt":"next"}')"
+sess 100 s1 "auto-again" auto
+reset
+expect "◐ #1234 from-dialog" "auto name does not beat a Superset-dialog name" "$(run prompt claude "○ #1234 from-dialog" '{"session_id":"s1","prompt":"next"}')"
+sess 100 s1 "woodrow-03" derived
+reset
+expect "◐ ship-widget" "derived name ignored" "$(run prompt claude "" '{"session_id":"s1","prompt":"ship the widget"}')"
+expect "◐ ship-widget" "codex never mirrors" "$(reset; run prompt codex "" '{"session_id":"s1","prompt":"ship the widget"}')"
+rm -f "$SUPERSET_TAB_TITLE_SESSIONS_DIR"/*.json
+
+# ── --set: direct rename keeps the glyph ──
+reset
+expect "⏳ from-a-skill" "--set keeps glyph" "$(SUPERSET_TAB_TITLE_EXISTING="⏳ old-name" python3 "$HOOK" --set "from-a-skill")"
+expect "from-a-skill" "--set with no glyph" "$(SUPERSET_TAB_TITLE_EXISTING="" python3 "$HOOK" --set "from-a-skill")"
+expect "◐ from-a-skill" "--set name survives the next prompt" "$(run prompt claude "⏳ from-a-skill" '{"session_id":"s1","prompt":"unrelated prompt"}')"
+
 # ── never breaks a prompt ──
 reset
 out=$(printf 'not json' | SUPERSET_TAB_TITLE_EXISTING="" python3 "$HOOK" --event prompt); st=$?
