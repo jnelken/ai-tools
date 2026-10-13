@@ -117,13 +117,16 @@ cat > "$HOME/.claude/handoffs/<topic-slug>.md" <<'EOF'
 EOF
 ```
 
-**Creating a cloud session is interactive-only.** `claude -p --cloud "…"` is refused ("--cloud cannot be combined with --print"), so this session cannot spawn it. Hand the user the command to run from a terminal that is *not* inside this session (it opens its own TUI):
+**Creating a cloud session needs a real TTY.** `claude -p --cloud "…"` is refused ("--cloud cannot be combined with --print") and a piped invocation (the Bash tool, or the user's `!` prefix) fails with "--cloud requires an interactive terminal". A Superset terminal tab is a pty, so spawn it the same way the local mode does, then read the session URL back:
 
 ```bash
-cd <repo root> && claude --cloud "$(cat "$HOME/.claude/handoffs/<topic-slug>.md")"
+superset terminals create --workspace "$SUPERSET_WORKSPACE_ID" --local --cwd <repo root> \
+  --command 'claude --cloud "$(cat ~/.claude/handoffs/<topic-slug>.md)"' --json
+# ~8s later:
+superset terminals read --local --workspace "$SUPERSET_WORKSPACE_ID" --terminal <id> --json
 ```
 
-Report that the file exists and that the one remaining step is theirs, and sign off 🛑. (Messaging an *existing* cloud session is non-interactive — `claude -p "<msg>" --cloud <session-id>` — so a follow-up nudge later can be scripted once the session has an ID.)
+The tab prints `Created cloud session: <title>`, the `https://claude.ai/code/session_…` link, and `Resume with: claude --teleport session_…`, then drops back to a shell (the TUI doesn't stay attached). Report the link and the teleport command; the throwaway tab can be closed with `superset terminals close`. Outside Superset (no `SUPERSET_WORKSPACE_ID`), hand the user the `claude --cloud` command to run from a real terminal, not via `!`, and sign off 🛑. (Messaging an *existing* cloud session is non-interactive — `claude -p "<msg>" --cloud <session-id>` — so a follow-up nudge later can be scripted once the session has an ID.)
 
 ### 6. Report and step back
 
@@ -143,7 +146,7 @@ Then **stop working the handed-off stream in this session.** Two sessions editin
 - **Inline `--prompt` with a raw multiline string.** Quote breakage produces a truncated or mangled mission. File + `$(cat …)`.
 - **Giving up on the MCP 503.** It's a known false negative; the CLI works.
 - **Spawning into the wrong workspace** because cwd happened to be a root checkout.
-- **Trying to spawn the cloud successor from here.** `--cloud` creation is interactive-only; write the file, hand over the command, stop. Don't fall back to `-p` tricks or the scheduler.
+- **Spawning the cloud successor from the Bash tool or telling the user to use `!`.** Both are piped and `--cloud` refuses without a TTY. Spawn it in a Superset terminal tab (a pty) and read the link back; don't fall back to `-p` tricks or the scheduler.
 - **A cloud summary that assumes the machine.** Paths under `~/.superset`, hook state, local DBs — the successor can't see any of it. Say what's unreachable up front, or it burns its first turns discovering it.
 - **Writing the cloud prompt to the scratchpad.** Session-scoped tmp can vanish before the user runs the command; use `~/.claude/handoffs/`.
 - **Continuing to edit the handed-off worktree from the parent session.** Pick one driver.
