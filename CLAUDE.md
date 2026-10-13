@@ -15,11 +15,13 @@ describes that dev checkout.
 
 The `ai-tools-deploy-guard` hook now enforces this for Claude's file tools (Edit/Write/MultiEdit/NotebookEdit); Codex and other subprocesses must also target `~/code/ai-tools` (e.g. `codex exec -C ~/code/ai-tools`), never the deploy clone.
 
+`~/.ai-tools` is read-only on purpose at the filesystem level. `EACCES` / permission denied there, including through installed symlinks, means the edit belongs in `~/code/ai-tools`. Updates go through `bin/ai-tools-clone-lock run -- <command>`, which re-locks on exit; `.git/` and existing gitignored runtime files remain writable. For emergency repair: `~/.ai-tools/bin/ai-tools-clone-lock unlock`, repair, then `~/.ai-tools/bin/ai-tools-clone-lock lock`; use `~/.ai-tools/bin/ai-tools-clone-lock status` to check. `rm -rf ~/.ai-tools` needs `unlock` first. The helper honors `AI_TOOLS_HOME`; `install.sh --dev` keeps the dev checkout writable.
+
 **The dev checkout is dev-only.** `~/.claude/*` is symlinked from a separate deploy clone at `~/.ai-tools`, which tracks `origin/main` and is managed entirely by `install.sh` — never hand-edited. Concretely:
 
 - `git push` to `main` from this checkout **is** the deploy step — it doesn't reach any machine until something updates `~/.ai-tools` from origin.
 - After pushing, run `~/.ai-tools/install.sh` to make *this* machine pick the change up right away, instead of waiting for the next session's `ai-tools-sync` SessionStart hook to fetch/merge/re-link it automatically.
-- Editing through `~/.claude/...` instead of the dev checkout edits the *deployed copy*, not the source of truth — it'll get flagged as dirty (by `ai-tools-sync.sh` and `claude-symlink-hygiene.sh`) and overwritten on the next clean update. The fix is always: move the edit back here, commit, push.
+- Editing through `~/.claude/...` instead of the dev checkout targets the *deployed copy* and fails with permission denied while it's locked. The fix is always: edit here, commit, push. Edits left after an emergency unlock still trigger the dirty-clone checks.
 
 See `README.md`'s Install / Dev workflow sections for the full mechanics (`install.sh --dev` to test an unpushed change, invocation modes, env vars).
 

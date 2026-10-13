@@ -132,7 +132,12 @@ else
     if [ "$fetch_ok" -eq 1 ]; then
       merge_ok=1
       # shellcheck disable=SC2086
-      $TIMEOUT_BIN git -C "$AI_TOOLS_HOME" merge --ff-only -q "origin/$AI_TOOLS_REF" >/dev/null 2>&1 || merge_ok=0
+      if [ -x "$AI_TOOLS_HOME/bin/ai-tools-clone-lock" ]; then
+        AI_TOOLS_HOME="$AI_TOOLS_HOME" "$AI_TOOLS_HOME/bin/ai-tools-clone-lock" run -- \
+          $TIMEOUT_BIN git -C "$AI_TOOLS_HOME" merge --ff-only -q "origin/$AI_TOOLS_REF" >/dev/null 2>&1 || merge_ok=0
+      else
+        $TIMEOUT_BIN git -C "$AI_TOOLS_HOME" merge --ff-only -q "origin/$AI_TOOLS_REF" >/dev/null 2>&1 || merge_ok=0
+      fi
 
       if [ "$merge_ok" -eq 1 ]; then
         new_head="$(git -C "$AI_TOOLS_HOME" rev-parse --short HEAD 2>/dev/null || true)"

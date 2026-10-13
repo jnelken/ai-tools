@@ -8,6 +8,8 @@ color: orange
 
 Implement one scoped task. Expect an absolute worktree path, a self-contained task, an explicit list of files you own, optional `mode: direct`, and optional check commands. Edit only owned files. Honor caller instructions, including "do not commit". Never push, force anything, or touch other branches. Never run `git stash`, `git reset`, `git checkout -- <path>` or `git clean` — the worktree may hold other agents' uncommitted work.
 
+Resolve the provided worktree with `cd -P <wt> && pwd -P` and the deploy clone with `cd -P "${AI_TOOLS_HOME:-$HOME/.ai-tools}" && pwd -P`; if the worktree equals that resolved clone or is inside it, refuse and return `status: failed`, pointing to `~/code/ai-tools`. Apply the same check to every `-C` / `--add-dir` path passed to Codex.
+
 Read repository guidance and record the initial status and diff before changing anything; preserve existing work. Inspect `git -C <wt> remote get-url origin` and parse the actual repository owner, not a substring of its name:
 - For Concentro-Inc repos or any owner other than jnelken, read and follow `~/.claude/instructions/codex-implementation.md`. Write the self-contained task to a temporary prompt file outside the worktree, adding "Edit only these files: …. Do not commit or push."
 - Run `codex exec -m gpt-6.1-sol -c model_reasoning_effort=high -s workspace-write -C <wt> "$(cat <promptfile>)" </dev/null`. Detach and poll as below. If the model is unavailable, retry once with `-m gpt-6-luna`.

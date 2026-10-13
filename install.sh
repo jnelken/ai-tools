@@ -300,6 +300,7 @@ cat >&2 <<'MSG'
 install.sh fast-forwards this clone from origin. A commit here never reaches
 origin, and while the clone is dirty install.sh skips the update entirely — so
 this machine silently stops syncing.
+The working tree is read-only on purpose; edit the dev checkout instead.
 
 Put the change in the dev checkout and push:
 
@@ -311,7 +312,7 @@ Already made the edits here? Move them across, don't retype them:
 
     git -C $AI_TOOLS_HOME diff > /tmp/ai-tools.diff
     git -C "$AI_TOOLS_DEV_HINT" apply /tmp/ai-tools.diff
-    git -C $AI_TOOLS_HOME checkout -- .
+    $AI_TOOLS_HOME/bin/ai-tools-clone-lock run -- git -C $AI_TOOLS_HOME checkout -- .
 
 Untracked files won't be in that diff — copy those over by hand first.
 MSG
@@ -321,12 +322,23 @@ HOOK
 
 }
 
+# Older deploy clones do not have the helper yet and are still writable.
+clone_lock() {
+  if [ -x "$AI_TOOLS_HOME/bin/ai-tools-clone-lock" ]; then
+    AI_TOOLS_HOME="$AI_TOOLS_HOME" "$AI_TOOLS_HOME/bin/ai-tools-clone-lock" "$@"
+  elif [ "${1:-}" = run ] && [ "${2:-}" = -- ]; then
+    shift 2
+    "$@"
+  fi
+}
+
 # ── update step: sync $AI_TOOLS_HOME from origin (skipped w/ --no-update or --dev) ──
 update_ai_tools_home() {
   if [ ! -e "$AI_TOOLS_HOME" ] || { [ -d "$AI_TOOLS_HOME" ] && [ -z "$(ls -A "$AI_TOOLS_HOME" 2>/dev/null)" ]; }; then
     echo "Cloning $AI_TOOLS_REPO ($AI_TOOLS_REF) into ${AI_TOOLS_HOME}..."
     git clone --branch "$AI_TOOLS_REF" "$AI_TOOLS_REPO" "$AI_TOOLS_HOME"
     install_deploy_guard
+    clone_lock lock -q || echo "⚠ Could not lock $AI_TOOLS_HOME — continuing."
     return
   fi
 
@@ -341,7 +353,7 @@ update_ai_tools_home() {
     local before_rev after_rev
     before_rev="$(git -C "$AI_TOOLS_HOME" rev-parse HEAD 2>/dev/null || true)"
     if git -C "$AI_TOOLS_HOME" fetch -q origin "$AI_TOOLS_REF" \
-      && git -C "$AI_TOOLS_HOME" merge --ff-only -q "origin/$AI_TOOLS_REF"; then
+      && clone_lock run -- git -C "$AI_TOOLS_HOME" merge --ff-only -q "origin/$AI_TOOLS_REF"; then
       after_rev="$(git -C "$AI_TOOLS_HOME" rev-parse HEAD 2>/dev/null || true)"
       if [ "$before_rev" != "$after_rev" ]; then
         echo "Updated $AI_TOOLS_HOME to latest $AI_TOOLS_REF."
@@ -736,4 +748,7 @@ run_section "── statusline ──" section_statusline
 run_section "── personal context ──" section_personal
 
 echo ""
+if [ "$DEV_MODE" -eq 0 ] && [ -d "$AI_TOOLS_HOME/.git" ]; then
+  clone_lock lock -q || echo "⚠ Could not lock $AI_TOOLS_HOME — continuing."
+fi
 echo "Done."

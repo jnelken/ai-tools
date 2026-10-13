@@ -102,6 +102,12 @@ Unlike the other categories, installing this also patches `~/.claude/settings.js
 |---|---|
 | [`session-retrospectives.md`](docs/session-retrospectives.md) | The session-retrospective class — field schema, action tiers, self-start rules, and the registry of retros that live here or as `~/.claude/CLAUDE.md` sections |
 
+### Tools (`bin/`)
+
+| Tool | Purpose |
+|---|---|
+| [`ai-tools-clone-lock`](bin/ai-tools-clone-lock) | Keep the deploy working tree read-only; `run --` opens a brief update window and re-locks afterward |
+
 ## Install
 
 **Deploy model:** `~/code/ai-tools` (this checkout) is for *development only*. What actually lands in `~/.claude/*` is symlinked from a separate **deploy clone** at `~/.ai-tools`, which tracks `origin/main` and is never hand-edited. `git push` to `main` from the dev checkout *is* the deploy step — every machine and cloud environment then picks it up the same way, without needing a `~/code/ai-tools` checkout of its own.
@@ -141,6 +147,10 @@ It also prunes dangling `~/.claude/*` symlinks left behind by renamed or removed
 It also wires a `SessionStart` hook (`ai-tools-sync.sh`) into `~/.claude/settings.json` that keeps `~/.ai-tools` synced with `origin/main` automatically on future sessions — see [`hooks/README.md`](hooks/README.md#ai-tools-syncsh) — and a `PreToolUse` hook (`ai-tools-deploy-guard.sh`) that blocks Claude's file tools from editing the deploy clone while allowing gitignored runtime files.
 
 Safety: it **refuses to overwrite** existing non-symlink files/directories — manually `rm -rf` the conflicting path first if you want this repo's version. If `~/.ai-tools` has been edited in place (uncommitted changes), the update step warns and skips the fetch/merge rather than resetting it — no local edit is ever silently dropped.
+
+`~/.ai-tools` is **read-only on purpose**: `EACCES` / permission denied there (including through installed symlinks) means an edit targeted the deploy clone. The fix is always to edit `~/code/ai-tools`. Updates use `bin/ai-tools-clone-lock run -- <command>` and re-lock even on failure; `.git/` stays writable for fetches and hooks. Existing gitignored runtime files stay owner-writable, including session-hardening's `memory.md` (created on first lock) and existing Python cache directories; their parents stay locked.
+
+For an emergency repair, run `~/.ai-tools/bin/ai-tools-clone-lock unlock`, perform the repair, then `~/.ai-tools/bin/ai-tools-clone-lock lock`. Check with `~/.ai-tools/bin/ai-tools-clone-lock status`. Removing the clone with `rm -rf ~/.ai-tools` also needs `unlock` first. These commands honor `AI_TOOLS_HOME` when the clone lives elsewhere; `install.sh --dev` leaves the dev checkout writable.
 
 ### Cloud environments
 
@@ -190,7 +200,7 @@ cd ~/code/ai-tools
 ./install.sh            # flips back to the deployed copy (~/.ai-tools)
 ```
 
-**The trap:** editing through `~/.claude/...` (instead of `~/code/ai-tools/...`) now edits the *deployed copy*, not the source of truth. `~/.ai-tools` is managed by `install.sh` and gets overwritten on the next clean update — the `ai-tools-sync` hook and `claude-symlink-hygiene.sh` will both flag it as dirty, but the fix is always to move the edit back to `~/code/ai-tools`, commit, and push.
+**The trap:** editing through `~/.claude/...` (instead of `~/code/ai-tools/...`) targets the *deployed copy* and fails with permission denied while it's locked. The fix is always to edit `~/code/ai-tools`, commit, and push. Edits left after an emergency unlock still trigger the dirty-clone checks and block updates.
 
 ## Sharing with coworkers
 

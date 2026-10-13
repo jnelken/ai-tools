@@ -49,7 +49,12 @@ fi
 old_head="$(git -C "$AI_TOOLS_HOME" rev-parse --short HEAD 2>/dev/null || true)"
 # shellcheck disable=SC2086
 $TIMEOUT_BIN git $GIT_NET_OPTS -C "$AI_TOOLS_HOME" fetch -q origin main >/dev/null 2>&1 || exit 0
-git -C "$AI_TOOLS_HOME" merge --ff-only -q origin/main >/dev/null 2>&1 || exit 0
+if [ -x "$AI_TOOLS_HOME/bin/ai-tools-clone-lock" ]; then
+  AI_TOOLS_HOME="$AI_TOOLS_HOME" "$AI_TOOLS_HOME/bin/ai-tools-clone-lock" run -- \
+    git -C "$AI_TOOLS_HOME" merge --ff-only -q origin/main >/dev/null 2>&1 || exit 0
+else
+  git -C "$AI_TOOLS_HOME" merge --ff-only -q origin/main >/dev/null 2>&1 || exit 0
+fi
 new_head="$(git -C "$AI_TOOLS_HOME" rev-parse --short HEAD 2>/dev/null || true)"
 
 if [ -n "$old_head" ] && [ -n "$new_head" ] && [ "$old_head" != "$new_head" ]; then

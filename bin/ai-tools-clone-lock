@@ -1,0 +1,176 @@
+#!/usr/bin/env bash
+# Keep the deploy working tree read-only; .git remains writable. lock/unlock
+# change permissions, status reports them, and run -- <command> opens a mutex-
+# protected write window and re-locks on exit (including failure or signals).
+# Emergency recovery: ~/.ai-tools/bin/ai-tools-clone-lock unlock; perform the
+# repair, then ~/.ai-tools/bin/ai-tools-clone-lock lock. Edit ~/code/ai-tools.
+# Bash 3.2 compatible. Keep all code in functions: a merge can rewrite this
+# script while it runs, so the final main invocation must also exit Bash.
+
+usage() {
+  echo 'Usage: ai-tools-clone-lock [-q] {lock|unlock|status|run -- <command...>}' >&2
+}
+
+message() {
+  [ "$quiet" = 1 ] || printf 'ai-tools-clone-lock: %s\n' "$1"
+}
+
+acquire_mutex() {
+  local started=$SECONDS owner
+  while ! mkdir "$mutex" 2>/dev/null; do
+    owner=""
+    if [ -f "$mutex/pid" ]; then
+      IFS= read -r owner < "$mutex/pid" || true
+      case "$owner" in
+        ''|*[!0-9]*) ;;
+        *)
+          if ! kill -0 "$owner" 2>/dev/null; then
+            if rm -f "$mutex/pid" "$mutex/ignored" && rmdir "$mutex" 2>/dev/null; then continue; fi
+          fi
+          ;;
+      esac
+    elif [ $((SECONDS - started)) -ge 2 ]; then
+      # An empty directory can be left by a crash before the pid was written.
+      rmdir "$mutex" 2>/dev/null && continue
+    fi
+    if [ $((SECONDS - started)) -ge 60 ]; then
+      echo "ai-tools-clone-lock: timed out waiting for $mutex" >&2
+      return 75
+    fi
+    sleep 1
+  done
+  mutex_held=1
+  printf '%s\n' "$$" > "$mutex/pid"
+}
+
+unlock_tree() {
+  find "$root" -path "$root/.git" -prune -o ! -type l -exec chmod u+w {} +
+}
+
+lock_tree() {
+  local memory_dir="$root/skills/session-hardening" entry path
+  # Resolve this parent before touching it: even directory symlinks must not
+  # let chmod/touch escape the clone or touch .git through an alias.
+  if [ -d "$memory_dir" ] && [ ! -e "$memory_dir/memory.md" ] && [ ! -L "$memory_dir/memory.md" ]; then
+    path="$(cd -P "$memory_dir" && pwd -P)" || return
+    case "$path" in
+      "$root/.git"|"$root/.git"/*) ;;
+      "$root"/*) chmod u+w "$path" && touch "$path/memory.md" || return ;;
+    esac
+  fi
+  find "$root" -path "$root/.git" -prune -o ! -type l -exec chmod a-w {} + || return
+  # Only existing ignored runtime entries get owner-write back. Their parents
+  # stay locked, and find never follows symlinks (including ignored entries).
+  git -C "$root" ls-files -z -o -i --exclude-standard --directory > "$mutex/ignored" || return
+  while IFS= read -r -d '' entry; do
+    path="$root/${entry%/}"
+    [ ! -L "$path" ] || continue
+    if [ -d "$path" ]; then
+      find "$path" ! -type l -exec chmod u+w {} + || return
+    elif [ -e "$path" ]; then
+      chmod u+w "$path" || return
+    fi
+  done < "$mutex/ignored"
+}
+
+status_tree() {
+  local root_writable tracked_writable entry result
+  root_writable="$(find "$root" -prune -perm -u+w -print)" || return
+  # An empty tracked list must not make xargs run find on the whole tree.
+  tracked_writable="$(git -C "$root" ls-files)" || return
+  if [ -n "$tracked_writable" ]; then
+    tracked_writable="$(
+      cd "$root" &&
+      git ls-files -z |
+        while IFS= read -r -d '' entry; do printf './%s\0' "$entry"; done |
+        xargs -0 "$BASH" -c 'find "$@" ! -type l -perm -u+w -print -quit' bash
+    )"
+    result=$?
+    [ "$result" -eq 0 ] || { echo partial; return 1; }
+  else
+    tracked_writable=""
+  fi
+  if [ -z "$root_writable" ] && [ -z "$tracked_writable" ]; then
+    echo locked
+    return 0
+  elif [ -n "$root_writable" ] && [ -n "$tracked_writable" ]; then
+    echo unlocked
+  else
+    echo partial
+  fi
+  return 1
+}
+
+cleanup() {
+  local result=$?
+  trap - EXIT INT TERM HUP
+  if [ "$relock" = 1 ]; then
+    lock_tree || echo "ai-tools-clone-lock: WARNING: could not fully re-lock $root" >&2
+  fi
+  if [ "$mutex_held" = 1 ]; then
+    rm -f "$mutex/pid" "$mutex/ignored"
+    rmdir "$mutex" || echo "ai-tools-clone-lock: could not release $mutex" >&2
+  fi
+  exit "$result"
+}
+
+signal_exit() {
+  local result="$1"
+  if [ -n "$command_pid" ]; then
+    kill -TERM "$command_pid" 2>/dev/null || true
+    wait "$command_pid" 2>/dev/null || true
+  fi
+  exit "$result"
+}
+
+main() {
+  set -u
+  set -o pipefail
+  local root="${AI_TOOLS_HOME:-$HOME/.ai-tools}" quiet="${AI_TOOLS_CLONE_LOCK_QUIET:-0}"
+  local action mutex mutex_held=0 relock=0 command_pid="" result
+  # Trap handlers run after main returns, so these state variables must live
+  # until the explicit exit on the last line (main exits for mutating actions).
+  while [ "$root" != / ] && [ "${root%/}" != "$root" ]; do root="${root%/}"; done
+  if [ "${1:-}" = -q ]; then quiet=1; shift; fi
+  action="${1:-}"
+  [ $# -eq 0 ] || shift
+  if [ "${1:-}" = -q ]; then quiet=1; shift; fi
+  case "$action" in
+    lock|unlock|status) [ $# -eq 0 ] || { usage; return 2; } ;;
+    run) [ "${1:-}" = -- ] && [ $# -ge 2 ] || { usage; return 2; }; shift ;;
+    *) usage; return 2 ;;
+  esac
+  if [ ! -d "$root/.git" ]; then
+    echo "ai-tools-clone-lock: refusing $root: .git is not a directory" >&2
+    return 2
+  fi
+  root="$(cd -P "$root" && pwd -P)" || return 2
+  export AI_TOOLS_HOME="$root"
+  if [ "$action" = status ]; then status_tree; return $?; fi
+  if [ "$action" = run ] && [ "${AI_TOOLS_CLONE_LOCK_HELD:-}" = 1 ]; then exec "$@"; fi
+  mutex="$root/.git/ai-tools-clone-lock.d"
+  trap cleanup EXIT
+  trap 'signal_exit 130' INT
+  trap 'signal_exit 143' TERM
+  trap 'signal_exit 129' HUP
+  acquire_mutex || exit $?
+  case "$action" in
+    lock) lock_tree; result=$?; [ "$result" -ne 0 ] || message "locked $root" ;;
+    unlock) unlock_tree; result=$?; [ "$result" -ne 0 ] || message "unlocked $root" ;;
+    run)
+      relock=1
+      unlock_tree || exit $?
+      export AI_TOOLS_CLONE_LOCK_HELD=1
+      # Explicitly preserve stdin: an asynchronous command otherwise gets
+      # /dev/null. wait lets signal traps stop the child before re-locking.
+      "$@" <&0 &
+      command_pid=$!
+      wait "$command_pid"
+      result=$?
+      command_pid=""
+      ;;
+  esac
+  exit "$result"
+}
+
+main "$@"; exit $?
