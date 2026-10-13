@@ -77,6 +77,25 @@ expect "◐ widget-codex-items" "codex items[].text" "$(run prompt codex "" '{"s
 reset
 expect "◐ widget-userturn" "codex payload.UserTurn" "$(run prompt codex "" '{"session_id":"c1","payload":{"UserTurn":{"items":[{"text":"a widget userturn"}]}}}')"
 
+# ── Codex sub-agents share the terminal: a foreign session must not rename or finish the tab ──
+reset
+run prompt codex "" '{"session_id":"main","transcript_path":"/x/main.jsonl","prompt":"review the branch changes"}' >/dev/null
+expect "" "codex: sub-agent prompt ignored" \
+  "$(run prompt codex "◐ review-branch-changes" '{"session_id":"sub","transcript_path":null,"cwd":"/Users/x/.codex/memories","prompt":"## Memory Writing Agent: Phase 2"}')"
+expect "" "codex: sub-agent stop ignored" \
+  "$(run stop codex "◐ review-branch-changes" '{"session_id":"sub","last_assistant_message":"consolidated"}')"
+expect "◐ review-branch-changes" "codex: main session's next prompt keeps slug" \
+  "$(run prompt codex "○ review-branch-changes" '{"session_id":"main","prompt":"whats the session id"}')"
+expect "○ review-branch-changes" "codex: main session stop lands" \
+  "$(run stop codex "◐ review-branch-changes" '{"session_id":"main","last_assistant_message":"it is main"}')"
+# Claude has no sub-agent UserPromptSubmit: a new id is a new session and re-slugs.
+reset
+run prompt claude "" '{"session_id":"s1","prompt":"ship the widget"}' >/dev/null
+expect "" "claude: stop from an unknown session ignored" \
+  "$(run stop claude "◐ ship-widget" '{"session_id":"s9","last_assistant_message":"✅ done"}')"
+expect "◐ resume-other-thing" "claude: new session re-slugs" \
+  "$(run prompt claude "◐ ship-widget" '{"session_id":"s2","prompt":"resume the other thing"}')"
+
 # ── never breaks a prompt ──
 reset
 out=$(printf 'not json' | SUPERSET_TAB_TITLE_EXISTING="" python3 "$HOOK" --event prompt); st=$?

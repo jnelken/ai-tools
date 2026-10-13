@@ -310,14 +310,24 @@ def save_state(path, state):
 def decide(event, harness, data, existing, state):
     """Return (new_title or None, new_state). Pure, so tests can cover it."""
     # No session key in the payload (Codex shape unverified): one terminal is one session.
-    session_id = str(data.get("session_id") or data.get("resourceId") or data.get("resource_id")
-                     or os.environ.get("SUPERSET_TERMINAL_ID", ""))
+    raw_session = str(data.get("session_id") or data.get("resourceId") or data.get("resource_id") or "")
+    session_id = raw_session or os.environ.get("SUPERSET_TERMINAL_ID", "")
     glyph, base = split_glyph(existing or "")
     ours = state.get("slug", "")
     new_state = dict(state)
 
+    pinned = state.get("session_id", "")
+    # Unknown (no id in the payload) is not foreign; only a different id is.
+    foreign = bool(pinned) and bool(raw_session) and raw_session != pinned
     if event == "prompt":
-        same_session = session_id and state.get("session_id") == session_id
+        # Codex sub-agents (spawned agents, the memory-writing agent) run hooks
+        # inside the parent's terminal with their own session_id: ignore them
+        # once the tab is named, else every sub-agent re-slugs the tab. Claude
+        # sub-agents never fire UserPromptSubmit, so a new id there is a real
+        # new session (resume, /clear) and re-slugs.
+        if harness == "codex" and foreign and base:
+            return None, new_state
+        same_session = session_id and not foreign
         manual = base and base != ours  # a name we didn't set: keep it
         if manual or (base and same_session):
             slug = base
@@ -333,6 +343,8 @@ def decide(event, harness, data, existing, state):
     # stop
     if not base:
         return None, new_state  # nothing was ever named; a stop alone names nothing
+    if foreign:
+        return None, new_state  # a sub-agent finishing is not the session finishing
     text, tool = final_text_and_tool(data)
     if not text.strip() and not tool:
         # No information about how the turn ended. Claude: a transcript hiccup,

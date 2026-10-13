@@ -81,7 +81,7 @@ Gated on `SUPERSET_TERMINAL_ID` + `SUPERSET_WORKSPACE_ID`; always exits 0 and pr
 
 ### ~/.codex/hooks.json wiring (Codex)
 
-Same two entries with `--harness codex`. Codex pins hook trust per entry in `~/.codex/config.toml` (`[hooks.state]`, hashed on the command string), so after editing `hooks.json` the new entries must be re-trusted in Codex's hooks UI before they run. The Codex payload shape is unverified; the prompt parser tries `prompt`, `user_prompt`, `text`, `items[].text` and `payload.UserTurn.items[].text`, and the debug log shows what actually arrived.
+Same two entries with `--harness codex`. Codex pins hook trust per entry in `~/.codex/config.toml` (`[hooks.state]`, hashed on the command string), so after editing `hooks.json` the new entries must be re-trusted in Codex's hooks UI before they run. Codex's payload matches Claude's (`session_id`, `turn_id`, `transcript_path`, `cwd`, `hook_event_name`, `model`, `prompt`), verified 2026-10-13. Codex sub-agents (spawned agents, the memory-writing agent) run these hooks inside the parent's terminal with their own `session_id`, so the hook pins the terminal to the first session it names and ignores prompts/stops from any other session while the tab has a name — which also means `/new` in a Codex tab keeps the old slug until the tab is renamed or the state file in `~/.cache/superset-tab-title/` is removed. Codex has no sign-off convention, so its stops show `○`.
 
 ## post-yesterdays-ccusage.sh
 
