@@ -1,6 +1,6 @@
 ---
 name: post-pr
-description: 'Drive a PR the rest of the way to review-ready — run Codex review until clean, watch CI, post the PR to the #pr-review Slack channel, badge the description, and undraft it — or, for a sub-PR into a trunk branch, merge it into the trunk instead of announcing it. Use when work on a branch is finished and its PR should be shared, e.g. "post this PR", "share it to Slack", "take this the rest of the way", "run the post-PR workflow", "it''s ready, ship the announcement". Runs automatically when a task''s work is complete (see the Post-PR Workflow section of the global CLAUDE.md); invoke by hand to re-run it for a later push, or to target a PR in a different worktree.'
+description: 'Drive a PR the rest of the way to review-ready — run Codex review until clean, watch CI, post the PR to the #pr-review Slack channel, badge the description, and undraft it — or, for a sub-PR into a trunk branch, merge it into the trunk and reap its sswt instead of announcing it. Use when work on a branch is finished and its PR should be shared, e.g. "post this PR", "share it to Slack", "take this the rest of the way", "run the post-PR workflow", "it''s ready, ship the announcement". Runs automatically when a task''s work is complete (see the Post-PR Workflow section of the global CLAUDE.md); invoke by hand to re-run it for a later push, or to target a PR in a different worktree.'
 ---
 
 # Post PR
@@ -12,7 +12,7 @@ The last mile of a PR: review it until it's quiet, confirm CI is green, announce
 ```
 /loop /peer-review  →  resolve base conflicts  →  gh pr checks --watch  →  base is the default branch?
                                                 ├─ yes → Slack #pr-review → badge → gh pr ready
-                                                └─ no  → gh pr merge --merge into the trunk
+                                                └─ no  → gh pr merge --merge into the trunk → reap the sub-PR's sswt
 ```
 
 Every step gates the next. A PR that never comes back clean is never announced and never merged; a PR that is never announced is never badged and never leaves draft (the one exception is the undraft that `gh pr merge` requires immediately before a trunk merge, step 3.6). That chain is the whole point — the draft pill is load-bearing, not cosmetic.
@@ -136,10 +136,35 @@ gh pr merge <PR_NUMBER> --repo <OWNER/REPO> --merge --delete-branch=false
 ```
 
 - **Merge commit, never squash.** Squashing a sub-PR rewrites its commits and orphans the base of anything stacked on it (the restack pain [[rebase-after-squash]] exists to undo). The trunk is squashed into main at the end, so intermediate history never reaches main anyway.
-- **Keep the branch.** Superset autoprunes a workspace whose branch disappears; deleting it mid-session pulls the worktree out from under whoever is working in it. Let [[clean-sswts]] / [[cleanup-local-branches]] reap it later.
+- **Keep the remote branch at merge time** (`--delete-branch=false`). Branches stacked on it still resolve, and the PR keeps its head ref. The sub-PR's local workspace and branch are reaped separately, as the run's last action (step 3.7).
 - **The undraft here is a merge prerequisite, not a signal.** No human reviews a sub-PR, so its draft pill was never load-bearing. Do it immediately before the merge and never badge the PR.
 - **Conflicts** (`CONFLICTING` / `DIRTY`): resolve them as in step 2.5, with the trunk as the base. Stop and report "merge blocked — conflicts with `<trunk>`" only for a conflict that needs a product or design decision.
 - After the merge the trunk PR's diff has grown — say so in the report, and pull the trunk in the worktree if the next piece of work starts from it. Nothing is written to `pr-review-posted.jsonl`; there was no post to dedup.
+
+### 3.7. Reap the sub-PR's sswt
+
+Only after step 3.6 merged the PR. A merged sub-PR's workspace has nothing left to do, so reaping it is part of the run, not a later cleanup. The trunk's own workspace is never reaped here; it lives until the trunk PR merges into main.
+
+Deleting the workspace closes the terminal of whatever session runs inside it — usually this one. That makes ordering load-bearing:
+
+1. **Put the record on the PR first.** Post the step 7 sub-PR report as a PR comment (`gh pr comment <PR_NUMBER> --body-file …`). The PR description plus that comment are the durable record; the terminal is not.
+2. **Check, and skip the reap if any check fails:**
+   ```bash
+   git -C <WORKTREE> status --porcelain                          # must be empty
+   git -C <WORKTREE> log --oneline origin/<BRANCH>..HEAD         # must be empty (nothing unpushed)
+   git fetch origin <TRUNK> && git merge-base --is-ancestor "$(git -C <WORKTREE> rev-parse HEAD)" origin/<TRUNK>
+   gh pr list --repo <OWNER/REPO> --base <BRANCH> --state open   # must be empty (nothing stacked on it)
+   superset workspaces list --local --json                       # resolve the workspace id by branch
+   ```
+   A failed check is reported as `Reap: skipped — <which check>`, never worked around.
+3. **Reap as the very last command,** detached so it finishes even though it kills the calling terminal:
+   ```bash
+   nohup sh -c 'superset workspaces delete <WORKSPACE_ID> --local; \
+     git -C <ROOT_CHECKOUT> branch -D <BRANCH>; git -C <ROOT_CHECKOUT> worktree prune' >/dev/null 2>&1 &
+   ```
+   `<ROOT_CHECKOUT>` is the repo's main checkout (e.g. `$WOODROW_ROOT`), never the worktree being deleted. Nothing may run after this line: the session ends with it.
+
+When `/post-pr` runs from outside the sub-PR's worktree (a coordinator targeting it), the same checks and commands apply, and the coordinator simply keeps running afterwards.
 
 ### 4. Post to Slack
 
@@ -226,7 +251,10 @@ Concentro-Inc/woodrow#1555
 - Base: feature/vde-airtable-parity (not the default branch) — sub-PR, not announced
 - Merged into feature/vde-airtable-parity (merge commit abc1234); trunk PR #1500 now carries it
 - Slack / Badge: skipped (step 3.5 gate)
+- Reap: sswt + local branch deleted (or: skipped — <which check>)
 ```
+
+Post this report on the PR before the reap (step 3.7), since the reap closes the terminal it was printed in.
 
 If the merge was blocked, replace the `Merged` line with `Merge: blocked — conflicts with <trunk>` and say what is outstanding.
 
@@ -242,7 +270,7 @@ The global CLAUDE.md instructs this to run **automatically, without asking**, on
 
 Do not fire on intermediate pushes mid-task, and do not fire on a branch whose PR is deliberately parked. When several PRs finished together, run this for each of them.
 
-Firing automatically still runs the full skill, base-branch gate included: a finished task on a branch stacked onto something other than the default branch gets reviewed and CI-checked same as any other, then merged into its trunk (step 3.6) rather than announced. The trunk's own PR into the default branch is announced when the user declares the trunk complete — not automatically on each sub-merge.
+Firing automatically still runs the full skill, base-branch gate included: a finished task on a branch stacked onto something other than the default branch gets reviewed and CI-checked same as any other, then merged into its trunk (step 3.6) and its sswt reaped (step 3.7) rather than announced. The trunk's own PR into the default branch is announced when the user declares the trunk complete — not automatically on each sub-merge.
 
 Because it self-starts, it must also self-report: state plainly what it did to each PR, including anything a gate stopped.
 
