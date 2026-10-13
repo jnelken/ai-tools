@@ -69,7 +69,7 @@ class TokensTests(unittest.TestCase):
         src = self.write("codex.txt", f"session id: {sid}\nprompt echo\ntokens used\n1,050\n")
         old, tokens.CODEX_SESSIONS = tokens.CODEX_SESSIONS, str(self.dir / "sessions")
         try:
-            tokens.cmd_codex(Args(input=src, log=self.log, model="gpt-5.6-sol", role="orchestrator"))
+            tokens.cmd_codex(Args(input=src, log=self.log, model="gpt-6.1-sol", role="orchestrator"))
         finally:
             tokens.CODEX_SESSIONS = old
         (r,) = self.rows()

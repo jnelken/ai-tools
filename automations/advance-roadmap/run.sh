@@ -17,6 +17,8 @@
 set -u
 
 ROOT="${ADVANCE_ROADMAP_ROOT:-/Users/jake/.claude/automations/advance-roadmap}"
+[ -r "$ROOT/lib/models.sh" ] || { echo "advance-roadmap: missing model defaults: $ROOT/lib/models.sh" >&2; exit 1; }
+. "$ROOT/lib/models.sh"
 # Personal machines only (OMEN, JXIV): this commits across the personal repos.
 if [ -x "$HOME/dotfiles/bin/is-personal-machine" ]; then
   "$HOME/dotfiles/bin/is-personal-machine"
@@ -61,7 +63,7 @@ WORKER_POLL_S="${ADVANCE_ROADMAP_WORKER_POLL_S:-10}"
 CLAUDE="${ADVANCE_ROADMAP_CLAUDE_BIN:-/Users/jake/.local/bin/claude}"
 CODEX="${ADVANCE_ROADMAP_CODEX_BIN:-/opt/homebrew/bin/codex}"
 
-ORCH_CODEX_MODEL="${ADVANCE_ROADMAP_ORCH_CODEX_MODEL:-gpt-5.6-sol}"
+ORCH_CODEX_MODEL="${ADVANCE_ROADMAP_ORCH_CODEX_MODEL:-$CODEX_MODEL_DEFAULT}"
 ORCH_CLAUDE_MODEL="${ADVANCE_ROADMAP_ORCH_CLAUDE_MODEL:-claude-opus-5}"
 
 export PATH="/opt/homebrew/bin:/opt/homebrew/opt/node@22/bin:/usr/bin:/bin:/usr/sbin:/sbin:/Users/jake/.local/bin"

@@ -7,6 +7,7 @@ TMP_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/advance-roadmap-goal-test.XXXXXX")"
 trap 'rm -rf "$TMP_ROOT"' EXIT INT TERM
 
 mkdir -p "$TMP_ROOT/root/lib" "$TMP_ROOT/bin"
+cp "$TEST_DIR/lib/models.sh" "$TMP_ROOT/root/lib/"
 : > "$TMP_ROOT/root/lib/usage.py"
 
 cat > "$TMP_ROOT/bin/fake-provider" <<'SH'

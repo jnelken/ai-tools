@@ -119,6 +119,6 @@ Agent definitions load at session start, so open a fresh session after installin
 
 ## Follow-ups (not in scope)
 
-- **Codex model pin disagrees:** `gpt-6.1-sol` in CLAUDE.md and codex-implementation.md, `gpt-5.6-sol` in MODEL_ROUTER and the advance-roadmap scripts, and no `-m` in peer-review. Conductor's `review.sh` also defaults to `low` effort, while peer-review never goes below medium.
+- **Codex model pin resolved:** best roles are pinned to `gpt-6.1-sol`; the fast tier is `gpt-6-luna`. Conductor's `review.sh` defaults to `low` effort, while peer-review never goes below medium.
 - **Settings drift:** `~/.claude/settings.json` is a regular file, not a symlink to dotfiles, and the two differ. The `model-router-pointer.sh` hook can't fire because `~/.claude/MODEL_ROUTER.md` doesn't exist.
 - **Unused presets:** retire `react-pro` and `typescript-pro`, which had zero uses in 60 days.

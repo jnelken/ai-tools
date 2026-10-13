@@ -85,6 +85,7 @@ class DailyBatchTest(unittest.TestCase):
         self.code = self.root / 'code'
         self.code.mkdir()
         (self.root / 'lib').mkdir()
+        shutil.copyfile(HERE / 'lib/models.sh', self.root / 'lib/models.sh')
         (self.root / 'run.sh').write_text(FAKE_RUN)
         (self.root / 'lib/usage.py').write_text(
             "import os, sys\n"

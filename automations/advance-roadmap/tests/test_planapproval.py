@@ -1,8 +1,11 @@
-"""The plan approver's mechanical checks and ruling logic, with no model involved."""
+"""The plan approver's model configuration, mechanical checks and ruling logic, with no live model."""
 import json
+import os
 import sys
+import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 HERE = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(HERE / "lib"))
@@ -16,6 +19,37 @@ def plan(stamp, thread, touch, **extra):
 
 def request(*plans):
     return {"repo": "r", "plans": list(plans)}
+
+
+class ModelConfiguration(unittest.TestCase):
+    def codex_model(self, env):
+        with mock.patch.dict(os.environ, env, clear=True), \
+                mock.patch.object(pa.subprocess, "run", return_value=mock.Mock(stdout="")) as run:
+            pa.run_codex("prompt", "/code")
+        argv = run.call_args.args[0]
+        return argv[argv.index("-m") + 1]
+
+    def test_default_matches_models_sh(self):
+        assignments = dict(line.split("=", 1) for line in (HERE / "lib/models.sh").read_text().splitlines()
+                           if line and not line.startswith("#"))
+        self.assertEqual(self.codex_model({}), assignments["CODEX_MODEL_DEFAULT"])
+
+    def test_env_override_wins(self):
+        self.assertEqual(self.codex_model({"ADVANCE_ROADMAP_ORCH_CODEX_MODEL": "custom-model"}),
+                         "custom-model")
+
+    def test_missing_models_file_is_a_clear_error(self):
+        with tempfile.TemporaryDirectory() as tmp, \
+                mock.patch.object(pa, "__file__", str(Path(tmp) / "planapproval.py")):
+            with self.assertRaisesRegex(RuntimeError, "cannot read model defaults: .*models.sh"):
+                self.codex_model({})
+
+    def test_missing_default_assignment_is_a_clear_error(self):
+        with tempfile.TemporaryDirectory() as tmp, \
+                mock.patch.object(pa, "__file__", str(Path(tmp) / "planapproval.py")):
+            (Path(tmp) / "models.sh").write_text("# no default assignment\n")
+            with self.assertRaisesRegex(RuntimeError, "missing CODEX_MODEL_DEFAULT assignment"):
+                self.codex_model({})
 
 
 class MechanicalChecks(unittest.TestCase):

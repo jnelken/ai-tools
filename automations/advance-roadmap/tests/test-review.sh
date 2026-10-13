@@ -11,6 +11,7 @@ trap 'rm -rf "$TMP"' EXIT INT TERM
 ROOT="$TMP/root"; BIN="$TMP/bin"; REPO="$TMP/repo"; LOG="$TMP/reviews.jsonl"
 mkdir -p "$ROOT/lib" "$BIN"
 cp "$HERE/review.sh" "$ROOT/"
+cp "$HERE/lib/models.sh" "$HERE/lib/tokens.py" "$ROOT/lib/"
 print -r -- 'import sys; open(sys.argv[2] + "/limits.txt", "a").write(sys.argv[-1] + "\n")' > "$ROOT/lib/usage.py"
 
 git init -q -b main "$REPO"

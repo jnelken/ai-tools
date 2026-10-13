@@ -14,6 +14,8 @@
 set -u
 
 ROOT="${ADVANCE_ROADMAP_ROOT:-/Users/jake/.claude/automations/advance-roadmap}"
+[ -r "$ROOT/lib/models.sh" ] || { echo "review: missing model defaults: $ROOT/lib/models.sh" >&2; exit 1; }
+. "$ROOT/lib/models.sh"
 USAGE_PY="$ROOT/lib/usage.py"
 TOKENS_PY="$ROOT/lib/tokens.py"
 
@@ -21,7 +23,7 @@ CLAUDE="${ADVANCE_ROADMAP_CLAUDE_BIN:-/Users/jake/.local/bin/claude}"
 AGENT="${ADVANCE_ROADMAP_AGENT_BIN:-/Users/jake/.local/bin/agent}"
 CODEX="${ADVANCE_ROADMAP_CODEX_BIN:-/opt/homebrew/bin/codex}"
 
-CODEX_REVIEW_MODEL="${ADVANCE_ROADMAP_CODEX_REVIEW_MODEL:-gpt-5.6-sol}"
+CODEX_REVIEW_MODEL="${ADVANCE_ROADMAP_CODEX_REVIEW_MODEL:-$CODEX_MODEL_DEFAULT}"
 CURSOR_REVIEW_MODEL="${ADVANCE_ROADMAP_CURSOR_REVIEW_MODEL:-auto}"
 CLAUDE_REVIEW_MODEL="${ADVANCE_ROADMAP_CLAUDE_REVIEW_MODEL:-claude-opus-5}"
 # Reviews run cheap and are repeated; the worker that fixes findings runs at high

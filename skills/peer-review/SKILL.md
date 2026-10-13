@@ -395,7 +395,7 @@ EOF
 
    | Reviewer | Reviewee / triage |
    | --- | --- |
-   | Codex `gpt-5.6-sol` · high effort | Claude Sonnet 5 · high effort |
+   | Codex `gpt-6.1-sol` · high effort | Claude Sonnet 5 · high effort |
 
    Found one real bug: `groupKey` used `??`, which only falls back on null/undefined — so items with `label: ""` (rather than `null`) all collapsed into a single group and got hidden as spurious duplicates of one another. Fixed by falling back with `||` instead, added a regression test for the empty-string case, and re-ran the full suite clean (committed as `abc1234de`).
    ```

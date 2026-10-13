@@ -11,6 +11,8 @@
 set -u
 
 ROOT="${ADVANCE_ROADMAP_ROOT:-/Users/jake/.claude/automations/advance-roadmap}"
+[ -r "$ROOT/lib/models.sh" ] || { echo "worker: missing model defaults: $ROOT/lib/models.sh" >&2; exit 1; }
+. "$ROOT/lib/models.sh"
 # Where the personal repos live differs by machine; ai-tools' personal-code-dir
 # decides (never ~/code, which holds work checkouts). Unresolved = nothing to do.
 CODE_DIR="${PERSONAL_CODE_DIR:-$("${0:A:h:h:h}/bin/personal-code-dir" 2>/dev/null)}" || CODE_DIR=""
@@ -25,7 +27,7 @@ AGENT="${ADVANCE_ROADMAP_AGENT_BIN:-/Users/jake/.local/bin/agent}"
 CODEX="${ADVANCE_ROADMAP_CODEX_BIN:-/opt/homebrew/bin/codex}"
 
 CLAUDE_WORKER_MODEL="${ADVANCE_ROADMAP_CLAUDE_WORKER_MODEL:-claude-opus-5}"
-CODEX_WORKER_MODEL="${ADVANCE_ROADMAP_CODEX_WORKER_MODEL:-gpt-5.6-sol}"
+CODEX_WORKER_MODEL="${ADVANCE_ROADMAP_CODEX_WORKER_MODEL:-$CODEX_MODEL_DEFAULT}"
 CURSOR_WORKER_MODEL="${ADVANCE_ROADMAP_CURSOR_WORKER_MODEL:-auto}"
 
 export PATH="/opt/homebrew/bin:/opt/homebrew/opt/node@22/bin:/usr/bin:/bin:/usr/sbin:/sbin:/Users/jake/.local/bin"

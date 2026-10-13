@@ -4,6 +4,7 @@ each lane is told the busy repos, and the supervisor stops at the window's dispa
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -44,6 +45,7 @@ class SupervisorTest(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name)
         (self.root / "lib").mkdir()
+        shutil.copyfile(HERE / "lib" / "models.sh", self.root / "lib" / "models.sh")
         (self.root / "lib" / "usage.py").write_text(FAKE_USAGE)
         for name in ("verdict.py", "linearsnap.py", "workspaces.py"):
             (self.root / "lib" / name).write_text("import sys; sys.exit(0)\n")

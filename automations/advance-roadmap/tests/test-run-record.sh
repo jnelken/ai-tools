@@ -10,7 +10,8 @@ trap 'rm -rf "$TMP"' EXIT INT TERM
 ROOT="$TMP/root"; SKILLS="$TMP/skills"; BIN="$TMP/bin"
 mkdir -p "$ROOT/lib" "$SKILLS" "$BIN" "$TMP/code/demo"
 cp "$HERE/run.sh" "$HERE/worker.sh" "$ROOT/"
-cp "$HERE/lib/runrecord.py" "$HERE/lib/tokens.py" "$HERE/lib/workspaces.py" "$ROOT/lib/"
+cp "$HERE/lib/runrecord.py" "$HERE/lib/tokens.py" "$HERE/lib/workspaces.py" "$HERE/lib/models.sh" "$ROOT/lib/"
+. "$ROOT/lib/models.sh"
 for f in ORCHESTRATOR.md SAFETY.md WORKER.md; do echo stub > "$SKILLS/$f"; done
 
 cat > "$ROOT/lib/usage.py" <<'PY'
@@ -112,7 +113,7 @@ run good file;    check "agent-written result → shipped"       "$(last outcome
                         "$(python3 -c "import json; print(json.loads(open('$ROOT/runs.jsonl').readlines()[-1])['tokens']['total'])")" 12505
                   check "worker tokens carry provider/model" \
                         "$(python3 -c "import json; c=json.loads(open('$ROOT/runs.jsonl').readlines()[-1])['tokens']['calls']; print(sorted((x['role'],x['provider'],x['model']) for x in c))")" \
-                        "[('orchestrator', 'codex', 'gpt-5.6-sol'), ('worker', 'cursor', 'auto')]"
+                        "[('orchestrator', 'codex', '$CODEX_MODEL_DEFAULT'), ('worker', 'cursor', 'auto')]"
 run good reviewed; check "reviewed ship → shipped"             "$(last outcome)" shipped
                   check "review rounds recorded"                "$(last review_rounds)" 2
                   check "reviewer recorded"                     "$(last reviewer)" codex

@@ -6,11 +6,11 @@ permissionMode: bypassPermissions
 color: orange
 ---
 
-Implement one scoped task. Expect an absolute worktree path, a self-contained task, an explicit list of files you own, optional `mode: direct`, and optional check commands. Edit only owned files. Honor caller instructions, including "do not commit". Never push, force anything, or touch other branches.
+Implement one scoped task. Expect an absolute worktree path, a self-contained task, an explicit list of files you own, optional `mode: direct`, and optional check commands. Edit only owned files. Honor caller instructions, including "do not commit". Never push, force anything, or touch other branches. Never run `git stash`, `git reset`, `git checkout -- <path>` or `git clean` — the worktree may hold other agents' uncommitted work.
 
 Read repository guidance and record the initial status and diff before changing anything; preserve existing work. Inspect `git -C <wt> remote get-url origin` and parse the actual repository owner, not a substring of its name:
 - For Concentro-Inc repos or any owner other than jnelken, read and follow `~/.claude/instructions/codex-implementation.md`. Write the self-contained task to a temporary prompt file outside the worktree, adding "Edit only these files: …. Do not commit or push."
-- Run `codex exec -m gpt-6.1-sol -c model_reasoning_effort=high -s workspace-write -C <wt> "$(cat <promptfile>)" </dev/null`. Detach and poll as below. If the model is unavailable, retry once with `-m gpt-5.6-luna`.
+- Run `codex exec -m gpt-6.1-sol -c model_reasoning_effort=high -s workspace-write -C <wt> "$(cat <promptfile>)" </dev/null`. Detach and poll as below. If the model is unavailable, retry once with `-m gpt-6-luna`.
 - For jnelken-owned repos, read `/Users/jake/dotfiles/claude/MODEL_ROUTER.md` and follow its provider order. If missing, use the Concentro path. Apply the same waiting rules to any Codex invocation and any other long-running provider process.
 - For `mode: direct`, skip Codex and implement with your own Edit/Write tools. Without `mode: direct`, ALWAYS take the provider path first — never skip it on your own judgment of task size; the caller decides that.
 

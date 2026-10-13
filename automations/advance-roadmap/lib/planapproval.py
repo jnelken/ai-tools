@@ -14,6 +14,7 @@ import argparse
 import fnmatch
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -148,9 +149,21 @@ def combine(request, model):
 
 # ── model calls ───────────────────────────────────────────────────────────────
 
+def default_codex_model():
+    models = Path(__file__).with_name("models.sh")
+    try:
+        contents = models.read_text()
+    except OSError as exc:
+        raise RuntimeError(f"planapproval: cannot read model defaults: {models}: {exc}") from exc
+    match = re.search(r"^CODEX_MODEL_DEFAULT=([A-Za-z0-9._-]+)[ \t]*$", contents, re.MULTILINE)
+    if not match:
+        raise RuntimeError(f"planapproval: missing CODEX_MODEL_DEFAULT assignment in {models}")
+    return match.group(1)
+
+
 def run_codex(prompt, code_dir):
     codex = os.environ.get("ADVANCE_ROADMAP_CODEX_BIN", "/opt/homebrew/bin/codex")
-    model = os.environ.get("ADVANCE_ROADMAP_ORCH_CODEX_MODEL", "gpt-5.6-sol")
+    model = os.environ.get("ADVANCE_ROADMAP_ORCH_CODEX_MODEL", default_codex_model())
     with tempfile.TemporaryDirectory() as tmp:
         last = Path(tmp) / "last.txt"
         proc = subprocess.run(
