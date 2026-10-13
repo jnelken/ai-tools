@@ -62,6 +62,12 @@ commit, merge, or push (see WORKER.md).
   is exactly what let a sibling automation commit on top of a stuck rebase for two weeks unnoticed.
 - **Skip live sessions.** If any `.claude-sessions/*.md` at the repo root has `updated_at_epoch`
   within the last 15 minutes, someone is working there right now. Pick a different repo.
+- **More than one thread in a repo only with an approved plan.** Several workers may share a repo
+  in one daily batch only after [`PLAN_APPROVAL.md`](PLAN_APPROVAL.md)'s approver ruled on every
+  thread after the first. No approver ruling (it failed, was unavailable or didn't answer) means the
+  extra threads wait for tomorrow; the first thread is unaffected. Each thread has its own branch
+  and workspace — never two workers in one workspace — and only the first thread does repo-level
+  bookkeeping (archives, blockers, directives, code-health). Never start a thread outside a batch.
 - **Never force anything.** No `--force`, no `--force-with-lease`, no `git reset --hard`, no
   `git clean -fd`, no rewriting published history. If a `git push` is rejected as
   non-fast-forward, STOP — leave the branch and its commits in place, and report it.

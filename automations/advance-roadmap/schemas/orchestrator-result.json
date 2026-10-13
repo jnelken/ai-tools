@@ -41,6 +41,14 @@
     },
     "directive_ticket": { "type": ["string", "null"] },
     "worker_brief": { "type": ["string", "null"] },
+    "touchpoints": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "conflict_notes": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
     "archives": {
       "type": "array",
       "items": { "type": "string" }

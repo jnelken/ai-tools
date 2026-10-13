@@ -2,6 +2,7 @@
 import importlib.util
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -21,17 +22,23 @@ from pathlib import Path
 root = Path(os.environ['ADVANCE_ROADMAP_ROOT'])
 stamp = os.environ['ADVANCE_ROADMAP_STAMP']
 repo = os.environ['ADVANCE_ROADMAP_TARGET_REPO']
+thread = int(os.environ.get('ADVANCE_ROADMAP_THREAD', '1'))
 run = root / 'runs' / stamp
 def event(kind):
     with open(root / 'trace.jsonl', 'a') as f:
-        f.write(json.dumps({'kind': kind, 'repo': repo, 'time': time.time()}) + '\n')
+        f.write(json.dumps({'kind': kind, 'repo': repo, 'thread': thread, 'stamp': stamp,
+                            'time': time.time()}) + '\n')
 event('plan-start')
 time.sleep(.15 if repo == 'a' else .05)
 if repo == os.environ.get('FAKE_FAILED_REPO'):
     event('plan-failed')
     raise SystemExit(1)
-(run / 'orchestrator-result.json').write_text(json.dumps({
-    'action': 'dispatch_worker', 'repo': repo, 'linear_id': 'DEV-' + repo, 'item': repo}))
+plan = {'action': 'dispatch_worker', 'repo': repo, 'linear_id': f'DEV-{repo}{thread}',
+        'item': f'{repo} t{thread}', 'branch': f'roadmap/{repo}-{thread}', 'work_kind': 'feature',
+        'touchpoints': [f'src/{repo}{thread}.ts'], 'worker_brief': 'do it', 'summary': 's'}
+if thread > 1 and os.environ.get('FAKE_NO_SECOND'):
+    plan = {'action': 'blocked_no_item', 'repo': None, 'summary': 'no second thread'}
+(run / 'orchestrator-result.json').write_text(json.dumps(plan))
 event('plan-ready')
 (run / 'batch-ready').touch()
 while not (run / 'batch-release').exists():
@@ -47,6 +54,29 @@ with open(root / 'runs.jsonl', 'a') as f:
 PY
 '''
 
+FAKE_APPROVER = '''import json, os, sys
+a = sys.argv
+req = json.load(open(a[a.index('--request') + 1]))
+verdict = os.environ.get('FAKE_VERDICT', 'approve')
+import time
+with open(os.path.join(os.environ['ADVANCE_ROADMAP_ROOT'], 'approver.jsonl'), 'a') as f:
+    f.write(json.dumps({'kind': 'start', 'repo': req['repo'], 'time': time.time()}) + '\\n')
+time.sleep(float(os.environ.get('FAKE_APPROVER_SLEEP', '0')))
+with open(os.path.join(os.environ['ADVANCE_ROADMAP_ROOT'], 'approver.jsonl'), 'a') as f:
+    f.write(json.dumps({'kind': 'end', 'repo': req['repo'], 'time': time.time()}) + '\\n')
+if verdict == 'fail':
+    sys.stderr.write('approver exploded')
+    raise SystemExit(1)
+plans = req['plans']
+decisions = [{'stamp': p['stamp'], 'thread': p['thread'], 'verdict': 'approve' if n == 0 else verdict,
+              'reason': 'fake', 'after': plans[0]['stamp'] if verdict == 'serialize' else None,
+              'acknowledged_conflicts': [{'area': 'ROADMAP.md', 'handling': 'rebase'}]}
+             for n, p in enumerate(plans)]
+json.dump({'ok': True, 'repo': req['repo'], 'decisions': decisions,
+           'standing_conflicts': [{'area': 'lockfiles', 'handling': 'retake'}]},
+          open(a[a.index('--out') + 1], 'w'))
+'''
+
 
 class DailyBatchTest(unittest.TestCase):
     def setUp(self):
@@ -60,13 +90,16 @@ class DailyBatchTest(unittest.TestCase):
             "import os, sys\n"
             "print('' if os.environ.get('FAKE_NO_QUOTA') else "
             "{'pick-worker-chain': 'cursor', 'pick-orchestrator': 'codex'}.get(sys.argv[-1], ''))\n")
+        (self.root / 'lib/planapproval.py').write_text(FAKE_APPROVER)
         (self.root / 'lib/linearsnap.py').write_text(
             "import json, sys\njson.dump({'ok': True, 'issues': []}, open(sys.argv[-1], 'w'))\n")
         self.env = {**os.environ, 'ADVANCE_ROADMAP_ROOT': str(self.root),
                     'PERSONAL_CODE_DIR': str(self.code), 'ADVANCE_ROADMAP_BATCH_POLL_S': '.02',
                     'ADVANCE_ROADMAP_SUPERSET': '0', 'DOTFILES_PERSONAL_MACHINE': '1',
                     'ADVANCE_ROADMAP_SKILL_DIR': str(self.root / 'skills'),
-                    'FAKE_PYTHON': sys.executable, 'PYTHONDONTWRITEBYTECODE': '1'}
+                    'FAKE_PYTHON': sys.executable, 'PYTHONDONTWRITEBYTECODE': '1',
+                    'ADVANCE_ROADMAP_THREADS_PER_REPO': '1', 'ADVANCE_ROADMAP_BATCH_SUMMARY': '0',
+                    'ADVANCE_ROADMAP_THREAD_RELEASE_GAP_S': '0'}
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -178,6 +211,134 @@ class DailyBatchTest(unittest.TestCase):
         self.run_batch()
         self.assertEqual(self.state()['queue'][0]['status'], 'deferred')
         self.assertFalse((self.root / 'trace.jsonl').exists())
+
+    # ── threads ───────────────────────────────────────────────────────────────
+
+    def threaded(self, **extra):
+        self.env.update({'ADVANCE_ROADMAP_THREADS_PER_REPO': '2', **extra})
+        self.repo('a')
+        self.run_batch(lanes=5)
+        return self.events()
+
+    def starts(self, events):
+        return sorted((e['repo'], e['thread']) for e in events if e['kind'] == 'work-start')
+
+    def test_approved_second_thread_runs_beside_the_first(self):
+        events = self.threaded(FAKE_VERDICT='approve')
+        self.assertEqual(self.starts(events), [('a', 1), ('a', 2)])
+        ready = max(e['time'] for e in events if e['kind'] == 'plan-ready')
+        self.assertLess(ready, min(e['time'] for e in events if e['kind'] == 'work-start'))
+        queue = self.state()['queue']
+        self.assertEqual([(i['thread'], i['outcome']) for i in queue], [(1, 'shipped'), (2, 'shipped')])
+        self.assertEqual(queue[1]['parent'], queue[0]['stamp'])
+        request = json.loads(next((self.root / 'batches').glob('*/approval-a-request.json')).read_text())
+        self.assertEqual([p['thread'] for p in request['plans']], [1, 2])
+        note = json.loads((self.root / 'runs' / queue[1]['stamp'] / 'batch-approval.json').read_text())
+        self.assertEqual((note['verdict'], note['siblings'][0]['thread']), ('approve', 1))
+        self.assertEqual(note['acknowledged_conflicts'][0]['area'], 'ROADMAP.md')
+        self.assertEqual(note['standing_conflicts'][0]['area'], 'lockfiles')
+
+    def test_approvals_for_different_repos_run_side_by_side(self):
+        self.env.update({'ADVANCE_ROADMAP_THREADS_PER_REPO': '2', 'FAKE_VERDICT': 'approve',
+                         'FAKE_APPROVER_SLEEP': '.4'})
+        self.repo('a')
+        self.repo('b')
+        self.run_batch(lanes=5)
+        rows = [json.loads(line) for line in (self.root / 'approver.jsonl').read_text().splitlines()]
+        starts = [r['time'] for r in rows if r['kind'] == 'start']
+        ends = [r['time'] for r in rows if r['kind'] == 'end']
+        self.assertEqual(len(starts), 2)
+        self.assertLess(max(starts), min(ends))
+
+    def test_second_thread_sees_the_first_threads_plan(self):
+        self.threaded(FAKE_VERDICT='approve')
+        stamp = self.state()['queue'][1]['stamp']
+        peers = json.loads((self.root / 'runs' / stamp / 'peer-plans.json').read_text())
+        self.assertEqual([(p['thread'], p['touchpoints']) for p in peers], [(1, ['src/a1.ts'])])
+
+    def test_serialized_second_thread_starts_after_the_first_finishes(self):
+        events = self.threaded(FAKE_VERDICT='serialize')
+        self.assertEqual(self.starts(events), [('a', 1), ('a', 2)])
+        end_one = next(e['time'] for e in events if e['kind'] == 'work-end' and e['thread'] == 1)
+        start_two = next(e['time'] for e in events if e['kind'] == 'work-start' and e['thread'] == 2)
+        self.assertLessEqual(end_one, start_two)
+
+    def test_deferred_second_thread_never_starts_work(self):
+        events = self.threaded(FAKE_VERDICT='defer')
+        self.assertEqual(self.starts(events), [('a', 1)])
+        self.assertIn(('deferred', 2), [(e['kind'], e['thread']) for e in events])
+        self.assertEqual(self.state()['queue'][0]['outcome'], 'shipped')
+
+    def test_failed_approver_defers_extra_threads_but_not_the_first(self):
+        events = self.threaded(FAKE_VERDICT='fail')
+        self.assertEqual(self.starts(events), [('a', 1)])
+        self.assertEqual(self.state()['phase'], 'done')
+
+    def test_missing_approver_defers_extra_threads(self):
+        (self.root / 'lib/planapproval.py').unlink()
+        events = self.threaded()
+        self.assertEqual(self.starts(events), [('a', 1)])
+
+    def test_repo_with_no_second_item_needs_no_approval(self):
+        # Thread 2 ran, but only to find nothing: no approver call, no second piece of work.
+        events = self.threaded(FAKE_NO_SECOND='1')
+        self.assertEqual(self.starts(events), [('a', 1), ('a', 2)])
+        self.assertFalse(list((self.root / 'batches').glob('*/approval-a-request.json')))
+
+    def test_thread_cap_is_respected(self):
+        events = self.threaded(ADVANCE_ROADMAP_THREADS_PER_REPO='3', FAKE_VERDICT='approve')
+        self.assertEqual(self.starts(events), [('a', 1), ('a', 2), ('a', 3)])
+        events = [e for e in events if e['kind'] == 'plan-start']
+        self.assertEqual(len(events), 3)
+
+    def test_lane_cap_bounds_threads_not_just_repos(self):
+        self.env.update({'ADVANCE_ROADMAP_THREADS_PER_REPO': '2', 'FAKE_VERDICT': 'approve'})
+        self.repo('a')
+        self.repo('b')
+        self.run_batch(lanes=2)
+        active, peak = 0, 0
+        for e in self.events():
+            if e['kind'] == 'work-start':
+                active += 1
+                peak = max(peak, active)
+            elif e['kind'] == 'work-end':
+                active -= 1
+        self.assertEqual(peak, 2)
+        self.assertEqual(len(self.starts(self.events())), 4)
+
+    def test_one_summary_after_every_thread_has_stopped(self):
+        if not shutil.which('node'):
+            self.skipTest('node is not installed')
+        slack = self.root / 'slackagent'
+        (slack / 'scripts').mkdir(parents=True)
+        (slack / 'scripts/post-roadmap-summary.mjs').write_text(
+            "import { appendFileSync, readFileSync } from 'node:fs';\n"
+            "const i = process.argv.indexOf('--batch');\n"
+            "const state = JSON.parse(readFileSync(process.argv[i + 1], 'utf8'));\n"
+            f"appendFileSync({json.dumps(str(self.root / 'slack-posts.jsonl'))}, "
+            "JSON.stringify({time: Date.now() / 1000, phase: state.phase, lanes: state.queue.length}) + '\\n');\n")
+        events = self.threaded(FAKE_VERDICT='approve', ADVANCE_ROADMAP_BATCH_SUMMARY='1',
+                               ADVANCE_ROADMAP_SLACKAGENT_DIR=str(slack))
+        posts = [json.loads(line) for line in (self.root / 'slack-posts.jsonl').read_text().splitlines()]
+        self.assertEqual(len(posts), 1)
+        self.assertEqual((posts[0]['phase'], posts[0]['lanes']), ('done', 2))
+        self.assertGreaterEqual(posts[0]['time'], max(e['time'] for e in events if e['kind'] == 'work-end'))
+        self.assertTrue(self.state()['summary_posted'])
+
+    def test_failed_summary_never_fails_the_batch(self):
+        if not shutil.which('node'):
+            self.skipTest('node is not installed')
+        slack = self.root / 'slackagent'
+        (slack / 'scripts').mkdir(parents=True)
+        (slack / 'scripts/post-roadmap-summary.mjs').write_text("process.exit(3);\n")
+        self.repo('a')
+        self.env.update({'ADVANCE_ROADMAP_BATCH_SUMMARY': '1', 'ADVANCE_ROADMAP_SLACKAGENT_DIR': str(slack),
+                         'ADVANCE_ROADMAP_SLACK_WEBHOOK': '', 'SLACK_CCUSAGE_WEBHOOK_URL': '',
+                         'ADVANCE_ROADMAP_SECRETS': str(self.root / 'none.env')})
+        self.run_batch()
+        self.assertFalse(self.state()['summary_posted'])
+        self.assertEqual(self.state()['phase'], 'done')
+
 
     def test_dashboard_schedule_preserves_history_and_uses_one_daily_slot(self):
         with patch.dict(os.environ, self.env):

@@ -1,7 +1,7 @@
 ---
 name: advance-roadmap
 description: >-
-  Ship planned items end-to-end, one per run, from a personal repo's ROADMAP.md, from docs/plans/ when the
+  Ship planned items end-to-end, one per thread (a repo may run a few threads at once once a plan approver clears them), from a personal repo's ROADMAP.md, from docs/plans/ when the
   repo has no roadmap, or from a Linear issue carrying a repo label. Pick a qualifying repo under
   the personal code dir, implement the item in its own Superset workspace, verify with the repo's
   test/build, move it to Shipped, then open a PR and merge it. Never pushes code to main directly.
@@ -20,7 +20,9 @@ description: >-
 
 # Advance the roadmap
 
-Take exactly ONE item from planned → shipped on `main` per run, or stop cleanly with blockers recorded.
+Take items from planned → shipped on `main`: one per **thread**, and a repo may run a few threads
+side by side when the plan approver clears them. Stop cleanly with blockers recorded when there's
+nothing to do.
 
 **Every item ships as a merged PR from its own Superset workspace.** `run.sh` creates a workspace
 (a git worktree under `~/.superset/worktrees/`, outside Dropbox) on the item's branch and runs the
@@ -36,30 +38,45 @@ up to 3 rounds. Findings still open after round 3 merge anyway, marked in the co
 `FIXME(advance-roadmap review)` (bugs) or `TODO(advance-roadmap review)` (lesser) and listed in the
 summary. `runs.jsonl` records the rounds and flags a ship with no logged review.
 
-**Nothing to ship? Clean something up.** When no item is dispatchable in any repo, the orchestrator
-picks one repo for a bounded, behavior-preserving refactor (`work_kind: code_health`) — an open
-`code-health` ticket first, otherwise an audit against a shared rubric — instead of stopping. And
-after every clean ship, the worker runs a short code-health retrospective on the repo it just
-touched and files up to 2 deduped `code-health` tickets. Those tickets rank below all feature work.
-Rubric, retrospective and refactor caps: [`CODE_HEALTH.md`](CODE_HEALTH.md).
+**Nothing to ship? Clean something up.** When a repo has no dispatchable item, its first thread runs
+one bounded, behavior-preserving refactor (`work_kind: code_health`) — an open `code-health` ticket
+first, otherwise an audit against a shared rubric — instead of stopping. And after every clean ship,
+the worker runs a short code-health retrospective on the repo it just touched and files up to 2
+deduped `code-health` tickets. Those tickets rank below all feature work. Rubric, retrospective and
+refactor caps: [`CODE_HEALTH.md`](CODE_HEALTH.md). A code-health pass never runs beside a feature thread.
 
-**Sprints in parallel lanes, twice a day: 10:30–15:30 and 16:00–21:00.** launchd starts
-`supervisor.py` at a window's first tick; the later hourly ticks are a watchdog that exits while
-it's alive. The supervisor keeps one **lane** busy per available repo (`run.sh` in lane mode, at
-most `ADVANCE_ROADMAP_LANES`, never two on one repo): lanes start one at a time, each told which
-repos the others hold; a finished lane's slot refills; a lane that finds no work stops new lanes
-until a repo frees up or a no-model fingerprint check sees the world change. No new lane in a
-window's last 30 minutes, and nothing overnight — lone overnight runs add one-session slots that
-drag Superset's width median down, while work packed into the windows overlaps Jake's own
-sessions (including his work org's, same username). Lanes don't chain; the supervisor refills
-instead. Why: [`../../docs/plans/production-run.md`](../../docs/plans/production-run.md).
+**One batch a day: 10:30, `daily_batch.py`.** launchd starts it once; it lists the personal repos and
+plans each one in parallel (at most `ADVANCE_ROADMAP_LANES`, default 5, planners or workers at once).
+No refills, no quota retries, no second batch the same calendar day. (`supervisor.py`'s sprint
+windows are the retired scheduler; its helpers are still imported.) The batch runs in four phases:
+
+1. **Plan.** One planner per repo (*thread 1*), read-only, picks one item and lists its
+   `touchpoints`. Once thread 1 has planned a *feature*, a planner for the repo's *next thread*
+   starts, shown the earlier threads' plans, up to `ADVANCE_ROADMAP_THREADS_PER_REPO` (default 2,
+   at most 3; `--threads`). A later thread picks the next item that isn't theirs, owns no bookkeeping,
+   and answers `no second thread` when there's nothing independent to do.
+2. **Approve.** At the barrier — every planner finished, no worker started — each repo with two or
+   more ready plans goes to the **plan approver** ([`PLAN_APPROVAL.md`](PLAN_APPROVAL.md)). It
+   rules on every thread after the first: `approve` (parallel), `serialize` (starts after the named
+   thread has merged) or `defer` (planned afresh tomorrow), and writes down every overlap it accepts. Thread 1
+   is never deferred or serialized, but it does wait at the barrier for the slowest approval (the
+   rulings run side by side). If the approver fails or can't run, the extra threads defer and nothing
+   else changes. That is the only way two workers ever share a repo.
+3. **Build.** Workers are released at the barrier, two threads of a repo at least 20s apart, a
+   serialized thread only after its predecessor ends. Each worker's brief carries the approver's
+   acknowledged conflicts and the sibling threads (WORKER.md *Threads*).
+4. **Summarize.** When the last thread has stopped, `daily_batch.py` posts **one** Slack summary
+   through Slackagent (ships first, no-item repos collapsed, threads grouped by repo). Individual
+   runs inside a batch post nothing; the consecutive-failure alert is separate and still fires.
+   A lone `run.sh` outside a batch still posts its own line.
 
 **Never depends on Claude.** Every role has a non-Claude first choice: Codex orchestrates, Cursor
 builds, the reviewer is never Claude first, and the scheduling around them is plain shell and
 Python. Claude is only ever a fallback, so the job keeps shipping when Jake's Claude usage is spent.
-Anything added here (a supervisor, a slicer) must keep that true.
+Anything added here (a scheduler, a slicer, the plan approver) must keep that true: the approver is
+Codex Sol first, Claude Opus only as the fallback.
 
-**Keep going while there's time (lone runs).** A `run.sh` outside lane mode — a manual run — that
+**Keep going while there's time (lone runs).** A `run.sh` outside a batch — a manual run — that
 ships a feature cleanly (`shipped`, deploy green) starts another run — fresh orchestrator pass,
 fresh item — as long as fewer than `ADVANCE_ROADMAP_CHAIN_MINUTES` (default 40; `0` = one item)
 have passed since the first run started. Anything else (blocked, failed, red deploy, no item,
@@ -80,6 +97,7 @@ only (see `SAFETY.md`) — from [[unblock-roadmap]] (the only dirty-tree excepti
 |---|---|---|---|
 | **Orchestrator** | Codex **Sol** high → Claude Opus high | **No** | [`../conductor/ORCHESTRATOR.md`](../conductor/ORCHESTRATOR.md) |
 | **Worker** | Cursor Auto → Codex Sol → Claude Opus | **Yes** | [`WORKER.md`](WORKER.md) |
+| **Plan approver** | Codex **Sol** high → Claude Opus high | **No** | [`PLAN_APPROVAL.md`](PLAN_APPROVAL.md) |
 | **Reviewer** | a provider other than the worker's (Cursor ↔ Codex; Claude → Codex) | **No** | [`WORKER.md`](WORKER.md) Step 5b |
 | **Safety** | — | binds both | [`SAFETY.md`](SAFETY.md) |
 
@@ -91,8 +109,9 @@ only (see `SAFETY.md`) — from [[unblock-roadmap]] (the only dirty-tree excepti
 4. Dispatch `worker.sh` (Cursor → Codex → Claude) in the item's Superset workspace terminal, with
    same-run failover on limits.
 5. Persist usage for the next tick. Skip only when **no orchestrator** remains.
-6. On a clean ship under the chain limit, re-exec for the next item (lone runs only; in lane mode
-   `supervisor.py` refills the lane instead, and owns the lock, the window and workspace cleanup).
+6. On a clean ship under the chain limit, re-exec for the next item (lone runs only; inside a daily
+   batch `daily_batch.py` owns the lock, workspace cleanup, thread planning, plan approval and the
+   one Slack summary, and nothing chains).
 
 Linear routing labels:
 
@@ -120,5 +139,6 @@ For human-driven work on an item you name, call `/conductor` directly.
 
 1. [`SAFETY.md`](SAFETY.md)
 2. [`../conductor/ORCHESTRATOR.md`](../conductor/ORCHESTRATOR.md) — Steps 0–2d + JSON protocol (lives in the [[conductor]] skill)
-3. [`WORKER.md`](WORKER.md) — Steps 3–8 (including Step 5b's cross-model review, Step 7b's deploy watch and Step 7c's retrospective) + worker result fence
-4. [`CODE_HEALTH.md`](CODE_HEALTH.md) — the code-health rubric, retrospective, and refactor pass
+3. [`PLAN_APPROVAL.md`](PLAN_APPROVAL.md) — only if you are the plan approver
+4. [`WORKER.md`](WORKER.md) — Steps 3–8 (including Step 5b's cross-model review, Step 7b's deploy watch and Step 7c's retrospective) + worker result fence
+5. [`CODE_HEALTH.md`](CODE_HEALTH.md) — the code-health rubric, retrospective, and refactor pass

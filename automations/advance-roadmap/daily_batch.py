@@ -1,9 +1,16 @@
 #!/usr/bin/env python3
-"""One daily batch: plan one item per personal repo, then run the plans in parallel.
+"""One daily batch: plan the personal repos, approve the plans, then run them in parallel.
 
-The queue is fixed before planning. --lanes bounds both planning and implementation
-to between one and five repos at once. Ready planners wait without using a model.
-No repo refills, quota retries, or second batch on the same calendar day.
+Each repo starts with one thread. Once a repo's first thread has planned a feature, a second
+planner for the same repo may be started (--threads, at most three per repo) and told what the
+earlier threads will touch. Before any worker starts, a plan approver (lib/planapproval.py) rules
+on every extra thread: run in parallel, run only after an earlier thread has merged, or wait for
+tomorrow. The first thread of a repo is never deferred or serialized by that ruling; it waits
+at the barrier only for the slowest approval (rulings for different repos run side by side).
+
+--lanes bounds both planning and implementation to between one and five threads at once. Ready
+planners wait without using a model. No repo refills, quota retries, or second batch on the same
+calendar day. One Slack summary is posted when the batch ends; individual runs post nothing.
 """
 import argparse
 import fcntl
@@ -15,6 +22,7 @@ import shutil
 import subprocess
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
 
@@ -24,6 +32,11 @@ ROOT = shared.ROOT
 POLL_S = float(os.environ.get("ADVANCE_ROADMAP_BATCH_POLL_S", "1"))
 PLAN_TIMEOUT_S = float(os.environ.get("ADVANCE_ROADMAP_PLAN_TIMEOUT_S", "1800"))
 MAX_CONCURRENT_REPOS = 5
+MAX_THREADS_PER_REPO = 3
+DEFAULT_THREADS_PER_REPO = 2
+# Two workers of one repo creating Superset workspaces in the same second race the project import.
+RELEASE_GAP_S = float(os.environ.get("ADVANCE_ROADMAP_THREAD_RELEASE_GAP_S", "20"))
+APPROVAL_TIMEOUT_S = float(os.environ.get("ADVANCE_ROADMAP_APPROVAL_TIMEOUT_S", "1800"))
 
 
 def save(path, value):
@@ -49,51 +62,90 @@ def candidates(code):
     return repos
 
 
+def plan_of(result, item):
+    """What a later planner and the plan approver need to know about one thread's plan."""
+    return {"stamp": item["stamp"], "thread": item["thread"], "repo": item["repo"],
+            "action": result.get("action"), "item": result.get("item"),
+            "linear_id": result.get("linear_id"), "branch": result.get("branch"),
+            "work_kind": result.get("work_kind") or "feature",
+            "touchpoints": [t for t in result.get("touchpoints") or [] if isinstance(t, str)],
+            "conflict_notes": [n for n in result.get("conflict_notes") or [] if isinstance(n, str)],
+            "worker_brief": (result.get("worker_brief") or "")[:2500],
+            "summary": (result.get("summary") or "")[:600]}
+
+
 class Batch:
-    def __init__(self, directory, repos, lanes):
+    def __init__(self, directory, repos, lanes, threads=1):
         if not 1 <= lanes <= MAX_CONCURRENT_REPOS:
-            raise ValueError("batch concurrency must be between 1 and 5 repos")
+            raise ValueError("batch concurrency must be between 1 and 5 lanes")
+        if not 1 <= threads <= MAX_THREADS_PER_REPO:
+            raise ValueError(f"threads per repo must be between 1 and {MAX_THREADS_PER_REPO}")
         self.directory = directory
         self.limit = lanes
+        self.threads = threads
         self.procs = {}
         self.state = {"date": directory.name, "phase": "preparing", "lanes_max": self.limit,
+                      "threads_max": self.threads,
                       "started_at": datetime.now().isoformat(timespec="seconds"), "queue": []}
         # Keep the legacy timestamp format: runmemory and dashboard parse it. Reserve all
         # stamps before launch, rather than sleeping a second between parallel starts.
-        stamp_time = int(time.time())
-        for n, repo in enumerate(repos, 1):
-            while True:
-                stamp = datetime.fromtimestamp(stamp_time).strftime("%Y%m%d-%H%M%S")
-                stamp_time += 1
-                try:
-                    (ROOT / "runs" / stamp).mkdir(parents=True)
-                    break
-                except FileExistsError:
-                    continue
-            self.state["queue"].append({"repo": repo, "lane": n, "stamp": stamp,
-                                        "status": "queued"})
+        self.stamp_time = int(time.time())
+        for repo in repos:
+            self.reserve(repo, 1)
+
+    def reserve(self, repo, thread, parent=None):
+        """Add a queued entry for one thread of a repo, with a stamp nobody else has used."""
+        self.stamp_time = max(self.stamp_time, int(time.time())) if thread > 1 else self.stamp_time
+        while True:
+            stamp = datetime.fromtimestamp(self.stamp_time).strftime("%Y%m%d-%H%M%S")
+            self.stamp_time += 1
+            try:
+                (ROOT / "runs" / stamp).mkdir(parents=True)
+                break
+            except FileExistsError:
+                continue
+        item = {"repo": repo, "lane": len(self.state["queue"]) + 1, "stamp": stamp,
+                "thread": thread, "status": "queued"}
+        if parent:
+            item["parent"] = parent
+        self.state["queue"].append(item)
+        return item
+
+    def siblings(self, item):
+        return [i for i in self.state["queue"] if i["repo"] == item["repo"] and i is not item]
 
     def write(self):
         self.state["updated_at"] = datetime.now().isoformat(timespec="seconds")
         save(self.directory / "batch.json", self.state)
 
+    def verdict_path(self, item):
+        suffix = "" if item["thread"] == 1 else f'.t{item["thread"]}'
+        return ROOT / "batch-verdicts" / f'{item["repo"]}{suffix}.json'
+
     def launch(self, item):
+        run = ROOT / "runs" / item["stamp"]
+        peers = [i["plan"] for i in self.siblings(item) if i.get("plan") and i["thread"] < item["thread"]]
+        save(run / "peer-plans.json", peers)
         env = {**os.environ, "ADVANCE_ROADMAP_LANE": str(item["lane"]),
                "ADVANCE_ROADMAP_STAMP": item["stamp"], "ADVANCE_ROADMAP_TARGET_REPO": item["repo"],
+               "ADVANCE_ROADMAP_THREAD": str(item["thread"]),
+               "ADVANCE_ROADMAP_THREADS_PER_REPO": str(self.threads),
+               "ADVANCE_ROADMAP_PEER_PLANS": str(run / "peer-plans.json"),
                "ADVANCE_ROADMAP_BATCH_PID": str(os.getpid()),
                "ADVANCE_ROADMAP_BATCH_SNAPSHOT": str(self.directory / "linear-snapshot.json"),
                "ADVANCE_ROADMAP_INFLIGHT_STAMPS": " ".join(i["stamp"] for i in self.state["queue"]),
-               "ADVANCE_ROADMAP_LAST_VERDICT": str(ROOT / "batch-verdicts" / f'{item["repo"]}.json')}
-        # Other batch repos are never this planner's fallback, even before they have a worker.
+               "ADVANCE_ROADMAP_LAST_VERDICT": str(self.verdict_path(item))}
+        # Other repos are never this planner's fallback, even before they have a worker. Threads of
+        # its own repo are not busy: they are the siblings it is planning around.
         env["ADVANCE_ROADMAP_BUSY_REPOS"] = " ".join(
-            i["repo"] for i in self.state["queue"] if i is not item)
+            sorted({i["repo"] for i in self.state["queue"] if i["repo"] != item["repo"]}))
         with open(ROOT / "logs" / f'batch-lane-{item["stamp"]}.err', "w") as err:
             proc = subprocess.Popen(["/bin/zsh", str(shared.RUN_SH)], env=env,
                                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                                     stderr=err, start_new_session=True)
         self.procs[item["stamp"]] = proc
         item.update(status="planning", pid=proc.pid, started=time.time())
-        shared.log(f'planning {item["repo"]} [{item["stamp"]}]')
+        shared.log(f'planning {item["repo"]} thread {item["thread"]} [{item["stamp"]}]')
 
     def poll(self):
         for item in self.state["queue"]:
@@ -109,7 +161,8 @@ class Batch:
             if item["status"] == "planning" and (run / "batch-ready").exists():
                 result = shared.read_json(run / "orchestrator-result.json") or {}
                 item.update(status="ready", action=result.get("action"),
-                            linear_id=result.get("linear_id"), item=result.get("item"))
+                            linear_id=result.get("linear_id"), item=result.get("item"),
+                            plan=plan_of(result, item))
             elif item["status"] == "planning" and time.time() - item["started"] > PLAN_TIMEOUT_S:
                 # Only planning gets this deadline. Already dispatched workers retain run.sh's
                 # existing timeout/recovery behavior and are never killed by this controller.
@@ -121,11 +174,112 @@ class Batch:
                     proc.wait()
                 item.update(status="finished", outcome="planning-timeout")
 
+    def spawn_threads(self):
+        """Once a thread has planned a feature, queue the repo's next thread (up to --threads).
+
+        Code-health passes and resumes never grow a second thread: the first means the repo has no
+        feature work left, the second is finishing a parked branch nobody should plan around.
+        """
+        for item in list(self.state["queue"]):
+            plan = item.get("plan")
+            if (item["status"] != "ready" or item.get("spawned") or not plan
+                    or plan["action"] != "dispatch_worker" or plan["work_kind"] != "feature"):
+                continue
+            item["spawned"] = True
+            count = len(self.siblings(item)) + 1
+            if count < self.threads:
+                self.reserve(item["repo"], count + 1, parent=item["stamp"])
+
+    def plan_ruling(self, items):
+        """The approver's result for one repo's ready plans; a failure defers every extra thread."""
+        repo = items[0]["repo"]
+        request = {"repo": repo, "plans": [i["plan"] for i in items]}
+        req = self.directory / f"approval-{repo}-request.json"
+        out = self.directory / f"approval-{repo}.json"
+        save(req, request)
+        reason = "the plan approver did not run"
+        try:
+            doc = Path(os.environ.get("ADVANCE_ROADMAP_SKILL_DIR",
+                                      str(Path.home() / ".claude/skills/advance-roadmap"))) / "PLAN_APPROVAL.md"
+            proc = shared.py("planapproval.py", "--root", str(ROOT), "approve", "--request", str(req),
+                             "--out", str(out), "--doc", str(doc), "--code-dir", str(shared.code_dir()),
+                             timeout=APPROVAL_TIMEOUT_S)
+            result = shared.read_json(out) if proc.returncode == 0 else None
+            if result and result.get("ok"):
+                if result.get("error"):
+                    shared.log(f"{repo}: approver unavailable ({result['error']}); extra threads wait")
+                return result
+            reason = f"the plan approver failed (exit {proc.returncode}): {(proc.stderr or '').strip()[-300:]}"
+        except (OSError, subprocess.TimeoutExpired) as error:
+            reason = f"the plan approver could not run: {error}"
+        shared.log(f"{repo}: {reason}")
+        return {"ok": True, "repo": repo, "standing_conflicts": [], "error": reason,
+                "decisions": [{"stamp": i["stamp"], "thread": i["thread"],
+                               "verdict": "approve" if n == 0 else "defer",
+                               "reason": "first thread always proceeds" if n == 0 else reason,
+                               "after": None} for n, i in enumerate(items)]}
+
+    def approve_threads(self):
+        """Rule on every repo that planned more than one thread, before any worker starts."""
+        groups = {}
+        for item in self.state["queue"]:
+            if item["status"] == "ready" and item.get("action") == "dispatch_worker" and item.get("plan"):
+                groups.setdefault(item["repo"], []).append(item)
+        pending = {repo: sorted(items, key=lambda i: i["thread"])
+                   for repo, items in sorted(groups.items()) if len(items) > 1}
+        if not pending:
+            return
+        # One model call per repo, side by side: thread 1 of every repo waits for the slowest
+        # ruling rather than the sum of them.
+        with ThreadPoolExecutor(max_workers=max(1, min(self.limit, len(pending)))) as pool:
+            rulings = dict(zip(pending, pool.map(self.plan_ruling, pending.values())))
+        for repo, items in pending.items():
+            result = rulings[repo]
+            decisions = {d.get("stamp"): d for d in result.get("decisions", [])}
+            for item in items:
+                d = decisions.get(item["stamp"]) or {"verdict": "defer", "reason": "no ruling"}
+                verdict = d.get("verdict") if item is not items[0] else "approve"
+                item.update(ruling=verdict, ruling_reason=d.get("reason"))
+                note = {"repo": repo, "thread": item["thread"], "verdict": verdict,
+                        "reason": d.get("reason"), "after": d.get("after"),
+                        "acknowledged_conflicts": d.get("acknowledged_conflicts") or [],
+                        "standing_conflicts": result.get("standing_conflicts") or [],
+                        "siblings": [{"stamp": o["stamp"], "thread": o["thread"], "item": o.get("item"),
+                                      "branch": o["plan"].get("branch"),
+                                      "touchpoints": o["plan"].get("touchpoints"),
+                                      "verdict": (decisions.get(o["stamp"]) or {}).get("verdict")}
+                                     for o in items if o is not item]}
+                save(ROOT / "runs" / item["stamp"] / "batch-approval.json", note)
+                if verdict == "defer":
+                    self.cancel(item, f'plan approval: {d.get("reason") or "deferred"}')
+                elif verdict == "serialize":
+                    item["after"] = d.get("after")
+                shared.log(f'{repo} thread {item["thread"]}: {verdict}'
+                           + (f' after {item["after"]}' if verdict == "serialize" else "")
+                           + (f' ({d.get("reason")})' if d.get("reason") else ""))
+
+    def cancel(self, item, reason):
+        (ROOT / "runs" / item["stamp"] / "batch-cancel").write_text(reason + "\n")
+        item.update(status="canceling", reason=reason)
+
+    def releasable(self, item, chosen):
+        """A serialized thread waits for the thread it follows; two threads of a repo start apart."""
+        if item.get("after"):
+            prior = next((i for i in self.state["queue"] if i["stamp"] == item["after"]), None)
+            if prior and prior["status"] != "finished":
+                return False
+        for other in self.siblings(item):
+            if other in chosen:
+                return False
+            if other.get("released_at") and time.time() - other["released_at"] < RELEASE_GAP_S \
+                    and other["status"] in {"running", "canceling"}:
+                return False
+        return True
+
     def defer_ready(self, reason):
         for item in self.state["queue"]:
             if item["status"] == "ready":
-                (ROOT / "runs" / item["stamp"] / "batch-cancel").write_text(reason + "\n")
-                item.update(status="canceling", reason=reason)
+                self.cancel(item, reason)
 
     def run(self):
         self.write()
@@ -134,20 +288,28 @@ class Batch:
         # whole finite queue can reach the barrier even when repos outnumber the cap.
         while any(i["status"] in {"queued", "planning"} for i in self.state["queue"]):
             self.poll()
+            self.spawn_threads()
             slots = self.limit - sum(i["status"] == "planning" for i in self.state["queue"])
             for item in [i for i in self.state["queue"] if i["status"] == "queued"][:slots]:
                 self.launch(item)
             self.write()
             time.sleep(POLL_S)
+        self.state["phase"] = "approving"
+        self.write()
+        self.approve_threads()
         self.state["phase"] = "implementing"
         self.write()
         while any(i["status"] in {"ready", "running", "canceling"} for i in self.state["queue"]):
             self.poll()
             slots = self.limit - sum(i["status"] in {"running", "canceling"}
                                     for i in self.state["queue"])
-            ready = sorted((i for i in self.state["queue"] if i["status"] == "ready"),
-                           key=lambda i: i.get("action") not in {"dispatch_worker", "resume_worker"})[:slots]
-            if ready:
+            ready, chosen = sorted(
+                (i for i in self.state["queue"] if i["status"] == "ready"),
+                key=lambda i: (i.get("action") not in {"dispatch_worker", "resume_worker"}, i["thread"])), []
+            for item in ready:
+                if len(chosen) < slots and self.releasable(item, chosen):
+                    chosen.append(item)
+            if chosen:
                 # Recheck before each wave; exhaustion defers the remaining saved plans to
                 # tomorrow. It never turns the daily job into an all-day retry loop.
                 shared.py("usage.py", "--root", str(ROOT), "refresh", timeout=120)
@@ -155,24 +317,99 @@ class Batch:
                 if providers.returncode or providers.stdout.strip() in {"", "none"}:
                     self.defer_ready("no worker quota available; saved plans wait for the next daily batch")
                 else:
-                    for item in ready:
+                    for item in chosen:
                         (ROOT / "runs" / item["stamp"] / "batch-release").touch()
-                        item["status"] = "running"
-                        shared.log(f'released {item["repo"]} {item.get("linear_id") or ""}')
+                        item.update(status="running", released_at=time.time())
+                        shared.log(f'released {item["repo"]} thread {item["thread"]} {item.get("linear_id") or ""}')
             self.write()
             time.sleep(POLL_S)
         self.state["phase"] = "done"
         self.write()
+        self.post_summary()
         return 0
+
+    def post_summary(self):
+        """The batch's only Slack post, sent once every thread has stopped (or the batch failed)."""
+        if os.environ.get("ADVANCE_ROADMAP_BATCH_SUMMARY", "1") != "1":
+            return False
+        posted = post_slack_summary(self.directory)
+        self.state["summary_posted"] = posted
+        self.write()
+        return posted
+
+
+def slackagent_script():
+    code = shared.code_dir() or ""
+    base = Path(os.environ.get("ADVANCE_ROADMAP_SLACKAGENT_DIR", str(Path(code) / "slackagent")))
+    return base / "scripts" / "post-roadmap-summary.mjs"
+
+
+def webhook_url():
+    url = os.environ.get("ADVANCE_ROADMAP_SLACK_WEBHOOK") or os.environ.get("SLACK_CCUSAGE_WEBHOOK_URL")
+    if url:
+        return url
+    secrets = Path(os.environ.get("ADVANCE_ROADMAP_SECRETS", str(Path.home() / ".claude/automations/secrets.env")))
+    try:
+        for line in secrets.read_text().splitlines():
+            match = re.match(r"\s*(?:export\s+)?(ADVANCE_ROADMAP_SLACK_WEBHOOK|SLACK_CCUSAGE_WEBHOOK_URL)=(.*)", line)
+            if match:
+                return match.group(2).strip().strip("'\"")
+    except OSError:
+        pass
+    return ""
+
+
+def post_slack_summary(directory):
+    """Post one summary for the whole batch through slackagent; webhook text if that fails."""
+    script = slackagent_script()
+    node = shutil.which("node")
+    args = ["--batch", str(directory / "batch.json"), "--runs", str(ROOT / "runs.jsonl")]
+    text = ""
+    if node and script.exists():
+        try:
+            done = subprocess.run([node, str(script), *args], capture_output=True, text=True,
+                                  timeout=120, stdin=subprocess.DEVNULL)
+            if done.returncode == 0:
+                shared.log("posted the batch summary to Slack")
+                return True
+            shared.log(f"slackagent batch post failed: {(done.stderr or done.stdout).strip()[-300:]}")
+            dry = subprocess.run([node, str(script), *args, "--dry-run"], capture_output=True, text=True,
+                                 timeout=60, stdin=subprocess.DEVNULL)
+            text = dry.stdout.strip() if dry.returncode == 0 else ""
+        except (OSError, subprocess.TimeoutExpired) as error:
+            shared.log(f"slackagent batch post could not run: {error}")
+    else:
+        shared.log("no slackagent post script; batch summary not posted through slackagent")
+    url = webhook_url()
+    if not url:
+        return False
+    state = shared.read_json(directory / "batch.json") or {}
+    text = text or f'advance-roadmap batch {state.get("date")}: {state.get("phase")}'
+    try:
+        import urllib.request
+        request = urllib.request.Request(url, data=json.dumps({"text": text}).encode(),
+                                         headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(request, timeout=15):
+            shared.log("posted the batch summary through the webhook")
+            return True
+    except Exception as error:  # a Slack outage must never fail the batch
+        shared.log(f"webhook batch post failed: {error}")
+        return False
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--lanes", type=int, default=int(os.environ.get("ADVANCE_ROADMAP_LANES", "5")))
+    parser.add_argument("--threads", type=int, default=int(os.environ.get(
+        "ADVANCE_ROADMAP_THREADS_PER_REPO", str(DEFAULT_THREADS_PER_REPO))),
+        help=f"most parallel threads of work in one repo (1-{MAX_THREADS_PER_REPO}); more than one "
+             "needs the plan approver")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
     if not 1 <= args.lanes <= MAX_CONCURRENT_REPOS:
         parser.error("--lanes must be between 1 and 5 repos")
+    if not 1 <= args.threads <= MAX_THREADS_PER_REPO:
+        parser.error(f"--threads must be between 1 and {MAX_THREADS_PER_REPO}")
     marker = Path.home() / "dotfiles/bin/is-personal-machine"
     if marker.exists() and subprocess.run([str(marker)]).returncode == 1:
         return 0
@@ -182,7 +419,8 @@ def main():
     repos = candidates(Path(code))
     if args.dry_run:
         print(json.dumps({"repos": repos, "concurrency": args.lanes,
-                          "schedule": "daily at 10:30 local time", "items_per_repo": 1}, indent=2))
+                          "schedule": "daily at 10:30 local time",
+                          "threads_per_repo": args.threads}, indent=2))
         return 0
     ROOT.mkdir(parents=True, exist_ok=True)
     with open(ROOT / "run.lock.f", "a") as lock:
@@ -200,7 +438,7 @@ def main():
             return 0
         (ROOT / "logs").mkdir(exist_ok=True)
         (ROOT / "batch-verdicts").mkdir(exist_ok=True)
-        batch = Batch(directory, repos, args.lanes)
+        batch = Batch(directory, repos, args.lanes, args.threads)
         batch.write()
         shared.LOG = ROOT / "logs" / f"batch-{directory.name}.log"
         marker_dir = ROOT / "run.lock"
@@ -242,6 +480,7 @@ def main():
             batch.state.update(phase="failed", error=str(error))
             batch.write()
             shared.log(str(error))
+            batch.post_summary()
             return 1
         finally:
             shutil.rmtree(marker_dir, ignore_errors=True)

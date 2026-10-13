@@ -50,12 +50,19 @@ Schema: `~/.claude/automations/advance-roadmap/schemas/orchestrator-result.json`
   "work_kind": "feature",
   "directive_ticket": null,
   "worker_brief": "Self-contained brief: scope, touchpoints, acceptance, risks.",
+  "touchpoints": ["src/analytics/", "src/pages/triage.tsx"],
+  "conflict_notes": [],
   "archives": [],
   "blockers": [],
   "considered": ["typey.site DEV-56 skipped: needs PostHog key"],
   "summary": "Picked DEV-35 in mailcruxh."
 }
 ```
+
+`touchpoints` lists every repo-relative file, directory or glob the item will change — as specific as
+you can make it, and never empty for a dispatch. It's what the plan approver compares across threads
+(see *Threads* below). `conflict_notes` is anything you already expect to overlap with a sibling
+thread's plan, stated plainly; empty when there's nothing.
 
 Use `"action": "resume_worker"` when Step 0 requires finishing an interrupted run; set
 `branch` to the existing `roadmap/...` branch.
@@ -122,6 +129,28 @@ lane — and drops it when it isn't. If you are running, the log lines `pending 
 say why any were declined; a plan for a busy repo is simply another lane's, so leave it alone.
 Never edit or delete these files — `run.sh` owns them.
 
+### Threads
+
+A daily batch may run up to a few **threads** of work in one repo: separate planners, separate
+branches, separate Superset workspaces, one item each. Your prompt names your thread number and the
+cap. The rules:
+
+- **Thread 1 plans exactly as above.** It owns everything repo-level: Step 2d's code-health pass,
+  archives, blockers, Linear comments, a directive. Plan it as if it were the only thread.
+- **A later thread** gets `peer-plans.json` — the earlier threads' items, branches and touchpoints.
+  Pick the next-ranked eligible item that is not theirs and doesn't need their branch, preferring
+  one whose touchpoints are disjoint. If the only candidates collide, pick the best and say so in
+  `conflict_notes` — don't hide it, don't skip a good item to avoid it; the approver rules on it.
+  If no second independent item exists, return `blocked_no_item` with the summary `no second
+  thread`. A later thread owns **no bookkeeping**: no code-health pass, no archives, no blockers, no
+  comments, no resume. `run.sh` enforces this and blanks those fields.
+- **A code-health pass never runs beside a feature thread.** It exists for a repo with no feature
+  item, so a repo that has a thread-1 feature gets no second thread for hygiene.
+- **Every plan is approved before any worker starts.** For a repo with two or more ready plans,
+  [`PLAN_APPROVAL.md`](../advance-roadmap/PLAN_APPROVAL.md)'s approver rules on each later thread:
+  run in parallel, run after an earlier thread has merged, or wait for tomorrow. You don't call the
+  approver; `daily_batch.py` does. Your job is a plan with honest touchpoints.
+
 ### Parallel lanes
 
 In a scheduled window, `supervisor.py` runs several of these runs at once, one per repo. Your
@@ -133,7 +162,7 @@ the **in-flight run stamps**:
 - **An in-flight stamp's log is never an interrupted run.** It has no exit line because it is still
   running. When you look for the previous run below, skip in-flight logs and take the newest one
   older than yours that isn't in flight.
-- Everything else is unchanged: you still emit exactly one decision, for one repo.
+- Everything else is unchanged: you still emit exactly one decision, for one repo (and one thread of it).
 
 ### A carried no-work verdict exists
 
@@ -459,6 +488,8 @@ items you considered and why each was skipped, and record it in memory.
 
 **One item per run.** Don't chain a second one because the first went fast — chaining is `run.sh`'s
 job: after a clean ship it starts a fresh run (new plan, new item) while the tick is under 40 minutes.
+A second item in the same repo comes from a second *thread* (see *Threads* above), planned by its
+own run and approved before it starts — never from you picking two.
 
 ### Also check Linear
 

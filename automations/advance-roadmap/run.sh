@@ -92,6 +92,11 @@ if [ -n "$TARGET_REPO" ]; then
   LAST_VERDICT="${ADVANCE_ROADMAP_LAST_VERDICT:-$CODE_DIR/.advance-roadmap/last-verdict-$TARGET_REPO.json}"
 fi
 BATCH_PID="${ADVANCE_ROADMAP_BATCH_PID:-}"
+# Thread N of a repo's work in one daily batch (daily_batch.py). Thread 1 is the repo's primary
+# planner; later threads plan around the earlier ones' plans (PEER_PLANS) and own no bookkeeping.
+THREAD="${ADVANCE_ROADMAP_THREAD:-1}"
+case "$THREAD" in ''|*[!0-9]*|0) THREAD=1 ;; esac
+PEER_PLANS="${ADVANCE_ROADMAP_PEER_PLANS:-}"
 BATCH_SNAPSHOT="${ADVANCE_ROADMAP_BATCH_SNAPSHOT:-}"
 BUSY_REPOS="${ADVANCE_ROADMAP_BUSY_REPOS:-}"
 INFLIGHT_STAMPS="${ADVANCE_ROADMAP_INFLIGHT_STAMPS:-}"
@@ -488,17 +493,32 @@ In-flight run stamps — still running, never interrupted: ${INFLIGHT_STAMPS:-no
   if [ -n "$TARGET_REPO" ]; then
     ORCH_PROMPT="$ORCH_PROMPT
 
-This is a finite daily batch. Your ONLY repository is $TARGET_REPO.
-First select at most ONE existing actionable ticket/roadmap item in that repo.
-If none is actionable, apply Step 2d's bounded code-health (hygiene) fallback to this repo.
+This is a finite daily batch. Your ONLY repository is $TARGET_REPO. You are THREAD $THREAD of at most ${ADVANCE_ROADMAP_THREADS_PER_REPO:-2} in it (ORCHESTRATOR.md, *Threads*).
+Select at most ONE existing actionable ticket/roadmap item for your thread.
+For a dispatch, list in touchpoints every file, directory or glob the item will change, and put
+anything you expect to overlap with a sibling thread in conflict_notes (ORCHESTRATOR.md, JSON protocol).
+Do not choose another repo, invent roadmap features, reconcile another repo's prior run,
+or include another repo's archives, blockers, directives, or bookkeeping.
+Other batch planners own every other repo. Keep considered and summary scoped to $TARGET_REPO."
+    if [ "$THREAD" -le 1 ]; then
+      ORCH_PROMPT="$ORCH_PROMPT
+If no feature item is actionable, apply Step 2d's bounded code-health (hygiene) fallback to this repo.
 For this daily batch the fallback is PER REPO: feature work in another repo does not block it.
 Prefer an existing code-health ticket; otherwise queue one ad-hoc pass under CODE_HEALTH.md.
 Keep every Step 2d eligibility gate, including the clean tree and 24-hour cooldown.
 Emit work_kind=code_health for a hygiene pass; if the repo is ineligible, return no work.
-The daily limit is ONE feature/resume OR hygiene pass for this repo, never both.
-Do not choose another repo, invent roadmap features, reconcile another repo's prior run,
-or include another repo's archives, blockers, directives, or bookkeeping.
-Other batch planners own every other repo. Keep considered and summary scoped to $TARGET_REPO."
+A code-health pass is only for a repo with no feature item; it never runs beside a feature thread.
+Later threads of this repo are planned after yours and approved against it, so plan yours as if alone."
+    else
+      ORCH_PROMPT="$ORCH_PROMPT
+Earlier threads of $TARGET_REPO already hold the items in $PEER_PLANS (read it). Never pick one of
+those items or anything that needs their branch. Pick the next-ranked eligible item whose
+touchpoints are as disjoint from theirs as you can make them; if the only candidates collide, say
+so in conflict_notes rather than hiding it, and the plan approver will decide.
+You own NO bookkeeping: no Step 2d code-health pass, no archives, no blockers, no Linear comments,
+no directive. If no second independent item exists, return blocked_no_item with the summary
+\"no second thread\" and nothing else."
+    fi
   fi
 
   if [ ! -f "$PROBE_FLAG" ]; then
@@ -514,7 +534,9 @@ If a PushNotification probe would have been useful, set a note in summary; the w
   # Oldest first; another lane's repo is not ours to resume. A plan that can't be reused is
   # dead (too old, retried out, repo unsafe) — drop it, as a fresh plan would have replaced it.
   reused=0
+  # Only a repo's first thread resumes a saved plan; a later thread always plans fresh.
   for f in "$PENDING_DIR"/pending-plan*.json(N.Om); do
+    [ "$THREAD" -gt 1 ] && break
     prepo="$(jq -r '.orchestrator.repo // empty' "$f" 2>/dev/null)"
     [ -n "$TARGET_REPO" ] && [ "$prepo" != "$TARGET_REPO" ] && continue
     [[ " $BUSY_REPOS " == *" $prepo "* ]] && continue
@@ -612,16 +634,27 @@ PY
   # even a supervisor that crashed and lost track can't put two lanes on one repo.
   pick="$(jq -r 'select(.action=="dispatch_worker" or .action=="resume_worker") | .repo // empty' "$result" 2>/dev/null)"
   if [[ "$pick" =~ '^[A-Za-z0-9][A-Za-z0-9._-]*$' ]] && { [ -z "$TARGET_REPO" ] || [ "$pick" = "$TARGET_REPO" ]; }; then
-    mkdir -p "$ROOT/repo-locks"; : >> "$ROOT/repo-locks/$pick.lock"
-    zsystem flock -t 0 -e -f REPO_LOCK_FD "$ROOT/repo-locks/$pick.lock" 2>/dev/null \
+    # One lock per repo and thread: two lanes on the same thread of a repo are still a bug, but a
+    # repo's threads are meant to run side by side.
+    repo_lock="$ROOT/repo-locks/$pick.lock"; [ "$THREAD" -gt 1 ] && repo_lock="$ROOT/repo-locks/$pick.t$THREAD.lock"
+    mkdir -p "$ROOT/repo-locks"; : >> "$repo_lock"
+    zsystem flock -t 0 -e -f REPO_LOCK_FD "$repo_lock" 2>/dev/null \
       || BUSY_REPOS="$BUSY_REPOS $pick"
   fi
-  ORCH_RESULT="$ORCH_RESULT" python3 - "$result" "$CODE_DIR" "$BUSY_REPOS" "$TARGET_REPO" <<'PY'
+  ORCH_RESULT="$ORCH_RESULT" python3 - "$result" "$CODE_DIR" "$BUSY_REPOS" "$TARGET_REPO" "$THREAD" <<'PY'
 import json, os, re, sys
 path, code, busy = sys.argv[1], sys.argv[2], sys.argv[3].split()
-target = sys.argv[4]
+target, thread = sys.argv[4], int(sys.argv[5])
 r = json.load(open(path))
 repo = r.get("repo")
+if thread > 1:
+    # Bookkeeping belongs to a repo's first thread, and a code-health pass never runs beside a feature.
+    r["blockers"], r["archives"] = [], []
+    if r.get("action") == "resume_worker" or r.get("work_kind") == "code_health":
+        r.update(action="blocked_no_item", outcome_token="blocked-no-item", repo=None, item=None,
+                 branch=None, linear_id=None, directive_ticket=None, worker_brief=None,
+                 summary="no second thread")
+        json.dump(r, open(path, "w"), indent=2)
 if target:
     # A target-scoped planner cannot authorize bookkeeping in another repo either.
     r["blockers"] = [b for b in r.get("blockers", []) if b.get("repo") == target]
@@ -658,6 +691,7 @@ PY
     plan_repo="$(jq -r '.repo // empty' "$result" 2>/dev/null)"
     if [ -n "$plan_repo" ]; then
       PENDING_PLAN="$PENDING_DIR/pending-plan-$plan_repo.json"
+      [ "$THREAD" -gt 1 ] && PENDING_PLAN="$PENDING_DIR/pending-plan-$plan_repo.t$THREAD.json"
       python3 "$PLAN_PY" --file "$PENDING_PLAN" save --result "$result" --stamp "$STAMP"
     fi
   fi
@@ -668,11 +702,15 @@ PY
     touch "$RUN_DIR/batch-ready"
     while [ ! -f "$RUN_DIR/batch-release" ]; do
       if [ -f "$RUN_DIR/batch-cancel" ]; then
+        # A later thread's plan was judged against today's siblings; tomorrow it is planned afresh
+        # (the plan may duplicate what thread 1 just shipped), so don't leave it to be replayed.
+        [ "$THREAD" -gt 1 ] && [ -n "$PENDING_PLAN" ] && python3 "$PLAN_PY" --file "$PENDING_PLAN" clear
         [ "$reused" -eq 1 ] && python3 "$PLAN_PY" --file "$PENDING_PLAN" refund
         record skipped-quota "daily batch deferred before worker launch; pending plan retained"
         exit 0
       fi
       if ! kill -0 "$BATCH_PID" 2>/dev/null; then
+        [ "$THREAD" -gt 1 ] && [ -n "$PENDING_PLAN" ] && python3 "$PLAN_PY" --file "$PENDING_PLAN" clear
         [ "$reused" -eq 1 ] && python3 "$PLAN_PY" --file "$PENDING_PLAN" refund
         record aborted "daily batch controller exited before worker launch; pending plan retained"
         exit 0
@@ -684,11 +722,39 @@ PY
   fi
 
   action="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("action",""))' "$result")"
+  # A later thread owns no bookkeeping, so "nothing for me" ends here without a worker.
+  if [ "$THREAD" -gt 1 ] && [ "$action" != "dispatch_worker" ] && [ ! -f "$RUN_DIR/dispatch-rejected" ]; then
+    print -r -- "thread $THREAD found no second independent item" > "$RUN_DIR/dispatch-rejected"
+  fi
   case "$action" in
     dispatch_worker|resume_worker)
-      python3 - "$result" "$req" "$STAMP" <<'PY'
-import json, sys
+      python3 - "$result" "$req" "$STAMP" "$RUN_DIR" <<'PY'
+import json, os, sys
 r = json.load(open(sys.argv[1]))
+note = None
+try:
+    note = json.load(open(os.path.join(sys.argv[4], "batch-approval.json")))
+except (OSError, ValueError):
+    pass
+if note and note.get("siblings"):
+    lines = [f"## Plan approval — thread {note.get('thread')} of {note.get('repo')}",
+             f"Ruling: {note.get('verdict')}" + (f" (after {note['after']} merged)" if note.get("after") else "")
+             + (f" — {note['reason']}" if note.get("reason") else ""),
+             "Sibling threads in this repo today (each is a separate branch and workspace):"]
+    for sib in note["siblings"]:
+        lines.append(f"- thread {sib.get('thread')}: {sib.get('item')} on {sib.get('branch')}; "
+                     f"touches {', '.join(sib.get('touchpoints') or []) or 'unspecified'}")
+    if note.get("acknowledged_conflicts"):
+        lines.append("Conflicts acknowledged in advance:")
+        for c in note["acknowledged_conflicts"]:
+            lines.append(f"- {c.get('area')}: {c.get('handling') or 'handle at merge'}")
+    if note.get("standing_conflicts"):
+        lines.append("Overlap every thread of a repo has:")
+        for c in note["standing_conflicts"]:
+            lines.append(f"- {c.get('area')}: {c.get('handling')}")
+    lines.append("WORKER.md *Threads* applies: merge origin/main into your branch before your PR merges, "
+                 "never overwrite a sibling's roadmap or doc edit, and judge only your own merge commit's deploy.")
+    r["worker_brief"] = ((r.get("worker_brief") or "").rstrip() + "\n\n" + "\n".join(lines)).strip()
 req = {
   "mode": "implement" if r.get("action") == "dispatch_worker" else "resume",
   "stamp": sys.argv[3],
@@ -791,7 +857,13 @@ regen_dashboard
 # does the old one-line webhook post below run as a fallback.
 SLACKAGENT_DIR="${ADVANCE_ROADMAP_SLACKAGENT_DIR:-$CODE_DIR/slackagent}"
 slackagent_posted=0
-if [ -f "$SLACKAGENT_DIR/scripts/post-roadmap-summary.mjs" ]; then
+# A run inside a daily batch posts nothing: daily_batch.py sends one summary when every thread has
+# stopped. Claiming "posted" also keeps the one-line webhook fallback below from firing per run.
+if [ -n "$BATCH_PID" ]; then
+  slackagent_posted=1
+  echo "=== slack: left to the batch summary ===" >> "$LOG"
+fi
+if [ "$slackagent_posted" -eq 0 ] && [ -f "$SLACKAGENT_DIR/scripts/post-roadmap-summary.mjs" ]; then
   if node "$SLACKAGENT_DIR/scripts/post-roadmap-summary.mjs" --stamp "$STAMP" --runs "$ROOT/runs.jsonl" >> "$LOG" 2>&1; then
     slackagent_posted=1
   else

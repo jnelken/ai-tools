@@ -187,6 +187,27 @@ fix cap.
    clean or the deploy's live check came back green, so the marker is stale. `Needs Input`
    never needs this from you — `/unblock-roadmap` is what moves it off, per its own design.
 
+## Threads — when other workers are in this repo
+
+If your `worker_brief` ends with a **Plan approval** section, the plan approver
+([`PLAN_APPROVAL.md`](PLAN_APPROVAL.md)) cleared your item to run beside others in this repo today.
+Each thread has its own branch and workspace; you share `origin/main` and nothing else. Beyond the
+steps below:
+
+- **Stay inside your touchpoints.** If the work needs a file a sibling thread also touches, do the
+  smallest change that works and name it in your summary; don't restructure it.
+- **Honor the acknowledged conflicts.** Each lists what you do about it. They are not suggestions.
+- **A `serialize` ruling means you started after the earlier thread merged.** Your Step 3 fetch
+  already includes its work: build on it, don't duplicate it.
+- **Before your PR merges, merge `origin/main` into your branch** (Step 7) even when GitHub says it
+  is mergeable — a sibling may have just moved the roadmap or a lockfile. Then re-read the roadmap
+  and redo your Step 6 move and renumber on top of what is there; never overwrite a sibling's edit
+  to resolve a conflict. Retake lockfiles from `origin/main` and reinstall.
+- **Judge only your own deploy.** Step 7b watches the deployment of *your* merge commit. A sibling's
+  newer deploy failing is theirs to fix forward, not yours; say so in your summary if it blocks your check.
+- **Bookkeeping stays with thread 1.** You don't run Step 2b/2c or archive plan docs you merely
+  found; report them in your summary for the next run.
+
 ## Step 3 — Start from fresh `origin/main` in your workspace
 
 **Scheduled runs build in a Superset workspace, never the root checkout.** `run.sh` created the
