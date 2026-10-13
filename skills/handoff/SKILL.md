@@ -1,6 +1,6 @@
 ---
 name: handoff
-description: "Summarize the current session's true state and spawn a continuation Claude agent in a new Superset terminal tab in the right workspace, so work continues on a small accurate context instead of a bloated one. Runs the close-out sweep first — filing follow-ups and writing durable memories — then hands the successor tracked work (ticket IDs, PRs, decisions) rather than a to-do list. Use whenever the user wants to hand a session off, continue in a fresh session/tab, spin up a new session with a summary, says the context is getting long/heavy, wants to save on context, or asks for a successor/handoff session. Bare invocation summarizes and tells the successor to continue; arguments become the successor's mission on top of the summary."
+description: "Summarize the current session's true state and spawn a continuation Claude agent in a new Superset terminal tab in the right workspace, so work continues on a small accurate context instead of a bloated one. Runs the close-out sweep first — filing follow-ups and writing durable memories — then hands the successor tracked work (ticket IDs, PRs, decisions) rather than a to-do list. Use whenever the user wants to hand a session off, continue in a fresh session/tab, spin up a new session with a summary, says the context is getting long/heavy, wants to save on context, or asks for a successor/handoff session. Bare invocation summarizes and tells the successor to continue; arguments become the successor's mission on top of the summary. `--cloud` targets a claude.ai cloud session instead of a Superset tab (also: \"hand this off to the cloud\", \"continue this in a cloud session\", \"teleport this to the cloud\")."
 ---
 
 # Handoff
@@ -17,6 +17,7 @@ Two modes, chosen by the arguments:
 
 - **Bare (`/handoff`)** — the successor's mission is "continue this work"; its first actions come from the session's own next-steps.
 - **With args (`/handoff <instructions>`)** — the args become the successor's mission, layered on top of the same summary. The summary is built identically either way; only the "First useful actions" framing changes.
+- **`--cloud` (`/handoff --cloud [instructions]`)** — the successor is a claude.ai cloud session, not a Superset tab. Same close-out, same summary; steps 4–5 are replaced by the cloud variant below. Use it when the user wants to leave the machine (laptop closing, continuing from a phone or claude.ai/code) or asked for `/teleport` expecting it to send the session up — `/teleport` only pulls cloud sessions *down*; this is the only upward path, and it carries a summary, not the transcript.
 
 ## When NOT to use
 
@@ -100,6 +101,30 @@ Success returns `{"kind":"terminal","sessionId":"…","label":"Claude"}` — a n
 
 **Known trap:** the MCP tool `mcp__superset__agents_create` can return `Host is not online` (503) even when the host is this very machine and perfectly healthy. The CLI path works when the MCP path 503s — go straight to the CLI; don't burn time diagnosing the MCP error.
 
+### 4b–5b. Cloud target (`--cloud`)
+
+Skip workspace resolution; the cloud VM clones the repo's GitHub remote at the current branch, so the session lands wherever `pwd` is. Two things change in the prompt:
+
+- **Open with the environment limits.** The cloud session cannot reach this machine: no `~/.superset`, no local hooks, no host services, no `.env`, no sswt worktrees. Say so in the first paragraph, and name what it *can* do (public GitHub, reasoning, drafting, preparing changes on a branch of the cloned repo). Anything local-only goes in "Open decision points" as "needs a local session".
+- **Push first.** The VM sees the remote, not the checkout. Unpushed commits or uncommitted edits the successor needs must be pushed before handing off (close-out's sweep already surfaces them). If the repo has no GitHub remote or the Claude GitHub App isn't installed on it, the CLI bundles the local checkout instead — including uncommitted tracked files — which is usually fine but worth knowing.
+
+Then write the prompt to a **stable** path, not the scratchpad — the user runs the command after this session may be gone:
+
+```bash
+mkdir -p "$HOME/.claude/handoffs"
+cat > "$HOME/.claude/handoffs/<topic-slug>.md" <<'EOF'
+<the handoff prompt>
+EOF
+```
+
+**Creating a cloud session is interactive-only.** `claude -p --cloud "…"` is refused ("--cloud cannot be combined with --print"), so this session cannot spawn it. Hand the user the command to run from a terminal that is *not* inside this session (it opens its own TUI):
+
+```bash
+cd <repo root> && claude --cloud "$(cat "$HOME/.claude/handoffs/<topic-slug>.md")"
+```
+
+Report that the file exists and that the one remaining step is theirs, and sign off 🛑. (Messaging an *existing* cloud session is non-interactive — `claude -p "<msg>" --cloud <session-id>` — so a follow-up nudge later can be scripted once the session has an ID.)
+
 ### 6. Report and step back
 
 Tell the user: the new tab exists (label + workspace), what it knows, and what close-out filed on the way through.
@@ -118,6 +143,9 @@ Then **stop working the handed-off stream in this session.** Two sessions editin
 - **Inline `--prompt` with a raw multiline string.** Quote breakage produces a truncated or mangled mission. File + `$(cat …)`.
 - **Giving up on the MCP 503.** It's a known false negative; the CLI works.
 - **Spawning into the wrong workspace** because cwd happened to be a root checkout.
+- **Trying to spawn the cloud successor from here.** `--cloud` creation is interactive-only; write the file, hand over the command, stop. Don't fall back to `-p` tricks or the scheduler.
+- **A cloud summary that assumes the machine.** Paths under `~/.superset`, hook state, local DBs — the successor can't see any of it. Say what's unreachable up front, or it burns its first turns discovering it.
+- **Writing the cloud prompt to the scratchpad.** Session-scoped tmp can vanish before the user runs the command; use `~/.claude/handoffs/`.
 - **Continuing to edit the handed-off worktree from the parent session.** Pick one driver.
 - **Pasting a connection string "just to be helpful."** Scrollback and logs are forever; recipes by reference only.
 
