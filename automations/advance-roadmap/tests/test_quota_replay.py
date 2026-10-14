@@ -18,13 +18,21 @@ from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+from unittest import mock
+
 HERE = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(HERE))
+sys.path.insert(0, str(HERE / "lib"))
 import daily_batch  # noqa: E402
+import planapproval  # noqa: E402
+import runrecord  # noqa: E402
+from usage import ROLE_PROVIDERS  # noqa: E402
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures" / "oct13"
 NY = ZoneInfo("America/New_York")
 FUTURE = int(time.time()) + 6 * 3600
+LATER = FUTURE + 3 * 86400
+BANNER = "You've hit your session limit · resets 11:50am (America/New_York)"
 NO_WORK = {"action": "blocked_no_item", "outcome_token": "blocked-no-item", "repo": "demo",
            "blockers": [], "archives": [], "considered": [], "summary": "No work qualified for demo."}
 
@@ -36,7 +44,7 @@ prompt = args[args.index("-p") + 1] if name == "claude" and "-p" in args else (a
 role = "worker" if "WORKER.md" in prompt else "orchestrator"
 with open(os.environ["FAKE_CALLS"], "a") as f:
     f.write(json.dumps({{"bin": name, "role": role}}) + "\n")
-mode = os.environ.get("FAKE_" + name.upper(), "plan")
+mode = os.environ.get(f"FAKE_{{name.upper()}}_{{role.upper()}}") or os.environ.get("FAKE_" + name.upper(), "plan")
 fence = "```ORCHESTRATOR_RESULT_JSON\n" + os.environ.get("FAKE_PLAN", "{{}}") + "\n```"
 if name == "agent":
     path = next(l.split(": ", 1)[1] for l in prompt.splitlines() if l.startswith("(raw JSON, no fence) to: "))
@@ -103,8 +111,8 @@ class QuotaReplayTest(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
-    def usage_state(self, codex=None, claude=None):
-        providers = {"codex": codex or {}, "claude": claude or {}}
+    def usage_state(self, codex=None, claude=None, cursor=None):
+        providers = {"codex": codex or {}, "claude": claude or {}, "cursor": cursor or {}}
         (self.root / "providers-usage.json").write_text(json.dumps({"providers": providers, "history": []}))
 
     def env(self, **fake):
@@ -266,6 +274,64 @@ class QuotaReplayTest(unittest.TestCase):
                          ("skipped-quota", None, "orchestrator"))
         self.assertEqual(sorted(p["provider"] for p in rec["quota"]["providers"]), ["claude", "codex"])
         self.assertEqual(self.alert(), "")
+
+    # ── one quota record for every role ──────────────────────────────────────
+
+    def planner_row(self):
+        self.run_lane(FAKE_CLAUDE="limit")
+        return self.record()
+
+    def worker_row(self):
+        plan = {"action": "dispatch_worker", "outcome_token": None, "repo": "demo", "item": "DEV-1 thing",
+                "branch": "roadmap/thing", "worker_mode": "standard", "work_kind": "feature",
+                "archives": [], "blockers": [], "considered": [], "summary": "do the thing"}
+        self.run_lane(FAKE_CLAUDE="plan", FAKE_CLAUDE_WORKER="limit", FAKE_PLAN=json.dumps(plan))
+        self.assertEqual([c["bin"] for c in self.calls()], ["claude", "claude"])
+        return self.record()
+
+    def approver_row(self):
+        req = {"repo": "demo", "plans": [{"stamp": "p1", "thread": 1, "touchpoints": ["a"]},
+                                         {"stamp": "p2", "thread": 2, "touchpoints": ["b"]}]}
+        runners = {"codex": lambda prompt, code: self.fail("a gated approver was called"),
+                   "claude": lambda prompt, code: ("", BANNER)}
+        with mock.patch.dict(os.environ, self.env(), clear=True):
+            result = planapproval.approve(str(self.root), req, "DOC.md", str(self.code), runners=runners)
+        self.assertEqual(result["decisions"][1]["verdict"], "defer")
+        # daily_batch.py saves it beside the deferred thread; run.sh records that thread's skip.
+        run = self.root / "runs" / self.stamp
+        run.mkdir(parents=True)
+        (run / "quota-gates.json").write_text(json.dumps(result["quota"]))
+        runrecord.main(["--root", str(self.root), "append", "--stamp", self.stamp, "--status", "skipped-quota",
+                        "--detail", "plan approval deferred", "--quota-gates", str(run / "quota-gates.json")])
+        return self.record()
+
+    def test_every_provider_in_the_role_is_in_the_record_when_the_last_one_runs_out(self):
+        # Every provider but the last is over its gate; the last one is tried and hits its limit.
+        # Whatever chain the lane was handed, the record and the batch summary name them all.
+        over_codex = {"weekly": {"used_pct": 85, "reset_epoch": FUTURE}}
+        over_cursor = {"included": {"auto_pct": 99, "reset_epoch": LATER}}
+        cases = [("orchestrator", dict(codex=over_codex), self.planner_row, {"codex": FUTURE}),
+                 ("worker", dict(codex=over_codex, cursor=over_cursor), self.worker_row,
+                  {"cursor": LATER, "codex": FUTURE}),
+                 ("approver", dict(codex=over_codex), self.approver_row, {"codex": FUTURE})]
+        for role, gated, row, gated_resets in cases:
+            with self.subTest(role=role):
+                (self.dir / "calls.jsonl").unlink(missing_ok=True)
+                self.usage_state(**gated)
+                rec = row()
+                self.assertIn(rec["outcome"], ("quota-paused", "skipped-quota"), rec)
+                self.assertEqual((rec["quota"]["role"], rec["quota"]["provider"]), (role, "claude"))
+                by = {p["provider"]: p for p in rec["quota"]["providers"]}
+                self.assertEqual(list(by), list(ROLE_PROVIDERS[role]))
+                self.assertEqual({n: (p["state"], p["reset_epoch"]) for n, p in by.items() if n != "claude"},
+                                 {n: ("over", r) for n, r in gated_resets.items()})
+                self.assertEqual(by["claude"]["state"], "limited")
+                self.assertEqual(by["claude"]["cause"], BANNER)
+                self.assertEqual(datetime.fromtimestamp(by["claude"]["reset_epoch"], NY).strftime("%H:%M"), "11:50")
+                summary = daily_batch.quota_paused({"queue": [{"repo": "demo", "outcome": rec["outcome"],
+                                                               "quota": rec["quota"]}]})
+                self.assertEqual({q["provider"]: (q["repos"], q["reset_epoch"]) for q in summary},
+                                 {n: (["demo"], p["reset_epoch"]) for n, p in by.items()})
 
     # ── malformed output is an error, still with no worker ───────────────────
 

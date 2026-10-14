@@ -159,9 +159,13 @@ A run stopped by usage — the planner hit its limit, or every worker provider w
 limited — is recorded as **`quota-paused`**, not `error`. Its row carries a `quota` field (provider,
 reset and cause); it neither counts toward nor breaks an error streak, and the batch supervisor
 pauses that lane instead of alerting. A run that never started because its providers were already
-gated (`skipped-quota`: no planner under its gate, or the daily batch deferring saved plans for lack
-of worker quota) carries the same field, from `usage.py gates`; the daily batch's quota summary
-counts both, so a limit one lane hit is reported for every repo it held back.
+gated (`skipped-quota`: no planner under its gate, the daily batch deferring saved plans for lack
+of worker quota, or a plan approver that ran out) carries the same field. Every one of them —
+planner, worker, approver, skip — comes from `usage.py quota-record --role R`, which lists every
+provider in the role's full preference list with its gate state and reset, not only the providers
+that lane tried, so a provider filtered out of a quota-filtered chain still shows up. The daily
+batch's quota summary counts every provider a row lists as over its gate or limited, so a limit
+one lane hit is reported for every repo it held back.
 
 **Carried-forward verdicts are checked for contamination.** `lib/verdict.py` refuses to save a
 no-work verdict from a run whose planner failed or whose worker hit a limit, and `verdict.py check`

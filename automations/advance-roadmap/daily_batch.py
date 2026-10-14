@@ -254,6 +254,9 @@ class Batch:
                                       "verdict": (decisions.get(o["stamp"]) or {}).get("verdict")}
                                      for o in items if o is not item]}
                 save(ROOT / "runs" / item["stamp"] / "batch-approval.json", note)
+                if verdict == "defer" and (result.get("quota") or {}).get("provider"):
+                    # The approver ran out of quota: this thread's skipped-quota row says who and until when.
+                    save(ROOT / "runs" / item["stamp"] / "quota-gates.json", result["quota"])
                 if verdict == "defer":
                     self.cancel(item, f'plan approval: {d.get("reason") or "deferred"}')
                 elif verdict == "serialize":
@@ -280,18 +283,18 @@ class Batch:
                 return False
         return True
 
-    def defer_ready(self, reason, gates=None):
-        """Cancel every saved plan; `gates` (usage.py gates output) goes beside each one so its
-        skipped-quota record says which provider ran out and when it resets."""
+    def defer_ready(self, reason, quota=None):
+        """Cancel every saved plan; `quota` (usage.py quota-record output) goes beside each one so
+        its skipped-quota record says which provider ran out and when it resets."""
         for item in self.state["queue"]:
             if item["status"] == "ready":
-                if gates:
-                    (ROOT / "runs" / item["stamp"] / "quota-gates.json").write_text(gates)
+                if quota:
+                    (ROOT / "runs" / item["stamp"] / "quota-gates.json").write_text(quota)
                 self.cancel(item, reason)
 
-    def worker_gates(self):
+    def worker_quota(self):
         try:
-            out = shared.py("usage.py", "--root", str(ROOT), "gates", "--role", "worker", timeout=120)
+            out = shared.py("usage.py", "--root", str(ROOT), "quota-record", "--role", "worker", timeout=120)
             if out.returncode == 0 and isinstance(json.loads(out.stdout), dict):
                 return out.stdout
         except (OSError, ValueError, subprocess.TimeoutExpired):
@@ -333,7 +336,7 @@ class Batch:
                 providers = shared.py("usage.py", "--root", str(ROOT), "pick-worker-chain")
                 if providers.returncode or providers.stdout.strip() in {"", "none"}:
                     self.defer_ready("no worker quota available; saved plans wait for the next daily batch",
-                                     self.worker_gates())
+                                     self.worker_quota())
                 else:
                     for item in chosen:
                         (ROOT / "runs" / item["stamp"] / "batch-release").touch()
@@ -361,13 +364,15 @@ def quota_paused(state):
     """One entry per provider whose usage ran out during the batch: the repos it paused and the
     latest reset seen. A pause is not a failure; this is what the summary says instead. A lane
     skipped because an earlier lane's limit already gated its provider counts here too, and so
-    does every provider a row lists as out, not only the one it names first."""
+    does every provider a row lists as out, not only the one it names first. A row lists every
+    provider in its role; one that was still under its gate is not out."""
     out = {}
     for item in state.get("queue", []):
         q = item.get("quota")
         if item.get("outcome") not in QUOTA_OUTCOMES or not q:
             continue
-        listed = [p for p in q.get("providers") or [] if isinstance(p, dict)]
+        listed = [p for p in q.get("providers") or []
+                  if isinstance(p, dict) and p.get("state", "limited") in ("over", "limited")]
         for p in listed or [q]:
             cause = (p.get("cause") or p.get("reason")) if listed else q.get("cause")
             entry = out.setdefault(p.get("provider") or "?", {

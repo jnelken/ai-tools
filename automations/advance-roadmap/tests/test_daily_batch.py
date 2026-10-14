@@ -36,10 +36,12 @@ def skip_quota(detail):
                     *(['--quota-gates', str(gates)] if gates.exists() else [])], check=True)
 if repo in os.environ.get('FAKE_PLANNER_GATED', '').split():
     # An earlier lane's planner limit already gated every planner: run.sh skips before planning.
-    (run / 'quota-gates.json').write_text(json.dumps({'role': 'orchestrator', 'gates': [
-        {'provider': 'codex', 'available': False, 'state': 'over', 'reason': 'weekly 85%'},
-        {'provider': 'claude', 'available': False, 'state': 'limited', 'reason': 'session limit',
-         'reset_epoch': 1791906600, 'reset_at': '2026-10-13T11:50:00-04:00'}]}))
+    (run / 'quota-gates.json').write_text(json.dumps({
+        'role': 'orchestrator', 'provider': 'claude', 'reset_epoch': 1791906600,
+        'reset_at': '2026-10-13T11:50:00-04:00', 'cause': 'codex: weekly 85%; claude: session limit', 'providers': [
+            {'provider': 'codex', 'state': 'over', 'cause': 'weekly 85%', 'reset_epoch': None, 'reset_at': None},
+            {'provider': 'claude', 'state': 'limited', 'cause': 'session limit',
+             'reset_epoch': 1791906600, 'reset_at': '2026-10-13T11:50:00-04:00'}]}))
     event('quota-skip')
     skip_quota('no orchestrator available')
     raise SystemExit(0)
@@ -84,6 +86,18 @@ if verdict == 'fail':
     sys.stderr.write('approver exploded')
     raise SystemExit(1)
 plans = req['plans']
+if verdict == 'quota':
+    out = {'ok': True, 'repo': req['repo'], 'error': 'claude: session limit', 'standing_conflicts': [],
+           'decisions': [{'stamp': p['stamp'], 'thread': p['thread'], 'verdict': 'approve' if n == 0 else 'defer',
+                          'reason': 'no approver ruling was obtained', 'after': None} for n, p in enumerate(plans)],
+           'quota': {'role': 'approver', 'provider': 'claude', 'reset_epoch': 1791906600, 'reset_at': 'r1',
+                     'cause': 'session limit', 'providers': [
+                         {'provider': 'codex', 'state': 'over', 'cause': 'weekly 85%', 'reset_epoch': 1792000000,
+                          'reset_at': 'r2'},
+                         {'provider': 'claude', 'state': 'limited', 'cause': 'session limit',
+                          'reset_epoch': 1791906600, 'reset_at': 'r1'}]}}
+    json.dump(out, open(a[a.index('--out') + 1], 'w'))
+    raise SystemExit(0)
 decisions = [{'stamp': p['stamp'], 'thread': p['thread'], 'verdict': 'approve' if n == 0 else verdict,
               'reason': 'fake', 'after': plans[0]['stamp'] if verdict == 'serialize' else None,
               'acknowledged_conflicts': [{'area': 'ROADMAP.md', 'handling': 'rebase'}]}
@@ -106,11 +120,12 @@ class DailyBatchTest(unittest.TestCase):
         (self.root / 'run.sh').write_text(FAKE_RUN)
         (self.root / 'lib/usage.py').write_text(
             "import json, os, sys\n"
-            "if 'gates' in sys.argv:\n"
-            "    print(json.dumps({'role': sys.argv[-1], 'gates': [\n"
-            "        {'provider': 'cursor', 'available': False, 'state': 'over', 'reason': 'auto pool 96%',\n"
+            "if 'quota-record' in sys.argv:\n"
+            "    print(json.dumps({'role': 'worker', 'provider': 'cursor', 'reset_epoch': 1792000000,\n"
+            "        'reset_at': '2026-10-24T00:00:00-04:00', 'cause': 'cursor: auto pool 96%', 'providers': [\n"
+            "        {'provider': 'cursor', 'state': 'over', 'cause': 'auto pool 96%',\n"
             "         'reset_epoch': 1792000000, 'reset_at': '2026-10-24T00:00:00-04:00'},\n"
-            "        {'provider': 'codex', 'available': True, 'state': 'ok'}]}))\n"
+            "        {'provider': 'codex', 'state': 'ok', 'cause': None, 'reset_epoch': None, 'reset_at': None}]}))\n"
             "    raise SystemExit(0)\n"
             "print('' if os.environ.get('FAKE_NO_QUOTA') else "
             "{'pick-worker-chain': 'cursor', 'pick-orchestrator': 'codex'}.get(sys.argv[-1], ''))\n")
@@ -346,6 +361,14 @@ class DailyBatchTest(unittest.TestCase):
         events = self.threaded(FAKE_VERDICT='fail')
         self.assertEqual(self.starts(events), [('a', 1)])
         self.assertEqual(self.state()['phase'], 'done')
+
+    def test_approver_out_of_quota_puts_every_approver_in_the_quota_summary(self):
+        events = self.threaded(FAKE_VERDICT='quota')
+        self.assertEqual(self.starts(events), [('a', 1)])
+        state = self.state()
+        self.assertEqual([(i['thread'], i['outcome']) for i in state['queue']], [(1, 'shipped'), (2, 'skipped-quota')])
+        self.assertEqual([(q['provider'], q['role'], q['repos'], q['reset_epoch']) for q in state['quota_paused']],
+                         [('codex', 'approver', ['a'], 1792000000), ('claude', 'approver', ['a'], 1791906600)])
 
     def test_missing_approver_defers_extra_threads(self):
         (self.root / 'lib/planapproval.py').unlink()

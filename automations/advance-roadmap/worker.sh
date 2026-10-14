@@ -55,11 +55,24 @@ LIMITED_LOG=""   # one JSON line per provider skipped over its usage gate or sto
 MISSING=""       # providers whose CLI was not installed
 
 write_status() {
-  # write_status USED EXIT [FATAL]
+  # write_status USED EXIT [FATAL] [STOPPED_ON] — STOPPED_ON: the provider whose limit ended the run.
   [ -n "$STATUS_FILE" ] || return 0
-  python3 - "$STATUS_FILE" "$1" "$2" "${3:-}" "$LIMITED_LOG" "$MISSING" <<'PY2'
+  local quota="" primary=()
+  if [ -s "$LIMITED_LOG" ] && { [ -z "$1" ] || [ -n "${4:-}" ]; }; then
+    # Every provider in the worker role, not only this (possibly quota-filtered) chain.
+    quota="$tmpdir/quota.json"
+    [ -n "${4:-}" ] && primary=(--primary "$4")
+    python3 "$USAGE_PY" --root "$ROOT" quota-record --role worker --attempts "$LIMITED_LOG" \
+      "${primary[@]}" > "$quota" 2>/dev/null || quota=""
+  fi
+  python3 - "$STATUS_FILE" "$1" "$2" "${3:-}" "$LIMITED_LOG" "$MISSING" "$quota" <<'PY2'
 import json, sys
-path, used, rc, fatal, limited_log, missing = sys.argv[1:7]
+path, used, rc, fatal, limited_log, missing, quota_path = sys.argv[1:8]
+quota = None
+try:
+    quota = json.load(open(quota_path)) if quota_path else None
+except (OSError, ValueError):
+    pass
 limited = []
 try:
     for line in open(limited_log) if limited_log else ():
@@ -72,7 +85,8 @@ try:
 except OSError:
     pass
 json.dump({"used": used or None, "exit": int(rc) if rc.lstrip("-").isdigit() else None,
-           "fatal": fatal or None, "limited": limited, "missing": missing.split()},
+           "fatal": fatal or None, "limited": limited, "missing": missing.split(),
+           "quota": quota if isinstance(quota, dict) else None},
           open(path, "w"), indent=1)
 PY2
 }
@@ -258,6 +272,8 @@ print(json.dumps({"provider": sys.argv[1], "state": "limited", "cause": sys.argv
 
 final_rc=1
 used=""
+stopped_on=""   # the provider whose result-only limit_hit ended the run
+last_hit=""     # the last provider stopped by a limit banner
 for provider in "${providers[@]}"; do
   out="$tmpdir/$provider.log"
   # Fresh usage before every attempt — an explicit --providers list included. Exit 3 is the
@@ -291,6 +307,7 @@ for provider in "${providers[@]}"; do
       "$out" || true)" && [ -n "$text" ]; then
     echo "(limit for $provider — recording and failing over)"
     record_limit "$provider" "$text"
+    last_hit="$provider"
     continue
   fi
 
@@ -307,7 +324,7 @@ done
 
 if [ -z "$used" ]; then
   echo "=== worker exhausted all providers ==="
-  write_status "" 3
+  write_status "" 3 "" "$last_hit"
   exit 3
 fi
 
@@ -351,9 +368,10 @@ if isinstance(r, dict) and r.get("outcome") == "limit_hit":
   if [ -n "$limit_text" ]; then
     echo "(worker result reports a limit for $used — recording it)"
     record_limit "$used" "$limit_text"
+    stopped_on="$used"
   fi
 fi
-write_status "$used" "$final_rc"
+write_status "$used" "$final_rc" "" "$stopped_on"
 
 echo "=== worker used=$used exit=$final_rc finished $(date) ==="
 exit $final_rc

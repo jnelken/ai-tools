@@ -393,6 +393,41 @@ class ResetParseTests(unittest.TestCase):
         self.assertTrue(usage.provider_gate(state, "claude", "orchestrator")["available"])
 
 
+class QuotaRecordTests(unittest.TestCase):
+    def state(self, **providers):
+        state = usage.empty_state()
+        for name, prov in providers.items():
+            state["providers"][name].update(prov)
+        return state
+
+    def test_lists_the_whole_role_even_when_the_lane_tried_one(self):
+        state = self.state(cursor={"included": {"auto_pct": 99, "reset_epoch": FUTURE}})
+        rec = usage.quota_record(state, "worker", [{"provider": "claude", "state": "limited", "cause": "usage limit",
+                                                    "reset_epoch": FUTURE + 60}], primary="claude")
+        self.assertEqual([(p["provider"], p["state"], p["reset_epoch"]) for p in rec["providers"]],
+                         [("cursor", "over", FUTURE), ("codex", "unknown", None), ("claude", "limited", FUTURE + 60)])
+        self.assertEqual((rec["provider"], rec["reset_epoch"], rec["cause"]), ("claude", FUTURE + 60, "usage limit"))
+
+    def test_without_a_primary_the_first_reset_leads_and_every_reason_is_joined(self):
+        state = self.state(codex={"weekly": {"used_pct": 85, "reset_epoch": FUTURE + 60}},
+                           claude={"five_hour": {"used_pct": 90, "reset_epoch": FUTURE}})
+        rec = usage.quota_record(state, "orchestrator")
+        self.assertEqual((rec["provider"], rec["reset_epoch"]), ("claude", FUTURE))
+        self.assertEqual(rec["cause"], "codex: weekly 85% >= 80%; claude: 5h 90% >= 70%")
+
+    def test_the_live_gate_fills_a_reset_the_attempt_lacks(self):
+        state = self.state(claude={"last_limit_hit": {"reset_epoch": FUTURE, "observed_at": usage.now_iso()}})
+        rec = usage.quota_record(state, "approver", [{"provider": "claude", "cause": "session limit"}], "claude")
+        claude = rec["providers"][1]
+        self.assertEqual((claude["state"], claude["cause"], claude["reset_epoch"]), ("limited", "session limit", FUTURE))
+        self.assertTrue(claude["reset_at"])
+
+    def test_nobody_out_has_no_provider(self):
+        rec = usage.quota_record(usage.empty_state(), "reviewer")
+        self.assertIsNone(rec["provider"])
+        self.assertEqual([p["provider"] for p in rec["providers"]], ["codex", "cursor", "claude"])
+
+
 class LimitBannerTests(unittest.TestCase):
     def test_banner_at_line_start_only(self):
         text = "noise\nYou've hit your session limit · resets 11:50am (America/New_York)\nmore"
@@ -570,6 +605,21 @@ class CliTests(unittest.TestCase):
         self.assertFalse(claude["available"])
         self.assertAlmostEqual(claude["reset_epoch"], time.time() + 3600, delta=120)
         self.assertTrue(claude["reset_at"])
+
+    def test_quota_record_command_reads_hits_and_attempts(self):
+        hit = self.root / "hit.json"
+        self.run_usage("record-limit", "--provider", "codex", "--out", str(hit), "--text", "usage limit, resets in 2h 5m")
+        attempts = self.root / "attempts.jsonl"
+        attempts.write_text(json.dumps({"provider": "cursor", "state": "over", "reason": "auto pool 96%",
+                                        "reset_epoch": FUTURE}) + "\nnot json\n")
+        result = self.run_usage("quota-record", "--role", "worker", "--attempts", str(attempts),
+                                "--hit", f"codex={hit}", "--primary", "codex")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        out = json.loads(result.stdout)
+        self.assertEqual((out["role"], out["provider"], out["cause"]), ("worker", "codex", "usage limit, resets in 2h 5m"))
+        self.assertEqual([(p["provider"], p["state"]) for p in out["providers"]],
+                         [("cursor", "over"), ("codex", "limited"), ("claude", "unknown")])
+        self.assertEqual(out["providers"][0]["reset_epoch"], FUTURE)
 
     def test_probe_command_reports_missing_data(self):
         result = self.run_usage("probe")

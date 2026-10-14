@@ -110,39 +110,20 @@ def quota_info(orch, wstatus, wresult):
         if limits:
             info["providers"] = limits  # every planner that ran out, when one failed over to another
         return info
-    limited = [l for l in (wstatus or {}).get("limited") or [] if isinstance(l, dict)]
+    # worker.sh wrote `usage.py quota-record --role worker` into its status: every worker provider.
+    quota = recorded_quota((wstatus or {}).get("quota"))
+    if quota:
+        return quota
     if (wresult or {}).get("outcome") == "limit_hit":
-        name = wresult.get("provider") or (wstatus or {}).get("used")
-        hit = next((l for l in limited if l.get("provider") == name), {})
-        own = {"provider": name, "state": "limited", "cause": wresult.get("limit_text"),
-               "reset_epoch": hit.get("reset_epoch"), "reset_at": hit.get("reset_at")}
-        # The providers it failed over from were out too; the batch summary counts each of them.
-        return {"role": "worker", "provider": name, "reset_epoch": hit.get("reset_epoch"),
-                "reset_at": hit.get("reset_at"), "cause": wresult.get("limit_text"),
-                "providers": [l for l in limited if l.get("provider") != name] + [own]}
-    if limited:
-        resets = [l for l in limited if l.get("reset_epoch")]
-        first = min(resets, key=lambda l: l["reset_epoch"]) if resets else limited[0]
-        return {"role": "worker", "provider": first.get("provider"), "reset_epoch": first.get("reset_epoch"),
-                "reset_at": first.get("reset_at"), "cause": "; ".join(
-                    f"{l.get('provider')}: {l.get('cause') or l.get('reason') or '?'}" for l in limited),
-                "providers": limited}
+        # No record (usage.py failed): still say who stopped and why.
+        return {"role": "worker", "provider": wresult.get("provider") or (wstatus or {}).get("used"),
+                "reset_epoch": None, "reset_at": None, "cause": wresult.get("limit_text")}
     return None
 
 
-def skip_quota_info(gates):
-    """The same shape for a skipped-quota run, from the gates usage.py saw when it skipped
-    (`usage.py gates --role R`). None when no provider in that read was over its gate or limited."""
-    blocked = [g for g in (gates or {}).get("gates") or []
-               if isinstance(g, dict) and g.get("state") in ("over", "limited")]
-    if not blocked:
-        return None
-    resets = [g for g in blocked if g.get("reset_epoch")]
-    first = min(resets, key=lambda g: g["reset_epoch"]) if resets else blocked[0]
-    return {"role": gates.get("role"), "provider": first.get("provider"), "reset_epoch": first.get("reset_epoch"),
-            "reset_at": first.get("reset_at"), "cause": "; ".join(
-                f"{g.get('provider')}: {g.get('reason') or g.get('state')}" for g in blocked),
-            "providers": blocked}
+def recorded_quota(record):
+    """A `usage.py quota-record` result as the row's quota, or None when nobody in it is out."""
+    return record if isinstance(record, dict) and record.get("provider") else None
 
 
 def read_reviews(worker_result_path):
@@ -206,7 +187,7 @@ def cmd_append(a):
         "summary": (w.get("summary") or o.get("summary") or "")[:1000],
         "slack_summary": (w.get("slack_summary") or "")[:400] or None,
         "quota": (quota_info(orch, wstatus, wresult) if outcome in QUOTA_OUTCOMES
-                  else skip_quota_info(load_json(a.quota_gates)) if outcome == "skipped-quota" else None),
+                  else recorded_quota(load_json(a.quota_gates)) if outcome == "skipped-quota" else None),
         # Tokens this run spent, per (role, review round, model): see lib/tokens.py.
         "tokens": tokens.summarize(a.usage_log),
     }
@@ -286,7 +267,7 @@ def main(argv=None):
     ap.add_argument("--worker-result", default="")
     ap.add_argument("--usage-log", default="")
     ap.add_argument("--quota-gates", default="",
-                    help="usage.py gates output saved when the run skipped for quota")
+                    help="usage.py quota-record output saved when the run skipped for quota")
     ap.add_argument("--lane", type=int, default=None)
     ap.add_argument("--expect-pr", action="store_true",
                     help="the worker ran in a Superset workspace, so a ship must name its PR")

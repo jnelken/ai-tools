@@ -8,6 +8,12 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 import runrecord  # noqa: E402
+import usage  # noqa: E402
+
+
+def quota(role, attempts, primary=None):
+    """What worker.sh / run.sh save from `usage.py quota-record`; no live readings beyond `attempts`."""
+    return usage.quota_record(usage.empty_state(), role, attempts, primary)
 
 QUOTA_PLAN = {"action": None, "summary": "Planner claude hit its usage limit",
               "planner_error": {"kind": "quota", "provider": "claude", "tried": ["claude"],
@@ -65,18 +71,21 @@ class RunRecordTest(unittest.TestCase):
         self.assertIsNone(rec["quota"])
 
     def test_every_worker_over_its_gate_is_a_quota_pause(self):
-        status = {"used": None, "exit": 3, "fatal": None, "missing": [], "limited": [
+        limited = [
             {"provider": "cursor", "state": "over", "reason": "auto pool 96% >= 95%", "reset_epoch": 1792000000},
-            {"provider": "codex", "state": "limited", "cause": "usage limit", "reset_epoch": 1791910000}]}
+            {"provider": "codex", "state": "limited", "cause": "usage limit", "reset_epoch": 1791910000}]
+        status = {"used": None, "exit": 3, "fatal": None, "missing": [], "limited": limited,
+                  "quota": quota("worker", limited)}
         rec = self.append({"action": "dispatch_worker", "repo": "demo"}, status)
         self.assertEqual(rec["outcome"], "quota-paused")
+        self.assertEqual(rec["quota"], status["quota"])
         self.assertEqual((rec["quota"]["provider"], rec["quota"]["reset_epoch"]), ("codex", 1791910000))
-        self.assertEqual(len(rec["quota"]["providers"]), 2)
 
     def test_worker_quota_pause_with_no_known_reset_still_names_a_provider(self):
-        status = {"used": None, "exit": 3, "fatal": None, "missing": [], "limited": [
-            {"provider": "cursor", "state": "over", "reason": "auto pool 96% >= 95%"},
-            {"provider": "codex", "state": "limited", "cause": "usage limit"}]}
+        limited = [{"provider": "cursor", "state": "over", "reason": "auto pool 96% >= 95%"},
+                   {"provider": "codex", "state": "limited", "cause": "usage limit"}]
+        status = {"used": None, "exit": 3, "fatal": None, "missing": [], "limited": limited,
+                  "quota": quota("worker", limited)}
         rec = self.append({"action": "dispatch_worker", "repo": "demo"}, status)
         self.assertEqual(rec["outcome"], "quota-paused")
         self.assertEqual((rec["quota"]["provider"], rec["quota"]["reset_epoch"]), ("cursor", None))
@@ -94,32 +103,21 @@ class RunRecordTest(unittest.TestCase):
         self.assertEqual(rec["quota"]["cause"], "usage limit")
 
     def test_worker_limit_hit_carries_the_reset_worker_sh_recorded(self):
-        # worker.sh records a result-only limit_hit itself; its status entry holds the reset.
-        status = {"used": "codex", "exit": 0, "limited": [
-            {"provider": "codex", "state": "limited", "cause": "usage limit", "reset_epoch": 1791910000,
-             "reset_at": "2026-10-13T12:46:40-04:00"}]}
+        # worker.sh records a result-only limit_hit itself; its status holds the record and reset.
+        limited = [{"provider": "codex", "state": "limited", "cause": "usage limit", "reset_epoch": 1791910000,
+                    "reset_at": "2026-10-13T12:46:40-04:00"}]
+        status = {"used": "codex", "exit": 0, "limited": limited, "quota": quota("worker", limited, "codex")}
         for result in ({"outcome": "limit_hit", "provider": "codex", "limit_text": "usage limit"},
                        {"outcome": "limit_hit", "limit_text": "usage limit"}):
             with self.subTest(result=result):
                 rec = self.append({"action": "dispatch_worker"}, status, result)
                 self.assertEqual((rec["quota"]["provider"], rec["quota"]["reset_epoch"]), ("codex", 1791910000))
-                self.assertEqual([p["provider"] for p in rec["quota"]["providers"]], ["codex"])
+                self.assertEqual(rec["quota"]["cause"], "usage limit")
 
-    def test_worker_limit_hit_after_gated_fallbacks_keeps_every_provider(self):
-        status = {"used": "claude", "exit": 0, "limited": [
-            {"provider": "cursor", "state": "over", "reason": "auto pool 96%", "reset_epoch": 1792000000},
-            {"provider": "codex", "state": "limited", "cause": "usage limit", "reset_epoch": 1791910000}]}
-        rec = self.append({"action": "dispatch_worker"}, status,
-                          {"outcome": "limit_hit", "provider": "claude", "limit_text": "session limit"})
-        self.assertEqual(rec["outcome"], "quota-paused")
-        self.assertEqual(rec["quota"]["provider"], "claude")
-        self.assertEqual([(p["provider"], p.get("cause") or p.get("reason")) for p in rec["quota"]["providers"]],
-                         [("cursor", "auto pool 96%"), ("codex", "usage limit"), ("claude", "session limit")])
-        sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-        import daily_batch
-        summary = daily_batch.quota_paused({"queue": [{"repo": "demo", "outcome": rec["outcome"],
-                                                       "quota": rec["quota"]}]})
-        self.assertEqual(sorted(q["provider"] for q in summary), ["claude", "codex", "cursor"])
+    def test_worker_limit_hit_without_a_quota_record_still_names_who_stopped(self):
+        rec = self.append({"action": "dispatch_worker"}, {"used": "codex", "exit": 0, "limited": []},
+                          {"outcome": "limit_hit", "limit_text": "usage limit"})
+        self.assertEqual((rec["quota"]["role"], rec["quota"]["provider"]), ("worker", "codex"))
 
     def test_quota_pauses_never_alert_and_never_count_toward_the_error_streak(self):
         for _ in range(4):
@@ -145,11 +143,11 @@ class RunRecordTest(unittest.TestCase):
         runrecord.main(args)
         return runrecord.read_records(str(self.root))[-1]
 
-    ORCH_GATED = {"role": "orchestrator", "gates": [
-        {"provider": "codex", "available": False, "state": "over", "reason": "weekly 85% >= 80%",
+    ORCH_GATED = quota("orchestrator", [
+        {"provider": "codex", "state": "over", "reason": "weekly 85% >= 80%",
          "reset_epoch": 1792000000, "reset_at": "2026-10-15T09:00:00-04:00"},
-        {"provider": "claude", "available": False, "state": "limited", "reason": "session limit",
-         "reset_epoch": 1791906600, "reset_at": "2026-10-13T11:50:00-04:00"}]}
+        {"provider": "claude", "state": "limited", "reason": "session limit",
+         "reset_epoch": 1791906600, "reset_at": "2026-10-13T11:50:00-04:00"}])
 
     def test_quota_skip_keeps_who_is_out_and_the_earliest_reset(self):
         rec = self.skip(self.ORCH_GATED)
@@ -162,8 +160,7 @@ class RunRecordTest(unittest.TestCase):
 
     def test_quota_skip_without_a_gated_reading_has_no_quota(self):
         self.assertIsNone(self.skip(None)["quota"])
-        ok = {"role": "worker", "gates": [{"provider": "cursor", "available": True, "state": "ok"}]}
-        self.assertIsNone(self.skip(ok)["quota"])
+        self.assertIsNone(self.skip(quota("worker", []))["quota"])
 
     def test_quota_skips_never_alert_and_never_count_toward_the_error_streak(self):
         self.append(INVALID_PLAN)

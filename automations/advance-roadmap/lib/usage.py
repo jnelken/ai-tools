@@ -11,6 +11,8 @@ Usage:
   usage.py pick-worker-chain [--root DIR]
   usage.py gate --role R --provider P [--root DIR]  # exit 0 under its gate, 3 over it
   usage.py gates --role R [--root DIR]             # every provider's gate for R, as JSON
+  usage.py quota-record --role R [--attempts F] [--hit P=F]... [--primary P] [--root DIR]
+                                                   # who is out for R when a lane stops on quota
   usage.py record-limit --provider P --text T [--scope S] [--out FILE] [--root DIR]
   usage.py detect-limit --file PATH | --text T
   usage.py probe [--provider codex|cursor|all]   # live read, writes nothing
@@ -90,6 +92,7 @@ GATED_EXIT = 3
 # Which providers may fill each role, in preference order.
 ROLE_PROVIDERS = {
     "orchestrator": ("codex", "claude"),
+    "approver": ("codex", "claude"),
     "worker": ("cursor", "codex", "claude"),
     "reviewer": ("codex", "cursor", "claude"),
 }
@@ -843,9 +846,88 @@ def role_gates(state: dict[str, Any], role: str) -> list[dict[str, Any]]:
     return out
 
 
+OUT_STATES = ("over", "limited")
+
+
+def quota_record(state: dict[str, Any], role: str, attempts: Any = (), primary: str | None = None,
+                 now: float | None = None) -> dict[str, Any]:
+    """Who is out for `role` when a lane stops or skips on quota — the one shape every run record
+    and the batch summary use.
+
+    `providers` lists every provider in the role's full preference list, not only the ones the lane
+    tried: a quota-filtered or explicit chain must not hide a provider that was already gated, or
+    its reset. `attempts` are what the lane itself saw ({provider, state, cause/reason, reset_epoch,
+    reset_at}): they win over the live gate for that provider, which still fills in a missing reset.
+    `provider` is `primary` (the one the lane stopped on) when it is out, else the out provider that
+    frees up first; it is None when nobody in the role is out. `cause` is the primary's own words,
+    or every out provider's reason joined when there is no primary.
+    """
+    now = time.time() if now is None else now
+    seen = {a["provider"]: a for a in attempts or ()
+            if isinstance(a, dict) and a.get("provider") in ROLE_PROVIDERS[role]}
+    providers = []
+    for name in ROLE_PROVIDERS[role]:
+        gate = provider_gate(state, name, role, now)
+        entry = {"provider": name, "state": gate["state"], "cause": gate["reason"],
+                 "reset_epoch": gate["reset_epoch"], "reset_at": epoch_to_iso(gate["reset_epoch"])}
+        a = seen.get(name)
+        if a:
+            entry["state"] = a.get("state") if a.get("state") in OUT_STATES else "limited"
+            entry["cause"] = a.get("cause") or a.get("reason") or entry["cause"]
+            if _num(a.get("reset_epoch")) is not None:
+                entry["reset_epoch"] = a["reset_epoch"]
+                entry["reset_at"] = a.get("reset_at") or epoch_to_iso(a["reset_epoch"])
+        providers.append(entry)
+    out = [p for p in providers if p["state"] in OUT_STATES]
+    first = next((p for p in out if p["provider"] == primary), None)
+    if first is None and out:
+        resets = [p for p in out if p["reset_epoch"]]
+        first = min(resets, key=lambda p: p["reset_epoch"]) if resets else out[0]
+    if first is not None and first["provider"] == primary:
+        cause = first["cause"]
+    else:
+        cause = "; ".join(f"{p['provider']}: {p['cause'] or p['state']}" for p in out) or None
+    return {"role": role, "provider": first and first["provider"],
+            "reset_epoch": first and first["reset_epoch"], "reset_at": first and first["reset_at"],
+            "cause": cause, "providers": providers}
+
+
+def read_attempts(path: str | None, hits: list[str]) -> list[dict[str, Any]]:
+    """--attempts (JSON lines, one per provider) plus --hit P=FILE (a record-limit --out file)."""
+    attempts: list[dict[str, Any]] = []
+    if path:
+        try:
+            lines = Path(path).read_text(encoding="utf-8").splitlines()
+        except OSError:
+            lines = []
+        for line in lines:
+            try:
+                entry = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(entry, dict):
+                attempts.append(entry)
+    for spec in hits:
+        name, _, file = spec.partition("=")
+        try:
+            hit = json.loads(Path(file).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            hit = {}
+        hit = hit if isinstance(hit, dict) else {}
+        attempts.append({"provider": name, "state": "limited", "cause": hit.get("exact_cli_text"),
+                         "reset_epoch": hit.get("reset_epoch"), "reset_at": hit.get("reset_at")})
+    return attempts
+
+
 def cmd_gates(args: argparse.Namespace) -> None:
-    """Refresh, then print {"role", "gates": [...]} — what a quota skip records as its cause."""
+    """Refresh, then print {"role", "gates": [...]}: every provider's gate for the role right now."""
     print(json.dumps({"role": args.role, "gates": role_gates(refresh(Path(args.root)), args.role)}))
+
+
+def cmd_quota_record(args: argparse.Namespace) -> None:
+    """Refresh, then print quota_record() as one JSON object."""
+    state = refresh(Path(args.root))
+    print(json.dumps(quota_record(state, args.role, read_attempts(args.attempts, args.hit), args.primary)))
 
 
 def cmd_pick_orchestrator(args: argparse.Namespace) -> None:
@@ -919,6 +1001,14 @@ def main() -> None:
     p = sub.add_parser("gates")
     p.add_argument("--role", required=True, choices=sorted(ROLE_PROVIDERS))
     p.set_defaults(func=cmd_gates)
+
+    p = sub.add_parser("quota-record")
+    p.add_argument("--role", required=True, choices=sorted(ROLE_PROVIDERS))
+    p.add_argument("--attempts", help="JSON lines the lane wrote, one per provider it tried or skipped")
+    p.add_argument("--hit", action="append", default=[], metavar="PROVIDER=FILE",
+                   help="a record-limit --out file for a provider that hit its limit (repeatable)")
+    p.add_argument("--primary", help="the provider the lane stopped on")
+    p.set_defaults(func=cmd_quota_record)
 
     p = sub.add_parser("record-limit")
     p.add_argument("--provider", required=True, choices=["claude", "codex", "cursor"])

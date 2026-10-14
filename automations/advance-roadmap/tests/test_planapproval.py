@@ -191,8 +191,8 @@ class Approve(unittest.TestCase):
         with mock.patch.object(pa, "usage_cli", side_effect=self.gates(over)) as usage:
             out = pa.approve("/root", req, "DOC.md", "/code", runners=runners, providers=["codex", "claude"])
         self.assertEqual(calls, ["codex"])
-        self.assertEqual(usage.call_args.args,
-                         ("/root", "gate", "--role", "orchestrator", "--provider", "claude"))
+        self.assertEqual([c.args for c in usage.call_args_list if c.args[1] == "gate"][-1],
+                         ("/root", "gate", "--role", "approver", "--provider", "claude"))
         self.assertEqual(out["decisions"][1]["verdict"], "defer")
         self.assertIn("claude: over its usage gate", out["error"])
         self.assertIn("codex: no", out["error"])

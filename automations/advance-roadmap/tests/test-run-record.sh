@@ -20,10 +20,12 @@ for f in ORCHESTRATOR.md SAFETY.md WORKER.md; do echo stub > "$SKILLS/$f"; done
 cat > "$ROOT/lib/usage.py" <<'PY'
 import json, os, sys
 cmd = sys.argv[-1]
-if "gates" in sys.argv:
-    print(json.dumps({"role": cmd, "gates": [
-        {"provider": "codex", "available": False, "state": "over", "reason": "weekly 85%"},
-        {"provider": "claude", "available": False, "state": "limited", "reason": "session limit",
+if "quota-record" in sys.argv:
+    print(json.dumps({"role": "orchestrator", "provider": "claude", "reset_epoch": 1791906600,
+                      "reset_at": "2026-10-13T11:50:00-04:00", "cause": "codex: weekly 85%; claude: session limit",
+                      "providers": [
+        {"provider": "codex", "state": "over", "cause": "weekly 85%", "reset_epoch": None, "reset_at": None},
+        {"provider": "claude", "state": "limited", "cause": "session limit",
          "reset_epoch": 1791906600, "reset_at": "2026-10-13T11:50:00-04:00"}]}))
     sys.exit(0)
 if os.environ.get("FAKE_NO_PLANNER") and cmd in ("pick-orchestrator", "pick-orchestrators"):
@@ -211,8 +213,8 @@ for n in {1..200}; do
   sleep .1
 done
 [ -f "$ROOT/runs/$batch_stamp/batch-ready" ] || { echo "FAIL: batch never reached barrier"; exit 1; }
-# daily_batch.py saves the worker gates beside a plan it defers for quota, then cancels it.
-print -r -- '{"role":"worker","gates":[{"provider":"cursor","available":false,"state":"over","reason":"auto pool 96%","reset_epoch":1792000000,"reset_at":"2026-10-24T00:00:00-04:00"}]}' \
+# daily_batch.py saves the worker quota record beside a plan it defers for quota, then cancels it.
+print -r -- '{"role":"worker","provider":"cursor","reset_epoch":1792000000,"reset_at":"2026-10-24T00:00:00-04:00","cause":"cursor: auto pool 96%","providers":[{"provider":"cursor","state":"over","cause":"auto pool 96%","reset_epoch":1792000000,"reset_at":"2026-10-24T00:00:00-04:00"}]}' \
   > "$ROOT/runs/$batch_stamp/quota-gates.json"
 touch "$ROOT/runs/$batch_stamp/batch-cancel"
 wait $batch_pid

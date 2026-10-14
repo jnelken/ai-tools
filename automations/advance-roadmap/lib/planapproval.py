@@ -201,25 +201,45 @@ def usage_cli(root, *args):
 def provider_order():
     """Codex first, Claude only as the fallback. Every one is listed: whether it is under its gate
     is read right before it is tried, since a gate can open or close while the one before it runs."""
-    return [n for n in ROLE_PROVIDERS["orchestrator"] if n in RUNNERS]
+    return [n for n in ROLE_PROVIDERS["approver"] if n in RUNNERS]
 
 
 def still_under_gate(root, name):
     """Exit 3 is the only "over its gate"; a usage.py failure is no reading and never blocks."""
     try:
-        return usage_cli(root, "gate", "--role", "orchestrator", "--provider", name).returncode != 3
+        return usage_cli(root, "gate", "--role", "approver", "--provider", name).returncode != 3
     except (OSError, subprocess.SubprocessError):
         return True
 
 
+def quota_record(root, hits, primary):
+    """`usage.py quota-record --role approver`: every approver provider, with the limits hit here
+    (`hits`: (provider, record-limit --out file)). None when the read fails or nobody is out."""
+    args = [a for name, path in hits for a in ("--hit", f"{name}={path}")]
+    if primary:
+        args += ["--primary", primary]
+    try:
+        record = json.loads(usage_cli(root, "quota-record", "--role", "approver", *args).stdout)
+    except (OSError, subprocess.SubprocessError, ValueError, TypeError):
+        return None
+    return record if isinstance(record, dict) and record.get("provider") else None
+
+
 def approve(root, request, doc, code_dir, runners=None, providers=None):
+    with tempfile.TemporaryDirectory() as tmp:
+        return _approve(root, request, doc, code_dir, runners, providers, Path(tmp))
+
+
+def _approve(root, request, doc, code_dir, runners, providers, tmp):
     runners = runners or RUNNERS
     providers = providers if providers is not None else provider_order()
     prompt = build_prompt(request, doc, str(Path(code_dir) / request["repo"]))
     model, error = None, "no orchestrator provider is under its usage gate"
+    hits, gated = [], False
     for name in providers:
         if not still_under_gate(root, name):
             error = f"{error}; {name}: over its usage gate"
+            gated = True
             continue
         try:
             answer, log = runners[name](prompt, code_dir)
@@ -231,17 +251,26 @@ def approve(root, request, doc, code_dir, runners=None, providers=None):
             break
         banner = limit_banner(answer) or limit_banner(log)
         if banner:
-            # Gate this provider for every other role too, until its reset.
+            # Gate this provider for every other role too, until its reset. The banner stays the
+            # cause in the quota record even if usage.py can't write the hit back.
+            hit = tmp / f"limit-{name}.json"
+            hit.write_text(json.dumps({"exact_cli_text": banner}))
             try:
-                usage_cli(root, "record-limit", "--provider", name, "--text", banner, "--scope", "approver")
+                usage_cli(root, "record-limit", "--provider", name, "--text", banner, "--scope", "approver",
+                          "--out", str(hit))
             except (OSError, subprocess.SubprocessError):
                 pass
+            hits.append((name, hit))
             error = f"{name}: {banner}"
             continue
         error = f"{name}: no {FENCE} fence in its answer"
     result = combine(request, model)
     if model is None:
         result["error"] = error
+        if hits or gated:
+            quota = quota_record(root, hits, hits[-1][0] if hits else None)
+            if quota:
+                result["quota"] = quota
     return result
 
 

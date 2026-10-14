@@ -248,7 +248,7 @@ if [ "$orch_pick_rc" -ne 0 ] || [ -z "$ORCH" ] || [ "$ORCH" = "none" ]; then
   echo "=== advance-roadmap $STAMP: skipping — no orchestrator available ===" >> "$LOG"
   ORCH=""
   # Who is out and until when, so a batch's quota summary counts this repo too.
-  python3 "$USAGE_PY" --root "$ROOT" gates --role orchestrator > "$RUN_DIR/quota-gates.json" 2>/dev/null \
+  python3 "$USAGE_PY" --root "$ROOT" quota-record --role orchestrator > "$RUN_DIR/quota-gates.json" 2>/dev/null \
     || rm -f "$RUN_DIR/quota-gates.json"
   record skipped-quota "no orchestrator available"
   ln -sf "$LOG" "$LOGDIR/latest.log"
@@ -597,7 +597,7 @@ Previous no-work verdict and what changed since (carry unchanged verdicts forwar
       if [ -z "$alt" ]; then
         echo "=== advance-roadmap $STAMP: skipping — planner $ORCH went over its gate before launch, no other is under its gate ==="
         ORCH=""
-        python3 "$USAGE_PY" --root "$ROOT" gates --role orchestrator > "$RUN_DIR/quota-gates.json" 2>/dev/null \
+        python3 "$USAGE_PY" --root "$ROOT" quota-record --role orchestrator > "$RUN_DIR/quota-gates.json" 2>/dev/null \
           || rm -f "$RUN_DIR/quota-gates.json"
         record skipped-quota "no orchestrator available at launch"
         ln -sf "$LOG" "$LOGDIR/latest.log"
@@ -655,47 +655,36 @@ sys.exit(0 if ok else 1)' "$result")" || had_json=0
       # verdict. A limit banner is a quota pause (provider and reset kept); anything else is an error.
       planner_failed=1
       echo "WARNING: the planner produced no usable ORCHESTRATOR_RESULT_JSON — nothing dispatched"
-      planner_gates=""
+      planner_quota=""
       if [ -n "$planner_hit" ]; then
-        planner_gates="$RUN_DIR/planner-gates.json"
-        python3 "$USAGE_PY" --root "$ROOT" gates --role orchestrator > "$planner_gates" 2>/dev/null \
-          || { rm -f "$planner_gates"; planner_gates=""; }
+        # Every planner in the role, with the limits the ones tried here hit and the gates of the rest.
+        hits=()
+        for p in ${=tried}; do
+          [ -f "$RUN_DIR/orchestrator-limit-$p.json" ] && hits+=(--hit "$p=$RUN_DIR/orchestrator-limit-$p.json")
+        done
+        planner_quota="$RUN_DIR/planner-quota.json"
+        python3 "$USAGE_PY" --root "$ROOT" quota-record --role orchestrator --primary "$ORCH" "${hits[@]}" \
+          > "$planner_quota" 2>/dev/null || { rm -f "$planner_quota"; planner_quota=""; }
       fi
-      python3 - "$orch_out" "$ORCH_RESULT" "$ORCH" "$tried" "$planner_hit" "$orch_rc" "$invalid" "$planner_gates" <<'PY'
-import json, os, sys
-out, dest, provider, tried, hit_path, rc, invalid, gates_path = sys.argv[1:9]
-hit, gates = {}, {}
+      python3 - "$orch_out" "$ORCH_RESULT" "$ORCH" "$tried" "$planner_hit" "$orch_rc" "$invalid" "$planner_quota" <<'PY'
+import json, sys
+out, dest, provider, tried, hit_path, rc, invalid, quota_path = sys.argv[1:9]
+hit, quota = {}, {}
 try:
     hit = json.load(open(hit_path)) if hit_path else {}
 except (OSError, ValueError):
     pass
 try:
-    gates = json.load(open(gates_path)) if gates_path else {}
+    quota = json.load(open(quota_path)) if quota_path else {}
 except (OSError, ValueError):
     pass
 r = {"action": None, "outcome_token": None, "repo": None, "item": None, "branch": None,
      "linear_id": None, "directive_ticket": None, "worker_brief": None,
      "archives": [], "blockers": [], "considered": []}
 if hit_path:
-    # Every planner that hit its limit on the way here, not only the last one.
-    limits = []
-    for name in tried.split():
-        try:
-            h = json.load(open(os.path.join(os.path.dirname(hit_path), f"orchestrator-limit-{name}.json")))
-        except (OSError, ValueError):
-            continue
-        limits.append({"provider": name, "state": "limited", "cause": h.get("exact_cli_text"),
-                       "reset_epoch": h.get("reset_epoch"), "reset_at": h.get("reset_at")})
-    # ...and every planner that was never tried because it was already over its gate.
-    listed = {l["provider"] for l in limits}
-    for g in gates.get("gates") or []:
-        if isinstance(g, dict) and g.get("state") in ("over", "limited") and g.get("provider") not in listed:
-            limits.append({"provider": g.get("provider"), "state": g.get("state"),
-                           "cause": g.get("reason") or g.get("state"),
-                           "reset_epoch": g.get("reset_epoch"), "reset_at": g.get("reset_at")})
     r["planner_error"] = {"kind": "quota", "provider": provider, "tried": tried.split(),
                           "limit_text": hit.get("exact_cli_text"), "reset_epoch": hit.get("reset_epoch"),
-                          "reset_at": hit.get("reset_at"), "limits": limits}
+                          "reset_at": hit.get("reset_at"), "limits": quota.get("providers") or []}
     r["summary"] = (f"Planner {provider} hit its usage limit"
                     + (f" (resets {hit['reset_at']})" if hit.get("reset_at") else "")
                     + "; no other planner was under its gate, so nothing was dispatched.")
