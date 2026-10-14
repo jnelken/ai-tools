@@ -362,6 +362,24 @@ def cmd_summary(a):
         hist[v] = hist.get(v, 0) + 1
     if hist:
         print("  distribution: " + "  ".join(f"{k}r:{hist[k]}" for k in sorted(hist)))
+    # The round counter runs across every push on a PR, so a PR that kept gaining commits after
+    # review reads as a long review. Each review comment is one push batch with a cumulative
+    # count, so the delta between comments is the rounds that batch took to converge.
+    batches, multi = [], 0
+    for e in prs:
+        prev = 0
+        if len(e["review_comments"]) > 1:
+            multi += 1
+        for c in e["review_comments"]:
+            batches.append(c["rounds"] - prev if c["rounds"] >= prev else c["rounds"])  # reset => fresh counter
+            prev = c["rounds"]
+    if batches:
+        print(f"  push batches (one per review comment; {multi} of {len(prs)} PRs had more than one):")
+        print(stats_line("rounds/batch", batches, lambda v: f"{v:.1f}" if isinstance(v, float) else str(v)))
+        bh = {}
+        for v in batches:
+            bh[v] = bh.get(v, 0) + 1
+        print("  batch distribution: " + "  ".join(f"{k}r:{bh[k]}" for k in sorted(bh)))
     by_repo = {}
     for (repo, _), v in counts.items():
         by_repo.setdefault(repo, []).append(v)
