@@ -317,8 +317,9 @@ run_worker_in_workspace() {
   name="roadmap $repo $(jq -r '.orchestrator.linear_id // empty' "$req") ${slug}"
   # A worker an earlier run timed out on may still be going in this branch's workspace;
   # never start a second one beside it.
-  local inflight="$ROOT/inflight/${repo}--${slug//\//-}.pid"
-  mkdir -p "$ROOT/inflight"
+  # inflight/<repo>/<slug>.pid: the directory names the repo, so a repo or slug with "--" reads right.
+  local inflight="$ROOT/inflight/$repo/${slug//\//-}.pid"
+  mkdir -p "$ROOT/inflight/$repo"
   if [ -s "$inflight" ] && kill -0 "$(cat "$inflight")" 2>/dev/null; then
     superset_skip="a worker from an earlier run is still running on $branch"; return 1
   fi

@@ -300,6 +300,17 @@ class DailyBatchTest(unittest.TestCase):
         self.assertEqual(self.state()['queue'][0]['status'], 'deferred')
         self.assertFalse((self.root / 'trace.jsonl').exists())
 
+    def test_inflight_pid_directory_names_the_repo_even_with_dashes(self):
+        # DEV-167: a repo named "a--b" read as "a" from the flat inflight/<repo>--<slug>.pid layout.
+        self.repo('a--b')
+        self.repo('a')
+        (self.root / 'inflight/a--b').mkdir(parents=True)
+        (self.root / 'inflight/a--b/x--y.pid').write_text(str(os.getpid()))
+        (self.root / 'inflight/a--b/dead.pid').write_text('999999')
+        self.run_batch()
+        status = {i['repo']: i['status'] for i in self.state()['queue']}
+        self.assertEqual(status, {'a': 'finished', 'a--b': 'deferred'})
+
     # ── threads ───────────────────────────────────────────────────────────────
 
     def threaded(self, **extra):

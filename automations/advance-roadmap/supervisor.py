@@ -114,6 +114,23 @@ def run_records(stamps):
     return out
 
 
+def inflight_repos(root=None):
+    """Repos with a worker still running that an earlier run timed out on and left going.
+
+    run.sh writes inflight/<repo>/<slug>.pid; the flat inflight/<repo>--<slug>.pid layout it used
+    before is still read, for workers launched by an older run.sh that are still alive."""
+    base = (root or ROOT) / "inflight"
+    busy = set()
+    for f in [*base.glob("*/*.pid"), *base.glob("*.pid")]:
+        repo = f.parent.name if f.parent != base else f.name.split("--", 1)[0]
+        try:
+            os.kill(int(f.read_text().strip()), 0)
+            busy.add(repo)
+        except (ValueError, OSError):
+            pass
+    return busy
+
+
 def code_dir():
     d = os.environ.get("PERSONAL_CODE_DIR")
     if d:
@@ -178,15 +195,8 @@ class Supervisor:
             time.sleep(1.05)
 
     def busy_repos(self):
-        busy = {l.repo for l in self.lanes.values() if l.repo}
         # A worker an earlier run timed out on may still be going in its workspace.
-        for f in (ROOT / "inflight").glob("*.pid"):
-            try:
-                os.kill(int(f.read_text().strip()), 0)
-                busy.add(f.name.split("--", 1)[0])
-            except (ValueError, OSError):
-                pass
-        return busy
+        return {l.repo for l in self.lanes.values() if l.repo} | inflight_repos()
 
     def write_state(self, phase):
         shipped = [r for r in self.results if r.get("outcome") in SHIPPED]
