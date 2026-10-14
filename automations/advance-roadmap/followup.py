@@ -246,6 +246,8 @@ def recover_interrupted():
     for st in all_stages():
         if st.get("status") != "running":
             continue
+        if builder_alive(st["key"]):
+            continue   # its Superset builder outlived the drain; never start a second beside it
         c = claim_stage(st["key"])
         if not c:
             continue
@@ -258,6 +260,18 @@ def recover_interrupted():
             log(f"{st['key']}: recovered an interrupted stage (next step {st.get('next')})")
         finally:
             c.close()
+
+
+def builder_alive(key):
+    for pid_file in stage_dir(key).glob("build-*/worker.pid"):
+        if (pid_file.parent / "worker.exit").exists():
+            continue
+        try:
+            os.kill(int(pid_file.read_text().strip()), 0)
+            return True
+        except (OSError, ValueError):
+            continue
+    return False
 
 
 # ── prior tickets ────────────────────────────────────────────────────────────

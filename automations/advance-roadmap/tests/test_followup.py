@@ -285,6 +285,22 @@ class FollowupTest(unittest.TestCase):
         self.assertEqual(len(self.calls("worker")), 1)
         self.assertTrue(any(b["kind"] == "interrupted" for b in st["blockers"]))
 
+    def test_an_interrupted_stage_whose_builder_is_still_running_is_left_alone(self):
+        self.shipped_item("20261014-050000")
+        self.run_followup("hook", "item-done", "--stamp", "20261014-050000")
+        st = self.state("cleanup-20261014-050000")
+        st.update(status="running", next={"step": "build", "round": 1})
+        (self.root / "followups" / st["key"] / "state.json").write_text(json.dumps(st))
+        build = self.root / "followups" / st["key"] / "build-r1-a1"
+        build.mkdir()
+        (build / "worker.pid").write_text(str(os.getpid()))
+        self.run_followup("drain")
+        self.assertEqual(self.state(st["key"])["status"], "running")
+        self.assertEqual(self.calls("worker"), [])
+        (build / "worker.exit").write_text("0")
+        self.run_followup("drain")
+        self.assertEqual(self.state(st["key"])["status"], "done")
+
     def test_repairs_in_one_repo_are_serialized(self):
         for stamp in ("20261014-050000", "20261014-060000"):
             self.shipped_item(stamp)
