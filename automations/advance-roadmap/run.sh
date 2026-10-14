@@ -475,7 +475,9 @@ else
 fi
 # The sandbox can't reach GitHub either, so production deploy state is snapshotted here too.
 DEPLOY_SNAPSHOT="$RUN_DIR/deploy-snapshot.json"
-python3 "$DEPLOY_SNAP_PY" --code-dir "$CODE_DIR" --out "$DEPLOY_SNAPSHOT" ${TARGET_REPO:+--repo "$TARGET_REPO"} >> "$LOG" 2>&1 \
+deploy_scope=()
+[ -n "$TARGET_REPO" ] && deploy_scope=(--repo "$TARGET_REPO")
+python3 "$DEPLOY_SNAP_PY" --code-dir "$CODE_DIR" --out "$DEPLOY_SNAPSHOT" "${deploy_scope[@]}" >> "$LOG" 2>&1 \
   || echo "(deploy snapshot failed — non-fatal)" >> "$LOG"
 python3 "$VERDICT_PY" fingerprint --snapshot "$LINEAR_SNAPSHOT" --deploys "$DEPLOY_SNAPSHOT" --out "$FINGERPRINT" >> "$LOG" 2>&1
 # The last run found no work and its bookkeeping landed. If no repo, issue, allowlist or skill

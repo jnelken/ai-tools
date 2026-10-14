@@ -38,10 +38,12 @@ ABANDONED_AFTER = timedelta(days=1)
 RANK = {"failed": 4, "stale": 3, "pending": 2, "green": 1}
 FAILED_STATES = {"failure", "error"}
 PENDING_STATES = {"pending", "queued", "in_progress"}
+# run.sh pins PATH, so tests swap gh out here rather than through PATH.
+GH = os.environ.get("ADVANCE_ROADMAP_GH_BIN", "gh")
 
 
 def gh(path):
-    p = subprocess.run(["gh", "api", path], capture_output=True, text=True, timeout=30)
+    p = subprocess.run([GH, "api", path], capture_output=True, text=True, timeout=30)
     if p.returncode != 0:
         raise RuntimeError((p.stderr or p.stdout).strip()[:300] or f"gh exited {p.returncode}")
     return json.loads(p.stdout)

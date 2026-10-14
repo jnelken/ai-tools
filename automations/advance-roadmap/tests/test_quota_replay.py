@@ -67,17 +67,24 @@ class QuotaReplayTest(unittest.TestCase):
             d.mkdir(parents=True)
         for f in ("run.sh", "worker.sh"):
             (self.root / f).symlink_to(HERE / f)
-        for f in ("models.sh", "usage.py", "runrecord.py", "tokens.py", "verdict.py", "pendingplan.py"):
+        for f in ("models.sh", "usage.py", "runrecord.py", "tokens.py", "verdict.py", "pendingplan.py",
+                  "deploysnap.py"):
             (self.root / "lib" / f).symlink_to(HERE / "lib" / f)
         (self.root / "lib" / "linearsnap.py").write_text(
             "import json, sys\na = sys.argv\njson.dump({'ok': True, 'issues': []}, open(a[a.index('--out') + 1], 'w'))\n")
         for f in ("ORCHESTRATOR.md", "SAFETY.md", "WORKER.md", "CODE_HEALTH.md"):
             (self.skills / f).write_text("stub\n")
         subprocess.run(["git", "init", "-q", str(self.code / "demo")], check=True)
+        subprocess.run(["git", "-C", str(self.code / "demo"), "remote", "add", "origin",
+                        "git@github.com:jnelken/demo.git"], check=True)
         for name in ("claude", "codex", "agent"):
             p = self.bin / name
             p.write_text(FAKE.format(python=sys.executable))
             p.chmod(0o755)
+        # deploysnap.py's gh: fails like an offline machine, so nothing reaches GitHub.
+        gh = self.bin / "gh"
+        gh.write_text("#!/bin/sh\necho \"gh: offline in tests\" >&2\nexit 1\n")
+        gh.chmod(0o755)
         self.snapshot = self.dir / "snapshot.json"
         self.snapshot.write_text(json.dumps({"ok": True, "issues": []}))
         self.verdict = self.root / "batch-verdicts" / "demo.json"
@@ -110,6 +117,7 @@ class QuotaReplayTest(unittest.TestCase):
             "ADVANCE_ROADMAP_PENDING_DIR": str(self.root / "pending"),
             "FAKE_CALLS": str(self.dir / "calls.jsonl"), "FAKE_LIMIT_FIXTURE": str(FIXTURES / "claude-planner-limit.json"),
             "FAKE_PLAN": json.dumps(NO_WORK), "PYTHONDONTWRITEBYTECODE": "1",
+            "ADVANCE_ROADMAP_GH_BIN": str(self.bin / "gh"),
         })
         env.update(fake)
         return env
@@ -231,11 +239,23 @@ class QuotaReplayTest(unittest.TestCase):
         self.assertEqual(self.record()["outcome"], "blocked-no-item")
         self.assertEqual(json.loads(self.verdict.read_text())["summary"], NO_WORK["summary"])
 
+    def test_offline_deploy_snapshot_is_unknown_and_never_blocks_planning(self):
+        self.usage_state(codex={"weekly": {"used_pct": 85, "reset_epoch": FUTURE}})
+        run = self.run_lane(FAKE_CLAUDE="plan")
+        snap = json.loads((run / "deploy-snapshot.json").read_text())
+        self.assertEqual(snap["repos"]["demo"]["status"], "unknown")
+        self.assertIn("gh: offline in tests", snap["repos"]["demo"]["error"])
+        self.assertNotIn("deploy snapshot failed", self.log)
+        self.assertTrue(self.reached_barrier)
+        self.assertEqual(self.record()["outcome"], "blocked-no-item")
+
     def test_contaminated_verdict_on_disk_is_discarded_and_the_repo_replanned(self):
         self.usage_state(codex={"weekly": {"used_pct": 85, "reset_epoch": FUTURE}})
-        fp = self.dir / "fp.json"
+        fp, deploys = self.dir / "fp.json", self.dir / "deploys.json"
+        subprocess.run([sys.executable, str(self.root / "lib/deploysnap.py"), "--code-dir", str(self.code),
+                        "--out", str(deploys)], env=self.env(), check=True, capture_output=True)
         subprocess.run([sys.executable, str(self.root / "lib/verdict.py"), "fingerprint",
-                        "--snapshot", str(self.snapshot), "--out", str(fp)],
+                        "--snapshot", str(self.snapshot), "--deploys", str(deploys), "--out", str(fp)],
                        env=self.env(), check=True, capture_output=True)
         bad = json.loads((FIXTURES / "batch-verdict-apt-sqft.json").read_text())
         bad.update(decided_at=datetime.now().isoformat(timespec="seconds"), fingerprint=json.loads(fp.read_text()))

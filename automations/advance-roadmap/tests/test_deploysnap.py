@@ -1,6 +1,11 @@
 #!/usr/bin/env python3
 
 import importlib.util
+import json
+import os
+import subprocess
+import sys
+import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -56,6 +61,30 @@ class ClassifyTest(unittest.TestCase):
                       env("Production – mailcruxh", "old", "failure", age=timedelta(days=25))]
         self.assertEqual(self.classify(production), "green")
         self.assertEqual([d["env"] for d in deploysnap.live_environments(production)], ["Production"])
+
+
+class OfflineTest(unittest.TestCase):
+    def test_failed_gh_writes_unknown_and_exits_zero(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            repo, bin_dir, out = tmp / "code" / "demo", tmp / "bin", tmp / "deploys.json"
+            bin_dir.mkdir()
+            subprocess.run(["git", "init", "-q", str(repo)], check=True)
+            subprocess.run(["git", "-C", str(repo), "remote", "add", "origin",
+                            "https://github.com/jnelken/demo.git"], check=True)
+            (tmp / "code" / "no-origin").mkdir()
+            subprocess.run(["git", "init", "-q", str(tmp / "code" / "no-origin")], check=True)
+            gh = bin_dir / "gh"
+            gh.write_text("#!/bin/sh\necho 'could not resolve host' >&2\nexit 1\n")
+            gh.chmod(0o755)
+            env = {**os.environ, "ADVANCE_ROADMAP_GH_BIN": str(gh)}
+            p = subprocess.run([sys.executable, str(LIB / "deploysnap.py"), "--code-dir", str(tmp / "code"),
+                                "--out", str(out)], env=env, capture_output=True, text=True)
+            self.assertEqual(p.returncode, 0, p.stderr)
+            repos = json.loads(out.read_text())["repos"]
+            self.assertEqual(list(repos), ["demo"])
+            self.assertEqual(repos["demo"]["status"], "unknown")
+            self.assertIn("could not resolve host", repos["demo"]["error"])
 
 
 class VerdictDeploysTest(unittest.TestCase):
