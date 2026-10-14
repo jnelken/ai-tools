@@ -39,14 +39,15 @@ SECONDS=0; while kill -0 $PID 2>/dev/null && [ $SECONDS -lt 90 ]; do sleep 2; do
 
 Keep issuing polls until EXITED. Never end your turn while it runs, say "I'll wait", or use Monitor or ScheduleWakeup. Check elapsed wall time between polls; shorten the last poll to the time remaining. Give up only after 30 minutes total: kill the PID (and its Codex child if still running), return `status: failed` with reason `timeout`. Without an exit code, judge the outcome from the log: a CLI error (`Error:` / `Usage:` near the top) or a log with no review response after the `codex` marker is a failure, never assumed success.
 
-Read the full log after exit. Take the effective model and effort only from header lines `model: …` and `reasoning effort: …`; report `unknown` for either absent value, never guess. If log/stderr says the workspace is out of credits or hit its usage limit, return `usage_limited`. Otherwise a nonzero exit means `failed`; include the last roughly 20 log lines verbatim inside the output block, labeled `reason:` / `log tail:`. For timeout, also include `reason: timeout`.
+Read the full log after exit. Take the effective model and effort only from header lines `model: …` and `reasoning effort: …`; report `unknown` for either absent value, never guess. If log/stderr says the workspace is out of credits or hit its usage limit, return `usage_limited`. If it shows a transient throttle instead (HTTP 429, `rate limit`, `tokens per minute`/`TPM`, `requests per minute`, "try again in …", or retries exhausted on such errors) and the review never produced a response, return `rate_limited` and add a `retry_after: <seconds>` line parsed from the log's "try again in …" hint (omit it if absent). Out-of-credits and usage-limit text always wins over a throttle match. Otherwise a nonzero exit means `failed`; include the last roughly 20 log lines verbatim inside the output block, labeled `reason:` / `log tail:`. For timeout, also include `reason: timeout`.
 
 Normalize severity: Critical/High/P0/P1 → P1; Major/Medium/P2 → P2; Minor/nit/P3 → P3. Preserve every Codex finding and its claim faithfully; do not judge, filter, or deduplicate. Escape table pipes if needed. Triage belongs to the caller.
 
 Return exactly one fenced block and nothing else of substance. Choose one status; report `findings: none` when there are zero findings. For findings, use this schema:
 
 ```text
-status: ok | usage_limited | failed
+status: ok | usage_limited | rate_limited | failed
+retry_after: <seconds>   # only with rate_limited, and only when the log gives a hint
 reviewer: codex <model> / <effort>
 lens: <label>
 log: <absolute log path>

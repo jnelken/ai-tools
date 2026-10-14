@@ -64,6 +64,8 @@ Serialize only for a real dependency: two targets sharing a worktree or branch, 
 
 Automatic review is disabled at all PR stages in these repos, so start the loop directly rather than waiting for a bot. `/peer-review` runs Codex against the branch, applies mechanical findings, commits, pushes, and comments the round count on the PR; `/loop` re-runs it until the review is quiet. That skill owns its own convergence ceiling — don't second-guess it here.
 
+**Rate limits are not a gate.** A Codex throttle (`rate_limited`: 429, tokens-per-minute) is waited out and retried inside `/peer-review`, then falls back to `/codex-action-review` if it persists; the run continues rather than stopping at step 2. Parallel `/post-pr` runs share one Codex quota, so when dispatching several targets at once, stagger the launches by ~60s or lower the lens count (`lenses=1`) instead of serializing them. Report any throttled retries in the step 7 block (`Review: clean after 3 rounds, 2 throttled retries`). Stop only if the fallback itself can't run (no PR, `local` mode) and say so.
+
 **Gate:** if the loop exits with unresolved P1/P2 findings, or hits its ceiling without converging, **stop**. Report what's outstanding and do not proceed to step 3. Those need a human decision before the PR goes near reviewers.
 
 Never post `@codex review` to trigger a round yourself — that's [[cycle-review-pr]]'s job, and only when asked.
