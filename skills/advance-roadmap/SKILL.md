@@ -104,11 +104,18 @@ only (see `SAFETY.md`) — from [[unblock-roadmap]] (the only dirty-tree excepti
 `run.sh` owns routing and `providers-usage.json` (`lib/usage.py`):
 
 1. Refresh usage (Claude statusline, Codex app-server/session log, Cursor dashboard API ∪ prior limit hits).
-2. Launch read-only orchestrator (**Sol first**).
-3. Parse the `ORCHESTRATOR_RESULT_JSON` fence.
+2. Launch read-only orchestrator (**Sol first**), failing over to the next planner under its gate
+   when one prints a limit banner.
+3. Parse the `ORCHESTRATOR_RESULT_JSON` fence. No valid plan → record a `planner_error` and
+   dispatch nothing (no worker, bookkeeping, pending plan or carried verdict).
 4. Dispatch `worker.sh` (Cursor → Codex → Claude) in the item's Superset workspace terminal, with
    same-run failover on limits.
 5. Persist usage for the next tick. Skip only when **no orchestrator** remains.
+
+Every role — planner, worker, reviewer, plan approver — skips a provider over its usage gate:
+Claude and Codex at 70% of the 5-hour window or 80% of the weekly one, Cursor at 95% of the pool
+the role draws from (env-overridable; see `automations/README.md`). A run stopped by usage is
+recorded as `quota-paused`, which never counts toward the error alert.
 6. On a clean ship under the chain limit, re-exec for the next item (lone runs only; inside a daily
    batch `daily_batch.py` owns the lock, workspace cleanup, thread planning, plan approval and the
    one Slack summary, and nothing chains).

@@ -134,6 +134,24 @@ class Approve(unittest.TestCase):
         self.assertEqual(out["decisions"][1]["verdict"], "approve")
         self.assertNotIn("error", out)
 
+    def test_limit_banner_is_recorded_and_fails_over(self):
+        req = request(plan("1", 1, ["a"]), plan("2", 2, ["b"]))
+        ruling = {"decisions": [{"stamp": "2", "verdict": "approve", "reason": "disjoint"}]}
+        runners = {"codex": lambda prompt, code: "You've hit your usage limit. Try again at 5:00 PM.\n",
+                   "claude": lambda prompt, code: self.fence(ruling)}
+        with mock.patch.object(pa, "usage_cli") as usage:
+            out = pa.approve("/root", req, "DOC.md", "/code", runners=runners, providers=["codex", "claude"])
+        args = usage.call_args.args
+        self.assertEqual(args[:3], ("/root", "record-limit", "--provider"))
+        self.assertEqual(args[3], "codex")
+        self.assertIn("approver", args)
+        self.assertEqual(out["decisions"][1]["verdict"], "approve")
+
+    def test_provider_order_is_the_gated_orchestrator_list(self):
+        with mock.patch.object(pa, "usage_cli", return_value=mock.Mock(stdout="claude other\n")) as usage:
+            self.assertEqual(pa.provider_order("/root"), ["claude"])
+        self.assertEqual(usage.call_args.args, ("/root", "pick-orchestrators"))
+
     def test_no_provider_defers_and_says_why(self):
         req = request(plan("1", 1, ["a"]), plan("2", 2, ["b"]))
         out = pa.approve("/nowhere", req, "DOC.md", "/code", runners={}, providers=[])

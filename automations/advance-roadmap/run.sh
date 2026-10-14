@@ -130,6 +130,7 @@ USAGE_LOG="$RUN_DIR/model-usage.jsonl"
 RECORDED=0
 ORCH=""
 orch_rc=""
+planner_failed=0
 record() {
   # record STATUS [DETAIL] [EXIT] — exactly once per run.
   [ "$RECORDED" -eq 0 ] || return 0
@@ -386,7 +387,8 @@ PY
 }
 
 record_limit_from_log() {
-  local provider="$1" logfile="$2"
+  # record_limit_from_log PROVIDER LOGFILE [HIT_OUT] — HIT_OUT gets the recorded hit (reset time) as JSON.
+  local provider="$1" logfile="$2" hit_out="${3:-}"
   # Only treat as a live CLI limit if the message looks like a banner, not prose
   # inside ORCHESTRATOR.md / prior logs the model may have read (those contain
   # the phrase "session limit" and were falsely tripping same-run failover).
@@ -395,7 +397,10 @@ record_limit_from_log() {
     '^(you.?ve hit your (session |usage )?limit|hit your session limit|rate limit exceeded|quota exceeded|out of (usage|credits|quota)\b)' \
     "$logfile" || true)"
   [ -n "$text" ] || return 1
-  python3 "$USAGE_PY" --root "$ROOT" record-limit --provider "$provider" --text "$text" || true
+  local -a out_arg=()
+  [ -n "$hit_out" ] && out_arg=(--out "$hit_out")
+  python3 "$USAGE_PY" --root "$ROOT" record-limit --provider "$provider" --text "$text" --scope orchestrator \
+    "${out_arg[@]}" || true
   return 0
 }
 
@@ -437,6 +442,17 @@ run_orchestrator_claude() {
   return $rc
 }
 
+run_orchestrator() {
+  # run_orchestrator PROVIDER OUT PROMPT — 127 when that provider's CLI is missing.
+  case "$1" in
+    codex)  command -v "$CODEX" >/dev/null 2>&1 || { echo "codex not found: $CODEX" > "$2"; return 127; }
+            run_orchestrator_codex "$2" "$3" ;;
+    claude) [ -x "$CLAUDE" ] || { echo "claude not found: $CLAUDE" > "$2"; return 127; }
+            run_orchestrator_claude "$2" "$3" ;;
+    *) echo "unknown orchestrator $1" > "$2"; return 127 ;;
+  esac
+}
+
 # ── Unchanged-world gate ──────────────────────────────────────────────────────
 # Linear goes through the `linear` CLI only. Its key is in the keychain, which the
 # read-only Codex sandbox can't read — so snapshot the queue here and hand over the file.
@@ -461,7 +477,7 @@ python3 "$VERDICT_PY" fingerprint --snapshot "$LINEAR_SNAPSHOT" --out "$FINGERPR
 # doc has moved since, this run would re-derive the same verdict — skip planning and worker both.
 # A pending plan always runs: it is work, not a verdict.
 if [ -z "$(print -l "$PENDING_DIR"/pending-plan*.json(N))" ] && python3 "$VERDICT_PY" check --file "$LAST_VERDICT" \
-     --fingerprint "$FINGERPRINT" --changes "$VERDICT_CHANGES" > "$RUN_DIR/verdict-check.txt" 2>&1; then
+     --fingerprint "$FINGERPRINT" --changes "$VERDICT_CHANGES" --root "$ROOT" > "$RUN_DIR/verdict-check.txt" 2>&1; then
   echo "=== advance-roadmap $STAMP: skipping — $(cat "$RUN_DIR/verdict-check.txt") ===" >> "$LOG"
   record skipped-unchanged "$(cat "$RUN_DIR/verdict-check.txt")"
   ln -sf "$LOG" "$LOGDIR/latest.log"
@@ -560,76 +576,92 @@ Linear snapshot (read this; never call Linear yourself): $LINEAR_SNAPSHOT"
 Previous no-work verdict and what changed since (carry unchanged verdicts forward): $VERDICT_CHANGES"
     fi
     orch_rc=0
-    case "$ORCH" in
-      codex)
-        command -v "$CODEX" >/dev/null 2>&1 || { echo "FATAL: codex not found"; exit 1; }
-        run_orchestrator_codex "$orch_out" "$ORCH_PROMPT" || orch_rc=$?
-        ;;
-      claude)
-        [ -x "$CLAUDE" ] || { echo "FATAL: claude not found"; exit 1; }
-        run_orchestrator_claude "$orch_out" "$ORCH_PROMPT" || orch_rc=$?
-        ;;
-      *) echo "FATAL: unknown orchestrator $ORCH"; exit 1 ;;
-    esac
-
-    cat "$orch_out"
-    echo ""
-    echo "=== orchestrator provider=$ORCH exit=$orch_rc ==="
-
-    # Limit failover only when the orchestrator failed to produce a result JSON.
-    # Successful triage dumps skill text that mentions "session limit" historically
-    # and must not burn a second orchestrator turn.
+    tried=""
+    planner_hit=""   # the last planner's recorded limit hit, when it stopped on one
     had_json=0
-    if [ -s "$orch_out.last" ] && extract_json_fence ORCHESTRATOR_RESULT_JSON "$orch_out.last" "$result"; then
-      had_json=1
-    elif extract_json_fence ORCHESTRATOR_RESULT_JSON "$orch_out" "$result"; then
-      had_json=1
-    fi
-
-    if [ "$had_json" -eq 0 ] && record_limit_from_log "$ORCH" "$orch_out"; then
-      echo "(orchestrator limit recorded — attempting one same-run failover)"
-      alt=""
-      case "$ORCH" in codex) alt=claude ;; claude) alt=codex ;; esac
-      next="$(python3 "$USAGE_PY" --root "$ROOT" pick-orchestrator 2>/dev/null | tr -d '\r' || true)"
-      if [ -n "$alt" ] && [ "$next" = "$alt" ]; then
-        ORCH="$alt"
-        orch_rc=0
-        case "$ORCH" in
-          codex) run_orchestrator_codex "$orch_out" "$ORCH_PROMPT" || orch_rc=$? ;;
-          claude) run_orchestrator_claude "$orch_out" "$ORCH_PROMPT" || orch_rc=$? ;;
-        esac
-        cat "$orch_out"
-        echo "=== orchestrator provider=$ORCH exit=$orch_rc ==="
-        if [ -s "$orch_out.last" ] && extract_json_fence ORCHESTRATOR_RESULT_JSON "$orch_out.last" "$result"; then
-          had_json=1
-        elif extract_json_fence ORCHESTRATOR_RESULT_JSON "$orch_out" "$result"; then
-          had_json=1
-        else
-          record_limit_from_log "$ORCH" "$orch_out" || true
-        fi
+    while :; do
+      tried="$tried $ORCH"
+      orch_rc=0
+      rm -f "$orch_out.last"   # a failed-over planner's final message must not be read as the next one's
+      run_orchestrator "$ORCH" "$orch_out" "$ORCH_PROMPT" || orch_rc=$?
+      cat "$orch_out" 2>/dev/null
+      echo ""
+      echo "=== orchestrator provider=$ORCH exit=$orch_rc ==="
+      if [ -s "$orch_out.last" ] && extract_json_fence ORCHESTRATOR_RESULT_JSON "$orch_out.last" "$result"; then
+        had_json=1; break
+      elif extract_json_fence ORCHESTRATOR_RESULT_JSON "$orch_out" "$result"; then
+        had_json=1; break
       fi
+      # Limit failover only when the orchestrator failed to produce a result JSON.
+      # Successful triage dumps skill text that mentions "session limit" historically
+      # and must not burn a second orchestrator turn.
+      planner_hit="$RUN_DIR/orchestrator-limit-$ORCH.json"
+      record_limit_from_log "$ORCH" "$orch_out" "$planner_hit" || { planner_hit=""; break; }
+      # The planner that just hit its limit is gated now; try the next one still under its gate.
+      alt=""
+      for p in ${=$(python3 "$USAGE_PY" --root "$ROOT" pick-orchestrators 2>/dev/null | tr -d '\r')}; do
+        [[ " $tried " == *" $p "* ]] || { alt="$p"; break; }
+      done
+      [ -n "$alt" ] || { echo "(orchestrator $ORCH hit its limit — no other planner is under its gate)"; break; }
+      echo "(orchestrator $ORCH hit its limit — failing over to $alt)"
+      ORCH="$alt"
+    done
+
+    invalid=""
+    if [ "$had_json" -eq 1 ]; then
+      invalid="$(python3 -c '
+import json, sys
+r = json.load(open(sys.argv[1]))
+ok = isinstance(r, dict) and r.get("action") in ("dispatch_worker", "resume_worker", "blocked_no_item", "nothing_qualified")
+ok or print("ORCHESTRATOR_RESULT_JSON has no valid action: %r" % (r.get("action") if isinstance(r, dict) else type(r).__name__))
+sys.exit(0 if ok else 1)' "$result")" || had_json=0
     fi
 
     if [ "$had_json" -eq 0 ]; then
-      echo "WARNING: missing ORCHESTRATOR_RESULT_JSON — wrapping stdout as blocked_no_item"
-      python3 - "$orch_out" "$result" <<'PY'
+      # No plan: nothing may act on this run — no worker, no batch-ready, no pending plan, no
+      # verdict. A limit banner is a quota pause (provider and reset kept); anything else is an error.
+      planner_failed=1
+      echo "WARNING: the planner produced no usable ORCHESTRATOR_RESULT_JSON — nothing dispatched"
+      python3 - "$orch_out" "$ORCH_RESULT" "$ORCH" "$tried" "$planner_hit" "$orch_rc" "$invalid" <<'PY'
 import json, sys
-summary = open(sys.argv[1], encoding="utf-8", errors="replace").read()[-8000:]
-json.dump({
-  "action": "blocked_no_item",
-  "outcome_token": "blocked-no-item",
-  "repo": None, "item": None, "branch": None,
-  "roadmap_path": None, "linear_id": None, "directive_ticket": None,
-  "worker_brief": None, "archives": [], "blockers": [],
-  "considered": [], "summary": summary,
-  "parse_error": "missing ORCHESTRATOR_RESULT_JSON",
-}, open(sys.argv[2], "w"), indent=2)
-open(sys.argv[2], "a").write("\n")
+out, dest, provider, tried, hit_path, rc, invalid = sys.argv[1:8]
+hit = {}
+try:
+    hit = json.load(open(hit_path)) if hit_path else {}
+except (OSError, ValueError):
+    pass
+r = {"action": None, "outcome_token": None, "repo": None, "item": None, "branch": None,
+     "linear_id": None, "directive_ticket": None, "worker_brief": None,
+     "archives": [], "blockers": [], "considered": []}
+if hit_path:
+    r["planner_error"] = {"kind": "quota", "provider": provider, "tried": tried.split(),
+                          "limit_text": hit.get("exact_cli_text"), "reset_epoch": hit.get("reset_epoch"),
+                          "reset_at": hit.get("reset_at")}
+    r["summary"] = (f"Planner {provider} hit its usage limit"
+                    + (f" (resets {hit['reset_at']})" if hit.get("reset_at") else "")
+                    + "; no other planner was under its gate, so nothing was dispatched.")
+else:
+    cause = invalid or ("the planner CLI was not found" if rc == "127" else "missing ORCHESTRATOR_RESULT_JSON")
+    try:
+        tail = open(out, encoding="utf-8", errors="replace").read()[-2000:]
+    except OSError:
+        tail = ""
+    r["planner_error"] = {"kind": "invalid_output", "provider": provider, "tried": tried.split(),
+                          "exit": int(rc) if rc.lstrip("-").isdigit() else None, "cause": cause}
+    r["parse_error"] = cause
+    r["summary"] = f"Planner {provider} returned no usable plan ({cause}); nothing was dispatched.\n{tail}".strip()
+json.dump(r, open(dest, "w"), indent=2)
+open(dest, "a").write("\n")
 PY
+      final_rc=0
+      [ -n "$planner_hit" ] || { final_rc=$orch_rc; [ "$final_rc" -ne 0 ] || final_rc=1; }
+      rm -f "$result" "$req"
+      echo "=== advance-roadmap exit=$final_rc finished $(date) (planner failed) ==="
     fi
 
   fi
-
+} >> "$LOG" 2>&1
+[ "$planner_failed" -eq 1 ] || {
   # The repo name becomes a path and a lock: it must be a top-level repo directory, and in lane
   # mode one no other lane holds. Anything else is turned into a no-dispatch decision.
   # Hold a kernel lock on the repo for the rest of this run (released when run.sh exits), so

@@ -4,11 +4,14 @@ import importlib.util
 import json
 import os
 import subprocess
+import sys
 import tempfile
 import time
 import unittest
+from datetime import datetime
 from pathlib import Path
 from unittest import mock
+from zoneinfo import ZoneInfo
 
 
 SCRIPT = Path(__file__).resolve().parents[1] / "lib" / "usage.py"
@@ -132,11 +135,14 @@ class RoutingTests(unittest.TestCase):
         self.assertFalse(self.flags()["codex"]["available_for_orchestrator"])
         self.assertEqual(usage.pick_orchestrator(self.state), "claude")
 
-    def test_claude_high_usage_does_not_gate(self):
-        self.state["providers"]["claude"]["five_hour"] = {"used_pct": 99, "reset_epoch": FUTURE}
-        self.state["providers"]["claude"]["seven_day"] = {"used_pct": 99, "reset_epoch": FUTURE}
-        self.assertTrue(self.flags()["claude"]["available_for_orchestrator"])
-        self.assertTrue(self.flags()["claude"]["available_for_worker"])
+    def test_claude_high_usage_gates_before_the_hard_limit(self):
+        self.state["providers"]["claude"]["five_hour"] = {"used_pct": 75, "reset_epoch": FUTURE}
+        providers = self.flags()
+        self.assertFalse(providers["claude"]["available_for_orchestrator"])
+        self.assertFalse(providers["claude"]["available_for_worker"])
+        self.assertEqual(providers["claude"]["gate"]["state"], "over")
+        self.assertEqual(providers["claude"]["gate"]["reset_epoch"], FUTURE)
+        self.assertEqual(usage.pick_orchestrators(self.state), ["codex"])
 
     def test_claude_observed_limit_hit_still_gates(self):
         self.state["providers"]["claude"]["last_limit_hit"] = {"reset_epoch": FUTURE}
@@ -208,6 +214,154 @@ class RoutingTests(unittest.TestCase):
         self.assertFalse(usage.apply_codex(self.state, None))
         self.assertEqual(self.state["providers"]["codex"]["weekly"]["used_pct"], 85)
         self.assertFalse(self.flags()["codex"]["available_for_worker"])
+
+
+class GateMatrixTests(unittest.TestCase):
+    """70% five-hour / 80% weekly for Claude and Codex, 95% of the role's Cursor pool — in every role."""
+
+    def gate(self, provider, role, prov=None, env=None):
+        state = usage.empty_state()
+        state["providers"][provider].update(prov or {})
+        with mock.patch.dict(os.environ, env or {}):
+            return usage.provider_gate(state, provider, role)
+
+    def windows(self, provider, five=None, weekly=None, reset=FUTURE):
+        key = "seven_day" if provider == "claude" else "weekly"
+        return {"five_hour": {"used_pct": five, "reset_epoch": reset},
+                key: {"used_pct": weekly, "reset_epoch": reset}}
+
+    def test_window_boundaries_for_claude_and_codex_in_every_role(self):
+        cases = [((69.9, None), True), ((70, None), False), ((None, 79.9), True), ((None, 80), False),
+                 ((69, 79), True), ((100, 100), False)]
+        for provider in ("claude", "codex"):
+            for role in ("orchestrator", "worker", "reviewer"):
+                for (five, weekly), available in cases:
+                    with self.subTest(provider=provider, role=role, five=five, weekly=weekly):
+                        got = self.gate(provider, role, self.windows(provider, five, weekly))
+                        self.assertEqual(got["available"], available, got)
+                        self.assertEqual(got["state"], "ok" if available else "over")
+
+    def test_cursor_pool_boundary_per_role(self):
+        for role, env_key in (("worker", "ADVANCE_ROADMAP_CURSOR_WORKER_MODEL"),
+                              ("reviewer", "ADVANCE_ROADMAP_CURSOR_REVIEW_MODEL")):
+            for model, pool in (("auto", "auto_pct"), ("claude-sonnet-4-6", "api_pct")):
+                for pct, available in ((94.9, True), (95, False)):
+                    with self.subTest(role=role, model=model, pct=pct):
+                        inc = {"auto_pct": 0, "api_pct": 0, "reset_epoch": FUTURE, pool: pct}
+                        got = self.gate("cursor", role, {"included": inc}, {env_key: model})
+                        self.assertEqual(got["available"], available, got)
+
+    def test_cursor_never_plans(self):
+        self.assertFalse(self.gate("cursor", "orchestrator")["available"])
+
+    def test_expired_windows_read_as_zero(self):
+        for provider in ("claude", "codex"):
+            with self.subTest(provider=provider):
+                self.assertTrue(self.gate(provider, "worker", self.windows(provider, 99, 99, reset=PAST))["available"])
+        inc = {"auto_pct": 99, "reset_epoch": PAST}
+        self.assertTrue(self.gate("cursor", "worker", {"included": inc})["available"])
+
+    def test_missing_readings_are_available_but_reported_unknown(self):
+        for provider, role in (("claude", "orchestrator"), ("codex", "reviewer"), ("cursor", "worker")):
+            with self.subTest(provider=provider):
+                got = self.gate(provider, role)
+                self.assertTrue(got["available"])
+                self.assertEqual(got["state"], "unknown")
+        state = usage.empty_state()
+        usage.recompute_flags(state)
+        self.assertEqual({p["gate"]["state"] for p in state["providers"].values()}, {"unknown"})
+
+    def test_limit_hit_is_reported_as_limited_with_its_reset(self):
+        got = self.gate("codex", "reviewer", {"last_limit_hit": {"reset_epoch": FUTURE}})
+        self.assertEqual((got["available"], got["state"], got["reset_epoch"]), (False, "limited", FUTURE))
+
+    def test_over_gate_reports_when_every_over_window_resets(self):
+        later = FUTURE + 3600
+        prov = {"five_hour": {"used_pct": 90, "reset_epoch": FUTURE},
+                "seven_day": {"used_pct": 90, "reset_epoch": later}}
+        self.assertEqual(self.gate("claude", "worker", prov)["reset_epoch"], later)
+
+    def test_thresholds_are_overridable_by_env(self):
+        env = dict(os.environ, ADVANCE_ROADMAP_MAX_FIVE_HOUR_PCT="50", ADVANCE_ROADMAP_MAX_WEEKLY_PCT="60",
+                   ADVANCE_ROADMAP_MAX_CURSOR_PCT="40")
+        code = ("import importlib.util, json, sys\n"
+                f"spec = importlib.util.spec_from_file_location('u', {str(SCRIPT)!r})\n"
+                "u = importlib.util.module_from_spec(spec); spec.loader.exec_module(u)\n"
+                "print(json.dumps([u.MAX_FIVE_HOUR_PCT, u.MAX_SEVEN_DAY_PCT, u.MAX_CURSOR_PCT]))\n")
+        out = subprocess.run([sys.executable, "-c", code], env=env, capture_output=True, text=True, check=True)
+        self.assertEqual(json.loads(out.stdout), [50, 60, 40])
+
+
+class ResetParseTests(unittest.TestCase):
+    NY = ZoneInfo("America/New_York")
+
+    def at(self, *args, tz=None):
+        return datetime(*args, tzinfo=tz or self.NY).timestamp()
+
+    def parse(self, text, observed, tz=None):
+        epoch = usage.parse_reset_epoch_from_text(text, observed, tz)
+        return None if epoch is None else datetime.fromtimestamp(epoch, tz or self.NY)
+
+    def test_relative_formats_are_kept(self):
+        obs = 1_800_000_000
+        self.assertEqual(usage.parse_reset_epoch_from_text("usage limit, resets in 2h 30m", obs), obs + 9000)
+        self.assertEqual(usage.parse_reset_epoch_from_text("Resets in 45m", obs), obs + 2700)
+        self.assertEqual(usage.parse_reset_epoch_from_text("resets in 2 hours", obs), obs + 7200)
+
+    def test_oct13_banner_resets_later_the_same_morning(self):
+        text = "You've hit your session limit · resets 11:50am (America/New_York)"
+        got = self.parse(text, self.at(2026, 10, 13, 10, 35))
+        self.assertEqual(got, datetime(2026, 10, 13, 11, 50, tzinfo=self.NY))
+
+    def test_clock_already_past_rolls_to_tomorrow(self):
+        text = "You've hit your session limit · resets 11:50am (America/New_York)"
+        got = self.parse(text, self.at(2026, 10, 13, 12, 0))
+        self.assertEqual(got, datetime(2026, 10, 14, 11, 50, tzinfo=self.NY))
+        # Exactly at the reset is already past too.
+        got = self.parse(text, self.at(2026, 10, 13, 11, 50))
+        self.assertEqual(got.date().day, 14)
+
+    def test_bare_pm_hour_uses_the_given_zone(self):
+        got = self.parse("You've hit your usage limit. Resets 3pm.", self.at(2026, 10, 13, 9, 0), self.NY)
+        self.assertEqual(got, datetime(2026, 10, 13, 15, 0, tzinfo=self.NY))
+
+    def test_midnight_and_noon(self):
+        london = ZoneInfo("Europe/London")
+        got = self.parse("resets 12:05 am (Europe/London)", self.at(2026, 10, 13, 23, 50, tz=london), london)
+        self.assertEqual(got, datetime(2026, 10, 14, 0, 5, tzinfo=london))
+        got = self.parse("resets 12pm (America/New_York)", self.at(2026, 10, 13, 9, 0))
+        self.assertEqual(got, datetime(2026, 10, 13, 12, 0, tzinfo=self.NY))
+        got = self.parse("resets 12am", self.at(2026, 10, 13, 9, 0), self.NY)
+        self.assertEqual(got, datetime(2026, 10, 14, 0, 0, tzinfo=self.NY))
+
+    def test_zone_converts_to_the_observers_epoch(self):
+        # 11:50am in New York is 16:50 in London (both on summer time on Oct 13).
+        london = ZoneInfo("Europe/London")
+        epoch = usage.parse_reset_epoch_from_text("resets 11:50am (America/New_York)",
+                                                  self.at(2026, 10, 13, 15, 0, tz=london), london)
+        self.assertEqual(datetime.fromtimestamp(epoch, london), datetime(2026, 10, 13, 16, 50, tzinfo=london))
+
+    def test_unknown_zone_falls_back_to_the_given_one(self):
+        got = self.parse("resets 3pm (Mars/Olympus)", self.at(2026, 10, 13, 9, 0), self.NY)
+        self.assertEqual(got, datetime(2026, 10, 13, 15, 0, tzinfo=self.NY))
+
+    def test_non_clock_text_is_not_a_reset(self):
+        for text in ("resets 2026 plans", "resets 13pm", "resets 9:75am", "You've hit your session limit"):
+            with self.subTest(text=text):
+                self.assertIsNone(usage.parse_reset_epoch_from_text(text, self.at(2026, 10, 13, 9, 0), self.NY))
+
+    def test_expired_recorded_reset_no_longer_gates(self):
+        state = usage.empty_state()
+        state["providers"]["claude"]["last_limit_hit"] = {"reset_epoch": PAST, "observed_at": usage.now_iso()}
+        self.assertTrue(usage.provider_gate(state, "claude", "orchestrator")["available"])
+
+
+class LimitBannerTests(unittest.TestCase):
+    def test_banner_at_line_start_only(self):
+        text = "noise\nYou've hit your session limit · resets 11:50am (America/New_York)\nmore"
+        self.assertEqual(usage.limit_banner(text), "You've hit your session limit · resets 11:50am (America/New_York)")
+        self.assertIsNone(usage.limit_banner("The doc says you've hit your session limit sometimes."))
+        self.assertIsNone(usage.limit_banner(""))
 
 
 class ProbeTests(unittest.TestCase):
@@ -338,6 +492,34 @@ class CliTests(unittest.TestCase):
         self.run_usage("record-limit", "--provider", "codex", "--text", "usage limit, resets in 2h 5m")
         result = self.run_usage("pick-orchestrator")
         self.assertEqual(result.stdout.strip(), "claude")
+
+    def test_record_limit_writes_the_hit_with_its_reset(self):
+        out = self.root / "hit.json"
+        self.run_usage("record-limit", "--provider", "claude", "--scope", "orchestrator", "--out", str(out),
+                       "--text", "You've hit your session limit · resets 11:50am (America/New_York)")
+        hit = json.loads(out.read_text())
+        self.assertEqual((hit["provider"], hit["scope"], hit["reset_source"]), ("claude", "orchestrator", "derived"))
+        reset = datetime.fromtimestamp(hit["reset_epoch"], ZoneInfo("America/New_York"))
+        self.assertEqual((reset.hour, reset.minute), (11, 50))
+        self.assertLess(hit["reset_epoch"] - time.time(), 86400)
+        self.assertTrue(hit["reset_at"])
+
+    def test_gate_command_exit_codes(self):
+        result = self.run_usage("gate", "--role", "worker", "--provider", "cursor")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout)["state"], "unknown")
+        self.run_usage("record-limit", "--provider", "codex", "--text", "usage limit, resets in 2h 5m")
+        result = self.run_usage("gate", "--role", "reviewer", "--provider", "codex")
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(json.loads(result.stdout)["state"], "limited")
+
+    def test_pick_orchestrators_lists_only_gated_eligible_planners(self):
+        self.assertEqual(self.run_usage("pick-orchestrators").stdout.split(), ["codex", "claude"])
+        self.run_usage("record-limit", "--provider", "claude", "--text", "You've hit your session limit · resets in 1h")
+        self.assertEqual(self.run_usage("pick-orchestrators").stdout.split(), ["codex"])
+        self.run_usage("record-limit", "--provider", "codex", "--text", "usage limit, resets in 2h 5m")
+        result = self.run_usage("pick-orchestrators")
+        self.assertEqual((result.returncode, result.stdout.strip()), (2, ""))
 
     def test_probe_command_reports_missing_data(self):
         result = self.run_usage("probe")

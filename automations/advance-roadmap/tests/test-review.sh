@@ -12,7 +12,18 @@ ROOT="$TMP/root"; BIN="$TMP/bin"; REPO="$TMP/repo"; LOG="$TMP/reviews.jsonl"
 mkdir -p "$ROOT/lib" "$BIN"
 cp "$HERE/review.sh" "$ROOT/"
 cp "$HERE/lib/models.sh" "$HERE/lib/tokens.py" "$ROOT/lib/"
-print -r -- 'import sys; open(sys.argv[2] + "/limits.txt", "a").write(sys.argv[-1] + "\n")' > "$ROOT/lib/usage.py"
+# Fake usage.py: `gate` refuses the providers in FAKE_GATED; anything else records its last arg.
+cat > "$ROOT/lib/usage.py" <<'PY'
+import json, os, sys
+args = sys.argv[1:]
+if "gate" in args:
+    provider = args[args.index("--provider") + 1]
+    if provider in os.environ.get("FAKE_GATED", "").split():
+        print(json.dumps({"provider": provider, "state": "over", "reason": "5h 71% >= 70%"}))
+        sys.exit(1)
+    sys.exit(0)
+open(args[1] + "/limits.txt", "a").write(args[-1] + "\n")
+PY
 
 git init -q -b main "$REPO"
 git -C "$REPO" -c user.name=t -c user.email=t@t commit -q --allow-empty -m base
@@ -67,4 +78,12 @@ check "one log line per round"               "$(wc -l < "$LOG" | tr -d ' ')" 4
 
 rc=0; review cursor 1 ADVANCE_ROADMAP_CODEX_BIN=/nonexistent FAKE_CLAUDE=clean >/dev/null || rc=$?
 check "missing binary → next reviewer"       "$(field reviewer)" claude
+
+review cursor 1 FAKE_GATED=codex FAKE_CLAUDE=clean >/dev/null
+check "codex over its gate → claude reviews" "$(field reviewer)" claude
+check "gated reviewer logged"                "$(field gated)" "['codex']"
+
+rc=0; review claude 1 FAKE_GATED="codex cursor" >/dev/null || rc=$?
+check "every reviewer gated → exit 3"        "$rc" 3
+check "gated round logged as unavailable"    "$(field verdict)" unavailable
 echo "all passed"

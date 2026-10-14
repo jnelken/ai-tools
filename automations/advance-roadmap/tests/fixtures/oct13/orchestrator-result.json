@@ -1,0 +1,16 @@
+{
+  "action": "blocked_no_item",
+  "outcome_token": "blocked-no-item",
+  "repo": null,
+  "item": null,
+  "branch": null,
+  "roadmap_path": null,
+  "linear_id": null,
+  "directive_ticket": null,
+  "worker_brief": null,
+  "archives": [],
+  "blockers": [],
+  "considered": [],
+  "summary": "You've hit your session limit · resets 11:50am (America/New_York)\n",
+  "parse_error": "missing ORCHESTRATOR_RESULT_JSON"
+}

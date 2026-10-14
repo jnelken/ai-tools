@@ -85,8 +85,9 @@ don't poll):
   --result-file "<dir>/worker-result.json" --status-file "<dir>/worker-status.json"
 ```
 
-`--providers cursor` pins the builder to Cursor. If Cursor is limited or missing, `worker.sh`
-exits `3` and tells you; **ask the user** before failing over (`--providers "codex claude"`) —
+`--providers cursor` pins the builder to Cursor. If Cursor is over its usage gate (95% of its
+pool), limited or missing, `worker.sh` exits `3` and says why in the status file's `limited` /
+`missing` lists; **ask the user** before failing over (`--providers "codex claude"`) —
 unlike the scheduled run, you have someone to ask. The builder invokes
 `review.sh --worker cursor`, so Codex reviews (read-only) and the builder fixes findings for up to
 3 rounds; leftovers merge marked `FIXME/TODO(advance-roadmap review)`.
@@ -112,7 +113,8 @@ never retry silently in a loop. Don't clean up the builder's branch.
 
 ## What this skill does not do
 
-No chaining, no provider-usage gating, no scheduling, no run dashboard — that's
-[[advance-roadmap]]'s `run.sh`. It ships through the same PR flow (WORKER.md Step 7), but from a
+No chaining, no planner routing, no scheduling, no run dashboard — that's
+[[advance-roadmap]]'s `run.sh`. (`worker.sh` and `review.sh` still apply the usage gates, so a
+pinned provider over its gate is skipped here too.) It ships through the same PR flow (WORKER.md Step 7), but from a
 branch in the root checkout rather than a Superset workspace, so its PRs aren't credited on the
 Production Run leaderboard.

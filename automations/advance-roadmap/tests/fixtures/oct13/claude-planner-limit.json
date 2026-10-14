@@ -1,0 +1,33 @@
+{
+  "type": "result",
+  "subtype": "success",
+  "is_error": true,
+  "api_error_status": 429,
+  "api_error": "usage_limit_reached",
+  "terminal_reason": "api_error",
+  "result": "You've hit your session limit · resets 11:50am (America/New_York)",
+  "stop_reason": "stop_sequence",
+  "num_turns": 19,
+  "usage": {
+    "input_tokens": 24,
+    "cache_creation_input_tokens": 114373,
+    "cache_read_input_tokens": 1177082,
+    "output_tokens": 7013
+  },
+  "modelUsage": {
+    "claude-opus-5": {
+      "inputTokens": 24,
+      "outputTokens": 7013,
+      "cacheReadInputTokens": 1177082,
+      "cacheCreationInputTokens": 114373,
+      "webSearchRequests": 0,
+      "costUSD": 1.9003284999999999,
+      "contextWindow": 1000000,
+      "maxOutputTokens": 64000,
+      "thinkingTokens": 3027,
+      "canonicalModel": "claude-opus-5",
+      "provider": "firstParty",
+      "costBasis": "list"
+    }
+  }
+}

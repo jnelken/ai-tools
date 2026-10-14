@@ -6,7 +6,8 @@
 #   (--base defaults to origin's default branch: origin/main, or origin/master where that's it)
 #
 # Reviewer: Cursor's work → Codex, Codex's → Cursor, Claude's → Codex; the
-# remaining provider is the fallback when the first is limited or missing. The
+# remaining provider is the fallback when the first is over its usage gate
+# (usage.py gate, checked fresh before each reviewer), limited or missing. The
 # reviewer is read-only. Findings go to stdout, ending in one line:
 #   VERDICT: clean | VERDICT: findings
 # Each round appends one JSON line to --log, which run.sh folds into the run
@@ -127,8 +128,15 @@ run_reviewer() {
 
 out="$(mktemp "${TMPDIR:-/tmp}/advance-roadmap-review.XXXXXX")"
 trap 'rm -f "$out" "$out.last" "$out.json"' EXIT INT TERM
-used="" verdict="unavailable"
+used="" verdict="unavailable" gated=""
 for who in "${reviewers[@]}"; do
+  # Exit 1 is the only "over its gate"; a usage.py failure is no reading, which never blocks.
+  gate="$(python3 "$USAGE_PY" --root "$ROOT" gate --role reviewer --provider "$who" 2>/dev/null)"
+  if [ $? -eq 1 ]; then
+    echo "(skipping reviewer $who — over its usage gate: $gate)"
+    gated="$gated $who"
+    continue
+  fi
   rc=0
   rm -f "$out.last"   # a limited Codex attempt must not supply the next reviewer's text
   run_reviewer "$who" "$out" || rc=$?
@@ -146,16 +154,17 @@ for who in "${reviewers[@]}"; do
   break
 done
 
-python3 - "$LOG" "$ROUND" "$WORKER" "${used:-}" "$verdict" "$(git -C "$REPO" rev-parse --short HEAD)" <<'PY'
+python3 - "$LOG" "$ROUND" "$WORKER" "${used:-}" "$verdict" "$(git -C "$REPO" rev-parse --short HEAD)" "$gated" <<'PY'
 import json, sys, time
-log, rnd, worker, reviewer, verdict, head = sys.argv[1:7]
+log, rnd, worker, reviewer, verdict, head, gated = sys.argv[1:8]
 with open(log, "a", encoding="utf-8") as f:
     f.write(json.dumps({"round": int(rnd), "worker": worker, "reviewer": reviewer or None,
-                        "verdict": verdict, "head": head, "at": int(time.time())}) + "\n")
+                        "verdict": verdict, "head": head, "at": int(time.time()),
+                        "gated": gated.split()}) + "\n")
 PY
 
 if [ -z "$used" ]; then
-  echo "REVIEW UNAVAILABLE: every reviewer (${reviewers[*]}) was limited or missing."
+  echo "REVIEW UNAVAILABLE: every reviewer (${reviewers[*]}) was over its usage gate, limited or missing."
   echo "VERDICT: unavailable"
   exit 3
 fi

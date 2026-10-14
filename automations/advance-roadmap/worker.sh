@@ -51,14 +51,29 @@ while [ $# -gt 0 ]; do
   esac
 done
 
+LIMITED_LOG=""   # one JSON line per provider skipped over its usage gate or stopped by a limit
+MISSING=""       # providers whose CLI was not installed
+
 write_status() {
   # write_status USED EXIT [FATAL]
   [ -n "$STATUS_FILE" ] || return 0
-  python3 - "$STATUS_FILE" "$1" "$2" "${3:-}" <<'PY2'
+  python3 - "$STATUS_FILE" "$1" "$2" "${3:-}" "$LIMITED_LOG" "$MISSING" <<'PY2'
 import json, sys
-path, used, rc, fatal = sys.argv[1:5]
+path, used, rc, fatal, limited_log, missing = sys.argv[1:7]
+limited = []
+try:
+    for line in open(limited_log) if limited_log else ():
+        try:
+            entry = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(entry, dict):
+            limited.append(entry)
+except OSError:
+    pass
 json.dump({"used": used or None, "exit": int(rc) if rc.lstrip("-").isdigit() else None,
-           "fatal": fatal or None}, open(path, "w"), indent=1)
+           "fatal": fatal or None, "limited": limited, "missing": missing.split()},
+          open(path, "w"), indent=1)
 PY2
 }
 
@@ -104,7 +119,8 @@ fi
 # shellcheck disable=SC2206
 providers=(${=PROVIDERS_STR})
 if [ ${#providers[@]} -eq 0 ]; then
-  # Bookkeeping with Claude still possible if chain empty but claude binary exists
+  # Bookkeeping with Claude is still possible if the chain came back empty — but only if
+  # Claude is under its gate, which the loop below checks like any other provider.
   providers=(claude)
   echo "(worker chain empty — falling back to claude for bookkeeping attempt)"
 fi
@@ -223,11 +239,20 @@ run_claude() {
 
 tmpdir="$(mktemp -d "${TMPDIR:-/tmp}/advance-roadmap-worker.XXXXXX")"
 trap 'rm -rf "$tmpdir"' EXIT INT TERM
+LIMITED_LOG="$tmpdir/limited.jsonl"
 
 final_rc=1
 used=""
 for provider in "${providers[@]}"; do
   out="$tmpdir/$provider.log"
+  # Fresh usage before every attempt — an explicit --providers list included. Exit 1 is the
+  # only "over its gate"; a usage.py failure is no reading, which never blocks.
+  gate="$(python3 "$USAGE_PY" --root "$ROOT" gate --role worker --provider "$provider" 2>/dev/null)"
+  if [ $? -eq 1 ]; then
+    echo "(skipping $provider — over its usage gate: $gate)"
+    print -r -- "$gate" >> "$LIMITED_LOG"
+    continue
+  fi
   echo "=== worker try provider=$provider mode=$WORKER_MODE stamp=$STAMP ($(date)) ==="
   rc=0
   [ -n "$RESULT_FILE" ] && rm -f "$RESULT_FILE"   # a failed-over attempt's result must not count
@@ -250,12 +275,23 @@ for provider in "${providers[@]}"; do
       '^(you.?ve hit your (session |usage )?limit|hit your session limit|rate limit exceeded|quota exceeded|out of (usage|credits|quota)\b)' \
       "$out" || true)" && [ -n "$text" ]; then
     echo "(limit for $provider — recording and failing over)"
-    python3 "$USAGE_PY" --root "$ROOT" record-limit --provider "$provider" --text "$text" || true
+    python3 "$USAGE_PY" --root "$ROOT" record-limit --provider "$provider" --text "$text" --scope worker \
+      --out "$tmpdir/hit-$provider.json" || true
+    python3 -c 'import json, sys
+hit = {}
+try:
+    hit = json.load(open(sys.argv[2]))
+except (OSError, ValueError):
+    pass
+print(json.dumps({"provider": sys.argv[1], "state": "limited", "cause": sys.argv[3],
+                  "reset_epoch": hit.get("reset_epoch"), "reset_at": hit.get("reset_at")}))' \
+      "$provider" "$tmpdir/hit-$provider.json" "$text" >> "$LIMITED_LOG"
     continue
   fi
 
   if [ "$rc" -eq 127 ]; then
     echo "(binary missing for $provider — failing over)"
+    MISSING="$MISSING $provider"
     continue
   fi
 

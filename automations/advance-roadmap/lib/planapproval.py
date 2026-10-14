@@ -20,6 +20,9 @@ import sys
 import tempfile
 from pathlib import Path
 
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+from usage import limit_banner  # noqa: E402
+
 SEVERITY = {"approve": 0, "serialize": 1, "defer": 2}
 FENCE = "PLAN_APPROVAL_JSON"
 
@@ -187,35 +190,43 @@ def run_claude(prompt, code_dir):
 RUNNERS = {"codex": run_codex, "claude": run_claude}
 
 
+def usage_cli(root, *args):
+    return subprocess.run([sys.executable, str(Path(root) / "lib" / "usage.py"), "--root", str(root), *args],
+                          capture_output=True, text=True, timeout=120, stdin=subprocess.DEVNULL)
+
+
 def provider_order(root):
-    """Codex first, Claude only as the fallback, narrowed by what usage.py says is available."""
-    pick = ""
+    """Codex first, Claude only as the fallback — each only while under its usage gate."""
     try:
-        pick = subprocess.run([sys.executable, str(Path(root) / "lib" / "usage.py"), "--root", str(root),
-                               "pick-orchestrator"], capture_output=True, text=True, timeout=120,
-                              stdin=subprocess.DEVNULL).stdout.strip()
+        names = usage_cli(root, "pick-orchestrators").stdout.split()
     except (OSError, subprocess.SubprocessError):
-        pass
-    if pick == "claude":
-        return ["claude", "codex"]
-    if pick == "codex":
-        return ["codex", "claude"]
-    return []
+        return []
+    return [n for n in names if n in RUNNERS]
 
 
 def approve(root, request, doc, code_dir, runners=None, providers=None):
     runners = runners or RUNNERS
     providers = providers if providers is not None else provider_order(root)
     prompt = build_prompt(request, doc, str(Path(code_dir) / request["repo"]))
-    model, error = None, "no orchestrator provider is available"
+    model, error = None, "no orchestrator provider is under its usage gate"
     for name in providers:
         try:
-            model = extract_fence(runners[name](prompt, code_dir))
+            text = runners[name](prompt, code_dir)
         except (OSError, subprocess.SubprocessError) as exc:
             model, error = None, f"{name}: {exc}"
             continue
+        model = extract_fence(text)
         if model:
             break
+        banner = limit_banner(text)
+        if banner:
+            # Gate this provider for every other role too, until its reset.
+            try:
+                usage_cli(root, "record-limit", "--provider", name, "--text", banner, "--scope", "approver")
+            except (OSError, subprocess.SubprocessError):
+                pass
+            error = f"{name}: {banner}"
+            continue
         error = f"{name}: no {FENCE} fence in its answer"
     result = combine(request, model)
     if model is None:

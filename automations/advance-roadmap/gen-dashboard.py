@@ -62,13 +62,13 @@ PROVIDERS_USAGE = os.path.join(ROOT, "providers-usage.json")
 RUNS_JSONL = os.path.join(ROOT, "runs.jsonl")
 LOG_TAIL_CHARS = 4000
 
-# Thresholds mirror lib/usage.py. Kept in sync by hand; shown so the page can say
-# whether the next run would be gated.
-MAX_SEVEN_DAY_PCT = 80
-MAX_FIVE_HOUR_PCT = 70
-MAX_CURSOR_PCT = 95
+# Thresholds mirror lib/usage.py (same defaults, same env overrides). Kept in sync by hand;
+# shown so the page can say whether the next run would be gated. Claude and Codex share them.
+MAX_SEVEN_DAY_PCT = float(os.environ.get("ADVANCE_ROADMAP_MAX_WEEKLY_PCT", 80))
+MAX_FIVE_HOUR_PCT = float(os.environ.get("ADVANCE_ROADMAP_MAX_FIVE_HOUR_PCT", 70))
+MAX_CURSOR_PCT = float(os.environ.get("ADVANCE_ROADMAP_MAX_CURSOR_PCT", 95))
 # worker.sh draws Cursor usage from the Auto pool unless a named model is pinned;
-# only that pool is gated (lib/usage.py cursor_quota_ok).
+# only that pool is gated (lib/usage.py cursor_gate).
 CURSOR_WORKER_MODEL = os.environ.get("ADVANCE_ROADMAP_CURSOR_WORKER_MODEL", "auto")
 # Before GRID_SINCE launchd fired at fixed 6h slots; from it, hourly at :45 with run.sh keeping
 # the base-cadence grid ((hour - 3) % base == 0); from SPRINT_SINCE, hourly ticks inside two
@@ -556,8 +556,8 @@ def write_state(runs):
     """Consecutive-blocked count → cadence, plus a one-line summary for Slack."""
     streak = 0
     for r in runs:                      # newest first
-        if r["outcome"] in ("skipped-quota", "skipped-lock", "skipped-backoff", "skipped-unchanged", "skipped-superset", "running"):
-            continue                    # a skipped tick is not evidence either way
+        if r["outcome"] in ("skipped-quota", "quota-paused", "skipped-lock", "skipped-backoff", "skipped-unchanged", "skipped-superset", "running"):
+            continue                    # a skipped tick or quota pause is not evidence either way
         if r["outcome"] in BLOCKED_OUTCOMES:
             streak += 1
             continue
@@ -601,7 +601,7 @@ def write_state(runs):
 # "measured zero" mean very different things when deciding whether to run.
 # (provider key, pool key, label, gate cap or None when the pool isn't gated)
 POOLS = {
-    "claude": (("five_hour", "5-hour", None), ("seven_day", "7-day", None)),
+    "claude": (("five_hour", "5-hour", MAX_FIVE_HOUR_PCT), ("seven_day", "7-day", MAX_SEVEN_DAY_PCT)),
     "codex": (("five_hour", "5-hour", MAX_FIVE_HOUR_PCT), ("weekly", "Weekly", MAX_SEVEN_DAY_PCT)),
 }
 # Within this many points of the cap the bar turns amber.
@@ -646,8 +646,8 @@ def pool_bar(label, pct, cap, reset_epoch, reset_text, source, now):
     else:
         colour = "var(--ok)"
     shown = f"{round(pct)}%" if pct >= 1 or pct == 0 else "&lt;1%"
-    tick = f'<i class=cap style="left:{cap}%"></i>' if cap is not None else ""
-    capnote = (f'<span class=dim> / {cap}%</span>' if cap is not None
+    tick = f'<i class=cap style="left:{cap:g}%"></i>' if cap is not None else ""
+    capnote = (f'<span class=dim> / {cap:g}%</span>' if cap is not None
                else '<span class=dim title="worker.sh doesn\'t draw from this pool, so it never gates a run"> · no gate</span>')
     reset = ('<span class=dim>window reset since reading</span>' if rolled
              else reset_html(reset_epoch, reset_text, now))
@@ -798,7 +798,8 @@ def waiting_html(snap, repos):
 
 CATEGORY = {"shipped": "shipped", "completed": "shipped", "archive-only": "shipped",
             "blocked-no-item": "blocked", "blocked": "blocked",
-            "error": "error", "failed": "error", "incomplete": "error", "shipped-deploy-failed": "error"}
+            "error": "error", "failed": "error", "incomplete": "error", "shipped-deploy-failed": "error",
+            "quota-paused": "skipped"}
 
 
 def category(outcome):
@@ -818,6 +819,7 @@ BADGE = {
     "shipped": ("ok", "✓ shipped"), "completed": ("ok", "✓ completed"),
     "blocked-no-item": ("unk", "◦ blocked"), "blocked": ("unk", "◦ blocked"),
     "skipped-quota": ("off", "⏸ quota skip"), "skipped-lock": ("off", "⏸ lock skip"),
+    "quota-paused": ("off", "⏸ quota paused"),
     "skipped-backoff": ("off", "⏸ backoff skip"),
     "skipped-superset": ("off", "⏸ Superset down"),
     "skipped-unchanged": ("off", "⏸ unchanged skip"),

@@ -155,7 +155,9 @@ class Batch:
             if proc.poll() is not None:
                 row = shared.run_records({item["stamp"]}).get(item["stamp"], {})
                 item.update(status="finished", outcome=row.get("outcome", "unrecorded"),
-                            pr_url=row.get("pr_url"), exit_code=proc.returncode)
+                            pr_url=row.get("pr_url"), exit_code=proc.returncode, detail=row.get("detail"))
+                if row.get("quota"):
+                    item["quota"] = row["quota"]  # who ran out, when it resets, the CLI's words
                 continue
             run = ROOT / "runs" / item["stamp"]
             if item["status"] == "planning" and (run / "batch-ready").exists():
@@ -324,6 +326,7 @@ class Batch:
             self.write()
             time.sleep(POLL_S)
         self.state["phase"] = "done"
+        self.state["quota_paused"] = quota_paused(self.state)
         self.write()
         self.post_summary()
         return 0
@@ -336,6 +339,30 @@ class Batch:
         self.state["summary_posted"] = posted
         self.write()
         return posted
+
+
+def quota_paused(state):
+    """One entry per provider whose usage ran out during the batch: the repos it paused and the
+    latest reset seen. A pause is not a failure; this is what the summary says instead."""
+    out = {}
+    for item in state.get("queue", []):
+        q = item.get("quota")
+        if item.get("outcome") != "quota-paused" or not q:
+            continue
+        entry = out.setdefault(q.get("provider") or "?", {"provider": q.get("provider"), "role": q.get("role"),
+                                                            "repos": [], "reset_epoch": None, "reset_at": None,
+                                                            "cause": q.get("cause")})
+        entry["repos"].append(item["repo"])
+        if q.get("reset_epoch") and (entry["reset_epoch"] or 0) < q["reset_epoch"]:
+            entry.update(reset_epoch=q["reset_epoch"], reset_at=q.get("reset_at"))
+    return list(out.values())
+
+
+def quota_line(state):
+    parts = [f'{q["provider"] or "?"} out of quota for {len(q["repos"])} repo(s)'
+             + (f', resets {q["reset_at"]}' if q.get("reset_at") else "")
+             for q in state.get("quota_paused") or []]
+    return ("; ".join(parts) + ".") if parts else ""
 
 
 def slackagent_script():
@@ -384,7 +411,8 @@ def post_slack_summary(directory):
     if not url:
         return False
     state = shared.read_json(directory / "batch.json") or {}
-    text = text or f'advance-roadmap batch {state.get("date")}: {state.get("phase")}'
+    text = text or " ".join(filter(None, [f'advance-roadmap batch {state.get("date")}: {state.get("phase")}.',
+                                          quota_line(state)]))
     try:
         import urllib.request
         request = urllib.request.Request(url, data=json.dumps({"text": text}).encode(),
