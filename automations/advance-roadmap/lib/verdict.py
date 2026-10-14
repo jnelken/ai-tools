@@ -4,8 +4,8 @@
 A blocked-no-item run costs ~6 min of Codex planning plus ~9 min of a bookkeeping
 worker, and the next run a couple of hours later usually reaches the identical verdict.
 This fingerprints everything that verdict was derived from — each repo's HEAD,
-branches, working tree and session files; the Linear snapshot; the allowlist and
-the skill docs — and stores it with the verdict in the provider-neutral
+branches, working tree and session files; the Linear snapshot; each repo's production
+deploy status; the allowlist and the skill docs — and stores it with the verdict in the provider-neutral
 ``<personal code dir>/.advance-roadmap/last-verdict.json``.
 
     verdict.py fingerprint --snapshot S --out F
@@ -107,8 +107,17 @@ def cmd_fingerprint(a):
                                  i["blocked_by"], i.get("human_comments_sha")]))
         for i in snap.get("issues", [])
     }
+    deploys = {}
+    if a.deploys:
+        try:
+            with open(a.deploys, encoding="utf-8") as f:
+                # Status only: a red deploy recovering is what has to reopen triage.
+                deploys = {k: v.get("status") for k, v in json.load(f).get("repos", {}).items()}
+        except (OSError, ValueError):
+            pass
     fp = {
         "repos": repos,
+        "deploys": deploys,
         # A failed fetch is its own state: the verdict it produced may not survive Linear's return.
         "linear_ok": bool(snap.get("ok")),
         "issues": issues,
@@ -133,7 +142,7 @@ def diff(old, new):
     for key in ("linear_ok", "allowlist", "skill"):
         if old.get(key) != new.get(key):
             changes.append(key)
-    for kind in ("repos", "issues"):
+    for kind in ("repos", "issues", "deploys"):
         o, n = old.get(kind, {}), new.get(kind, {})
         changes += [f"{kind[:-1]}:{k}" for k in sorted(set(o) | set(n)) if o.get(k) != n.get(k)]
     return changes
@@ -205,6 +214,7 @@ def main():
     ap = argparse.ArgumentParser()
     sub = ap.add_subparsers(dest="cmd", required=True)
     s = sub.add_parser("fingerprint"); s.add_argument("--snapshot", required=True); s.add_argument("--out", required=True)
+    s.add_argument("--deploys", default="")
     s = sub.add_parser("check"); s.add_argument("--file", required=True); s.add_argument("--fingerprint", required=True)
     s.add_argument("--changes", required=True); s.add_argument("--max-age-hours", type=int, default=24)
     s = sub.add_parser("save"); s.add_argument("--file", required=True); s.add_argument("--fingerprint", required=True)
