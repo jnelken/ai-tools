@@ -1,6 +1,7 @@
 """The plan approver's model configuration, mechanical checks and ruling logic, with no live model."""
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -139,12 +140,35 @@ class Approve(unittest.TestCase):
         ruling = {"decisions": [{"stamp": "2", "verdict": "approve", "reason": "disjoint"}]}
         runners = {"codex": lambda prompt, code: "You've hit your usage limit. Try again at 5:00 PM.\n",
                    "claude": lambda prompt, code: self.fence(ruling)}
-        with mock.patch.object(pa, "usage_cli") as usage:
+        with mock.patch.object(pa, "usage_cli", return_value=mock.Mock(returncode=0)) as usage:
             out = pa.approve("/root", req, "DOC.md", "/code", runners=runners, providers=["codex", "claude"])
-        args = usage.call_args.args
+        args = usage.call_args_list[0].args
         self.assertEqual(args[:3], ("/root", "record-limit", "--provider"))
         self.assertEqual(args[3], "codex")
         self.assertIn("approver", args)
+        self.assertEqual(out["decisions"][1]["verdict"], "approve")
+
+    def test_fallback_gated_during_the_first_attempt_is_never_called(self):
+        req = request(plan("1", 1, ["a"]), plan("2", 2, ["b"]))
+        calls = []
+        runners = {"codex": lambda prompt, code: calls.append("codex") or "no fence here",
+                   "claude": lambda prompt, code: calls.append("claude") or self.fence({"decisions": []})}
+        with mock.patch.object(pa, "usage_cli", return_value=mock.Mock(returncode=3)) as usage:
+            out = pa.approve("/root", req, "DOC.md", "/code", runners=runners, providers=["codex", "claude"])
+        self.assertEqual(calls, ["codex"])
+        self.assertEqual(usage.call_args.args,
+                         ("/root", "gate", "--role", "orchestrator", "--provider", "claude"))
+        self.assertEqual(out["decisions"][1]["verdict"], "defer")
+        self.assertIn("claude: over its usage gate", out["error"])
+        self.assertIn("codex: no", out["error"])
+
+    def test_unreadable_usage_never_blocks_the_fallback(self):
+        req = request(plan("1", 1, ["a"]), plan("2", 2, ["b"]))
+        ruling = {"decisions": [{"stamp": "2", "verdict": "approve", "reason": "disjoint"}]}
+        runners = {"codex": lambda prompt, code: "no fence here",
+                   "claude": lambda prompt, code: self.fence(ruling)}
+        with mock.patch.object(pa, "usage_cli", side_effect=subprocess.TimeoutExpired("usage.py", 120)):
+            out = pa.approve("/root", req, "DOC.md", "/code", runners=runners, providers=["codex", "claude"])
         self.assertEqual(out["decisions"][1]["verdict"], "approve")
 
     def test_provider_order_is_the_gated_orchestrator_list(self):

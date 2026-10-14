@@ -204,12 +204,24 @@ def provider_order(root):
     return [n for n in names if n in RUNNERS]
 
 
+def still_under_gate(root, name):
+    """A fallback's gate can close while the attempt before it runs (or another approver records a
+    limit). Exit 3 is the only "over its gate"; a usage.py failure is no reading and never blocks."""
+    try:
+        return usage_cli(root, "gate", "--role", "orchestrator", "--provider", name).returncode != 3
+    except (OSError, subprocess.SubprocessError):
+        return True
+
+
 def approve(root, request, doc, code_dir, runners=None, providers=None):
     runners = runners or RUNNERS
     providers = providers if providers is not None else provider_order(root)
     prompt = build_prompt(request, doc, str(Path(code_dir) / request["repo"]))
     model, error = None, "no orchestrator provider is under its usage gate"
-    for name in providers:
+    for i, name in enumerate(providers):
+        if i and not still_under_gate(root, name):
+            error = f"{error}; {name}: over its usage gate"
+            continue
         try:
             text = runners[name](prompt, code_dir)
         except (OSError, subprocess.SubprocessError) as exc:
