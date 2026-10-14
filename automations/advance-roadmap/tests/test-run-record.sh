@@ -64,7 +64,7 @@ rf="$(print -r -- "$prompt" | sed -n 's/^(raw JSON, no fence) to: //p')"
 res='{"outcome":"shipped","provider":"cursor","repo":"demo","item":"DEV-1 thing","merge_commit":"abc1234","summary":"ok","slack_summary":"Did the thing. DEV-1 Done."}'
 case "$FAKE_WORKER" in
   file)  print -r -- "$res" > "$rf"; print "=== advance-roadmap exit=2 finished (decoy) ==="
-         print -r -- '{"type":"result","result":"done","usage":{"inputTokens":100,"outputTokens":50,"cacheReadTokens":900,"cacheWriteTokens":10}}' ;;
+         print -r -- '{"type":"result","result":"done","session_id":"cursor-session-1","usage":{"inputTokens":100,"outputTokens":50,"cacheReadTokens":900,"cacheWriteTokens":10}}' ;;
   fence) print -r -- '```WORKER_RESULT_JSON'; print -r -- "$res"; print -r -- '```' ;;
   fail)  print "boom"; exit 1 ;;
   reviewed) print -r -- "$prompt" | grep -q -- '--worker cursor --round <N> --log .*/reviews.jsonl' || exit 9
@@ -121,6 +121,7 @@ check() { [ "$2" = "$3" ] || { echo "FAIL [$1]: expected '$3', got '$2'"; tail -
 
 run good file;    check "agent-written result → shipped"       "$(last outcome)" shipped
                   check "result source is the agent's file"     "$(last worker_result_source)" agent
+                  check "worker session id recorded"            "$(last worker_session)" cursor-session-1
                   check "merge commit carried through"          "$(last merge_commit)" abc1234
                   check "slack summary carried through"         "$(last slack_summary)" "Did the thing. DEV-1 Done."
                   check "unreviewed ship is flagged"            "$(last detail)" "merged without a logged review"

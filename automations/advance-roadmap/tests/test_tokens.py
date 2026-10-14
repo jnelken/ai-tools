@@ -82,6 +82,34 @@ class TokensTests(unittest.TestCase):
         (r,) = self.rows()
         self.assertEqual((r["total"], r["source"]), (111291, "codex-total"))
 
+    def test_session_ids_are_captured_for_every_provider(self):
+        usage = {"inputTokens": 1, "outputTokens": 1}
+        cases = [
+            (tokens.cmd_claude_json, json.dumps({"result": "r", "session_id": "claude-s1",
+                                                 "modelUsage": {"claude-opus-5": usage}}), "claude-s1"),
+            (tokens.cmd_cursor_json, json.dumps({"result": "r", "session_id": "cursor-s1", "usage": usage}),
+             "cursor-s1"),
+            (tokens.cmd_codex, "session id: 01a109bc-cc7b-7343-a406-81827e2d26d5\ntokens used\n12\n",
+             "01a109bc-cc7b-7343-a406-81827e2d26d5"),
+        ]
+        for n, (cmd, text, sid) in enumerate(cases):
+            with self.subTest(sid=sid):
+                session = self.dir / f"session-{n}"
+                kw = {} if cmd is tokens.cmd_codex else {"out_text": str(self.dir / f"o{n}")}
+                cmd(Args(input=self.write(f"in{n}", text + "\n"), log=self.log, model="m",
+                         session_out=str(session), **kw))
+                self.assertEqual(session.read_text().strip(), sid)
+                self.assertEqual(self.rows()[-1]["session_id"], sid)
+        calls = tokens.summarize(self.log)["calls"]
+        self.assertEqual(sorted(s for c in calls for s in c["sessions"]),
+                         sorted(sid for _, _, sid in cases))
+
+    def test_no_session_id_writes_no_session_file(self):
+        session = self.dir / "session"
+        tokens.cmd_cursor_json(Args(input=self.write("in.json", json.dumps({"result": "r", "usage": {}})),
+                                    out_text=str(self.dir / "o"), log=self.log, session_out=str(session)))
+        self.assertFalse(session.exists())
+
     def test_summarize_groups_review_rounds_per_reviewer(self):
         for rnd in (1, 1, 2):
             tokens.append(self.log, [tokens.record("reviewer", "codex", "m", 10, 0, 0, 5, None, "s", rnd)])

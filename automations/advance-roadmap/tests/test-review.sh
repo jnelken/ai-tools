@@ -37,6 +37,7 @@ for p in codex agent claude; do
 #!/bin/zsh
 name=$p; mode="\${FAKE_${p:u}:-clean}"
 last=""; while [ \$# -gt 0 ]; do [ "\$1" = "-o" ] && { last="\$2"; shift; }; shift; done
+[ "\$name" = codex ] && print "session id: 11111111-2222-3333-4444-555555555555"
 print -r -- "echoed prompt: VERDICT: clean      (no findings)"
 [ "\$mode" = limit ] && { print "You've hit your usage limit. Resets 5pm."; exit 1; }
 [ "\$mode" = capacity ] && { print "ERROR: Selected model is at capacity. Please try a different model."; exit 1; }
@@ -60,6 +61,7 @@ check() { [ "$2" = "$3" ] || { echo "FAIL [$1]: expected '$3', got '$2'"; exit 1
 
 out="$(review cursor 1 FAKE_CODEX=findings)"
 check "cursor's work → codex reviews"        "$(field reviewer)" codex
+check "reviewer session id logged"           "$(field session_id)" 11111111-2222-3333-4444-555555555555
 check "last VERDICT wins over echoed prompt" "$(field verdict)" findings
 case "$out" in *"x.py:1 bug"*) echo "ok   findings printed" ;; *) echo "FAIL: no findings in output"; exit 1 ;; esac
 
@@ -94,6 +96,7 @@ out="$(review cursor 1 FAKE_CODEX=capacity FAKE_CLAUDE=clean)"
 check "codex at capacity → claude reviews"   "$(field reviewer)" claude
 check "capacity is not unparsed"             "$(field verdict)" clean
 check "capacity reviewer logged"             "$(field capacity)" "['codex']"
+check "skipped reviewer's session not kept"  "$(field session_id)" None
 [ -s "$ROOT/limits.txt" ] && { echo "FAIL: capacity recorded as a quota limit"; exit 1; } || echo "ok   capacity is not a quota hit"
 case "$out" in *"at capacity"*) echo "ok   capacity skip printed" ;; *) echo "FAIL: no capacity note"; exit 1 ;; esac
 

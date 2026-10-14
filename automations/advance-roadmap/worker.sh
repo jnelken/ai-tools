@@ -65,9 +65,15 @@ write_status() {
     python3 "$USAGE_PY" --root "$ROOT" quota-record --role worker --attempts "$LIMITED_LOG" \
       "${primary[@]}" > "$quota" 2>/dev/null || quota=""
   fi
-  python3 - "$STATUS_FILE" "$1" "$2" "${3:-}" "$LIMITED_LOG" "$MISSING" "$quota" <<'PY2'
+  python3 - "$STATUS_FILE" "$1" "$2" "${3:-}" "$LIMITED_LOG" "$MISSING" "$quota" "${tmpdir:-}/${1:-none}.log.session" <<'PY2'
 import json, sys
-path, used, rc, fatal, limited_log, missing, quota_path = sys.argv[1:8]
+path, used, rc, fatal, limited_log, missing, quota_path, session_path = sys.argv[1:9]
+session = None
+if used:
+    try:
+        session = open(session_path).read().strip() or None
+    except OSError:
+        pass
 quota = None
 try:
     quota = json.load(open(quota_path)) if quota_path else None
@@ -86,7 +92,9 @@ except OSError:
     pass
 json.dump({"used": used or None, "exit": int(rc) if rc.lstrip("-").isdigit() else None,
            "fatal": fatal or None, "limited": limited, "missing": missing.split(),
-           "quota": quota if isinstance(quota, dict) else None},
+           "quota": quota if isinstance(quota, dict) else None,
+           # The CLI session the used provider ran (Cursor/Claude JSON session_id, Codex header).
+           "session_id": session},
           open(path, "w"), indent=1)
 PY2
 }
@@ -207,7 +215,7 @@ run_cursor() {
     "$prompt" >"$out.json" 2>&1
   local rc=$?
   python3 "$TOKENS_PY" cursor-json "$out.json" "$out" --role worker --model "$CURSOR_WORKER_MODEL" \
-    --log "$USAGE_LOG" 2>&1
+    --log "$USAGE_LOG" --session-out "$out.session" 2>&1
   [ -s "$out" ] || cp "$out.json" "$out" 2>/dev/null   # tokens.py missing or broken: keep the raw output
   return $rc
 }
@@ -228,7 +236,8 @@ run_codex() {
     --dangerously-bypass-approvals-and-sandbox \
     "$prompt" >"$out" 2>&1 </dev/null
   local rc=$?
-  python3 "$TOKENS_PY" codex "$out" --role worker --model "$CODEX_WORKER_MODEL" --log "$USAGE_LOG" 2>&1
+  python3 "$TOKENS_PY" codex "$out" --role worker --model "$CODEX_WORKER_MODEL" --log "$USAGE_LOG" \
+    --session-out "$out.session" 2>&1
   return $rc
 }
 
@@ -246,7 +255,7 @@ run_claude() {
     --output-format json >"$out.json" 2>&1
   local rc=$?
   python3 "$TOKENS_PY" claude-json "$out.json" "$out" --role worker --model "$CLAUDE_WORKER_MODEL" \
-    --log "$USAGE_LOG" 2>&1
+    --log "$USAGE_LOG" --session-out "$out.session" 2>&1
   [ -s "$out" ] || cp "$out.json" "$out" 2>/dev/null   # tokens.py missing or broken: keep the raw output
   return $rc
 }

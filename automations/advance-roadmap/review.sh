@@ -101,7 +101,7 @@ run_reviewer() {
         -s read-only -C "$REPO" "$PROMPT" >"$out" 2>&1 </dev/null
       local rc=$?
       python3 "$TOKENS_PY" codex "$out" --role reviewer --round "$ROUND" --model "$CODEX_REVIEW_MODEL" \
-        --log "$USAGE_LOG" >/dev/null 2>&1
+        --log "$USAGE_LOG" --session-out "$out.session" >/dev/null 2>&1
       [ -s "$out.last" ] && { cat "$out.last" >> "$out"; }
       return $rc ;;
     cursor)
@@ -110,7 +110,7 @@ run_reviewer() {
         --output-format json "$PROMPT" >"$out.json" 2>&1
       local rc=$?
       python3 "$TOKENS_PY" cursor-json "$out.json" "$out" --role reviewer --round "$ROUND" \
-        --model "$CURSOR_REVIEW_MODEL" --log "$USAGE_LOG" >/dev/null 2>&1
+        --model "$CURSOR_REVIEW_MODEL" --log "$USAGE_LOG" --session-out "$out.session" >/dev/null 2>&1
       [ -s "$out" ] || cp "$out.json" "$out" 2>/dev/null
       return $rc ;;
     claude)
@@ -120,7 +120,7 @@ run_reviewer() {
         --output-format json ) >"$out.json" 2>&1
       local rc=$?
       python3 "$TOKENS_PY" claude-json "$out.json" "$out" --role reviewer --round "$ROUND" \
-        --model "$CLAUDE_REVIEW_MODEL" --log "$USAGE_LOG" >/dev/null 2>&1
+        --model "$CLAUDE_REVIEW_MODEL" --log "$USAGE_LOG" --session-out "$out.session" >/dev/null 2>&1
       [ -s "$out" ] || cp "$out.json" "$out" 2>/dev/null
       return $rc ;;
   esac
@@ -131,7 +131,7 @@ run_reviewer() {
 CAPACITY='selected model is at capacity|model is (currently )?(at capacity|overloaded)|server is overloaded|overloaded_error|\b(503|529)\b.*(unavailable|overloaded|capacity)|(unavailable|overloaded).*\b(503|529)\b'
 
 out="$(mktemp "${TMPDIR:-/tmp}/advance-roadmap-review.XXXXXX")"
-trap 'rm -f "$out" "$out.last" "$out.json"' EXIT INT TERM
+trap 'rm -f "$out" "$out.last" "$out.json" "$out.session"' EXIT INT TERM
 used="" verdict="unavailable" gated="" capacity=""
 for who in "${reviewers[@]}"; do
   # Exit 3 is the only "over its gate"; a usage.py failure (1, 2) is no reading, which never blocks.
@@ -142,7 +142,7 @@ for who in "${reviewers[@]}"; do
     continue
   fi
   rc=0
-  rm -f "$out.last"   # a limited Codex attempt must not supply the next reviewer's text
+  rm -f "$out.last" "$out.session"   # a limited Codex attempt must not supply the next reviewer's text
   run_reviewer "$who" "$out" || rc=$?
   [ "$rc" -eq 127 ] && continue
   if text="$(rg -m1 -i \
@@ -164,13 +164,20 @@ for who in "${reviewers[@]}"; do
   break
 done
 
-python3 - "$LOG" "$ROUND" "$WORKER" "${used:-}" "$verdict" "$(git -C "$REPO" rev-parse --short HEAD)" "$gated" "$capacity" <<'PY'
+python3 - "$LOG" "$ROUND" "$WORKER" "${used:-}" "$verdict" "$(git -C "$REPO" rev-parse --short HEAD)" "$gated" "$capacity" "$out.session" <<'PY'
 import json, sys, time
-log, rnd, worker, reviewer, verdict, head, gated, capacity = sys.argv[1:9]
+log, rnd, worker, reviewer, verdict, head, gated, capacity, session_path = sys.argv[1:10]
+session = None
+if reviewer:
+    try:
+        session = open(session_path).read().strip() or None
+    except OSError:
+        pass
 with open(log, "a", encoding="utf-8") as f:
     f.write(json.dumps({"round": int(rnd), "worker": worker, "reviewer": reviewer or None,
                         "verdict": verdict, "head": head, "at": int(time.time()),
-                        "gated": gated.split(), "capacity": capacity.split()}) + "\n")
+                        "gated": gated.split(), "capacity": capacity.split(),
+                        "session_id": session}) + "\n")
 PY
 
 if [ -z "$used" ]; then
