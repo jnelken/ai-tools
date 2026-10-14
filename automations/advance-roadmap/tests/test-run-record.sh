@@ -2,6 +2,9 @@
 # End-to-end: run.sh + worker.sh with fake providers → one runs.jsonl row per run,
 # outcomes from result files and exit codes (never log text), and the error alert.
 set -eu
+# A worker session exports these; inherited, they would retarget run.sh away from the fixture repo.
+unset ADVANCE_ROADMAP_TARGET_REPO ADVANCE_ROADMAP_LANE ADVANCE_ROADMAP_THREAD ADVANCE_ROADMAP_BATCH_PID \
+  SUPERSET_WORKSPACE_PATH SUPERSET_TERMINAL_ID
 
 HERE="$(cd "$(dirname "$0")/.." && pwd)"
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/advance-roadmap-record-test.XXXXXX")"
@@ -17,7 +20,8 @@ for f in ORCHESTRATOR.md SAFETY.md WORKER.md; do echo stub > "$SKILLS/$f"; done
 cat > "$ROOT/lib/usage.py" <<'PY'
 import sys
 cmd = sys.argv[-1]
-print({"pick-orchestrator": "codex", "pick-worker-chain": "cursor"}.get(cmd, ""))
+print({"pick-orchestrator": "codex", "pick-orchestrators": "codex",
+       "pick-worker-chain": "cursor"}.get(cmd, ""))
 PY
 
 # Fake Codex orchestrator: echoes a decoy fence into stdout (like the real one
