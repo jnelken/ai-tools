@@ -112,7 +112,7 @@ def quota_info(orch, wstatus, wresult):
         return info
     limited = [l for l in (wstatus or {}).get("limited") or [] if isinstance(l, dict)]
     if (wresult or {}).get("outcome") == "limit_hit":
-        name = wresult.get("provider")
+        name = wresult.get("provider") or (wstatus or {}).get("used")
         hit = next((l for l in limited if l.get("provider") == name), {})
         own = {"provider": name, "state": "limited", "cause": wresult.get("limit_text"),
                "reset_epoch": hit.get("reset_epoch"), "reset_at": hit.get("reset_at")}

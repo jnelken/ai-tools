@@ -93,6 +93,18 @@ class RunRecordTest(unittest.TestCase):
         self.assertEqual(rec["outcome"], "quota-paused")
         self.assertEqual(rec["quota"]["cause"], "usage limit")
 
+    def test_worker_limit_hit_carries_the_reset_worker_sh_recorded(self):
+        # worker.sh records a result-only limit_hit itself; its status entry holds the reset.
+        status = {"used": "codex", "exit": 0, "limited": [
+            {"provider": "codex", "state": "limited", "cause": "usage limit", "reset_epoch": 1791910000,
+             "reset_at": "2026-10-13T12:46:40-04:00"}]}
+        for result in ({"outcome": "limit_hit", "provider": "codex", "limit_text": "usage limit"},
+                       {"outcome": "limit_hit", "limit_text": "usage limit"}):
+            with self.subTest(result=result):
+                rec = self.append({"action": "dispatch_worker"}, status, result)
+                self.assertEqual((rec["quota"]["provider"], rec["quota"]["reset_epoch"]), ("codex", 1791910000))
+                self.assertEqual([p["provider"] for p in rec["quota"]["providers"]], ["codex"])
+
     def test_worker_limit_hit_after_gated_fallbacks_keeps_every_provider(self):
         status = {"used": "claude", "exit": 0, "limited": [
             {"provider": "cursor", "state": "over", "reason": "auto pool 96%", "reset_epoch": 1792000000},

@@ -24,11 +24,18 @@ if "gate" in args:
                           "reason": "5h 71% >= 70%", "reset_epoch": 1760400000, "reset_at": "x"}))
         sys.exit(3)
     print(json.dumps({"provider": provider, "available": True, "state": "ok"}))
+if "record-limit" in args:
+    provider, text = args[args.index("--provider") + 1], args[args.index("--text") + 1]
+    with open(os.environ["LIMITS"], "a") as f:
+        f.write(f"{provider}|{text}\n")
+    with open(args[args.index("--out") + 1], "w") as f:
+        json.dump({"reset_epoch": 1760403600, "reset_at": "2025-10-13T21:00:00-04:00"}, f)
 PY
 
 cat > "$TMP_ROOT/bin/fake-provider" <<'SH'
 #!/bin/zsh
 print -r -- "$(basename "$0")" >> "$CALLS"
+[ -n "${FAKE_RESULT:-}" ] && print -r -- "$FAKE_RESULT" > "$RESULT_PATH"
 print -r -- "fake provider completed"
 SH
 chmod +x "$TMP_ROOT/bin/fake-provider"
@@ -38,7 +45,9 @@ print -r -- '{"mode":"implement","orchestrator":{"worker_mode":"standard"}}' > "
 run_worker() {
   local gated="$1" status_file="$2"
   : > "$TMP_ROOT/calls"
-  FAKE_GATED="$gated" FAKE_CRASH="${FAKE_CRASH:-}" CALLS="$TMP_ROOT/calls" \
+  : > "$TMP_ROOT/limits"
+  FAKE_GATED="$gated" FAKE_CRASH="${FAKE_CRASH:-}" CALLS="$TMP_ROOT/calls" LIMITS="$TMP_ROOT/limits" \
+  FAKE_RESULT="${FAKE_RESULT:-}" RESULT_PATH="$TMP_ROOT/result.json" \
   PERSONAL_CODE_DIR="$TMP_ROOT" \
   ADVANCE_ROADMAP_ROOT="$TMP_ROOT/root" \
   ADVANCE_ROADMAP_SKILL_DIR="$SKILL_DIR" \
@@ -46,7 +55,8 @@ run_worker() {
   ADVANCE_ROADMAP_CODEX_BIN="$TMP_ROOT/bin/codex" \
   ADVANCE_ROADMAP_CLAUDE_BIN="$TMP_ROOT/bin/claude" \
     "$TEST_DIR/worker.sh" --stamp test --request-file "$TMP_ROOT/request.json" \
-      --providers "cursor codex claude" --status-file "$status_file" >/dev/null
+      --providers "cursor codex claude" --status-file "$status_file" \
+      --result-file "$TMP_ROOT/result.json" >/dev/null
 }
 
 fail() { print -u2 -- "worker gate: $1"; exit 1; }
@@ -77,5 +87,23 @@ PY
 # A crashing usage.py (exit 1) is no reading, not a gate: the first provider still runs.
 FAKE_CRASH=1 run_worker "" "$TMP_ROOT/status-3.json" || fail "a usage.py crash blocked the worker"
 [ "$(cat "$TMP_ROOT/calls")" = "agent" ] || fail "expected cursor to run despite the crash, got: $(cat "$TMP_ROOT/calls")"
+
+# A limit_hit reported only in the result JSON (no banner on stdout) is still recorded, with its reset.
+FAKE_RESULT='{"outcome": "limit_hit", "provider": "cursor", "limit_text": "usage limit, resets 5pm"}' \
+  run_worker "" "$TMP_ROOT/status-4.json" || fail "a reported limit_hit failed the worker"
+[ "$(cat "$TMP_ROOT/limits")" = "cursor|usage limit, resets 5pm" ] \
+  || fail "result-only limit was not recorded: $(cat "$TMP_ROOT/limits")"
+python3 - "$TMP_ROOT/status-4.json" <<'PY' || fail "status for a result-only limit is wrong"
+import json, sys
+s = json.load(open(sys.argv[1]))
+assert s["used"] == "cursor", s
+assert s["limited"] == [{"provider": "cursor", "state": "limited", "cause": "usage limit, resets 5pm",
+                         "reset_epoch": 1760403600, "reset_at": "2025-10-13T21:00:00-04:00"}], s
+PY
+
+# Any other outcome records nothing.
+FAKE_RESULT='{"outcome": "shipped", "provider": "cursor"}' run_worker "" "$TMP_ROOT/status-5.json" \
+  || fail "a shipped result failed the worker"
+[ ! -s "$TMP_ROOT/limits" ] || fail "a shipped result recorded a limit: $(cat "$TMP_ROOT/limits")"
 
 print -- "worker usage gate: ok"

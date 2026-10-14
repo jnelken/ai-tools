@@ -241,6 +241,21 @@ tmpdir="$(mktemp -d "${TMPDIR:-/tmp}/advance-roadmap-worker.XXXXXX")"
 trap 'rm -rf "$tmpdir"' EXIT INT TERM
 LIMITED_LOG="$tmpdir/limited.jsonl"
 
+record_limit() {
+  # record_limit PROVIDER TEXT — gate the provider for later lanes and note its reset in the status.
+  python3 "$USAGE_PY" --root "$ROOT" record-limit --provider "$1" --text "$2" --scope worker \
+    --out "$tmpdir/hit-$1.json" || true
+  python3 -c 'import json, sys
+hit = {}
+try:
+    hit = json.load(open(sys.argv[2]))
+except (OSError, ValueError):
+    pass
+print(json.dumps({"provider": sys.argv[1], "state": "limited", "cause": sys.argv[3],
+                  "reset_epoch": hit.get("reset_epoch"), "reset_at": hit.get("reset_at")}))' \
+    "$1" "$tmpdir/hit-$1.json" "$2" >> "$LIMITED_LOG"
+}
+
 final_rc=1
 used=""
 for provider in "${providers[@]}"; do
@@ -275,17 +290,7 @@ for provider in "${providers[@]}"; do
       '^(you.?ve hit your (session |usage )?limit|hit your session limit|rate limit exceeded|quota exceeded|out of (usage|credits|quota)\b)' \
       "$out" || true)" && [ -n "$text" ]; then
     echo "(limit for $provider — recording and failing over)"
-    python3 "$USAGE_PY" --root "$ROOT" record-limit --provider "$provider" --text "$text" --scope worker \
-      --out "$tmpdir/hit-$provider.json" || true
-    python3 -c 'import json, sys
-hit = {}
-try:
-    hit = json.load(open(sys.argv[2]))
-except (OSError, ValueError):
-    pass
-print(json.dumps({"provider": sys.argv[1], "state": "limited", "cause": sys.argv[3],
-                  "reset_epoch": hit.get("reset_epoch"), "reset_at": hit.get("reset_at")}))' \
-      "$provider" "$tmpdir/hit-$provider.json" "$text" >> "$LIMITED_LOG"
+    record_limit "$provider" "$text"
     continue
   fi
 
@@ -335,6 +340,18 @@ while (i := text.rfind(label, 0, end)) >= 0:
         sys.exit(0)
 print("(worker wrote no result file and no valid fence)")
 PY2
+  # A limit the agent only reported in its result (no banner on stdout) must still gate it.
+  limit_text="$(python3 -c 'import json, sys
+try:
+    r = json.load(open(sys.argv[1], encoding="utf-8"))
+except (OSError, ValueError):
+    sys.exit(0)
+if isinstance(r, dict) and r.get("outcome") == "limit_hit":
+    print(" ".join(str(r.get("limit_text") or "").split()) or "worker reported limit_hit")' "$RESULT_FILE")"
+  if [ -n "$limit_text" ]; then
+    echo "(worker result reports a limit for $used — recording it)"
+    record_limit "$used" "$limit_text"
+  fi
 fi
 write_status "$used" "$final_rc"
 
