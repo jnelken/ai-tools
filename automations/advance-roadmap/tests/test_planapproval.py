@@ -142,18 +142,26 @@ class Approve(unittest.TestCase):
                    "claude": lambda prompt, code: self.fence(ruling)}
         with mock.patch.object(pa, "usage_cli", return_value=mock.Mock(returncode=0)) as usage:
             out = pa.approve("/root", req, "DOC.md", "/code", runners=runners, providers=["codex", "claude"])
-        args = usage.call_args_list[0].args
-        self.assertEqual(args[:3], ("/root", "record-limit", "--provider"))
-        self.assertEqual(args[3], "codex")
+        args = next(c.args for c in usage.call_args_list if c.args[1] == "record-limit")
+        self.assertEqual(args[:4], ("/root", "record-limit", "--provider", "codex"))
         self.assertIn("approver", args)
         self.assertEqual(out["decisions"][1]["verdict"], "approve")
 
+    @staticmethod
+    def gates(over):
+        """A usage_cli stand-in whose `gate` exits 3 for each provider in `over` at call time."""
+        def cli(root, *args):
+            if args[0] == "gate":
+                return mock.Mock(returncode=3 if args[-1] in over else 0)
+            return mock.Mock(returncode=0, stdout="")
+        return cli
+
     def test_fallback_gated_during_the_first_attempt_is_never_called(self):
         req = request(plan("1", 1, ["a"]), plan("2", 2, ["b"]))
-        calls = []
-        runners = {"codex": lambda prompt, code: calls.append("codex") or "no fence here",
+        calls, over = [], set()
+        runners = {"codex": lambda prompt, code: calls.append("codex") or over.add("claude") or "no fence here",
                    "claude": lambda prompt, code: calls.append("claude") or self.fence({"decisions": []})}
-        with mock.patch.object(pa, "usage_cli", return_value=mock.Mock(returncode=3)) as usage:
+        with mock.patch.object(pa, "usage_cli", side_effect=self.gates(over)) as usage:
             out = pa.approve("/root", req, "DOC.md", "/code", runners=runners, providers=["codex", "claude"])
         self.assertEqual(calls, ["codex"])
         self.assertEqual(usage.call_args.args,
@@ -161,6 +169,32 @@ class Approve(unittest.TestCase):
         self.assertEqual(out["decisions"][1]["verdict"], "defer")
         self.assertIn("claude: over its usage gate", out["error"])
         self.assertIn("codex: no", out["error"])
+
+    def test_fallback_whose_gate_reopens_during_the_first_attempt_is_tried(self):
+        # Claude is over its gate when the approval starts and resets while Codex runs: the
+        # default order still lists it, and its gate is read only when its turn comes.
+        req = request(plan("1", 1, ["a"]), plan("2", 2, ["b"]))
+        ruling = {"decisions": [{"stamp": "2", "verdict": "approve", "reason": "disjoint"}]}
+        calls, over = [], {"claude"}
+        runners = {"codex": lambda prompt, code: calls.append("codex") or over.discard("claude") or "no fence",
+                   "claude": lambda prompt, code: calls.append("claude") or self.fence(ruling)}
+        with mock.patch.object(pa, "usage_cli", side_effect=self.gates(over)), \
+                mock.patch.dict(pa.RUNNERS, runners):
+            out = pa.approve("/root", req, "DOC.md", "/code")
+        self.assertEqual(calls, ["codex", "claude"])
+        self.assertEqual(out["decisions"][1]["verdict"], "approve")
+        self.assertNotIn("error", out)
+
+    def test_first_provider_over_its_gate_is_skipped_not_called(self):
+        req = request(plan("1", 1, ["a"]), plan("2", 2, ["b"]))
+        ruling = {"decisions": [{"stamp": "2", "verdict": "approve", "reason": "disjoint"}]}
+        calls = []
+        runners = {"codex": lambda prompt, code: calls.append("codex") or self.fence(ruling),
+                   "claude": lambda prompt, code: calls.append("claude") or self.fence(ruling)}
+        with mock.patch.object(pa, "usage_cli", side_effect=self.gates({"codex"})):
+            out = pa.approve("/root", req, "DOC.md", "/code", runners=runners, providers=["codex", "claude"])
+        self.assertEqual(calls, ["claude"])
+        self.assertEqual(out["decisions"][1]["verdict"], "approve")
 
     def test_unreadable_usage_never_blocks_the_fallback(self):
         req = request(plan("1", 1, ["a"]), plan("2", 2, ["b"]))
@@ -171,10 +205,10 @@ class Approve(unittest.TestCase):
             out = pa.approve("/root", req, "DOC.md", "/code", runners=runners, providers=["codex", "claude"])
         self.assertEqual(out["decisions"][1]["verdict"], "approve")
 
-    def test_provider_order_is_the_gated_orchestrator_list(self):
-        with mock.patch.object(pa, "usage_cli", return_value=mock.Mock(stdout="claude other\n")) as usage:
-            self.assertEqual(pa.provider_order("/root"), ["claude"])
-        self.assertEqual(usage.call_args.args, ("/root", "pick-orchestrators"))
+    def test_provider_order_is_the_full_orchestrator_preference_order(self):
+        with mock.patch.object(pa, "usage_cli") as usage:
+            self.assertEqual(pa.provider_order(), ["codex", "claude"])
+        usage.assert_not_called()
 
     def test_no_provider_defers_and_says_why(self):
         req = request(plan("1", 1, ["a"]), plan("2", 2, ["b"]))

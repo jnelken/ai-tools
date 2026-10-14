@@ -21,7 +21,7 @@ import tempfile
 from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
-from usage import limit_banner  # noqa: E402
+from usage import ROLE_PROVIDERS, limit_banner  # noqa: E402
 
 SEVERITY = {"approve": 0, "serialize": 1, "defer": 2}
 FENCE = "PLAN_APPROVAL_JSON"
@@ -195,18 +195,14 @@ def usage_cli(root, *args):
                           capture_output=True, text=True, timeout=120, stdin=subprocess.DEVNULL)
 
 
-def provider_order(root):
-    """Codex first, Claude only as the fallback — each only while under its usage gate."""
-    try:
-        names = usage_cli(root, "pick-orchestrators").stdout.split()
-    except (OSError, subprocess.SubprocessError):
-        return []
-    return [n for n in names if n in RUNNERS]
+def provider_order():
+    """Codex first, Claude only as the fallback. Every one is listed: whether it is under its gate
+    is read right before it is tried, since a gate can open or close while the one before it runs."""
+    return [n for n in ROLE_PROVIDERS["orchestrator"] if n in RUNNERS]
 
 
 def still_under_gate(root, name):
-    """A fallback's gate can close while the attempt before it runs (or another approver records a
-    limit). Exit 3 is the only "over its gate"; a usage.py failure is no reading and never blocks."""
+    """Exit 3 is the only "over its gate"; a usage.py failure is no reading and never blocks."""
     try:
         return usage_cli(root, "gate", "--role", "orchestrator", "--provider", name).returncode != 3
     except (OSError, subprocess.SubprocessError):
@@ -215,11 +211,11 @@ def still_under_gate(root, name):
 
 def approve(root, request, doc, code_dir, runners=None, providers=None):
     runners = runners or RUNNERS
-    providers = providers if providers is not None else provider_order(root)
+    providers = providers if providers is not None else provider_order()
     prompt = build_prompt(request, doc, str(Path(code_dir) / request["repo"]))
     model, error = None, "no orchestrator provider is under its usage gate"
-    for i, name in enumerate(providers):
-        if i and not still_under_gate(root, name):
+    for name in providers:
+        if not still_under_gate(root, name):
             error = f"{error}; {name}: over its usage gate"
             continue
         try:
