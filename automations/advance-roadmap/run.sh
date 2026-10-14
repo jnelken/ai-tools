@@ -45,6 +45,7 @@ RECORD_PY="$ROOT/lib/runrecord.py"
 PLAN_PY="$ROOT/lib/pendingplan.py"
 TOKENS_PY="$ROOT/lib/tokens.py"
 LINEAR_SNAP_PY="$ROOT/lib/linearsnap.py"
+DEPLOY_SNAP_PY="$ROOT/lib/deploysnap.py"
 VERDICT_PY="$ROOT/lib/verdict.py"
 LAST_VERDICT="${ADVANCE_ROADMAP_LAST_VERDICT:-$CODE_DIR/.advance-roadmap/last-verdict.json}"
 # Provider-neutral: the plan belongs to the repos, not to whichever CLI orchestrates. One file
@@ -472,7 +473,11 @@ if [ -n "$BATCH_SNAPSHOT" ]; then
 else
   python3 "$LINEAR_SNAP_PY" --out "$LINEAR_SNAPSHOT" >> "$LOG" 2>&1
 fi
-python3 "$VERDICT_PY" fingerprint --snapshot "$LINEAR_SNAPSHOT" --out "$FINGERPRINT" >> "$LOG" 2>&1
+# The sandbox can't reach GitHub either, so production deploy state is snapshotted here too.
+DEPLOY_SNAPSHOT="$RUN_DIR/deploy-snapshot.json"
+python3 "$DEPLOY_SNAP_PY" --code-dir "$CODE_DIR" --out "$DEPLOY_SNAPSHOT" ${TARGET_REPO:+--repo "$TARGET_REPO"} >> "$LOG" 2>&1 \
+  || echo "(deploy snapshot failed — non-fatal)" >> "$LOG"
+python3 "$VERDICT_PY" fingerprint --snapshot "$LINEAR_SNAPSHOT" --deploys "$DEPLOY_SNAPSHOT" --out "$FINGERPRINT" >> "$LOG" 2>&1
 # The last run found no work and its bookkeeping landed. If no repo, issue, allowlist or skill
 # doc has moved since, this run would re-derive the same verdict — skip planning and worker both.
 # A pending plan always runs: it is work, not a verdict.
@@ -570,7 +575,8 @@ If a PushNotification probe would have been useful, set a note in summary; the w
     orch_out="$RUN_DIR/orchestrator-stdout.txt"  # kept, so a killed planning pass leaves a trace
     ORCH_PROMPT="$ORCH_PROMPT
 
-Linear snapshot (read this; never call Linear yourself): $LINEAR_SNAPSHOT"
+Linear snapshot (read this; never call Linear yourself): $LINEAR_SNAPSHOT
+Production deploy snapshot (read this; never call GitHub yourself): $DEPLOY_SNAPSHOT"
     if [ -s "$VERDICT_CHANGES" ]; then
       ORCH_PROMPT="$ORCH_PROMPT
 Previous no-work verdict and what changed since (carry unchanged verdicts forward): $VERDICT_CHANGES"

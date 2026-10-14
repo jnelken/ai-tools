@@ -168,13 +168,15 @@ the **in-flight run stamps**:
 
 When the last run found no work and its bookkeeping landed, `run.sh` stores that verdict with a
 fingerprint of everything it was derived from (each repo's HEAD, branches, working tree and
-`.claude-sessions`; the Linear snapshot; the allowlist; these skill docs) in
+`.claude-sessions`; the Linear snapshot; each repo's production deploy status; the allowlist;
+these skill docs) in
 `$CODE_DIR/.advance-roadmap/last-verdict.json`. If nothing moved, the run is skipped
 before you start (`skipping — verdict: nothing changed since …`, no run header — a gate skip, not
 an interruption). The verdict is re-derived in full at least every 24h regardless.
 
 If you are running and your prompt names a `verdict-changes.json`, something moved: its `changed`
-list names each `repo:<dir>`, `issue:DEV-N`, `linear_ok`, `allowlist` or `skill` entry that differs,
+list names each `repo:<dir>`, `issue:DEV-N`, `deploy:<dir>` (production deploy status flipped),
+`linear_ok`, `allowlist` or `skill` entry that differs,
 and `previous` holds the old verdict's `blockers` and `considered`. **Re-triage only what changed.**
 Carry every other repo's and issue's prior verdict forward as-is into your `blockers` and
 `considered` — don't re-read roadmaps or tickets the fingerprint says are identical. A `skill` or
@@ -225,10 +227,26 @@ run write the first row.
 
 A ledger row of `shipped-deploy-failed` means an earlier worker pushed to `main`, ran out of Step 7b
 fix attempts, and pinged Jake. That's a deliberate stop, not an interruption — don't resume it. But
-check whether that repo's production is still red before starting new work there: read the latest
-`main` commit's deploy status with `gh api repos/<owner>/<repo>/commits/<sha>/status` (read-only;
-if your sandbox can't reach GitHub, assume it's still red). If it is still red, **skip the repo for
-new work** so features don't pile up on a broken `main`. List it in `blockers` with the ticket from
+check whether that repo's production is still red before starting new work there. Read it from the
+**production deploy snapshot** named in your prompt (`deploy-snapshot.json`). `run.sh` takes it from
+GitHub's deployments API just before launching you, because your sandbox can't reach GitHub. Never
+call `gh` yourself. Its `repos.<dir>.status`:
+
+| Status | Meaning | Treat as |
+|---|---|---|
+| `green` | every live production environment deployed `main`'s head successfully | recovered |
+| `none` | the repo has no production deployments | recovered |
+| `pending` | head is building, or was pushed under 20 minutes ago | still red this run |
+| `stale` | head was pushed a while ago and production never deployed it | still red |
+| `failed` | production's deploy of head failed | still red |
+| `unknown` (or the repo or file is missing) | the GitHub calls failed; see `error` | still red |
+
+Environments flagged `abandoned` (a renamed or retired Vercel project that stopped deploying) are
+already excluded from `status`. Ignore them. The snapshot overrides older run-memory notes that
+say to check a live bundle or a commit status instead. Production's deployed commit matching
+`main` is the actual question those notes were working around.
+
+If it is still red, **skip the repo for new work** so features don't pile up on a broken `main`. List it in `blockers` with the ticket from
 that row, and let the worker's unchanged-comment rule suppress a duplicate ping — its Step 2b sets
 that ticket to `Paused` (never `Needs Input`; the deploy can recover on its own).
 
@@ -621,7 +639,10 @@ still applies:
 - It has opted into this automation: it has a `ROADMAP.md` or `docs/plans/`, the snapshot holds an
   issue carrying its repo label, or it's on the allowlist. A repo this skill has never had a reason
   to touch is not a refactor target.
-- Its production deploy isn't red (Step 0's *A repo left with a red deploy*).
+- Its production deploy isn't red: the deploy snapshot's status is `green` or `none` (Step 0's
+  *A repo left with a red deploy*). That applies to any repo the snapshot shows red, not only
+  ones with a `shipped-deploy-failed` ledger row. A refactor can't be proven safe against a
+  production that already isn't deploying.
 - It has a way to prove behavior was preserved: a test script, or at least a build or typecheck.
 - It isn't cooling down — no code-health commit in the last 24 hours:
   `git -C <repo> log origin/main --since=24.hours --grep='^Advance-Roadmap: code-health' -1 --format=%h`
