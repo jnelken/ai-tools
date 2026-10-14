@@ -190,6 +190,15 @@ class QuotaReplayTest(unittest.TestCase):
         self.assertIn("failing over to claude", self.log)
         self.assertTrue((run / "orchestrator-limit-codex.json").exists())
 
+    def test_bad_plan_after_a_limit_failover_is_an_error_not_a_quota_pause(self):
+        self.usage_state()
+        run = self.run_lane(FAKE_CODEX="limit", FAKE_CLAUDE="plan", FAKE_PLAN='{"action": "launch_rockets"}')
+        self.assert_nothing_dispatched(run)
+        self.assertEqual([c["bin"] for c in self.calls()], ["codex", "claude"])
+        rec = self.record()
+        self.assertEqual((rec["orchestrator"], rec["outcome"]), ("claude", "error"), rec)
+        self.assertIsNone(rec["quota"])
+
     def test_no_failover_to_a_planner_over_its_gate(self):
         self.usage_state(claude={"five_hour": {"used_pct": 90, "reset_epoch": FUTURE}})
         run = self.run_lane(FAKE_CODEX="limit", FAKE_CLAUDE="plan")

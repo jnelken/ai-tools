@@ -582,6 +582,7 @@ Previous no-work verdict and what changed since (carry unchanged verdicts forwar
     while :; do
       tried="$tried $ORCH"
       orch_rc=0
+      planner_hit=""   # only the planner that answers last decides quota vs invalid output
       rm -f "$orch_out.last"   # a failed-over planner's final message must not be read as the next one's
       run_orchestrator "$ORCH" "$orch_out" "$ORCH_PROMPT" || orch_rc=$?
       cat "$orch_out" 2>/dev/null
