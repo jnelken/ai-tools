@@ -62,6 +62,15 @@ class RunRecordTest(unittest.TestCase):
         self.assertEqual((rec["quota"]["provider"], rec["quota"]["reset_epoch"]), ("codex", 1791910000))
         self.assertEqual(len(rec["quota"]["providers"]), 2)
 
+    def test_worker_quota_pause_with_no_known_reset_still_names_a_provider(self):
+        status = {"used": None, "exit": 3, "fatal": None, "missing": [], "limited": [
+            {"provider": "cursor", "state": "over", "reason": "auto pool 96% >= 95%"},
+            {"provider": "codex", "state": "limited", "cause": "usage limit"}]}
+        rec = self.append({"action": "dispatch_worker", "repo": "demo"}, status)
+        self.assertEqual(rec["outcome"], "quota-paused")
+        self.assertEqual((rec["quota"]["provider"], rec["quota"]["reset_epoch"]), ("cursor", None))
+        self.assertNotIn("?", rec["detail"])
+
     def test_a_missing_worker_binary_is_still_an_error(self):
         status = {"used": None, "exit": 3, "fatal": None, "missing": ["claude"],
                   "limited": [{"provider": "cursor", "state": "over"}]}

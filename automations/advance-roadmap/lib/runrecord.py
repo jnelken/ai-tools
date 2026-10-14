@@ -113,7 +113,7 @@ def quota_info(orch, wstatus, wresult):
                 "reset_at": hit.get("reset_at"), "cause": wresult.get("limit_text")}
     if limited:
         resets = [l for l in limited if l.get("reset_epoch")]
-        first = min(resets, key=lambda l: l["reset_epoch"]) if resets else {}
+        first = min(resets, key=lambda l: l["reset_epoch"]) if resets else limited[0]
         return {"role": "worker", "provider": first.get("provider"), "reset_epoch": first.get("reset_epoch"),
                 "reset_at": first.get("reset_at"), "cause": "; ".join(
                     f"{l.get('provider')}: {l.get('cause') or l.get('reason') or '?'}" for l in limited),
