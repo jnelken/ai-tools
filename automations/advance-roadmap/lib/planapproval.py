@@ -173,7 +173,8 @@ def run_codex(prompt, code_dir):
             [codex, "exec", "-o", str(last), "-m", model, "-c", "model_reasoning_effort=high",
              "-s", "read-only", "-C", code_dir, "--add-dir", code_dir, "--skip-git-repo-check", prompt],
             capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=1500)
-        return (last.read_text(errors="replace") if last.exists() else "") or proc.stdout
+        answer = (last.read_text(errors="replace") if last.exists() else "") or proc.stdout
+        return answer, f"{proc.stdout}\n{proc.stderr}"
 
 
 def run_claude(prompt, code_dir):
@@ -184,9 +185,11 @@ def run_claude(prompt, code_dir):
          "--permission-prompts", "none", "--disallowedTools", "Edit,Write,NotebookEdit",
          "--add-dir", code_dir, "--output-format", "text"],
         capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=1500)
-    return proc.stdout
+    return proc.stdout, proc.stderr
 
 
+# Each runner returns (final answer, everything else it printed). The fence is read from the
+# answer only; a limit banner can be in either, and the CLIs often print it to stderr alone.
 RUNNERS = {"codex": run_codex, "claude": run_claude}
 
 
@@ -219,14 +222,14 @@ def approve(root, request, doc, code_dir, runners=None, providers=None):
             error = f"{error}; {name}: over its usage gate"
             continue
         try:
-            text = runners[name](prompt, code_dir)
+            answer, log = runners[name](prompt, code_dir)
         except (OSError, subprocess.SubprocessError) as exc:
             model, error = None, f"{name}: {exc}"
             continue
-        model = extract_fence(text)
+        model = extract_fence(answer)
         if model:
             break
-        banner = limit_banner(text)
+        banner = limit_banner(answer) or limit_banner(log)
         if banner:
             # Gate this provider for every other role too, until its reset.
             try:
