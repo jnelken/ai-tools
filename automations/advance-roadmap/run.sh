@@ -655,12 +655,22 @@ sys.exit(0 if ok else 1)' "$result")" || had_json=0
       # verdict. A limit banner is a quota pause (provider and reset kept); anything else is an error.
       planner_failed=1
       echo "WARNING: the planner produced no usable ORCHESTRATOR_RESULT_JSON — nothing dispatched"
-      python3 - "$orch_out" "$ORCH_RESULT" "$ORCH" "$tried" "$planner_hit" "$orch_rc" "$invalid" <<'PY'
+      planner_gates=""
+      if [ -n "$planner_hit" ]; then
+        planner_gates="$RUN_DIR/planner-gates.json"
+        python3 "$USAGE_PY" --root "$ROOT" gates --role orchestrator > "$planner_gates" 2>/dev/null \
+          || { rm -f "$planner_gates"; planner_gates=""; }
+      fi
+      python3 - "$orch_out" "$ORCH_RESULT" "$ORCH" "$tried" "$planner_hit" "$orch_rc" "$invalid" "$planner_gates" <<'PY'
 import json, os, sys
-out, dest, provider, tried, hit_path, rc, invalid = sys.argv[1:8]
-hit = {}
+out, dest, provider, tried, hit_path, rc, invalid, gates_path = sys.argv[1:9]
+hit, gates = {}, {}
 try:
     hit = json.load(open(hit_path)) if hit_path else {}
+except (OSError, ValueError):
+    pass
+try:
+    gates = json.load(open(gates_path)) if gates_path else {}
 except (OSError, ValueError):
     pass
 r = {"action": None, "outcome_token": None, "repo": None, "item": None, "branch": None,
@@ -676,6 +686,13 @@ if hit_path:
             continue
         limits.append({"provider": name, "state": "limited", "cause": h.get("exact_cli_text"),
                        "reset_epoch": h.get("reset_epoch"), "reset_at": h.get("reset_at")})
+    # ...and every planner that was never tried because it was already over its gate.
+    listed = {l["provider"] for l in limits}
+    for g in gates.get("gates") or []:
+        if isinstance(g, dict) and g.get("state") in ("over", "limited") and g.get("provider") not in listed:
+            limits.append({"provider": g.get("provider"), "state": g.get("state"),
+                           "cause": g.get("reason") or g.get("state"),
+                           "reset_epoch": g.get("reset_epoch"), "reset_at": g.get("reset_at")})
     r["planner_error"] = {"kind": "quota", "provider": provider, "tried": tried.split(),
                           "limit_text": hit.get("exact_cli_text"), "reset_epoch": hit.get("reset_epoch"),
                           "reset_at": hit.get("reset_at"), "limits": limits}

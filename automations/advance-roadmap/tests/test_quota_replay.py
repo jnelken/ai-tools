@@ -224,6 +224,13 @@ class QuotaReplayTest(unittest.TestCase):
         self.assertEqual([c["bin"] for c in self.calls()], ["codex"])
         rec = self.record()
         self.assertEqual((rec["outcome"], rec["quota"]["provider"]), ("quota-paused", "codex"))
+        # The gated planner is out too: the record and the batch summary name it with its reset.
+        out = {p["provider"]: p for p in rec["quota"]["providers"]}
+        self.assertEqual(sorted(out), ["claude", "codex"])
+        self.assertEqual((out["claude"]["state"], out["claude"]["reset_epoch"]), ("over", FUTURE))
+        summary = daily_batch.quota_paused({"queue": [{"repo": "demo", "outcome": rec["outcome"],
+                                                       "quota": rec["quota"]}]})
+        self.assertEqual({q["provider"]: q["reset_epoch"] for q in summary}["claude"], FUTURE)
 
     def test_both_planners_out_during_failover_are_both_in_the_quota_record(self):
         self.usage_state()
