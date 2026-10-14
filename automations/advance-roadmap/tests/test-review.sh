@@ -39,6 +39,8 @@ name=$p; mode="\${FAKE_${p:u}:-clean}"
 last=""; while [ \$# -gt 0 ]; do [ "\$1" = "-o" ] && { last="\$2"; shift; }; shift; done
 print -r -- "echoed prompt: VERDICT: clean      (no findings)"
 [ "\$mode" = limit ] && { print "You've hit your usage limit. Resets 5pm."; exit 1; }
+[ "\$mode" = capacity ] && { print "ERROR: Selected model is at capacity. Please try a different model."; exit 1; }
+[ "\$mode" = http503 ] && { print "stream error: unexpected status 503 Service Unavailable"; exit 1; }
 body="reviewer=\$name
 x.py:1 bug: something
 VERDICT: \$mode"
@@ -86,4 +88,17 @@ check "gated reviewer logged"                "$(field gated)" "['codex']"
 rc=0; review claude 1 FAKE_GATED="codex cursor" >/dev/null || rc=$?
 check "every reviewer gated → exit 3"        "$rc" 3
 check "gated round logged as unavailable"    "$(field verdict)" unavailable
+
+: > "$ROOT/limits.txt"
+out="$(review cursor 1 FAKE_CODEX=capacity FAKE_CLAUDE=clean)"
+check "codex at capacity → claude reviews"   "$(field reviewer)" claude
+check "capacity is not unparsed"             "$(field verdict)" clean
+check "capacity reviewer logged"             "$(field capacity)" "['codex']"
+[ -s "$ROOT/limits.txt" ] && { echo "FAIL: capacity recorded as a quota limit"; exit 1; } || echo "ok   capacity is not a quota hit"
+case "$out" in *"at capacity"*) echo "ok   capacity skip printed" ;; *) echo "FAIL: no capacity note"; exit 1 ;; esac
+
+rc=0; review claude 1 FAKE_CODEX=capacity FAKE_AGENT=http503 >/dev/null || rc=$?
+check "every reviewer at capacity → exit 3"  "$rc" 3
+check "capacity round logged as unavailable" "$(field verdict)" unavailable
+check "both capacity reviewers logged"       "$(field capacity)" "['codex', 'cursor']"
 echo "all passed"

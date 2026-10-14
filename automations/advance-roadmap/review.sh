@@ -7,7 +7,7 @@
 #
 # Reviewer: Cursor's work → Codex, Codex's → Cursor, Claude's → Codex; the
 # remaining provider is the fallback when the first is over its usage gate
-# (usage.py gate, checked fresh before each reviewer), limited or missing. The
+# (usage.py gate, checked fresh before each reviewer), limited, at capacity or missing. The
 # reviewer is read-only. Findings go to stdout, ending in one line:
 #   VERDICT: clean | VERDICT: findings
 # Each round appends one JSON line to --log, which run.sh folds into the run
@@ -126,9 +126,13 @@ run_reviewer() {
   esac
 }
 
+# A reviewer that failed because its model is overloaded (Codex: "Selected model is at capacity",
+# a 503/529) produced no review: fall back like a limit, without recording a quota hit.
+CAPACITY='selected model is at capacity|model is (currently )?(at capacity|overloaded)|server is overloaded|overloaded_error|\b(503|529)\b.*(unavailable|overloaded|capacity)|(unavailable|overloaded).*\b(503|529)\b'
+
 out="$(mktemp "${TMPDIR:-/tmp}/advance-roadmap-review.XXXXXX")"
 trap 'rm -f "$out" "$out.last" "$out.json"' EXIT INT TERM
-used="" verdict="unavailable" gated=""
+used="" verdict="unavailable" gated="" capacity=""
 for who in "${reviewers[@]}"; do
   # Exit 3 is the only "over its gate"; a usage.py failure (1, 2) is no reading, which never blocks.
   gate="$(python3 "$USAGE_PY" --root "$ROOT" gate --role reviewer --provider "$who" 2>/dev/null)"
@@ -147,24 +151,30 @@ for who in "${reviewers[@]}"; do
     python3 "$USAGE_PY" --root "$ROOT" record-limit --provider "$who" --text "$text" >/dev/null 2>&1 || true
     continue
   fi
-  used="$who"
   # Codex echoes the prompt (which quotes both verdict lines) — trust the last one.
-  verdict="$(rg -o '^VERDICT: (clean|findings)\s*$' -r '$1' "$out" | tail -1)"
-  [ -n "$verdict" ] || verdict="unparsed"
+  found="$(rg -o '^VERDICT: (clean|findings)\s*$' -r '$1' "$out" | tail -1)"
+  if [ -z "$found" ] && [ "$rc" -ne 0 ] && rg -q -i "$CAPACITY" "$out"; then
+    echo "(skipping reviewer $who — its model is at capacity: $(rg -m1 -i -o "$CAPACITY" "$out"))"
+    capacity="$capacity $who"
+    rm -f "$out.last"
+    continue
+  fi
+  used="$who"
+  verdict="${found:-unparsed}"
   break
 done
 
-python3 - "$LOG" "$ROUND" "$WORKER" "${used:-}" "$verdict" "$(git -C "$REPO" rev-parse --short HEAD)" "$gated" <<'PY'
+python3 - "$LOG" "$ROUND" "$WORKER" "${used:-}" "$verdict" "$(git -C "$REPO" rev-parse --short HEAD)" "$gated" "$capacity" <<'PY'
 import json, sys, time
-log, rnd, worker, reviewer, verdict, head, gated = sys.argv[1:8]
+log, rnd, worker, reviewer, verdict, head, gated, capacity = sys.argv[1:9]
 with open(log, "a", encoding="utf-8") as f:
     f.write(json.dumps({"round": int(rnd), "worker": worker, "reviewer": reviewer or None,
                         "verdict": verdict, "head": head, "at": int(time.time()),
-                        "gated": gated.split()}) + "\n")
+                        "gated": gated.split(), "capacity": capacity.split()}) + "\n")
 PY
 
 if [ -z "$used" ]; then
-  echo "REVIEW UNAVAILABLE: every reviewer (${reviewers[*]}) was over its usage gate, limited or missing."
+  echo "REVIEW UNAVAILABLE: every reviewer (${reviewers[*]}) was over its usage gate, limited, at capacity or missing."
   echo "VERDICT: unavailable"
   exit 3
 fi
