@@ -43,6 +43,14 @@
         "unresolved": { "type": "integer", "minimum": 0 }
       }
     },
+    "validation": {
+      "type": ["object", "null"],
+      "description": "Follow-up builders (followup.py) report their own verification here; the runner merges nothing without it passing.",
+      "properties": {
+        "status": { "type": "string", "enum": ["passed", "failed"] },
+        "commands": { "type": "array", "items": { "type": "string" } }
+      }
+    },
     "summary": { "type": "string" },
     "slack_summary": { "type": ["string", "null"] }
   }
