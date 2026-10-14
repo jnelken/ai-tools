@@ -42,7 +42,11 @@ Code-health work follows [`../advance-roadmap/CODE_HEALTH.md`](../advance-roadma
 - **"Pick the next one"** — follow [`ORCHESTRATOR.md`](ORCHESTRATOR.md) Steps 1–2d for triage. Skip
   its Step 0 log/ledger reconciliation of killed unattended runs unless the repo is sitting on a
   `roadmap/*` branch with unmerged commits (then offer to resume it). Read the Linear snapshot by
-  running `python3 ~/.claude/automations/advance-roadmap/lib/linearsnap.py --out <file>`.
+  running `python3 ~/.claude/automations/advance-roadmap/lib/linearsnap.py --out <file>`, and the
+  production deploy snapshot by running
+  `python3 ~/.claude/automations/advance-roadmap/lib/deploysnap.py --code-dir "$CODE_DIR" --out <file>`.
+  Judge red repos from that file per ORCHESTRATOR.md's *A repo left with a red deploy* rather than
+  calling `gh` yourself; the snapshot is that section's "deploy snapshot named in your prompt".
 - **Plain brief** (no roadmap/ticket) — fine. Set `linear_id` and `roadmap_path` to `null`; the
   builder skips the ticket/roadmap bookkeeping.
 
