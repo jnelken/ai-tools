@@ -71,6 +71,13 @@ commit, merge, or push (see WORKER.md).
 - **Never force anything.** No `--force`, no `--force-with-lease`, no `git reset --hard`, no
   `git clean -fd`, no rewriting published history. If a `git push` is rejected as
   non-fast-forward, STOP — leave the branch and its commits in place, and report it.
+- **Never use `git stash`, and never run git after a `cd` that may have failed.** The stash is
+  one list shared by every worktree of a repo, so a `stash pop` in one workspace applies another
+  thread's (or Jake's) entry; and `cd <path> && git …` written as `cd <path>; git …`, or after a
+  `cd` whose failure goes unchecked, runs in whatever directory the shell was left in. On the
+  DEV-232 run a builder's `cd` failed and its `git stash pop` partially applied the root checkout's
+  shared stash. Address every repository with `git -C <path>` instead; to set work aside, commit it
+  on your own branch.
 - **Ship as PRs from a Superset workspace; never push code to `main`.** Scheduled runs build in the
   item's own Superset workspace (a worktree `run.sh` creates), push the branch with `-u`, open a
   PR with `gh pr create`, and merge it at once with `gh pr merge --merge` (`--squash` only where
