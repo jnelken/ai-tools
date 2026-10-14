@@ -165,6 +165,8 @@ not evidence of a clean round.
 
 Pass the same `$EFFORT` to every reviewer agent this round.
 
+Stamp the round's start for the metrics ledger, keeping the first stamp if a throttled retry re-dispatches the same round: `[ -f "$GIT_DIR/peer-review-round-start" ] || date +%s > "$GIT_DIR/peer-review-round-start"`.
+
 **First round on a branch: build a focus prompt before dispatching the reviewer.** A bare `codex review` reports its top-confidence findings, not an exhaustive sweep — each new diff re-rolls its attention, so on a cross-cutting change it peels one layer per round and a review that should converge in 1–2 rounds takes 5+. Before the first round:
 
 1. **Enumerate the change's interaction matrix from the diff.** Which axes does it cut across? Typical axes: data types / value formats (enum, array, date, percent…), component or editor variants that share the behavior, permission/visibility states (unauthorized, masked, loading, read-only), and host contexts (inside buttons, tables, dashboards). A change that mirrors display state or adds a new affordance to existing values usually spans several.
@@ -275,6 +277,14 @@ echo "<number of P1 rows in this round's triage>" > "$GIT_DIR/peer-review-last-p
 ```
 
 Write it on every completed round, including a round that found nothing (`0`). Skipping it leaves the previous round's number in place and picks the next effort off stale evidence.
+
+**Append the round to the metrics ledger** (`~/.claude/state/review-metrics.jsonl`) from the same triage table. The helper reads the round number, start stamp, reviewer model/effort and lens count from `$GIT_DIR`, so you only pass the counts: P1/P2/P3 rows Codex reported, how many you applied vs dismissed, and how many throttled retries this round took (step 2's `rate_limited` handling):
+
+```bash
+~/.ai-tools/bin/review-metrics round --p1 <n> --p2 <n> --p3 <n> --applied <n> --dismissed <n> --throttled <n>
+```
+
+Run it on every completed round, including a clean one (all zeros). It is append-only and cheap; a failure to write must never fail the round, so ignore a nonzero exit. `~/.ai-tools/bin/review-metrics summary` reads it back (rounds/PR, round duration, findings by round number).
 
 ### 4. Apply the fixes
 

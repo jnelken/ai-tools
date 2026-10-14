@@ -1,0 +1,440 @@
+#!/usr/bin/env python3
+"""Ledger of /peer-review rounds and /post-pr runs, plus a backfill and a summary.
+
+Ledger: ~/.claude/state/review-metrics.jsonl (override: REVIEW_METRICS_LEDGER), append-only JSON lines.
+Every line carries `type`:
+  round  one completed /peer-review round (live; written by the skill)
+  run    one /post-pr run with phase timestamps (live; written by the skill)
+  pr     one PR reconstructed from its "Local peer review:" comments (backfill)
+
+Subcommands:
+  round     record a round (reads $GIT_DIR state files for round no., start time, model/effort)
+  mark      stamp a /post-pr phase (started | review_done | ci_done) in the worktree's git dir
+  run       record a /post-pr run from the marks, then clear them
+  backfill  scrape past PRs (index: ~/.claude/state/pr-review-posted.jsonl*) into `pr` rows
+  summary   print round-count, duration and findings-by-round stats
+
+Backfill can only recover what the PR comment and GitHub record: round count, reviewer model,
+effort ranges, timestamps. Per-round duration and per-round findings exist only for rounds
+recorded live.
+"""
+import argparse
+import concurrent.futures as cf
+import datetime
+import fcntl
+import glob
+import json
+import os
+import re
+import statistics
+import subprocess
+import sys
+import time
+
+STATE = os.path.expanduser("~/.claude/state")
+LEDGER = os.environ.get("REVIEW_METRICS_LEDGER") or os.path.join(STATE, "review-metrics.jsonl")
+SUSPECT_ROUND_SECONDS = 2 * 3600
+
+
+# ---------------------------------------------------------------- ledger io
+def _lock():
+    os.makedirs(os.path.dirname(LEDGER), exist_ok=True)
+    fh = open(LEDGER + ".lock", "w")
+    fcntl.flock(fh, fcntl.LOCK_EX)
+    return fh
+
+
+def append(event):
+    event.setdefault("ts", int(time.time()))
+    with _lock():
+        with open(LEDGER, "a") as f:
+            f.write(json.dumps(event, sort_keys=True) + "\n")
+
+
+def read_all():
+    if not os.path.exists(LEDGER):
+        return []
+    out = []
+    with open(LEDGER) as f:
+        for line in f:
+            line = line.strip()
+            if line:
+                try:
+                    out.append(json.loads(line))
+                except ValueError:
+                    pass
+    return out
+
+
+# ------------------------------------------------------------------ helpers
+def sh(cmd, cwd=None):
+    try:
+        r = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, timeout=60)
+        return r.stdout.strip() if r.returncode == 0 else ""
+    except Exception:
+        return ""
+
+
+def git_dir(worktree):
+    d = sh(["git", "rev-parse", "--git-dir"], cwd=worktree)
+    return os.path.abspath(os.path.join(worktree or ".", d)) if d else ""
+
+
+def repo_and_pr(worktree):
+    repo = sh(["gh", "repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner"], cwd=worktree)
+    pr = sh(["gh", "pr", "view", "--json", "number", "-q", ".number"], cwd=worktree)
+    return repo, (int(pr) if pr.isdigit() else None)
+
+
+def read_file(path, default=""):
+    try:
+        with open(path) as f:
+            return f.read().strip()
+    except OSError:
+        return default
+
+
+def pct(values, p):
+    if not values:
+        return None
+    s = sorted(values)
+    return s[min(len(s) - 1, int(round(p / 100 * (len(s) - 1))))]
+
+
+def fmt_dur(sec):
+    if sec is None:
+        return "-"
+    sec = int(sec)
+    if sec >= 3600:
+        return f"{sec // 3600}h{(sec % 3600) // 60:02d}m"
+    if sec >= 60:
+        return f"{sec // 60}m{sec % 60:02d}s"
+    return f"{sec}s"
+
+
+def parse_iso(s):
+    """ISO-8601 (Z, offset, naive, or date-only) to epoch seconds; naive and date-only are UTC."""
+    if not s:
+        return None
+    try:
+        dt = datetime.datetime.fromisoformat(str(s).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=datetime.timezone.utc)
+    return int(dt.timestamp())
+
+
+# ----------------------------------------------------------------- round
+def cmd_round(a):
+    gd = git_dir(a.worktree)
+    if not gd:
+        sys.exit("review-metrics round: not in a git worktree")
+    now = int(time.time())
+    start_file = os.path.join(gd, "peer-review-round-start")
+    start = read_file(start_file)
+    start = int(start) if start.isdigit() else None
+    if os.path.exists(start_file):
+        os.remove(start_file)
+    rnd = read_file(os.path.join(gd, "peer-review-rounds"), "0")
+    rows = [l.split("\t") for l in read_file(os.path.join(gd, "peer-review-models.tsv")).splitlines() if l]
+    last = rows[-1] if rows else []
+    lens_file = read_file(os.path.join(gd, "peer-review-lenses"))
+    repo, pr = repo_and_pr(a.worktree)
+    ev = {
+        "type": "round",
+        "repo": repo or None,
+        "pr": pr,
+        "round": int(rnd) if rnd.isdigit() else None,
+        "start": start,
+        "end": now,
+        "duration_s": (now - start) if start else None,
+        "reviewer_model": last[1] if len(last) > 1 else None,
+        "effort": last[2] if len(last) > 2 else None,
+        "reviewee_model": last[3] if len(last) > 3 else None,
+        "lenses": len(lens_file.splitlines()) if lens_file else 1,
+        "p1": a.p1, "p2": a.p2, "p3": a.p3,
+        "applied": a.applied, "dismissed": a.dismissed,
+        "throttled_retries": a.throttled,
+    }
+    if ev["duration_s"] and ev["duration_s"] > SUSPECT_ROUND_SECONDS:
+        ev["duration_suspect"] = True
+    append(ev)
+    print(f"recorded round {ev['round']} for {repo}#{pr}: {fmt_dur(ev['duration_s'])}, P1/P2/P3 {a.p1}/{a.p2}/{a.p3}")
+
+
+# --------------------------------------------------------------- post-pr
+def cmd_mark(a):
+    gd = git_dir(a.worktree)
+    if not gd:
+        sys.exit("review-metrics mark: not in a git worktree")
+    marks = os.path.join(gd, "post-pr-marks")
+    existing = read_file(marks)
+    if a.name == "started":
+        existing = ""  # a new run starts a fresh set of marks
+    with open(marks, "w") as f:
+        f.write((existing + "\n" if existing else "") + f"{a.name} {int(time.time())}\n")
+
+
+def cmd_run(a):
+    gd = git_dir(a.worktree)
+    if not gd:
+        sys.exit("review-metrics run: not in a git worktree")
+    marks_path = os.path.join(gd, "post-pr-marks")
+    marks = {}
+    for line in read_file(marks_path).splitlines():
+        k, _, v = line.partition(" ")
+        if v.isdigit():
+            marks[k] = int(v)
+    now = int(time.time())
+    started = marks.get("started")
+    repo, pr = repo_and_pr(a.worktree)
+    rounds = read_file(os.path.join(gd, "peer-review-rounds"), "")
+    ev = {
+        "type": "run",
+        "repo": repo or None,
+        "pr": pr,
+        "outcome": a.outcome,
+        "gate_stopped": a.gate,
+        "rounds": int(rounds) if rounds.isdigit() else None,
+        "started": started,
+        "review_done": marks.get("review_done"),
+        "ci_done": marks.get("ci_done"),
+        "end": now,
+        "review_s": (marks["review_done"] - started) if started and marks.get("review_done") else None,
+        "ci_s": (marks["ci_done"] - marks["review_done"]) if marks.get("ci_done") and marks.get("review_done") else None,
+        "total_s": (now - started) if started else None,
+    }
+    append(ev)
+    if os.path.exists(marks_path):
+        os.remove(marks_path)
+    print(f"recorded run for {repo}#{pr}: {a.outcome}, total {fmt_dur(ev['total_s'])}")
+
+
+# -------------------------------------------------------------- backfill
+POSTED_GLOBS = ["pr-review-posted.jsonl*"]
+ROUNDS_RE = re.compile(r"Local peer review:\s*(\d+)\s*round", re.I)
+EFFORT_RE = re.compile(r"\b(low|medium|high|xhigh|max)\s+effort", re.I)
+MODEL_RE = re.compile(r"`([^`]+)`")
+
+
+def posted_index():
+    idx = {}
+    for path in glob.glob(os.path.join(STATE, POSTED_GLOBS[0])):
+        with open(path) as f:
+            for line in f:
+                try:
+                    d = json.loads(line)
+                except ValueError:
+                    continue
+                # Older rows carry a short repo name ("api"); the URL always has owner/repo.
+                m = re.search(r"github\.com/([^/]+/[^/]+)/pull/(\d+)", d.get("url") or "")
+                repo = m.group(1) if m else d.get("repo")
+                pr = int(m.group(2)) if m else d.get("pr")
+                if repo and "/" not in repo:
+                    repo = "Concentro-Inc/" + repo
+                if repo and pr:
+                    key = (repo, int(pr))
+                    prev = idx.get(key)
+                    if not prev or (d.get("postedAt") or "") < (prev.get("postedAt") or "9"):
+                        idx[key] = d
+    return idx
+
+
+def gh_json(args):
+    out = sh(["gh", "api", "--paginate", "--slurp"] + args)
+    if not out:
+        return None
+    try:
+        pages = json.loads(out)
+    except ValueError:
+        return None
+    flat = []
+    for p in pages:
+        flat.extend(p if isinstance(p, list) else [p])
+    return flat
+
+
+def scrape_pr(item):
+    (repo, pr), posted = item
+    meta = gh_json([f"repos/{repo}/pulls/{pr}"])
+    comments = gh_json([f"repos/{repo}/issues/{pr}/comments"])
+    if meta is None or comments is None:
+        return (repo, pr), None
+    m = meta[0]
+    rc = []
+    models, efforts, reviewer_cell, reviewee_cell = [], [], None, None
+    for c in comments:
+        body = c.get("body") or ""
+        mt = ROUNDS_RE.search(body)
+        if not mt:
+            continue
+        rc.append({"at": c["created_at"], "rounds": int(mt.group(1))})
+        for row in body.splitlines():
+            if row.startswith("|") and ("effort" in row) and ("---" not in row):
+                cells = [x.strip() for x in row.strip("|").split("|")]
+                if len(cells) >= 2:
+                    reviewer_cell, reviewee_cell = cells[0], cells[1]
+                    models = MODEL_RE.findall(cells[0])
+                    efforts = [e.lower() for e in EFFORT_RE.findall(cells[0])]
+    rounds = max((x["rounds"] for x in rc), default=0)
+    created = parse_iso(m.get("created_at"))
+    posted_at = parse_iso(posted.get("postedAt"))
+    merged = parse_iso(m.get("merged_at"))
+    first_rc = parse_iso(rc[0]["at"]) if rc else None
+    last_rc = parse_iso(rc[-1]["at"]) if rc else None
+    ev = {
+        "type": "pr", "source": "backfill", "repo": repo, "pr": pr,
+        "title": m.get("title"), "state": "merged" if m.get("merged_at") else m.get("state"),
+        "created_at": m.get("created_at"), "merged_at": m.get("merged_at"),
+        "posted_at": posted.get("postedAt"),
+        "additions": m.get("additions"), "deletions": m.get("deletions"),
+        "changed_files": m.get("changed_files"), "commits": m.get("commits"),
+        "review_comments": rc, "rounds": rounds,
+        "reviewer_models": sorted(set(models)), "efforts": efforts,
+        "reviewer_cell": reviewer_cell, "reviewee_cell": reviewee_cell,
+        "created_to_first_review_comment_s": (first_rc - created) if first_rc and created else None,
+        "created_to_last_review_comment_s": (last_rc - created) if last_rc and created else None,
+        "created_to_posted_s": (posted_at - created) if posted_at and created else None,
+        "created_to_merged_s": (merged - created) if merged and created else None,
+    }
+    return (repo, pr), ev
+
+
+def cmd_backfill(a):
+    idx = posted_index()
+    targets = sorted(idx.items())
+    if a.limit:
+        targets = targets[: a.limit]
+    print(f"index: {len(targets)} PRs from {STATE}/pr-review-posted.jsonl*", file=sys.stderr)
+    results = {}
+    failed = []
+    with cf.ThreadPoolExecutor(max_workers=8) as ex:
+        for key, ev in ex.map(scrape_pr, targets):
+            if ev is None:
+                failed.append(key)
+            else:
+                results[key] = ev
+    with_rounds = sum(1 for e in results.values() if e["rounds"] > 0)
+    with _lock():
+        existing = read_all()
+        keep = [e for e in existing if not (e.get("type") == "pr" and (e.get("repo"), e.get("pr")) in results)]
+        rows = keep + [results[k] for k in sorted(results)]
+        tmp = LEDGER + ".tmp"
+        with open(tmp, "w") as f:
+            for e in rows:
+                f.write(json.dumps(e, sort_keys=True) + "\n")
+        os.replace(tmp, LEDGER)
+    print(f"scraped {len(results)}/{len(targets)} PRs; {with_rounds} have a 'Local peer review' comment; "
+          f"{len(failed)} failed to fetch" + (f": {failed[:5]}" if failed else ""))
+    print(f"ledger: {LEDGER} ({len(rows)} rows)")
+
+
+# --------------------------------------------------------------- summary
+def stats_line(label, values, fmt=str):
+    if not values:
+        return f"  {label}: no data"
+    return (f"  {label}: n={len(values)}  mean={fmt(statistics.mean(values))}  "
+            f"p50={fmt(pct(values, 50))}  p90={fmt(pct(values, 90))}  max={fmt(max(values))}")
+
+
+def cmd_summary(a):
+    ev = read_all()
+    prs = [e for e in ev if e.get("type") == "pr" and e.get("rounds", 0) > 0]
+    if a.repo:
+        prs = [e for e in prs if e.get("repo", "").endswith("/" + a.repo)]
+    rounds = [e for e in ev if e.get("type") == "round" and (not a.repo or (e.get("repo") or "").endswith("/" + a.repo))]
+    runs = [e for e in ev if e.get("type") == "run" and (not a.repo or (e.get("repo") or "").endswith("/" + a.repo))]
+    print(f"ledger: {LEDGER}  ({len(ev)} rows: {len(prs)} backfilled PRs with review, {len(rounds)} live rounds, {len(runs)} live runs)\n")
+
+    print("Rounds per PR (backfill + live)")
+    counts = {}
+    for e in prs:
+        counts[(e["repo"], e["pr"])] = e["rounds"]
+    for e in rounds:
+        if e.get("pr"):
+            k = (e.get("repo"), e["pr"])
+            counts[k] = max(counts.get(k, 0), e.get("round") or 0)
+    vals = list(counts.values())
+    print(stats_line("rounds/PR", vals, lambda v: f"{v:.1f}" if isinstance(v, float) else str(v)))
+    hist = {}
+    for v in vals:
+        hist[v] = hist.get(v, 0) + 1
+    if hist:
+        print("  distribution: " + "  ".join(f"{k}r:{hist[k]}" for k in sorted(hist)))
+    by_repo = {}
+    for (repo, _), v in counts.items():
+        by_repo.setdefault(repo, []).append(v)
+    for repo, vs in sorted(by_repo.items(), key=lambda kv: str(kv[0])):
+        print(f"    {repo}: n={len(vs)} mean={statistics.mean(vs):.1f} p90={pct(vs, 90)}")
+    print()
+
+    print("PR timing (backfill)")
+    for key, label in [("created_to_first_review_comment_s", "created → first review comment"),
+                       ("created_to_posted_s", "created → posted to #pr-review"),
+                       ("created_to_merged_s", "created → merged")]:
+        print(stats_line(label, [e[key] for e in prs if e.get(key) is not None and e[key] >= 0], fmt_dur))
+    print()
+
+    print("Live rounds (recorded by /peer-review since the ledger shipped)")
+    good = [e for e in rounds if e.get("duration_s") and not e.get("duration_suspect")]
+    print(stats_line("round duration", [e["duration_s"] for e in good], fmt_dur))
+    if rounds:
+        print("  findings by round number (mean per round; P1/P2/P3, applied, dismissed):")
+        by_n = {}
+        for e in rounds:
+            by_n.setdefault(e.get("round") or 0, []).append(e)
+        for n in sorted(by_n):
+            rs = by_n[n]
+            def avg(k):
+                xs = [r[k] for r in rs if isinstance(r.get(k), (int, float))]
+                return f"{statistics.mean(xs):.1f}" if xs else "-"
+            print(f"    round {n}: n={len(rs)}  P1 {avg('p1')}  P2 {avg('p2')}  P3 {avg('p3')}  applied {avg('applied')}  dismissed {avg('dismissed')}")
+        print(f"  throttled retries total: {sum(e.get('throttled_retries') or 0 for e in rounds)}")
+    print()
+
+    print("Live /post-pr runs")
+    print(stats_line("total", [e["total_s"] for e in runs if e.get("total_s")], fmt_dur))
+    print(stats_line("review phase", [e["review_s"] for e in runs if e.get("review_s")], fmt_dur))
+    print(stats_line("CI phase", [e["ci_s"] for e in runs if e.get("ci_s")], fmt_dur))
+    outcomes = {}
+    for e in runs:
+        k = e["outcome"] + (f" ({e['gate_stopped']})" if e.get("gate_stopped") else "")
+        outcomes[k] = outcomes.get(k, 0) + 1
+    if outcomes:
+        print("  outcomes: " + "  ".join(f"{k}: {v}" for k, v in sorted(outcomes.items())))
+
+
+def main():
+    p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("--worktree", default=None, help="worktree to read state from (default: cwd)")
+    sub = p.add_subparsers(dest="cmd", required=True)
+
+    r = sub.add_parser("round")
+    for k in ("p1", "p2", "p3", "applied", "dismissed", "throttled"):
+        r.add_argument(f"--{k}", type=int, default=0)
+    r.set_defaults(fn=cmd_round)
+
+    m = sub.add_parser("mark")
+    m.add_argument("name", choices=["started", "review_done", "ci_done"])
+    m.set_defaults(fn=cmd_mark)
+
+    u = sub.add_parser("run")
+    u.add_argument("--outcome", required=True, choices=["posted", "merged", "stopped", "skipped"])
+    u.add_argument("--gate", default=None, help="gate that stopped the run (review, ci, merge, conflicts, ...)")
+    u.set_defaults(fn=cmd_run)
+
+    b = sub.add_parser("backfill")
+    b.add_argument("--limit", type=int, default=0)
+    b.set_defaults(fn=cmd_backfill)
+
+    s = sub.add_parser("summary")
+    s.add_argument("--repo", default=None, help="repo name filter, e.g. api")
+    s.set_defaults(fn=cmd_summary)
+
+    a = p.parse_args()
+    a.fn(a)
+
+
+if __name__ == "__main__":
+    main()

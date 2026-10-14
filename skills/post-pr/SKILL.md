@@ -52,6 +52,8 @@ For each target, establish: worktree path, repo (`owner/name`), PR number, branc
 gh pr view --json number,url,title,isDraft,headRefName -q '.'
 ```
 
+Stamp the run's start for the metrics ledger, from the target's worktree: `~/.ai-tools/bin/review-metrics mark started`. Also stamp `review_done` when step 2 passes its gate and `ci_done` when step 3 does, and finish every run (announced, merged, or stopped at a gate) with the ledger line in step 7. Ledger writes are best-effort: ignore a nonzero exit.
+
 If several targets were given, run them **in parallel**. Targets in different worktrees (and especially different repos) are independent: dispatch each into its own sswt with its own agent (`superset workspaces create --local --project <id> --branch <branch> --agent claude --prompt "/post-pr <n>"`, or one Agent call per target in a single message) rather than finishing one before starting the next. Each run owns its worktree, so reviews, CI watches and merges don't interact. Append to `pr-review-posted.jsonl` with a single `>>` line write so concurrent runs can't clobber each other, and have each run report its own block (step 7) rather than interleaving output.
 
 Serialize only for a real dependency: two targets sharing a worktree or branch, a sub-PR whose trunk another target is still merging into, or the user stating a hard ordering requirement. A soft ordering hint ("API first so the endpoint exists") is not a hard requirement: run in parallel and flag the risk in the report (e.g. "UI PR announced before the API PR merged").
@@ -235,6 +237,8 @@ gh pr ready <PR_NUMBER> --repo <OWNER/REPO>
 Only if it is currently a draft. Together with the badge this gives reviewers two independent signals that the PR has been shared and wants eyes.
 
 ### 7. Report
+
+Record the run in the metrics ledger before reporting (and before step 3.7's reap, which kills the terminal): `~/.ai-tools/bin/review-metrics run --outcome posted|merged|stopped|skipped [--gate review|ci|conflicts|merge]`. Use `stopped` with the gate that fired when the run halted early, `skipped` when the dedup check skipped the Slack post. It reads the phase stamps and round count from the worktree, so run it from there. `~/.ai-tools/bin/review-metrics summary` aggregates rounds, durations and gate stops.
 
 Per target, one block:
 
