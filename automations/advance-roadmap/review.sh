@@ -130,9 +130,9 @@ out="$(mktemp "${TMPDIR:-/tmp}/advance-roadmap-review.XXXXXX")"
 trap 'rm -f "$out" "$out.last" "$out.json"' EXIT INT TERM
 used="" verdict="unavailable" gated=""
 for who in "${reviewers[@]}"; do
-  # Exit 1 is the only "over its gate"; a usage.py failure is no reading, which never blocks.
+  # Exit 3 is the only "over its gate"; a usage.py failure (1, 2) is no reading, which never blocks.
   gate="$(python3 "$USAGE_PY" --root "$ROOT" gate --role reviewer --provider "$who" 2>/dev/null)"
-  if [ $? -eq 1 ]; then
+  if [ $? -eq 3 ]; then
     echo "(skipping reviewer $who — over its usage gate: $gate)"
     gated="$gated $who"
     continue

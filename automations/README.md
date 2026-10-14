@@ -236,7 +236,7 @@ provider with no reading at all is available with gate state `unknown` until it 
 The same gate applies to **every role**: the planner (`run.sh`, `planapproval.py`), the worker
 (`worker.sh` checks each provider before trying it, an explicit `--providers` list included, and
 exits 3 when none remain) and the reviewer (`review.sh`). Check one by hand with
-`usage.py gate --role orchestrator|worker|reviewer --provider P` (exit 0 available, 1 gated).
+`usage.py gate --role orchestrator|worker|reviewer --provider P` (exit 0 available, 3 gated; any other code is a usage.py failure, which never blocks).
 
 | Provider | Source (in order) | Gate |
 | --- | --- | --- |

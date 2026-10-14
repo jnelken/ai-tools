@@ -325,6 +325,19 @@ class ResetParseTests(unittest.TestCase):
         got = self.parse("You've hit your usage limit. Resets 3pm.", self.at(2026, 10, 13, 9, 0), self.NY)
         self.assertEqual(got, datetime(2026, 10, 13, 15, 0, tzinfo=self.NY))
 
+    def test_try_again_at_clock_time(self):
+        observed = self.at(2026, 10, 13, 9, 0)
+        got = self.parse("You've hit your usage limit. Try again at 5:00 PM.", observed, self.NY)
+        self.assertEqual(got, datetime(2026, 10, 13, 17, 0, tzinfo=self.NY))
+        # ...and the recorded hit gates the provider until then, past the one-hour fallback.
+        with tempfile.TemporaryDirectory() as tmp:
+            state = usage.record_limit(Path(tmp), "codex", "You've hit your usage limit. Try again at 11:59 PM.",
+                                       "approver")
+        hit = state["providers"]["codex"]["last_limit_hit"]
+        self.assertIsNotNone(hit["reset_epoch"])
+        gate = usage.provider_gate(state, "codex", "orchestrator", now=hit["reset_epoch"] - 60)
+        self.assertEqual(gate["state"], "limited")
+
     def test_midnight_and_noon(self):
         london = ZoneInfo("Europe/London")
         got = self.parse("resets 12:05 am (Europe/London)", self.at(2026, 10, 13, 23, 50, tz=london), london)
@@ -510,7 +523,7 @@ class CliTests(unittest.TestCase):
         self.assertEqual(json.loads(result.stdout)["state"], "unknown")
         self.run_usage("record-limit", "--provider", "codex", "--text", "usage limit, resets in 2h 5m")
         result = self.run_usage("gate", "--role", "reviewer", "--provider", "codex")
-        self.assertEqual(result.returncode, 1)
+        self.assertEqual(result.returncode, usage.GATED_EXIT)
         self.assertEqual(json.loads(result.stdout)["state"], "limited")
 
     def test_pick_orchestrators_lists_only_gated_eligible_planners(self):

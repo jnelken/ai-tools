@@ -20,7 +20,7 @@ if "gate" in args:
     provider = args[args.index("--provider") + 1]
     if provider in os.environ.get("FAKE_GATED", "").split():
         print(json.dumps({"provider": provider, "state": "over", "reason": "5h 71% >= 70%"}))
-        sys.exit(1)
+        sys.exit(3)
     sys.exit(0)
 open(args[1] + "/limits.txt", "a").write(args[-1] + "\n")
 PY

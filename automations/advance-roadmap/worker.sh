@@ -245,10 +245,10 @@ final_rc=1
 used=""
 for provider in "${providers[@]}"; do
   out="$tmpdir/$provider.log"
-  # Fresh usage before every attempt — an explicit --providers list included. Exit 1 is the
-  # only "over its gate"; a usage.py failure is no reading, which never blocks.
+  # Fresh usage before every attempt — an explicit --providers list included. Exit 3 is the
+  # only "over its gate"; a usage.py failure (1, 2) is no reading, which never blocks.
   gate="$(python3 "$USAGE_PY" --root "$ROOT" gate --role worker --provider "$provider" 2>/dev/null)"
-  if [ $? -eq 1 ]; then
+  if [ $? -eq 3 ]; then
     echo "(skipping $provider — over its usage gate: $gate)"
     print -r -- "$gate" >> "$LIMITED_LOG"
     continue

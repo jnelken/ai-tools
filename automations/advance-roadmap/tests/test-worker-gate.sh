@@ -15,12 +15,14 @@ cp "$TEST_DIR/lib/models.sh" "$TMP_ROOT/root/lib/"
 cat > "$TMP_ROOT/root/lib/usage.py" <<'PY'
 import json, os, sys
 args = sys.argv[1:]
+if os.environ.get("FAKE_CRASH"):
+    raise RuntimeError("state file unreadable")
 if "gate" in args:
     provider = args[args.index("--provider") + 1]
     if provider in os.environ.get("FAKE_GATED", "").split():
         print(json.dumps({"provider": provider, "role": "worker", "available": False, "state": "over",
                           "reason": "5h 71% >= 70%", "reset_epoch": 1760400000, "reset_at": "x"}))
-        sys.exit(1)
+        sys.exit(3)
     print(json.dumps({"provider": provider, "available": True, "state": "ok"}))
 PY
 
@@ -36,7 +38,7 @@ print -r -- '{"mode":"implement","orchestrator":{"worker_mode":"standard"}}' > "
 run_worker() {
   local gated="$1" status_file="$2"
   : > "$TMP_ROOT/calls"
-  FAKE_GATED="$gated" CALLS="$TMP_ROOT/calls" \
+  FAKE_GATED="$gated" FAKE_CRASH="${FAKE_CRASH:-}" CALLS="$TMP_ROOT/calls" \
   PERSONAL_CODE_DIR="$TMP_ROOT" \
   ADVANCE_ROADMAP_ROOT="$TMP_ROOT/root" \
   ADVANCE_ROADMAP_SKILL_DIR="$SKILL_DIR" \
@@ -71,5 +73,9 @@ assert s["used"] is None and s["exit"] == 3, s
 assert [e["provider"] for e in s["limited"]] == ["cursor", "codex", "claude"], s
 assert all(e["state"] == "over" for e in s["limited"]), s
 PY
+
+# A crashing usage.py (exit 1) is no reading, not a gate: the first provider still runs.
+FAKE_CRASH=1 run_worker "" "$TMP_ROOT/status-3.json" || fail "a usage.py crash blocked the worker"
+[ "$(cat "$TMP_ROOT/calls")" = "agent" ] || fail "expected cursor to run despite the crash, got: $(cat "$TMP_ROOT/calls")"
 
 print -- "worker usage gate: ok"

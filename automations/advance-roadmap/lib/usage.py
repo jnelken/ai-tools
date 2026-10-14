@@ -9,7 +9,7 @@ Usage:
   usage.py pick-orchestrator [--root DIR]
   usage.py pick-orchestrators [--root DIR]        # every eligible planner, in preference order
   usage.py pick-worker-chain [--root DIR]
-  usage.py gate --role R --provider P [--root DIR]  # exit 0 under its gate, 1 over it
+  usage.py gate --role R --provider P [--root DIR]  # exit 0 under its gate, 3 over it
   usage.py record-limit --provider P --text T [--scope S] [--out FILE] [--root DIR]
   usage.py detect-limit --file PATH | --text T
   usage.py probe [--provider codex|cursor|all]   # live read, writes nothing
@@ -81,6 +81,10 @@ MAX_SEVEN_DAY_PCT = _pct_env("ADVANCE_ROADMAP_MAX_WEEKLY_PCT", 80)
 # Cursor quotas are monthly and worker.sh fails over within the tick, so gate
 # only when the pool is effectively spent.
 MAX_CURSOR_PCT = _pct_env("ADVANCE_ROADMAP_MAX_CURSOR_PCT", 95)
+
+# `gate`'s exit code for "over its gate". Not 1 (a crash) or 2 (bad arguments): callers skip a
+# provider only on this code, so a broken usage.py never silently skips every provider.
+GATED_EXIT = 3
 
 # Which providers may fill each role, in preference order.
 ROLE_PROVIDERS = {
@@ -696,7 +700,7 @@ def pick_worker_chain(state: dict[str, Any]) -> list[str]:
 
 
 _CLOCK_RESET = re.compile(
-    r"resets?\s+(?:at\s+)?(\d{1,2})(?::(\d{2}))?\s*(?:([ap])\.?\s*m\b\.?)?"
+    r"(?:resets?\s+(?:at\s+)?|try\s+again\s+at\s+)(\d{1,2})(?::(\d{2}))?\s*(?:([ap])\.?\s*m\b\.?)?"
     r"(?:\s*\(\s*([A-Za-z_]+(?:/[A-Za-z0-9_+\-]+)*)\s*\))?", re.I)
 
 
@@ -704,7 +708,7 @@ def parse_reset_epoch_from_text(text: str, observed: float, tz: Any = None) -> i
     """Reset time from a CLI limit banner, as an epoch.
 
     Relative ("resets in 2h 30m", "resets in 45m") counts from `observed`. A clock time
-    ("resets 11:50am (America/New_York)", "resets 3pm", "resets 12:05 am (Europe/London)") is
+    ("resets 11:50am (America/New_York)", "resets 3pm", "try again at 5:00 PM") is
     read in the named zone, else `tz`, else local time; a time already past at `observed`
     means the next day's. A bare hour needs am/pm, so "resets 2026" is not a clock.
     """
@@ -821,12 +825,12 @@ def cmd_pick_orchestrators(args: argparse.Namespace) -> None:
 
 
 def cmd_gate(args: argparse.Namespace) -> None:
-    """Refresh, then exit 0 when the provider may take this role now and 1 when it is over its
-    gate or limited. Prints the gate as one JSON line (state, reason, reset)."""
+    """Refresh, then exit 0 when the provider may take this role now and GATED_EXIT when it is
+    over its gate or limited. Prints the gate as one JSON line (state, reason, reset)."""
     gate = provider_gate(refresh(Path(args.root)), args.provider, args.role)
     print(json.dumps({"provider": args.provider, "role": args.role, **gate,
                       "reset_at": epoch_to_iso(gate.get("reset_epoch"))}))
-    sys.exit(0 if gate["available"] else 1)
+    sys.exit(0 if gate["available"] else GATED_EXIT)
 
 
 def cmd_pick_orchestrator(args: argparse.Namespace) -> None:
