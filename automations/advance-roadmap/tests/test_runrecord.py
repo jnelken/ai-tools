@@ -48,6 +48,17 @@ class RunRecordTest(unittest.TestCase):
         self.assertIn("11:50am", rec["quota"]["cause"])
         self.assertEqual(rec["quota"]["role"], "orchestrator")
 
+    def test_planner_quota_lists_every_planner_that_ran_out(self):
+        both = json.loads(json.dumps(QUOTA_PLAN))
+        both["planner_error"]["tried"] = ["codex", "claude"]
+        both["planner_error"]["limits"] = [
+            {"provider": "codex", "state": "limited", "cause": "usage limit", "reset_epoch": 1791910000},
+            {"provider": "claude", "state": "limited", "cause": "session limit", "reset_epoch": 1791906600}]
+        rec = self.append(both)
+        self.assertEqual(rec["quota"]["provider"], "claude")
+        self.assertEqual([p["provider"] for p in rec["quota"]["providers"]], ["codex", "claude"])
+        self.assertNotIn("providers", self.append(QUOTA_PLAN)["quota"])
+
     def test_malformed_plan_is_still_an_error(self):
         rec = self.append(INVALID_PLAN)
         self.assertEqual(rec["outcome"], "error")

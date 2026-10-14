@@ -19,6 +19,9 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 HERE = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(HERE))
+import daily_batch  # noqa: E402
+
 FIXTURES = Path(__file__).resolve().parent / "fixtures" / "oct13"
 NY = ZoneInfo("America/New_York")
 FUTURE = int(time.time()) + 6 * 3600
@@ -81,9 +84,16 @@ class QuotaReplayTest(unittest.TestCase):
             p = self.bin / name
             p.write_text(FAKE.format(python=sys.executable))
             p.chmod(0o755)
-        # deploysnap.py's gh: fails like an offline machine, so nothing reaches GitHub.
+        # deploysnap.py's gh: fails like an offline machine, so nothing reaches GitHub. It runs after
+        # the planner is picked and before it launches, so it can also stand in for another lane
+        # gating planners in between (FAKE_GATE_ON_SNAPSHOT).
         gh = self.bin / "gh"
-        gh.write_text("#!/bin/sh\necho \"gh: offline in tests\" >&2\nexit 1\n")
+        gh.write_text("#!/bin/sh\n"
+                      "for p in $FAKE_GATE_ON_SNAPSHOT; do\n"
+                      f"  {sys.executable} \"$ADVANCE_ROADMAP_ROOT/lib/usage.py\" --root \"$ADVANCE_ROADMAP_ROOT\" "
+                      "record-limit --provider \"$p\" --text \"usage limit, resets in 2h 5m\" >/dev/null 2>&1\n"
+                      "done\n"
+                      "echo \"gh: offline in tests\" >&2\nexit 1\n")
         gh.chmod(0o755)
         self.snapshot = self.dir / "snapshot.json"
         self.snapshot.write_text(json.dumps({"ok": True, "issues": []}))
@@ -214,6 +224,41 @@ class QuotaReplayTest(unittest.TestCase):
         self.assertEqual([c["bin"] for c in self.calls()], ["codex"])
         rec = self.record()
         self.assertEqual((rec["outcome"], rec["quota"]["provider"]), ("quota-paused", "codex"))
+
+    def test_both_planners_out_during_failover_are_both_in_the_quota_record(self):
+        self.usage_state()
+        run = self.run_lane(FAKE_CODEX="limit", FAKE_CLAUDE="limit")
+        self.assert_nothing_dispatched(run)
+        self.assertEqual([c["bin"] for c in self.calls()], ["codex", "claude"])
+        rec = self.record()
+        self.assertEqual((rec["outcome"], rec["quota"]["provider"]), ("quota-paused", "claude"))
+        out = {p["provider"]: p for p in rec["quota"]["providers"]}
+        self.assertEqual(sorted(out), ["claude", "codex"])
+        self.assertTrue(out["codex"]["reset_epoch"] and out["claude"]["reset_epoch"])
+        self.assertIn("usage limit", out["codex"]["cause"])
+        summary = daily_batch.quota_paused({"queue": [{"repo": "demo", "outcome": rec["outcome"],
+                                                       "quota": rec["quota"]}]})
+        self.assertEqual(sorted((q["provider"], q["repos"]) for q in summary),
+                         [("claude", ["demo"]), ("codex", ["demo"])])
+
+    def test_planner_gated_between_pick_and_launch_is_not_called(self):
+        self.usage_state()
+        self.run_lane(FAKE_GATE_ON_SNAPSHOT="codex", FAKE_CLAUDE="plan")
+        self.assertEqual([c["bin"] for c in self.calls() if c["role"] == "orchestrator"], ["claude"])
+        self.assertIn("planner codex went over its gate before launch — using claude", self.log)
+        self.assertTrue(self.reached_barrier)
+        self.assertEqual(self.record()["orchestrator"], "claude")
+
+    def test_every_planner_gated_before_launch_is_a_quota_skip_naming_them(self):
+        self.usage_state()
+        run = self.run_lane(FAKE_GATE_ON_SNAPSHOT="codex claude")
+        self.assert_nothing_dispatched(run)
+        self.assertEqual(self.calls(), [])
+        rec = self.record()
+        self.assertEqual((rec["outcome"], rec["orchestrator"], rec["quota"]["role"]),
+                         ("skipped-quota", None, "orchestrator"))
+        self.assertEqual(sorted(p["provider"] for p in rec["quota"]["providers"]), ["claude", "codex"])
+        self.assertEqual(self.alert(), "")
 
     # ── malformed output is an error, still with no worker ───────────────────
 

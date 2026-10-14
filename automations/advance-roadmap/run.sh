@@ -587,6 +587,26 @@ Production deploy snapshot (read this; never call GitHub yourself): $DEPLOY_SNAP
       ORCH_PROMPT="$ORCH_PROMPT
 Previous no-work verdict and what changed since (carry unchanged verdicts forward): $VERDICT_CHANGES"
     fi
+    # The planner was picked before the snapshots; another lane may have gated it since.
+    python3 "$USAGE_PY" --root "$ROOT" gate --role orchestrator --provider "$ORCH" >/dev/null 2>&1
+    if [ $? -eq 3 ]; then
+      alt=""
+      for p in ${=$(python3 "$USAGE_PY" --root "$ROOT" pick-orchestrators 2>/dev/null | tr -d '\r')}; do
+        [ "$p" = "$ORCH" ] || { alt="$p"; break; }
+      done
+      if [ -z "$alt" ]; then
+        echo "=== advance-roadmap $STAMP: skipping — planner $ORCH went over its gate before launch, no other is under its gate ==="
+        ORCH=""
+        python3 "$USAGE_PY" --root "$ROOT" gates --role orchestrator > "$RUN_DIR/quota-gates.json" 2>/dev/null \
+          || rm -f "$RUN_DIR/quota-gates.json"
+        record skipped-quota "no orchestrator available at launch"
+        ln -sf "$LOG" "$LOGDIR/latest.log"
+        regen_dashboard
+        exit 0
+      fi
+      echo "(planner $ORCH went over its gate before launch — using $alt)"
+      ORCH="$alt"
+    fi
     orch_rc=0
     tried=""
     planner_hit=""   # the last planner's recorded limit hit, when it stopped on one
@@ -636,7 +656,7 @@ sys.exit(0 if ok else 1)' "$result")" || had_json=0
       planner_failed=1
       echo "WARNING: the planner produced no usable ORCHESTRATOR_RESULT_JSON — nothing dispatched"
       python3 - "$orch_out" "$ORCH_RESULT" "$ORCH" "$tried" "$planner_hit" "$orch_rc" "$invalid" <<'PY'
-import json, sys
+import json, os, sys
 out, dest, provider, tried, hit_path, rc, invalid = sys.argv[1:8]
 hit = {}
 try:
@@ -647,9 +667,18 @@ r = {"action": None, "outcome_token": None, "repo": None, "item": None, "branch"
      "linear_id": None, "directive_ticket": None, "worker_brief": None,
      "archives": [], "blockers": [], "considered": []}
 if hit_path:
+    # Every planner that hit its limit on the way here, not only the last one.
+    limits = []
+    for name in tried.split():
+        try:
+            h = json.load(open(os.path.join(os.path.dirname(hit_path), f"orchestrator-limit-{name}.json")))
+        except (OSError, ValueError):
+            continue
+        limits.append({"provider": name, "state": "limited", "cause": h.get("exact_cli_text"),
+                       "reset_epoch": h.get("reset_epoch"), "reset_at": h.get("reset_at")})
     r["planner_error"] = {"kind": "quota", "provider": provider, "tried": tried.split(),
                           "limit_text": hit.get("exact_cli_text"), "reset_epoch": hit.get("reset_epoch"),
-                          "reset_at": hit.get("reset_at")}
+                          "reset_at": hit.get("reset_at"), "limits": limits}
     r["summary"] = (f"Planner {provider} hit its usage limit"
                     + (f" (resets {hit['reset_at']})" if hit.get("reset_at") else "")
                     + "; no other planner was under its gate, so nothing was dispatched.")

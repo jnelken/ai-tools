@@ -104,8 +104,12 @@ def quota_info(orch, wstatus, wresult):
     """Who ran out, when it resets and the CLI's own words — for a quota-paused run."""
     perr = (orch or {}).get("planner_error") or {}
     if perr.get("kind") == "quota":
-        return {"role": "orchestrator", "provider": perr.get("provider"), "reset_epoch": perr.get("reset_epoch"),
+        info = {"role": "orchestrator", "provider": perr.get("provider"), "reset_epoch": perr.get("reset_epoch"),
                 "reset_at": perr.get("reset_at"), "cause": perr.get("limit_text"), "tried": perr.get("tried")}
+        limits = [l for l in perr.get("limits") or [] if isinstance(l, dict)]
+        if limits:
+            info["providers"] = limits  # every planner that ran out, when one failed over to another
+        return info
     limited = [l for l in (wstatus or {}).get("limited") or [] if isinstance(l, dict)]
     if (wresult or {}).get("outcome") == "limit_hit":
         hit = next((l for l in limited if l.get("provider") == wresult.get("provider")), {})
