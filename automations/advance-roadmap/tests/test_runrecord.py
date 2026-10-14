@@ -91,6 +91,33 @@ class RunRecordTest(unittest.TestCase):
         self.assertEqual((rec["quota"]["provider"], rec["quota"]["reset_epoch"]), ("cursor", None))
         self.assertNotIn("?", rec["detail"])
 
+    def test_every_worker_gated_without_a_quota_record_still_has_one(self):
+        # usage.py quota-record failed, so worker.sh's status has no "quota"; its own log still counts.
+        limited = [
+            {"provider": "cursor", "state": "over", "reason": "auto pool 96% >= 95%", "reset_epoch": 1792000000,
+             "reset_at": "2026-10-14T13:46:40-04:00"},
+            {"provider": "codex", "state": "limited", "cause": "usage limit", "reset_epoch": 1791910000,
+             "reset_at": "2026-10-13T12:46:40-04:00"}]
+        status = {"used": None, "exit": 3, "fatal": None, "missing": [], "limited": limited, "quota": None}
+        rec = self.append({"action": "dispatch_worker", "repo": "demo"}, status)
+        self.assertEqual(rec["outcome"], "quota-paused")
+        q = rec["quota"]
+        self.assertEqual((q["role"], q["provider"], q["reset_epoch"], q["reset_at"]),
+                         ("worker", "codex", 1791910000, "2026-10-13T12:46:40-04:00"))
+        self.assertIn("cursor: auto pool 96%", q["cause"])
+        self.assertIn("codex: usage limit", q["cause"])
+        self.assertEqual([(p["provider"], p["state"]) for p in q["providers"]],
+                         [("cursor", "over"), ("codex", "limited")])
+
+    def test_worker_limit_hit_without_a_quota_record_keeps_the_logged_reset(self):
+        limited = [{"provider": "cursor", "state": "over", "reason": "auto pool 96% >= 95%", "reset_epoch": 1791900000},
+                   {"provider": "codex", "state": "limited", "cause": "usage limit", "reset_epoch": 1791910000}]
+        rec = self.append({"action": "dispatch_worker"}, {"used": "codex", "exit": 0, "limited": limited},
+                          {"outcome": "limit_hit", "provider": "codex", "limit_text": "usage limit"})
+        self.assertEqual((rec["quota"]["provider"], rec["quota"]["reset_epoch"], rec["quota"]["cause"]),
+                         ("codex", 1791910000, "usage limit"))
+        self.assertEqual(len(rec["quota"]["providers"]), 2)
+
     def test_a_missing_worker_binary_is_still_an_error(self):
         status = {"used": None, "exit": 3, "fatal": None, "missing": ["claude"],
                   "limited": [{"provider": "cursor", "state": "over"}]}

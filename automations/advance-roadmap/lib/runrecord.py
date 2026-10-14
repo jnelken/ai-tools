@@ -111,19 +111,53 @@ def quota_info(orch, wstatus, wresult):
             info["providers"] = limits  # every planner that ran out, when one failed over to another
         return info
     # worker.sh wrote `usage.py quota-record --role worker` into its status: every worker provider.
-    quota = recorded_quota((wstatus or {}).get("quota"))
+    w = wstatus or {}
+    quota = recorded_quota(w.get("quota"))
     if quota:
         return quota
-    if (wresult or {}).get("outcome") == "limit_hit":
-        # No record (usage.py failed): still say who stopped and why.
-        return {"role": "worker", "provider": wresult.get("provider") or (wstatus or {}).get("used"),
-                "reset_epoch": None, "reset_at": None, "cause": wresult.get("limit_text")}
-    return None
+    # No record (usage.py failed): rebuild it from the gates and limits worker.sh logged itself,
+    # and still say who stopped and why.
+    limit_hit = (wresult or {}).get("outcome") == "limit_hit"
+    primary = (wresult.get("provider") or w.get("used")) if limit_hit else None
+    quota = attempts_quota("worker", w.get("limited"), primary)
+    if limit_hit:
+        if quota is None or (primary and quota["provider"] != primary):
+            quota = {"role": "worker", "provider": primary, "reset_epoch": None, "reset_at": None,
+                     "cause": None, "providers": (quota or {}).get("providers", [])}
+        quota["cause"] = quota["cause"] or wresult.get("limit_text")
+    return quota
 
 
 def recorded_quota(record):
     """A `usage.py quota-record` result as the row's quota, or None when nobody in it is out."""
     return record if isinstance(record, dict) and record.get("provider") else None
+
+
+def attempts_quota(role, attempts, primary=None):
+    """`usage.py quota-record`'s shape from only the attempts a lane saw ({provider, state,
+    cause/reason, reset_epoch, reset_at}), or None when none names a provider. `provider` is
+    `primary` when it is among them, else the one that frees up first."""
+    seen = {}
+    for a in attempts or ():
+        if isinstance(a, dict) and a.get("provider"):
+            seen[a["provider"]] = {
+                "provider": a["provider"],
+                "state": a.get("state") if a.get("state") in ("over", "limited") else "limited",
+                "cause": a.get("cause") or a.get("reason"),
+                "reset_epoch": a.get("reset_epoch"), "reset_at": a.get("reset_at")}
+    out = list(seen.values())
+    if not out:
+        return None
+    first = seen.get(primary)
+    if first is None:
+        resets = [p for p in out if isinstance(p["reset_epoch"], (int, float))]
+        first = min(resets, key=lambda p: p["reset_epoch"]) if resets else out[0]
+    if first["provider"] == primary:
+        cause = first["cause"]
+    else:
+        cause = "; ".join(f"{p['provider']}: {p['cause'] or p['state']}" for p in out)
+    return {"role": role, "provider": first["provider"], "reset_epoch": first["reset_epoch"],
+            "reset_at": first["reset_at"], "cause": cause, "providers": out}
 
 
 def read_reviews(worker_result_path):
