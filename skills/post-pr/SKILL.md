@@ -27,7 +27,7 @@ This skill owns the *only* place the badge and the undraft happen. Never add `ðŸ
 /post-pr                      # the PR for the current branch
 /post-pr 1271                 # a PR by number, in the current repo
 /post-pr <worktree-path>      # a PR whose branch lives in another worktree
-/post-pr 41 1271 1433         # several, run to completion one at a time
+/post-pr 41 1271 1433         # several: one per worktree, run in parallel
 ```
 
 Runs automatically when a task's work is complete â€” see [When it fires on its own](#when-it-fires-on-its-own).
@@ -52,7 +52,9 @@ For each target, establish: worktree path, repo (`owner/name`), PR number, branc
 gh pr view --json number,url,title,isDraft,headRefName -q '.'
 ```
 
-If several targets were given, finish one completely before starting the next. Their reviews are independent, but interleaving makes the report unreadable and the dedup state hard to reason about.
+If several targets were given, run them **in parallel**. Targets in different worktrees (and especially different repos) are independent: dispatch each into its own sswt with its own agent (`superset workspaces create --local --project <id> --branch <branch> --agent claude --prompt "/post-pr <n>"`, or one Agent call per target in a single message) rather than finishing one before starting the next. Each run owns its worktree, so reviews, CI watches and merges don't interact. Append to `pr-review-posted.jsonl` with a single `>>` line write so concurrent runs can't clobber each other, and have each run report its own block (step 7) rather than interleaving output.
+
+Serialize only for a real dependency: two targets sharing a worktree or branch, a sub-PR whose trunk another target is still merging into, or the user stating a hard ordering requirement. A soft ordering hint ("API first so the endpoint exists") is not a hard requirement: run in parallel and flag the risk in the report (e.g. "UI PR announced before the API PR merged").
 
 ### 2. Review until clean
 
