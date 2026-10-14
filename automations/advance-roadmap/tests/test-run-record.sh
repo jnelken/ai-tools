@@ -152,10 +152,28 @@ run good deploy;  check "deploy cap hit → shipped-deploy-failed" "$(last outco
 check "exactly one record per run" "$(wc -l < "$ROOT/runs.jsonl" | tr -d ' ')" 7
 
 # Chain: ships twice, third link fails → three rows from one tick, then it stops.
+# A stub followup.py records the lone run's follow-up hooks.
+print -r -- 'import os, sys; open(os.environ["ADVANCE_ROADMAP_ROOT"] + "/followup-calls.log", "a").write(" ".join(sys.argv[1:]) + "\n")' \
+  > "$ROOT/followup.py"
 CHAIN_MINUTES=40 run good chain
 check "chain runs until a link fails to ship" "$(wc -l < "$ROOT/runs.jsonl" | tr -d ' ')" 10
 check "chain's last link is the failure"      "$(last outcome)" error
 grep -q "starting link 3" "$ROOT"/logs/run-*.log && echo "ok   chain logged its links" || { echo "FAIL: no chain log line"; exit 1; }
+sleep 1
+check "each link queues its item's cleanup"   "$(grep -c '^hook item-done' "$ROOT/followup-calls.log")" 3
+check "every link shares the chain's origin"  "$(grep '^hook item-done' "$ROOT/followup-calls.log" | awk '{print $NF}' | sort -u | wc -l | tr -d ' ')" 1
+check "the chain end queues one tooling pass" "$(grep '^hook run-end' "$ROOT/followup-calls.log" | grep -o -- '--stamp' | wc -l | tr -d ' ')" 3
+check "then drains once"                       "$(grep -c '^drain --origin run-' "$ROOT/followup-calls.log")" 1
+rm -f "$ROOT/followup-calls.log"
+ADVANCE_ROADMAP_LANE=2 ADVANCE_ROADMAP_BATCH_PID=$$ ADVANCE_ROADMAP_TARGET_REPO=demo run good file &
+lane_pid=$!
+for n in {1..100}; do ls "$ROOT"/runs/*/batch-ready >/dev/null 2>&1 && break; sleep .1; done
+for r in "$ROOT"/runs/*/batch-ready(N); do touch "${r:h}/batch-release"; done
+wait $lane_pid
+[ ! -f "$ROOT/followup-calls.log" ] && echo "ok   a batch lane leaves follow-ups to the batch" \
+  || { echo "FAIL: a batch lane ran follow-up hooks"; cat "$ROOT/followup-calls.log"; exit 1; }
+rm -f "$ROOT/followup.py" "$ROOT"/runs/*/batch-ready(N) "$ROOT"/runs/*/batch-release(N)
+sed -i '' '$d' "$ROOT/runs.jsonl"   # the lane's row; the counts below are for lone runs
 check "a feature ship records its kind"     "$(last work_kind)" feature
 # A code-health ship never chains, even well inside the time cap.
 rm -f "$TMP/chain-count"
