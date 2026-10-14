@@ -112,9 +112,14 @@ def quota_info(orch, wstatus, wresult):
         return info
     limited = [l for l in (wstatus or {}).get("limited") or [] if isinstance(l, dict)]
     if (wresult or {}).get("outcome") == "limit_hit":
-        hit = next((l for l in limited if l.get("provider") == wresult.get("provider")), {})
-        return {"role": "worker", "provider": wresult.get("provider"), "reset_epoch": hit.get("reset_epoch"),
-                "reset_at": hit.get("reset_at"), "cause": wresult.get("limit_text")}
+        name = wresult.get("provider")
+        hit = next((l for l in limited if l.get("provider") == name), {})
+        own = {"provider": name, "state": "limited", "cause": wresult.get("limit_text"),
+               "reset_epoch": hit.get("reset_epoch"), "reset_at": hit.get("reset_at")}
+        # The providers it failed over from were out too; the batch summary counts each of them.
+        return {"role": "worker", "provider": name, "reset_epoch": hit.get("reset_epoch"),
+                "reset_at": hit.get("reset_at"), "cause": wresult.get("limit_text"),
+                "providers": [l for l in limited if l.get("provider") != name] + [own]}
     if limited:
         resets = [l for l in limited if l.get("reset_epoch")]
         first = min(resets, key=lambda l: l["reset_epoch"]) if resets else limited[0]

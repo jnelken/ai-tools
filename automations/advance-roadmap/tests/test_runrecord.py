@@ -93,6 +93,22 @@ class RunRecordTest(unittest.TestCase):
         self.assertEqual(rec["outcome"], "quota-paused")
         self.assertEqual(rec["quota"]["cause"], "usage limit")
 
+    def test_worker_limit_hit_after_gated_fallbacks_keeps_every_provider(self):
+        status = {"used": "claude", "exit": 0, "limited": [
+            {"provider": "cursor", "state": "over", "reason": "auto pool 96%", "reset_epoch": 1792000000},
+            {"provider": "codex", "state": "limited", "cause": "usage limit", "reset_epoch": 1791910000}]}
+        rec = self.append({"action": "dispatch_worker"}, status,
+                          {"outcome": "limit_hit", "provider": "claude", "limit_text": "session limit"})
+        self.assertEqual(rec["outcome"], "quota-paused")
+        self.assertEqual(rec["quota"]["provider"], "claude")
+        self.assertEqual([(p["provider"], p.get("cause") or p.get("reason")) for p in rec["quota"]["providers"]],
+                         [("cursor", "auto pool 96%"), ("codex", "usage limit"), ("claude", "session limit")])
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+        import daily_batch
+        summary = daily_batch.quota_paused({"queue": [{"repo": "demo", "outcome": rec["outcome"],
+                                                       "quota": rec["quota"]}]})
+        self.assertEqual(sorted(q["provider"] for q in summary), ["claude", "codex", "cursor"])
+
     def test_quota_pauses_never_alert_and_never_count_toward_the_error_streak(self):
         for _ in range(4):
             self.append(QUOTA_PLAN)
