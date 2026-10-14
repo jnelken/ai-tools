@@ -354,6 +354,30 @@ class ResetParseTests(unittest.TestCase):
                                                   self.at(2026, 10, 13, 15, 0, tz=london), london)
         self.assertEqual(datetime.fromtimestamp(epoch, london), datetime(2026, 10, 13, 16, 50, tzinfo=london))
 
+    def parse_in_local_ny(self, text, observed):
+        """Parse with no zone given and the system zone set to New York."""
+        old = os.environ.get("TZ")
+        os.environ["TZ"] = "America/New_York"
+        time.tzset()
+        try:
+            return self.parse(text, observed)
+        finally:
+            if old is None:
+                os.environ.pop("TZ", None)
+            else:
+                os.environ["TZ"] = old
+            time.tzset()
+
+    def test_local_next_day_reset_across_fall_back(self):
+        # Observed in EDT on Oct 31; 3pm on Nov 1 2026 is already EST.
+        got = self.parse_in_local_ny("Resets 3pm.", self.at(2026, 10, 31, 16, 0))
+        self.assertEqual(got, datetime(2026, 11, 1, 15, 0, tzinfo=self.NY))
+
+    def test_local_next_day_reset_across_spring_forward(self):
+        # Observed in EST on Mar 7; 3pm on Mar 8 2026 is already EDT.
+        got = self.parse_in_local_ny("Resets 3pm.", self.at(2026, 3, 7, 16, 0))
+        self.assertEqual(got, datetime(2026, 3, 8, 15, 0, tzinfo=self.NY))
+
     def test_unknown_zone_falls_back_to_the_given_one(self):
         got = self.parse("resets 3pm (Mars/Olympus)", self.at(2026, 10, 13, 9, 0), self.NY)
         self.assertEqual(got, datetime(2026, 10, 13, 15, 0, tzinfo=self.NY))

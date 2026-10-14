@@ -737,9 +737,9 @@ def parse_reset_epoch_from_text(text: str, observed: float, tz: Any = None) -> i
                 zone = ZoneInfo(zone_name)
             except (ZoneInfoNotFoundError, ValueError):
                 zone = tz
-        now = datetime.fromtimestamp(observed, zone) if zone else datetime.fromtimestamp(observed).astimezone()
-        zone = now.tzinfo
-        day = now.date()
+        # No zone: naive local datetimes, so .timestamp() applies the local DST rules of the
+        # target date rather than the offset in force at `observed`.
+        day = datetime.fromtimestamp(observed, zone).date()
         at = datetime(day.year, day.month, day.day, hour, minute, tzinfo=zone)
         if at.timestamp() <= observed:
             day = day + timedelta(days=1)
