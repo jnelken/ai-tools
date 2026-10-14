@@ -140,6 +140,74 @@ plus notes), written only through [`lib/runmemory.py`](advance-roadmap/lib/runme
 directory and rewrites atomically so concurrent runs can't lose each other's rows. `has-stamp` is what
 Step 0 uses to tell a finished run from a killed one.
 
+### Follow-ups
+
+[`followup.py`](advance-roadmap/followup.py) repairs what a finished run's own records prove went
+wrong. It has two stages, and neither is the code-health retrospective (Step 7c):
+
+| Stage | Trigger | Corpus | Repairs |
+| --- | --- | --- | --- |
+| **project-cleanup** | an item ends `shipped` / `shipped-deploy-failed`, its builder and reviewers have exited, and the repo is quiescent (no live in-flight pid, every `repo-locks/<repo>*.lock` free) | its run dir: worker result, `reviews.jsonl`, the `FIXME/TODO(advance-roadmap review)` markers its merge added, its deploy | project-specific bugs in that repo |
+| **tooling-hardening** | once per batch / lone run chain / conductor session, after every child run has a `runs.jsonl` row and every cleanup it started has finished | those runs' rows, orchestrator results, review logs, worker output, run logs, saved verdicts, follow-up blockers | orchestration, routing, review and reporting in ai-tools |
+
+An item that did not ship (`blocked-branch-left`, `failed`, `incomplete`, `quota-paused`) is
+recoverable work for the next run, never a cleanup trigger. Findings come from recognition tests in
+[`lib/followscan.py`](advance-roadmap/lib/followscan.py) (each cites a file and a quote; deliberate
+non-findings are recorded too) plus an optional read-only analyst call (`usage.py` role `analyst`:
+Codex, then Claude) whose findings are kept only when every quote is really in the corpus.
+
+**Repairs are delegated** ([`lib/followrepair.py`](advance-roadmap/lib/followrepair.py)): `worker.sh`
+(Cursor first) builds on `roadmap/followup-<stage key>` in its own Superset workspace
+(`lib/workspaces.py`; `ADVANCE_ROADMAP_SUPERSET=0` uses a plain worktree under
+`~/.cache/advance-roadmap-followups`), pushes and opens a PR, and stops. `review.sh` has a second
+provider review it, up to three rounds. The runner merges **only** when the PR's checks pass and
+the last review is clean, then verifies the deploy (and for ai-tools runs `~/.ai-tools/install.sh`).
+It never merges past unresolved findings or an unavailable reviewer: the branch and PR stay for the
+next drain. Follow-up builders run with `ADVANCE_ROADMAP_FOLLOWUP=1`, and their run dirs carry a
+`followup-child` marker, so a follow-up never starts follow-ups.
+
+**Usage** is re-read before every builder and reviewer step, and a builder is only started when a
+reviewer `review.sh` would pick for it is also under its gate. When nobody is, the stage is
+deferred and its remaining findings go on one Linear ticket (`jlin.py new`, exactly one `repo/*`
+label, state Backlog) with the evidence, branch/PR, validation so far, reset time and the exact
+next step, plus a fenced `advance-roadmap-followup` metadata block (`finding_ids`, stage key,
+origin, branch, PR). Unknown usage and every non-quota blocker go to `followups/report.jsonl`,
+never to a new ticket; a ticket the stage already has gets the verified progress as a comment.
+A ticket is closed only after checks pass, the review is clean, the PR merged and the deploy
+was verified.
+
+**Prior tickets first.** Every drain pages through all open DEV issues (`linear api`, following
+`endCursor`), rebuilds local state for any follow-up ticket this machine has not seen, and works
+stages with a branch, PR or ticket before new ones. A fresh finding already tracked by a ticket —
+matched by `finding_id` in its metadata, or by title text for older tickets with no block — gets
+the new evidence as a comment instead of a duplicate. The orchestrator skips these tickets
+(ORCHESTRATOR.md); the follow-up runner owns them.
+
+**Hooks.** `daily_batch.py` queues a cleanup when an item ships, starts that repo's cleanup drain
+once none of its threads is still active (it takes a lane slot), and after the last thread queues
+and drains the batch's tooling pass. Its outcome — fixed, quota-deferred and blocked follow-ups —
+is saved in `batch.json` (`followups`, `followups_line`) and appended to the webhook summary. A lone
+`run.sh` queues per chain link and drains detached when its chain stops
+(`logs/followup-run-<stamp>.log`). The conductor runs the same commands by hand
+([conductor SKILL.md](../skills/conductor/SKILL.md)). Each hook is idempotent (one stage dir per
+stamp / origin), each stage is claimed with a kernel lock, a repair holds the repo's
+`repo-locks/<repo>.lock`, and a stage a killed drain left `running` resumes at its saved step
+(unless its builder is still alive).
+
+```sh
+F=~/.claude/automations/advance-roadmap/followup.py
+python3 $F status [--origin batch-2026-10-14] [--json]   # fixed / deferred / blocked
+python3 $F scan --stage tooling --origin dry --stamp <stamp> ...   # dry run: findings only
+python3 $F drain [--repo R] [--wait-s 600]                # run what is ready, prior tickets first
+```
+
+State lives in `~/.claude/automations/advance-roadmap/followups/<stage key>/state.json`
+(findings with stable ids and status, ticket refs, usage snapshots, builder/reviewer session ids,
+branch, PR, merge commit, validation, blockers). `ADVANCE_ROADMAP_FOLLOWUPS=0` turns the hooks off;
+`ADVANCE_ROADMAP_FOLLOWUP_ANALYST=0` skips the model pass; `ADVANCE_ROADMAP_FOLLOWUP_LINEAR=0`
+keeps a drain off Linear entirely. Tests: `tests/test_followup.py` (stubbed usage, worker, review,
+gh, linear and jlin; the tooling dry run replays the Oct 13 evidence in `tests/fixtures/oct13`).
+
 ### Run record and failure alert
 
 Every run — shipped, blocked, skipped, crashed — appends exactly one row to `runs.jsonl`. `run.sh`
@@ -233,6 +301,14 @@ over 24h / 7d / all tracked runs. Nothing here gates routing.
 `total` = new input + cache writes + output; cache reads are kept apart (they dwarf the rest and bill far
 lower). Runs before this was added have no token data. Codex subagent rollouts are not summed.
 
+Each call also records its **session id** (Cursor/Claude JSON `session_id`, Codex's `session id:`
+header): `worker-status.json` carries the worker's, every `reviews.jsonl` round its reviewer's, and the
+run row has `worker_session` and `review_sessions`, so a run can be reopened or audited later.
+
+A reviewer that answers "at capacity" / overloaded / HTTP 503 or 529 with no verdict is not a limit
+hit: `review.sh` records it under `capacity` in that round's row, does not gate the provider, and
+falls through to the next reviewer (`unavailable` only when every one is out).
+
 ### Provider usage sources
 
 `lib/usage.py refresh` reads live quota for every provider before routing, so a hot provider is
@@ -243,7 +319,7 @@ provider with no reading at all is available with gate state `unknown` until it 
 The same gate applies to **every role**: the planner (`run.sh`, `planapproval.py`), the worker
 (`worker.sh` checks each provider before trying it, an explicit `--providers` list included, and
 exits 3 when none remain) and the reviewer (`review.sh`). Check one by hand with
-`usage.py gate --role orchestrator|worker|reviewer --provider P` (exit 0 available, 3 gated; any other code is a usage.py failure, which never blocks).
+`usage.py gate --role orchestrator|worker|reviewer|analyst --provider P` (exit 0 available, 3 gated; any other code is a usage.py failure, which never blocks). `analyst` is the follow-up runner's read-only corpus pass (Codex, then Claude).
 
 | Provider | Source (in order) | Gate |
 | --- | --- | --- |

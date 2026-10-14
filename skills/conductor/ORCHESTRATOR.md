@@ -496,7 +496,10 @@ tiers. Do not let rank bypass dependencies, safety checks, or the skip rules.
 - are **large or risky** — audio-graph rewires, data-model migrations, broad renames, anything the
   roadmap itself flags as depending on another unbuilt item;
 - depend on a **product/taste decision the user hasn't made** (an open question in `PRODUCT.md`, a
-  "name TBD", two alternatives with no pick). Surface it, don't decide it for them.
+  "name TBD", two alternatives with no pick). Surface it, don't decide it for them;
+- are **follow-up tickets** — a description carrying an ```` ```advance-roadmap-followup ```` block.
+  `followup.py` owns them (it resumes their branch/PR when the provider resets and closes them only
+  after a verified merge); dispatching one here would build it twice. Don't list them as considered.
 
 If every planned item is skippable, that's a legitimate outcome — but not a silent one, and not the
 end of the run: try Step 2d first. If Step 2d dispatches nothing either, before you stop: archive

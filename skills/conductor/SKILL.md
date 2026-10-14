@@ -115,6 +115,27 @@ with no logged review is flagged). Then tell the user plainly:
 On `failed`, `limit_hit` or an incomplete result, report what the log shows and ask how to proceed;
 never retry silently in a loop. Don't clean up the builder's branch.
 
+## 4. Follow-ups (end of the session)
+
+The scheduled batch runs its follow-ups itself; a conductor session runs the same three commands
+(`F=~/.claude/automations/advance-roadmap/followup.py`):
+
+1. After each item that ended `shipped` / `shipped-deploy-failed` — not for blocked, failed or
+   incomplete items, which are the next run's work — queue its cleanup, pointing at the dir that
+   holds its `worker-result.json` and `reviews.jsonl`:
+   `python3 $F hook item-done --stamp <stamp> --run-dir <dir> --origin conductor-<session stamp>`.
+2. When you are done dispatching for the session (every builder you started has exited), queue one
+   tooling pass over the session's runs:
+   `python3 $F hook run-end --origin conductor-<session stamp> --stamp <stamp> [--stamp …]`.
+3. Drain: `python3 $F drain --origin conductor-<session stamp> --wait-s 600` (run it in the
+   background; it can take as long as a builder). It resumes prior follow-up tickets first, repairs
+   through `worker.sh` + `review.sh` on its own branches, and merges only on passing checks and a
+   clean review. Report `python3 $F status --origin conductor-<session stamp>` to the user: fixed,
+   deferred for quota (with the ticket and reset) and blocked (see `followups/report.jsonl`).
+
+Each hook is idempotent, so re-running one is harmless. Ask before step 3 if the user wants to keep
+the session's provider quota for something else.
+
 ## What this skill does not do
 
 No chaining, no planner routing, no scheduling, no run dashboard — that's
