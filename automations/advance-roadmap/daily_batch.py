@@ -37,6 +37,8 @@ DEFAULT_THREADS_PER_REPO = 2
 # Two workers of one repo creating Superset workspaces in the same second race the project import.
 RELEASE_GAP_S = float(os.environ.get("ADVANCE_ROADMAP_THREAD_RELEASE_GAP_S", "20"))
 APPROVAL_TIMEOUT_S = float(os.environ.get("ADVANCE_ROADMAP_APPROVAL_TIMEOUT_S", "1800"))
+# Outcomes whose row carries a `quota` field: who ran out and when it resets.
+QUOTA_OUTCOMES = {"quota-paused", "skipped-quota"}
 
 
 def save(path, value):
@@ -278,10 +280,23 @@ class Batch:
                 return False
         return True
 
-    def defer_ready(self, reason):
+    def defer_ready(self, reason, gates=None):
+        """Cancel every saved plan; `gates` (usage.py gates output) goes beside each one so its
+        skipped-quota record says which provider ran out and when it resets."""
         for item in self.state["queue"]:
             if item["status"] == "ready":
+                if gates:
+                    (ROOT / "runs" / item["stamp"] / "quota-gates.json").write_text(gates)
                 self.cancel(item, reason)
+
+    def worker_gates(self):
+        try:
+            out = shared.py("usage.py", "--root", str(ROOT), "gates", "--role", "worker", timeout=120)
+            if out.returncode == 0 and isinstance(json.loads(out.stdout), dict):
+                return out.stdout
+        except (OSError, ValueError, subprocess.TimeoutExpired):
+            pass
+        return None
 
     def run(self):
         self.write()
@@ -317,7 +332,8 @@ class Batch:
                 shared.py("usage.py", "--root", str(ROOT), "refresh", timeout=120)
                 providers = shared.py("usage.py", "--root", str(ROOT), "pick-worker-chain")
                 if providers.returncode or providers.stdout.strip() in {"", "none"}:
-                    self.defer_ready("no worker quota available; saved plans wait for the next daily batch")
+                    self.defer_ready("no worker quota available; saved plans wait for the next daily batch",
+                                     self.worker_gates())
                 else:
                     for item in chosen:
                         (ROOT / "runs" / item["stamp"] / "batch-release").touch()
@@ -343,11 +359,12 @@ class Batch:
 
 def quota_paused(state):
     """One entry per provider whose usage ran out during the batch: the repos it paused and the
-    latest reset seen. A pause is not a failure; this is what the summary says instead."""
+    latest reset seen. A pause is not a failure; this is what the summary says instead. A lane
+    skipped because an earlier lane's limit already gated its provider counts here too."""
     out = {}
     for item in state.get("queue", []):
         q = item.get("quota")
-        if item.get("outcome") != "quota-paused" or not q:
+        if item.get("outcome") not in QUOTA_OUTCOMES or not q:
             continue
         entry = out.setdefault(q.get("provider") or "?", {"provider": q.get("provider"), "role": q.get("role"),
                                                             "repos": [], "reset_epoch": None, "reset_at": None,

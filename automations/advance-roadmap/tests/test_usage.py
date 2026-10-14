@@ -534,6 +534,19 @@ class CliTests(unittest.TestCase):
         result = self.run_usage("pick-orchestrators")
         self.assertEqual((result.returncode, result.stdout.strip()), (2, ""))
 
+    def test_gates_command_lists_every_provider_for_the_role_with_its_reset(self):
+        self.run_usage("record-limit", "--provider", "claude", "--text", "You've hit your session limit · resets in 1h")
+        result = self.run_usage("gates", "--role", "orchestrator")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        out = json.loads(result.stdout)
+        self.assertEqual(out["role"], "orchestrator")
+        self.assertEqual([(g["provider"], g["state"]) for g in out["gates"]],
+                         [("codex", "unknown"), ("claude", "limited")])
+        claude = out["gates"][1]
+        self.assertFalse(claude["available"])
+        self.assertAlmostEqual(claude["reset_epoch"], time.time() + 3600, delta=120)
+        self.assertTrue(claude["reset_at"])
+
     def test_probe_command_reports_missing_data(self):
         result = self.run_usage("probe")
         self.assertEqual(result.returncode, 1)

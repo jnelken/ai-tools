@@ -8,7 +8,7 @@ from result files the agents wrote; nothing here reads the run log.
 
   runrecord.py --root R append --stamp S --status ran|skipped-backoff|skipped-quota|skipped-lock|skipped-unchanged|skipped-superset|aborted
                [--detail TEXT] [--orch-provider P] [--orch-exit N] [--orch-result FILE]
-               [--worker-status FILE] [--worker-result FILE] [--usage-log FILE] [--exit N]
+               [--worker-status FILE] [--worker-result FILE] [--usage-log FILE] [--quota-gates FILE] [--exit N]
   runrecord.py --root R alert        # prints a Slack line when the error streak warrants one
 """
 import argparse
@@ -121,6 +121,21 @@ def quota_info(orch, wstatus, wresult):
     return None
 
 
+def skip_quota_info(gates):
+    """The same shape for a skipped-quota run, from the gates usage.py saw when it skipped
+    (`usage.py gates --role R`). None when no provider in that read was over its gate or limited."""
+    blocked = [g for g in (gates or {}).get("gates") or []
+               if isinstance(g, dict) and g.get("state") in ("over", "limited")]
+    if not blocked:
+        return None
+    resets = [g for g in blocked if g.get("reset_epoch")]
+    first = min(resets, key=lambda g: g["reset_epoch"]) if resets else blocked[0]
+    return {"role": gates.get("role"), "provider": first.get("provider"), "reset_epoch": first.get("reset_epoch"),
+            "reset_at": first.get("reset_at"), "cause": "; ".join(
+                f"{g.get('provider')}: {g.get('reason') or g.get('state')}" for g in blocked),
+            "providers": blocked}
+
+
 def read_reviews(worker_result_path):
     """Step 5b rounds, from the log review.sh writes beside the worker result."""
     if not worker_result_path:
@@ -181,7 +196,8 @@ def cmd_append(a):
         "review_unresolved": (w.get("review") or {}).get("unresolved"),
         "summary": (w.get("summary") or o.get("summary") or "")[:1000],
         "slack_summary": (w.get("slack_summary") or "")[:400] or None,
-        "quota": quota_info(orch, wstatus, wresult) if outcome in QUOTA_OUTCOMES else None,
+        "quota": (quota_info(orch, wstatus, wresult) if outcome in QUOTA_OUTCOMES
+                  else skip_quota_info(load_json(a.quota_gates)) if outcome == "skipped-quota" else None),
         # Tokens this run spent, per (role, review round, model): see lib/tokens.py.
         "tokens": tokens.summarize(a.usage_log),
     }
@@ -260,6 +276,8 @@ def main(argv=None):
     ap.add_argument("--worker-status", default="")
     ap.add_argument("--worker-result", default="")
     ap.add_argument("--usage-log", default="")
+    ap.add_argument("--quota-gates", default="",
+                    help="usage.py gates output saved when the run skipped for quota")
     ap.add_argument("--lane", type=int, default=None)
     ap.add_argument("--expect-pr", action="store_true",
                     help="the worker ran in a Superset workspace, so a ship must name its PR")

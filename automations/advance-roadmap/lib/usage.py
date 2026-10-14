@@ -10,6 +10,7 @@ Usage:
   usage.py pick-orchestrators [--root DIR]        # every eligible planner, in preference order
   usage.py pick-worker-chain [--root DIR]
   usage.py gate --role R --provider P [--root DIR]  # exit 0 under its gate, 3 over it
+  usage.py gates --role R [--root DIR]             # every provider's gate for R, as JSON
   usage.py record-limit --provider P --text T [--scope S] [--out FILE] [--root DIR]
   usage.py detect-limit --file PATH | --text T
   usage.py probe [--provider codex|cursor|all]   # live read, writes nothing
@@ -833,6 +834,20 @@ def cmd_gate(args: argparse.Namespace) -> None:
     sys.exit(0 if gate["available"] else GATED_EXIT)
 
 
+def role_gates(state: dict[str, Any], role: str) -> list[dict[str, Any]]:
+    """Every provider that fills `role`, in preference order, with its gate right now."""
+    out = []
+    for name in ROLE_PROVIDERS[role]:
+        gate = provider_gate(state, name, role)
+        out.append({"provider": name, **gate, "reset_at": epoch_to_iso(gate.get("reset_epoch"))})
+    return out
+
+
+def cmd_gates(args: argparse.Namespace) -> None:
+    """Refresh, then print {"role", "gates": [...]} — what a quota skip records as its cause."""
+    print(json.dumps({"role": args.role, "gates": role_gates(refresh(Path(args.root)), args.role)}))
+
+
 def cmd_pick_orchestrator(args: argparse.Namespace) -> None:
     state = refresh(Path(args.root))
     orch = pick_orchestrator(state)
@@ -900,6 +915,10 @@ def main() -> None:
     p.add_argument("--role", required=True, choices=sorted(ROLE_PROVIDERS))
     p.add_argument("--provider", required=True, choices=["claude", "codex", "cursor"])
     p.set_defaults(func=cmd_gate)
+
+    p = sub.add_parser("gates")
+    p.add_argument("--role", required=True, choices=sorted(ROLE_PROVIDERS))
+    p.set_defaults(func=cmd_gates)
 
     p = sub.add_parser("record-limit")
     p.add_argument("--provider", required=True, choices=["claude", "codex", "cursor"])

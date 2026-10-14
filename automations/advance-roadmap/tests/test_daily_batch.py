@@ -17,7 +17,7 @@ import daily_batch
 
 FAKE_RUN = r'''#!/bin/zsh
 exec "$FAKE_PYTHON" - <<'PY'
-import json, os, time
+import json, os, subprocess, sys, time
 from pathlib import Path
 root = Path(os.environ['ADVANCE_ROADMAP_ROOT'])
 stamp = os.environ['ADVANCE_ROADMAP_STAMP']
@@ -28,6 +28,21 @@ def event(kind):
     with open(root / 'trace.jsonl', 'a') as f:
         f.write(json.dumps({'kind': kind, 'repo': repo, 'thread': thread, 'stamp': stamp,
                             'time': time.time()}) + '\n')
+def skip_quota(detail):
+    # As run.sh's record(): the real runrecord.py, with any gates saved beside the run.
+    gates = run / 'quota-gates.json'
+    subprocess.run([sys.executable, str(root / 'lib/runrecord.py'), '--root', str(root), 'append',
+                    '--stamp', stamp, '--status', 'skipped-quota', '--detail', detail,
+                    *(['--quota-gates', str(gates)] if gates.exists() else [])], check=True)
+if repo in os.environ.get('FAKE_PLANNER_GATED', '').split():
+    # An earlier lane's planner limit already gated every planner: run.sh skips before planning.
+    (run / 'quota-gates.json').write_text(json.dumps({'role': 'orchestrator', 'gates': [
+        {'provider': 'codex', 'available': False, 'state': 'over', 'reason': 'weekly 85%'},
+        {'provider': 'claude', 'available': False, 'state': 'limited', 'reason': 'session limit',
+         'reset_epoch': 1791906600, 'reset_at': '2026-10-13T11:50:00-04:00'}]}))
+    event('quota-skip')
+    skip_quota('no orchestrator available')
+    raise SystemExit(0)
 event('plan-start')
 time.sleep(.15 if repo == 'a' else .05)
 if repo == os.environ.get('FAKE_FAILED_REPO'):
@@ -44,6 +59,7 @@ event('plan-ready')
 while not (run / 'batch-release').exists():
     if (run / 'batch-cancel').exists():
         event('deferred')
+        skip_quota('daily batch deferred before worker launch; pending plan retained')
         raise SystemExit(0)
     time.sleep(.01)
 event('work-start')
@@ -85,10 +101,17 @@ class DailyBatchTest(unittest.TestCase):
         self.code = self.root / 'code'
         self.code.mkdir()
         (self.root / 'lib').mkdir()
-        shutil.copyfile(HERE / 'lib/models.sh', self.root / 'lib/models.sh')
+        for name in ('models.sh', 'runrecord.py', 'tokens.py'):
+            shutil.copyfile(HERE / 'lib' / name, self.root / 'lib' / name)
         (self.root / 'run.sh').write_text(FAKE_RUN)
         (self.root / 'lib/usage.py').write_text(
-            "import os, sys\n"
+            "import json, os, sys\n"
+            "if 'gates' in sys.argv:\n"
+            "    print(json.dumps({'role': sys.argv[-1], 'gates': [\n"
+            "        {'provider': 'cursor', 'available': False, 'state': 'over', 'reason': 'auto pool 96%',\n"
+            "         'reset_epoch': 1792000000, 'reset_at': '2026-10-24T00:00:00-04:00'},\n"
+            "        {'provider': 'codex', 'available': True, 'state': 'ok'}]}))\n"
+            "    raise SystemExit(0)\n"
             "print('' if os.environ.get('FAKE_NO_QUOTA') else "
             "{'pick-worker-chain': 'cursor', 'pick-orchestrator': 'codex'}.get(sys.argv[-1], ''))\n")
         (self.root / 'lib/planapproval.py').write_text(FAKE_APPROVER)
@@ -182,6 +205,41 @@ class DailyBatchTest(unittest.TestCase):
         self.run_batch()
         self.assertEqual([e['kind'] for e in self.events()], ['plan-start', 'plan-ready', 'deferred'])
         self.assertEqual(self.state()['phase'], 'done')
+
+    def test_quota_deferred_plans_are_in_the_quota_summary(self):
+        for name in 'ab':
+            self.repo(name)
+        self.env['FAKE_NO_QUOTA'] = '1'
+        self.run_batch()
+        state = self.state()
+        self.assertEqual([i['outcome'] for i in state['queue']], ['skipped-quota', 'skipped-quota'])
+        self.assertEqual([(q['provider'], q['role'], sorted(q['repos']), q['reset_epoch'])
+                          for q in state['quota_paused']], [('cursor', 'worker', ['a', 'b'], 1792000000)])
+        self.assertIn('cursor out of quota for 2 repo(s)', daily_batch.quota_line(state))
+
+    def test_lanes_gated_by_an_earlier_planner_limit_are_in_the_quota_summary(self):
+        for name in 'abc':
+            self.repo(name)
+        self.env['FAKE_PLANNER_GATED'] = 'b c'
+        self.run_batch()
+        state = self.state()
+        self.assertEqual([(i['repo'], i['outcome']) for i in state['queue']],
+                         [('a', 'shipped'), ('b', 'skipped-quota'), ('c', 'skipped-quota')])
+        self.assertEqual([(q['provider'], q['role'], sorted(q['repos']), q['reset_at'])
+                          for q in state['quota_paused']],
+                         [('claude', 'orchestrator', ['b', 'c'], '2026-10-13T11:50:00-04:00')])
+        self.assertIn('codex: weekly 85%', state['quota_paused'][0]['cause'])
+
+    def test_quota_summary_merges_pauses_and_skips_per_provider(self):
+        q = lambda epoch: {'provider': 'claude', 'role': 'orchestrator', 'reset_epoch': epoch,
+                           'reset_at': f'at-{epoch}', 'cause': 'limit'}
+        state = {'queue': [{'repo': 'a', 'outcome': 'quota-paused', 'quota': q(100)},
+                           {'repo': 'b', 'outcome': 'skipped-quota', 'quota': q(200)},
+                           {'repo': 'c', 'outcome': 'skipped-quota'},
+                           {'repo': 'd', 'outcome': 'error', 'quota': q(300)}]}
+        self.assertEqual(daily_batch.quota_paused(state),
+                         [{'provider': 'claude', 'role': 'orchestrator', 'repos': ['a', 'b'],
+                           'reset_epoch': 200, 'reset_at': 'at-200', 'cause': 'limit'}])
 
     def test_failed_planner_does_not_hold_barrier(self):
         for name in 'ab':

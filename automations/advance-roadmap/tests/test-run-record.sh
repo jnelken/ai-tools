@@ -18,8 +18,17 @@ cp "$HERE/lib/runrecord.py" "$HERE/lib/tokens.py" "$HERE/lib/workspaces.py" "$HE
 for f in ORCHESTRATOR.md SAFETY.md WORKER.md; do echo stub > "$SKILLS/$f"; done
 
 cat > "$ROOT/lib/usage.py" <<'PY'
-import sys
+import json, os, sys
 cmd = sys.argv[-1]
+if "gates" in sys.argv:
+    print(json.dumps({"role": cmd, "gates": [
+        {"provider": "codex", "available": False, "state": "over", "reason": "weekly 85%"},
+        {"provider": "claude", "available": False, "state": "limited", "reason": "session limit",
+         "reset_epoch": 1791906600, "reset_at": "2026-10-13T11:50:00-04:00"}]}))
+    sys.exit(0)
+if os.environ.get("FAKE_NO_PLANNER") and cmd in ("pick-orchestrator", "pick-orchestrators"):
+    print("none")
+    sys.exit(2)
 print({"pick-orchestrator": "codex", "pick-orchestrators": "codex",
        "pick-worker-chain": "cursor"}.get(cmd, ""))
 PY
@@ -202,10 +211,21 @@ for n in {1..200}; do
   sleep .1
 done
 [ -f "$ROOT/runs/$batch_stamp/batch-ready" ] || { echo "FAIL: batch never reached barrier"; exit 1; }
+# daily_batch.py saves the worker gates beside a plan it defers for quota, then cancels it.
+print -r -- '{"role":"worker","gates":[{"provider":"cursor","available":false,"state":"over","reason":"auto pool 96%","reset_epoch":1792000000,"reset_at":"2026-10-24T00:00:00-04:00"}]}' \
+  > "$ROOT/runs/$batch_stamp/quota-gates.json"
 touch "$ROOT/runs/$batch_stamp/batch-cancel"
 wait $batch_pid
 check "quota defers batch worker" "$(last outcome)" skipped-quota
 [ ! -f "$ROOT/runs/$batch_stamp/worker-result.json" ] || { echo "FAIL: canceled batch ran worker"; exit 1; }
+check "a quota deferral names who ran out" "$(last quota | python3 -c 'import ast,sys; q=ast.literal_eval(sys.stdin.read()); print(q["role"], q["provider"], q["reset_epoch"])')" "worker cursor 1792000000"
+
+# No planner under its gate (an earlier lane's limit gated both): a skip that still says who is out.
+FAKE_NO_PLANNER=1 run good file
+check "no planner → skipped-quota"           "$(last outcome)" skipped-quota
+check "the skip names the planner that is out" "$(last quota | python3 -c 'import ast,sys; q=ast.literal_eval(sys.stdin.read()); print(q["role"], q["provider"], q["reset_at"])')" \
+  "orchestrator claude 2026-10-13T11:50:00-04:00"
+check "a quota skip does not alert"          "$(python3 "$ROOT/lib/runrecord.py" --root "$ROOT" alert)" ""
 
 SUPERSET=1 run good ws
 check "workspace run → shipped"               "$(last outcome)" shipped

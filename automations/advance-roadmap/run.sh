@@ -141,6 +141,7 @@ record() {
   [ -n "$LANE" ] && extra+=(--lane "$LANE")
   [ -f "$RUN_DIR/workspace.json" ] && extra+=(--expect-pr)  # a workspace run must ship a PR
   [ -n "${orch_rc:-}" ] && extra+=(--orch-exit "$orch_rc")
+  [ -f "$RUN_DIR/quota-gates.json" ] && extra+=(--quota-gates "$RUN_DIR/quota-gates.json")
   python3 "$RECORD_PY" --root "$ROOT" append --stamp "$STAMP" --status "$1" \
     --detail "${2:-}" "${extra[@]}" \
     --orch-provider "$ORCH" \
@@ -246,6 +247,9 @@ orch_pick_rc=$?
 if [ "$orch_pick_rc" -ne 0 ] || [ -z "$ORCH" ] || [ "$ORCH" = "none" ]; then
   echo "=== advance-roadmap $STAMP: skipping — no orchestrator available ===" >> "$LOG"
   ORCH=""
+  # Who is out and until when, so a batch's quota summary counts this repo too.
+  python3 "$USAGE_PY" --root "$ROOT" gates --role orchestrator > "$RUN_DIR/quota-gates.json" 2>/dev/null \
+    || rm -f "$RUN_DIR/quota-gates.json"
   record skipped-quota "no orchestrator available"
   ln -sf "$LOG" "$LOGDIR/latest.log"
   regen_dashboard
