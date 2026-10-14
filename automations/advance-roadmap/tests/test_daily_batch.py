@@ -225,10 +225,10 @@ class DailyBatchTest(unittest.TestCase):
         state = self.state()
         self.assertEqual([(i['repo'], i['outcome']) for i in state['queue']],
                          [('a', 'shipped'), ('b', 'skipped-quota'), ('c', 'skipped-quota')])
-        self.assertEqual([(q['provider'], q['role'], sorted(q['repos']), q['reset_at'])
+        self.assertEqual([(q['provider'], q['role'], sorted(q['repos']), q['reset_at'], q['cause'])
                           for q in state['quota_paused']],
-                         [('claude', 'orchestrator', ['b', 'c'], '2026-10-13T11:50:00-04:00')])
-        self.assertIn('codex: weekly 85%', state['quota_paused'][0]['cause'])
+                         [('codex', 'orchestrator', ['b', 'c'], None, 'weekly 85%'),
+                          ('claude', 'orchestrator', ['b', 'c'], '2026-10-13T11:50:00-04:00', 'session limit')])
 
     def test_quota_summary_merges_pauses_and_skips_per_provider(self):
         q = lambda epoch: {'provider': 'claude', 'role': 'orchestrator', 'reset_epoch': epoch,
@@ -240,6 +240,20 @@ class DailyBatchTest(unittest.TestCase):
         self.assertEqual(daily_batch.quota_paused(state),
                          [{'provider': 'claude', 'role': 'orchestrator', 'repos': ['a', 'b'],
                            'reset_epoch': 200, 'reset_at': 'at-200', 'cause': 'limit'}])
+
+    def test_quota_summary_counts_every_listed_provider_and_each_repo_once(self):
+        # Two threads of repo a, each stopped with both workers out: one repo per provider.
+        row = {'role': 'worker', 'provider': 'codex', 'reset_epoch': 100, 'cause': 'joined', 'providers': [
+            {'provider': 'cursor', 'state': 'over', 'reason': 'auto pool 96%', 'reset_epoch': 500, 'reset_at': 'r500'},
+            {'provider': 'codex', 'state': 'limited', 'cause': 'usage limit', 'reset_epoch': 100, 'reset_at': 'r100'}]}
+        state = {'queue': [{'repo': 'a', 'thread': 1, 'outcome': 'quota-paused', 'quota': row},
+                           {'repo': 'a', 'thread': 2, 'outcome': 'skipped-quota', 'quota': row}]}
+        summary = daily_batch.quota_paused(state)
+        self.assertEqual([(q['provider'], q['repos'], q['reset_at'], q['cause']) for q in summary],
+                         [('cursor', ['a'], 'r500', 'auto pool 96%'), ('codex', ['a'], 'r100', 'usage limit')])
+        self.assertEqual(daily_batch.quota_line({'quota_paused': summary}),
+                         'cursor out of quota for 1 repo(s), resets r500; '
+                         'codex out of quota for 1 repo(s), resets r100.')
 
     def test_failed_planner_does_not_hold_barrier(self):
         for name in 'ab':

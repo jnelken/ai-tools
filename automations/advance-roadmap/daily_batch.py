@@ -360,18 +360,23 @@ class Batch:
 def quota_paused(state):
     """One entry per provider whose usage ran out during the batch: the repos it paused and the
     latest reset seen. A pause is not a failure; this is what the summary says instead. A lane
-    skipped because an earlier lane's limit already gated its provider counts here too."""
+    skipped because an earlier lane's limit already gated its provider counts here too, and so
+    does every provider a row lists as out, not only the one it names first."""
     out = {}
     for item in state.get("queue", []):
         q = item.get("quota")
         if item.get("outcome") not in QUOTA_OUTCOMES or not q:
             continue
-        entry = out.setdefault(q.get("provider") or "?", {"provider": q.get("provider"), "role": q.get("role"),
-                                                            "repos": [], "reset_epoch": None, "reset_at": None,
-                                                            "cause": q.get("cause")})
-        entry["repos"].append(item["repo"])
-        if q.get("reset_epoch") and (entry["reset_epoch"] or 0) < q["reset_epoch"]:
-            entry.update(reset_epoch=q["reset_epoch"], reset_at=q.get("reset_at"))
+        listed = [p for p in q.get("providers") or [] if isinstance(p, dict)]
+        for p in listed or [q]:
+            cause = (p.get("cause") or p.get("reason")) if listed else q.get("cause")
+            entry = out.setdefault(p.get("provider") or "?", {
+                "provider": p.get("provider"), "role": q.get("role"), "repos": [],
+                "reset_epoch": None, "reset_at": None, "cause": cause})
+            if item["repo"] not in entry["repos"]:
+                entry["repos"].append(item["repo"])
+            if p.get("reset_epoch") and (entry["reset_epoch"] or 0) < p["reset_epoch"]:
+                entry.update(reset_epoch=p["reset_epoch"], reset_at=p.get("reset_at"))
     return list(out.values())
 
 
