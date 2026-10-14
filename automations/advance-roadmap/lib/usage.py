@@ -740,15 +740,21 @@ def parse_reset_epoch_from_text(text: str, observed: float, tz: Any = None) -> i
                 zone = ZoneInfo(zone_name)
             except (ZoneInfoNotFoundError, ValueError):
                 zone = tz
-        # No zone: naive local datetimes, so .timestamp() applies the local DST rules of the
-        # target date rather than the offset in force at `observed`.
-        day = datetime.fromtimestamp(observed, zone).date()
-        at = datetime(day.year, day.month, day.day, hour, minute, tzinfo=zone)
-        if at.timestamp() <= observed:
-            day = day + timedelta(days=1)
-            at = datetime(day.year, day.month, day.day, hour, minute, tzinfo=zone)
-        return int(at.timestamp())
+        today = datetime.fromtimestamp(observed, zone).date()
+        later = [t for day in (today, today + timedelta(days=1))
+                 for t in _wall_clock_epochs(day, hour, minute, zone) if t > observed]
+        return min(later) if later else None
     return None
+
+
+def _wall_clock_epochs(day: Any, hour: int, minute: int, zone: Any) -> list[int]:
+    """Every instant `day hour:minute` names in `zone` (None: local time, with the target date's
+    DST rules). Two in the repeated fall-back hour; in the skipped spring-forward hour, the one
+    the clock reads after the jump (2:30 → 3:30)."""
+    stamps = [int(datetime(day.year, day.month, day.day, hour, minute, fold=fold, tzinfo=zone).timestamp())
+              for fold in (0, 1)]
+    real = sorted({t for t in stamps if datetime.fromtimestamp(t, zone).timetuple()[3:5] == (hour, minute)})
+    return real or [max(stamps)]
 
 
 def record_limit(

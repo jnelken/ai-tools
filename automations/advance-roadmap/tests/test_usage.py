@@ -378,6 +378,32 @@ class ResetParseTests(unittest.TestCase):
         got = self.parse_in_local_ny("Resets 3pm.", self.at(2026, 3, 7, 16, 0))
         self.assertEqual(got, datetime(2026, 3, 8, 15, 0, tzinfo=self.NY))
 
+    def parse_both_ways(self, text, observed):
+        """The same banner read with an explicit New York zone and with local time forced to it."""
+        explicit = self.parse(text + " (America/New_York)", observed)
+        return explicit, self.parse_in_local_ny(text, observed)
+
+    def test_repeated_fall_back_hour_resets_the_same_night(self):
+        # Nov 1 2026, 01:10 EST — the second pass through 1am. 1:30am EDT is past; 1:30am EST is not.
+        observed = datetime(2026, 11, 1, 1, 10, fold=1, tzinfo=self.NY).timestamp()
+        want = datetime(2026, 11, 1, 1, 30, fold=1, tzinfo=self.NY).timestamp()
+        for got in self.parse_both_ways("resets 1:30am", observed):
+            self.assertEqual(got.timestamp(), want)
+        # On the first pass (EDT) the earlier 1:30 is next.
+        observed = datetime(2026, 11, 1, 1, 10, fold=0, tzinfo=self.NY).timestamp()
+        want = datetime(2026, 11, 1, 1, 30, fold=0, tzinfo=self.NY).timestamp()
+        for got in self.parse_both_ways("resets 1:30am", observed):
+            self.assertEqual(got.timestamp(), want)
+
+    def test_skipped_spring_forward_hour_normalizes_forward(self):
+        # Mar 8 2026: 2:30am never happens in New York; the clock reads 3:30 EDT then.
+        observed = self.at(2026, 3, 8, 1, 0)
+        for got in self.parse_both_ways("resets 2:30am", observed):
+            self.assertEqual(got, datetime(2026, 3, 8, 3, 30, tzinfo=self.NY))
+        # Already past the jump: tomorrow's real 2:30.
+        for got in self.parse_both_ways("resets 2:30am", self.at(2026, 3, 8, 3, 45)):
+            self.assertEqual(got, datetime(2026, 3, 9, 2, 30, tzinfo=self.NY))
+
     def test_unknown_zone_falls_back_to_the_given_one(self):
         got = self.parse("resets 3pm (Mars/Olympus)", self.at(2026, 10, 13, 9, 0), self.NY)
         self.assertEqual(got, datetime(2026, 10, 13, 15, 0, tzinfo=self.NY))
