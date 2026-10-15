@@ -7,6 +7,8 @@ set -eu
 HERE="$(cd "$(dirname "$0")/.." && pwd)"
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/advance-roadmap-review-test.XXXXXX")"
 trap 'rm -rf "$TMP"' EXIT INT TERM
+# Fixture commits must not depend on the user's signing setup or hooks.
+export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
 
 ROOT="$TMP/root"; BIN="$TMP/bin"; REPO="$TMP/repo"; LOG="$TMP/reviews.jsonl"
 mkdir -p "$ROOT/lib" "$BIN"

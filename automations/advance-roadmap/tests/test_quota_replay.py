@@ -366,12 +366,14 @@ exec(compile(open(__file__).read(), __file__, "exec"))
         (self.root / "review.sh").symlink_to(HERE / "review.sh")
         repo = self.dir / "reviewed"
         git = ["git", "-c", "user.name=t", "-c", "user.email=t@t", "-C", str(repo)]
-        subprocess.run(["git", "init", "-q", "-b", "main", str(repo)], check=True)
-        subprocess.run([*git, "commit", "-q", "--allow-empty", "-m", "base"], check=True)
-        subprocess.run([*git, "checkout", "-q", "-b", "roadmap/x"], check=True)
+        # Fixture commits must not depend on the user's signing setup or hooks.
+        hermetic = {**os.environ, "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"}
+        subprocess.run(["git", "init", "-q", "-b", "main", str(repo)], env=hermetic, check=True)
+        subprocess.run([*git, "commit", "-q", "--allow-empty", "-m", "base"], env=hermetic, check=True)
+        subprocess.run([*git, "checkout", "-q", "-b", "roadmap/x"], env=hermetic, check=True)
         (repo / "x.py").write_text("x = 1\n")
-        subprocess.run([*git, "add", "x.py"], check=True)
-        subprocess.run([*git, "commit", "-q", "-m", "feat"], check=True)
+        subprocess.run([*git, "add", "x.py"], env=hermetic, check=True)
+        subprocess.run([*git, "commit", "-q", "-m", "feat"], env=hermetic, check=True)
         env = self.env(FAKE_CODEX="limit")
         run = self.root / "runs" / self.stamp
         run.mkdir(parents=True)
@@ -385,6 +387,13 @@ exec(compile(open(__file__).read(), __file__, "exec"))
         rec = self.record()
         self.assertEqual([h["provider"] for h in rec["review_limits"]], ["codex"], rec)
         return rec["review_limits"][0]
+
+    def test_reviewer_fixture_ignores_the_users_commit_signing(self):
+        hostile = self.dir / "hostile.gitconfig"
+        hostile.write_text("[commit]\n\tgpgsign = true\n[tag]\n\tgpgsign = true\n"
+                           "[gpg]\n\tprogram = false\n[gpg \"ssh\"]\n\tprogram = false\n")
+        with mock.patch.dict(os.environ, {"GIT_CONFIG_GLOBAL": str(hostile)}):
+            self.assertEqual(self.reviewer_row()["provider"], "codex")
 
     def batch_skip_row(self):
         self.env()

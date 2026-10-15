@@ -10,6 +10,8 @@
 # blocks. Write this file with the Write tool, not a shell heredoc.
 HOOK="${1:-$(cd "$(dirname "$0")/.." && pwd -P)/block-push-to-main.sh}"
 pass=0; fail=0
+# Fixture commits must not depend on the user's signing setup, hooks, or aliases.
+export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
 
 # The hook finds its denylist as a sibling of itself. To exercise denylist mode
 # without touching the real one, run the hook through a shim directory that has
