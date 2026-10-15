@@ -28,6 +28,9 @@ from pathlib import Path
 
 import supervisor as shared
 
+sys.path.insert(0, str(shared.HERE / "lib"))
+import usage  # noqa: E402
+
 ROOT = shared.ROOT
 POLL_S = float(os.environ.get("ADVANCE_ROADMAP_BATCH_POLL_S", "1"))
 PLAN_TIMEOUT_S = float(os.environ.get("ADVANCE_ROADMAP_PLAN_TIMEOUT_S", "1800"))
@@ -37,6 +40,8 @@ DEFAULT_THREADS_PER_REPO = 2
 # Two workers of one repo creating Superset workspaces in the same second race the project import.
 RELEASE_GAP_S = float(os.environ.get("ADVANCE_ROADMAP_THREAD_RELEASE_GAP_S", "20"))
 APPROVAL_TIMEOUT_S = float(os.environ.get("ADVANCE_ROADMAP_APPROVAL_TIMEOUT_S", "1800"))
+# Outcomes whose row carries a `quota` field: who ran out and when it resets.
+QUOTA_OUTCOMES = {"quota-paused", "skipped-quota"}
 
 
 def save(path, value):
@@ -155,7 +160,9 @@ class Batch:
             if proc.poll() is not None:
                 row = shared.run_records({item["stamp"]}).get(item["stamp"], {})
                 item.update(status="finished", outcome=row.get("outcome", "unrecorded"),
-                            pr_url=row.get("pr_url"), exit_code=proc.returncode)
+                            pr_url=row.get("pr_url"), exit_code=proc.returncode, detail=row.get("detail"))
+                if row.get("quota"):
+                    item["quota"] = row["quota"]  # who ran out, when it resets, the CLI's words
                 continue
             run = ROOT / "runs" / item["stamp"]
             if item["status"] == "planning" and (run / "batch-ready").exists():
@@ -250,6 +257,9 @@ class Batch:
                                       "verdict": (decisions.get(o["stamp"]) or {}).get("verdict")}
                                      for o in items if o is not item]}
                 save(ROOT / "runs" / item["stamp"] / "batch-approval.json", note)
+                if verdict == "defer" and (result.get("quota") or {}).get("provider"):
+                    # The approver ran out of quota: this thread's skipped-quota row says who and until when.
+                    save(ROOT / "runs" / item["stamp"] / "quota-gates.json", result["quota"])
                 if verdict == "defer":
                     self.cancel(item, f'plan approval: {d.get("reason") or "deferred"}')
                 elif verdict == "serialize":
@@ -276,10 +286,27 @@ class Batch:
                 return False
         return True
 
-    def defer_ready(self, reason):
+    def defer_ready(self, reason, quota=None):
+        """Cancel every saved plan; `quota` (usage.py quota-record output) goes beside each one so
+        its skipped-quota record says which provider ran out and when it resets."""
         for item in self.state["queue"]:
             if item["status"] == "ready":
+                if quota:
+                    (ROOT / "runs" / item["stamp"] / "quota-gates.json").write_text(quota)
                 self.cancel(item, reason)
+
+    def worker_quota(self):
+        try:
+            out = shared.py("usage.py", "--root", str(ROOT), "quota-record", "--role", "worker", timeout=120)
+            if out.returncode == 0 and isinstance(json.loads(out.stdout), dict):
+                return out.stdout
+        except (OSError, ValueError, subprocess.TimeoutExpired):
+            pass
+        # quota-record refreshes first; the gates the wave just read are still saved.
+        try:
+            return json.dumps(usage.saved_quota_record(ROOT, "worker"))
+        except (OSError, ValueError, TypeError, KeyError):
+            return None
 
     def run(self):
         self.write()
@@ -315,7 +342,8 @@ class Batch:
                 shared.py("usage.py", "--root", str(ROOT), "refresh", timeout=120)
                 providers = shared.py("usage.py", "--root", str(ROOT), "pick-worker-chain")
                 if providers.returncode or providers.stdout.strip() in {"", "none"}:
-                    self.defer_ready("no worker quota available; saved plans wait for the next daily batch")
+                    self.defer_ready("no worker quota available; saved plans wait for the next daily batch",
+                                     self.worker_quota())
                 else:
                     for item in chosen:
                         (ROOT / "runs" / item["stamp"] / "batch-release").touch()
@@ -324,6 +352,7 @@ class Batch:
             self.write()
             time.sleep(POLL_S)
         self.state["phase"] = "done"
+        self.state["quota_paused"] = quota_paused(self.state)
         self.write()
         self.post_summary()
         return 0
@@ -336,6 +365,38 @@ class Batch:
         self.state["summary_posted"] = posted
         self.write()
         return posted
+
+
+def quota_paused(state):
+    """One entry per provider whose usage ran out during the batch: the repos it paused and the
+    latest reset seen. A pause is not a failure; this is what the summary says instead. A lane
+    skipped because an earlier lane's limit already gated its provider counts here too, and so
+    does every provider a row lists as out, not only the one it names first. A row lists every
+    provider in its role; one that was still under its gate is not out."""
+    out = {}
+    for item in state.get("queue", []):
+        q = item.get("quota")
+        if item.get("outcome") not in QUOTA_OUTCOMES or not q:
+            continue
+        listed = [p for p in q.get("providers") or []
+                  if isinstance(p, dict) and p.get("state", "limited") in ("over", "limited")]
+        for p in listed or [q]:
+            cause = (p.get("cause") or p.get("reason")) if listed else q.get("cause")
+            entry = out.setdefault(p.get("provider") or "?", {
+                "provider": p.get("provider"), "role": q.get("role"), "repos": [],
+                "reset_epoch": None, "reset_at": None, "cause": cause})
+            if item["repo"] not in entry["repos"]:
+                entry["repos"].append(item["repo"])
+            if p.get("reset_epoch") and (entry["reset_epoch"] or 0) < p["reset_epoch"]:
+                entry.update(reset_epoch=p["reset_epoch"], reset_at=p.get("reset_at"))
+    return list(out.values())
+
+
+def quota_line(state):
+    parts = [f'{q["provider"] or "?"} out of quota for {len(q["repos"])} repo(s)'
+             + (f', resets {q["reset_at"]}' if q.get("reset_at") else "")
+             for q in state.get("quota_paused") or []]
+    return ("; ".join(parts) + ".") if parts else ""
 
 
 def slackagent_script():
@@ -384,7 +445,8 @@ def post_slack_summary(directory):
     if not url:
         return False
     state = shared.read_json(directory / "batch.json") or {}
-    text = text or f'advance-roadmap batch {state.get("date")}: {state.get("phase")}'
+    text = text or " ".join(filter(None, [f'advance-roadmap batch {state.get("date")}: {state.get("phase")}.',
+                                          quota_line(state)]))
     try:
         import urllib.request
         request = urllib.request.Request(url, data=json.dumps({"text": text}).encode(),

@@ -20,6 +20,9 @@ import sys
 import tempfile
 from pathlib import Path
 
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+from usage import ROLE_PROVIDERS, limit_banner, limit_hit, read_attempts, saved_quota_record  # noqa: E402
+
 SEVERITY = {"approve": 0, "serialize": 1, "defer": 2}
 FENCE = "PLAN_APPROVAL_JSON"
 
@@ -170,7 +173,9 @@ def run_codex(prompt, code_dir):
             [codex, "exec", "-o", str(last), "-m", model, "-c", "model_reasoning_effort=high",
              "-s", "read-only", "-C", code_dir, "--add-dir", code_dir, "--skip-git-repo-check", prompt],
             capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=1500)
-        return (last.read_text(errors="replace") if last.exists() else "") or proc.stdout
+        # Only the -o file is the answer: stdout echoes the prompt and PLAN_APPROVAL.md's examples.
+        answer = last.read_text(errors="replace") if last.exists() else ""
+        return answer, f"{proc.stdout}\n{proc.stderr}"
 
 
 def run_claude(prompt, code_dir):
@@ -181,45 +186,99 @@ def run_claude(prompt, code_dir):
          "--permission-prompts", "none", "--disallowedTools", "Edit,Write,NotebookEdit",
          "--add-dir", code_dir, "--output-format", "text"],
         capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=1500)
-    return proc.stdout
+    return proc.stdout, proc.stderr
 
 
+# Each runner returns (final answer, everything else it printed). The fence is read from the
+# answer only; a limit banner can be in either, and the CLIs often print it to stderr alone.
 RUNNERS = {"codex": run_codex, "claude": run_claude}
 
 
-def provider_order(root):
-    """Codex first, Claude only as the fallback, narrowed by what usage.py says is available."""
-    pick = ""
+def usage_cli(root, *args):
+    return subprocess.run([sys.executable, str(Path(root) / "lib" / "usage.py"), "--root", str(root), *args],
+                          capture_output=True, text=True, timeout=120, stdin=subprocess.DEVNULL)
+
+
+def provider_order():
+    """Codex first, Claude only as the fallback. Every one is listed: whether it is under its gate
+    is read right before it is tried, since a gate can open or close while the one before it runs."""
+    return [n for n in ROLE_PROVIDERS["approver"] if n in RUNNERS]
+
+
+def still_under_gate(root, name):
+    """Exit 3 is the only "over its gate"; a usage.py failure is no reading and never blocks."""
     try:
-        pick = subprocess.run([sys.executable, str(Path(root) / "lib" / "usage.py"), "--root", str(root),
-                               "pick-orchestrator"], capture_output=True, text=True, timeout=120,
-                              stdin=subprocess.DEVNULL).stdout.strip()
+        return usage_cli(root, "gate", "--role", "approver", "--provider", name).returncode != 3
     except (OSError, subprocess.SubprocessError):
-        pass
-    if pick == "claude":
-        return ["claude", "codex"]
-    if pick == "codex":
-        return ["codex", "claude"]
-    return []
+        return True
+
+
+def quota_record(root, hits, primary):
+    """`usage.py quota-record --role approver`: every approver provider, with the limits hit here
+    (`hits`: (provider, hit file)). When that fails, the same record from the gates as last saved.
+    None when nobody is out."""
+    specs = [f"{name}={path}" for name, path in hits]
+    args = [a for spec in specs for a in ("--hit", spec)]
+    if primary:
+        args += ["--primary", primary]
+    try:
+        record = json.loads(usage_cli(root, "quota-record", "--role", "approver", *args).stdout)
+    except (OSError, subprocess.SubprocessError, ValueError, TypeError):
+        record = None
+    if not isinstance(record, dict):
+        try:
+            record = saved_quota_record(Path(root), "approver", read_attempts(None, specs), primary)
+        except (OSError, ValueError, TypeError, KeyError):
+            return None
+    return record if isinstance(record, dict) and record.get("provider") else None
 
 
 def approve(root, request, doc, code_dir, runners=None, providers=None):
+    with tempfile.TemporaryDirectory() as tmp:
+        return _approve(root, request, doc, code_dir, runners, providers, Path(tmp))
+
+
+def _approve(root, request, doc, code_dir, runners, providers, tmp):
     runners = runners or RUNNERS
-    providers = providers if providers is not None else provider_order(root)
+    providers = providers if providers is not None else provider_order()
     prompt = build_prompt(request, doc, str(Path(code_dir) / request["repo"]))
-    model, error = None, "no orchestrator provider is available"
+    model, error = None, "no orchestrator provider is under its usage gate"
+    hits, gated = [], False
     for name in providers:
+        if not still_under_gate(root, name):
+            error = f"{error}; {name}: over its usage gate"
+            gated = True
+            continue
         try:
-            model = extract_fence(runners[name](prompt, code_dir))
+            answer, log = runners[name](prompt, code_dir)
         except (OSError, subprocess.SubprocessError) as exc:
             model, error = None, f"{name}: {exc}"
             continue
-        if model:
+        model = extract_fence(answer)
+        if isinstance(model, dict) and model:
             break
+        model = None
+        banner = limit_banner(answer) or limit_banner(log)
+        if banner:
+            # Saved before the shared usage file is touched: the quota record keeps the banner and
+            # its reset even if that update fails. Then gate this provider for every other role too.
+            hit = tmp / f"limit-{name}.json"
+            hit.write_text(json.dumps(limit_hit(name, banner, "approver")))
+            try:
+                usage_cli(root, "record-limit", "--provider", name, "--text", banner, "--scope", "approver")
+            except (OSError, subprocess.SubprocessError):
+                pass
+            hits.append((name, hit))
+            error = f"{name}: {banner}"
+            continue
         error = f"{name}: no {FENCE} fence in its answer"
     result = combine(request, model)
     if model is None:
         result["error"] = error
+        if hits or gated:
+            quota = quota_record(root, hits, hits[-1][0] if hits else None)
+            if quota:
+                result["quota"] = quota
     return result
 
 

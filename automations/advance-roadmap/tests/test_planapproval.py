@@ -1,6 +1,7 @@
 """The plan approver's model configuration, mechanical checks and ruling logic, with no live model."""
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -127,12 +128,162 @@ class Approve(unittest.TestCase):
         req = request(plan("1", 1, ["a"]), plan("2", 2, ["b"]))
         ruling = {"decisions": [{"stamp": "2", "verdict": "approve", "reason": "disjoint"}]}
         calls = []
-        runners = {"codex": lambda prompt, code: calls.append("codex") or "no fence here",
-                   "claude": lambda prompt, code: calls.append("claude") or self.fence(ruling)}
+        runners = {"codex": lambda prompt, code: (calls.append("codex") or "no fence here", ""),
+                   "claude": lambda prompt, code: (calls.append("claude") or self.fence(ruling), "")}
         out = pa.approve("/nowhere", req, "DOC.md", "/code", runners=runners, providers=["codex", "claude"])
         self.assertEqual(calls, ["codex", "claude"])
         self.assertEqual(out["decisions"][1]["verdict"], "approve")
         self.assertNotIn("error", out)
+
+    def test_limit_banner_is_recorded_and_fails_over(self):
+        req = request(plan("1", 1, ["a"]), plan("2", 2, ["b"]))
+        ruling = {"decisions": [{"stamp": "2", "verdict": "approve", "reason": "disjoint"}]}
+        runners = {"codex": lambda prompt, code: ("You've hit your usage limit. Try again at 5:00 PM.\n", ""),
+                   "claude": lambda prompt, code: (self.fence(ruling), "")}
+        with mock.patch.object(pa, "usage_cli", return_value=mock.Mock(returncode=0)) as usage:
+            out = pa.approve("/root", req, "DOC.md", "/code", runners=runners, providers=["codex", "claude"])
+        args = next(c.args for c in usage.call_args_list if c.args[1] == "record-limit")
+        self.assertEqual(args[:4], ("/root", "record-limit", "--provider", "codex"))
+        self.assertIn("approver", args)
+        self.assertEqual(out["decisions"][1]["verdict"], "approve")
+
+    def test_stderr_only_limit_banner_is_recorded_and_fails_over(self):
+        # The real runners, with CLIs that print the banner to stderr alone and answer nothing.
+        req = request(plan("1", 1, ["a"]), plan("2", 2, ["b"]))
+        banner = "You've hit your usage limit. Try again at 5:00 PM."
+        with tempfile.TemporaryDirectory() as tmp:
+            for name in ("codex", "claude"):
+                cli = Path(tmp) / name
+                cli.write_text(f"#!/bin/sh\necho \"{banner}\" >&2\nexit 1\n")
+                cli.chmod(0o755)
+            env = {"ADVANCE_ROADMAP_CODEX_BIN": str(Path(tmp) / "codex"),
+                   "ADVANCE_ROADMAP_CLAUDE_BIN": str(Path(tmp) / "claude")}
+            with mock.patch.dict(os.environ, env), \
+                    mock.patch.object(pa, "usage_cli", side_effect=self.gates(set())) as usage:
+                out = pa.approve("/root", req, "DOC.md", "/code", providers=["codex", "claude"])
+        recorded = [c.args[3] for c in usage.call_args_list if c.args[1] == "record-limit"]
+        self.assertEqual(recorded, ["codex", "claude"])
+        self.assertTrue(all(banner in c.args for c in usage.call_args_list if c.args[1] == "record-limit"))
+        self.assertEqual(out["error"], f"claude: {banner}")
+        self.assertEqual(out["decisions"][1]["verdict"], "defer")
+
+    def test_codex_ruling_comes_only_from_its_final_answer_file(self):
+        # The real Codex runner, with a CLI that echoes PLAN_APPROVAL.md's valid example ruling to
+        # stdout. Without an -o answer that echo is no ruling; a quota banner after it is a limit.
+        req = request(plan("1", 1, ["a"]), plan("2", 2, ["b"]))
+        echoed = self.fence({"decisions": [{"stamp": "2", "verdict": "approve", "reason": "doc example"}]})
+        final = self.fence({"decisions": [{"stamp": "2", "verdict": "serialize", "reason": "real answer"}]})
+        banner = "You've hit your usage limit. Try again at 5:00 PM."
+        script = ("#!/usr/bin/env python3\nimport os, sys\na = sys.argv[1:]\n"
+                  f"print({echoed!r})\n"
+                  "if os.environ.get('FAKE_FINAL'):\n"
+                  "    open(a[a.index('-o') + 1], 'w').write(os.environ['FAKE_FINAL'])\n"
+                  "else:\n"
+                  f"    print({banner!r}); sys.exit(1)\n")
+        with tempfile.TemporaryDirectory() as tmp:
+            cli = Path(tmp) / "codex"
+            cli.write_text(script)
+            cli.chmod(0o755)
+            for final_answer, verdict, reason in (("", "defer", None), (final, "serialize", "real answer")):
+                with self.subTest(final_answer=bool(final_answer)), \
+                        mock.patch.dict(os.environ, {"ADVANCE_ROADMAP_CODEX_BIN": str(cli),
+                                                     "FAKE_FINAL": final_answer}), \
+                        mock.patch.object(pa, "usage_cli", side_effect=self.gates(set())) as usage:
+                    out = pa.approve("/root", req, "DOC.md", "/code", providers=["codex"])
+                    self.assertEqual(out["decisions"][1]["verdict"], verdict)
+                    recorded = [c.args[3] for c in usage.call_args_list if c.args[1] == "record-limit"]
+                    if reason:
+                        self.assertEqual(out["decisions"][1]["reason"], reason)
+                        self.assertNotIn("error", out)
+                        self.assertEqual(recorded, [])
+                    else:
+                        self.assertEqual(out["error"], f"codex: {banner}")
+                        self.assertEqual(recorded, ["codex"])
+
+    def test_fence_is_read_from_the_answer_not_the_log(self):
+        req = request(plan("1", 1, ["a"]), plan("2", 2, ["b"]))
+        runners = {"codex": lambda prompt, code: ("no fence here", self.fence({"decisions": []}))}
+        with mock.patch.object(pa, "usage_cli", side_effect=self.gates(set())):
+            out = pa.approve("/root", req, "DOC.md", "/code", runners=runners, providers=["codex"])
+        self.assertIn("codex: no PLAN_APPROVAL_JSON fence", out["error"])
+
+    @staticmethod
+    def gates(over):
+        """A usage_cli stand-in whose `gate` exits 3 for each provider in `over` at call time."""
+        def cli(root, *args):
+            if args[0] == "gate":
+                return mock.Mock(returncode=3 if args[-1] in over else 0)
+            return mock.Mock(returncode=0, stdout="")
+        return cli
+
+    def test_fallback_gated_during_the_first_attempt_is_never_called(self):
+        req = request(plan("1", 1, ["a"]), plan("2", 2, ["b"]))
+        calls, over = [], set()
+        runners = {"codex": lambda prompt, code: (calls.append("codex") or over.add("claude") or "no fence here", ""),
+                   "claude": lambda prompt, code: (calls.append("claude") or self.fence({"decisions": []}), "")}
+        with mock.patch.object(pa, "usage_cli", side_effect=self.gates(over)) as usage:
+            out = pa.approve("/root", req, "DOC.md", "/code", runners=runners, providers=["codex", "claude"])
+        self.assertEqual(calls, ["codex"])
+        self.assertEqual([c.args for c in usage.call_args_list if c.args[1] == "gate"][-1],
+                         ("/root", "gate", "--role", "approver", "--provider", "claude"))
+        self.assertEqual(out["decisions"][1]["verdict"], "defer")
+        self.assertIn("claude: over its usage gate", out["error"])
+        self.assertIn("codex: no", out["error"])
+
+    def test_empty_ruling_then_gated_fallback_keeps_error_and_quota(self):
+        req = request(plan("1", 1, ["a"]), plan("2", 2, ["b"]))
+        quota = {"provider": "claude", "reset_at": "2026-10-15T17:00:00Z"}
+        for empty in ({}, [], "approve"):
+            with self.subTest(fence=empty):
+                runners = {"codex": lambda prompt, code: (self.fence(empty), "")}
+                with mock.patch.object(pa, "usage_cli", side_effect=self.gates({"claude"})), \
+                        mock.patch.object(pa, "quota_record", return_value=quota) as record:
+                    out = pa.approve("/root", req, "DOC.md", "/code", runners=runners,
+                                     providers=["codex", "claude"])
+                self.assertEqual(out["decisions"][1]["verdict"], "defer")
+                self.assertIn("claude: over its usage gate", out["error"])
+                self.assertEqual(out["quota"], quota)
+                record.assert_called_once_with("/root", [], None)
+
+    def test_fallback_whose_gate_reopens_during_the_first_attempt_is_tried(self):
+        # Claude is over its gate when the approval starts and resets while Codex runs: the
+        # default order still lists it, and its gate is read only when its turn comes.
+        req = request(plan("1", 1, ["a"]), plan("2", 2, ["b"]))
+        ruling = {"decisions": [{"stamp": "2", "verdict": "approve", "reason": "disjoint"}]}
+        calls, over = [], {"claude"}
+        runners = {"codex": lambda prompt, code: (calls.append("codex") or over.discard("claude") or "no fence", ""),
+                   "claude": lambda prompt, code: (calls.append("claude") or self.fence(ruling), "")}
+        with mock.patch.object(pa, "usage_cli", side_effect=self.gates(over)), \
+                mock.patch.dict(pa.RUNNERS, runners):
+            out = pa.approve("/root", req, "DOC.md", "/code")
+        self.assertEqual(calls, ["codex", "claude"])
+        self.assertEqual(out["decisions"][1]["verdict"], "approve")
+        self.assertNotIn("error", out)
+
+    def test_first_provider_over_its_gate_is_skipped_not_called(self):
+        req = request(plan("1", 1, ["a"]), plan("2", 2, ["b"]))
+        ruling = {"decisions": [{"stamp": "2", "verdict": "approve", "reason": "disjoint"}]}
+        calls = []
+        runners = {"codex": lambda prompt, code: (calls.append("codex") or self.fence(ruling), ""),
+                   "claude": lambda prompt, code: (calls.append("claude") or self.fence(ruling), "")}
+        with mock.patch.object(pa, "usage_cli", side_effect=self.gates({"codex"})):
+            out = pa.approve("/root", req, "DOC.md", "/code", runners=runners, providers=["codex", "claude"])
+        self.assertEqual(calls, ["claude"])
+        self.assertEqual(out["decisions"][1]["verdict"], "approve")
+
+    def test_unreadable_usage_never_blocks_the_fallback(self):
+        req = request(plan("1", 1, ["a"]), plan("2", 2, ["b"]))
+        ruling = {"decisions": [{"stamp": "2", "verdict": "approve", "reason": "disjoint"}]}
+        runners = {"codex": lambda prompt, code: ("no fence here", ""),
+                   "claude": lambda prompt, code: (self.fence(ruling), "")}
+        with mock.patch.object(pa, "usage_cli", side_effect=subprocess.TimeoutExpired("usage.py", 120)):
+            out = pa.approve("/root", req, "DOC.md", "/code", runners=runners, providers=["codex", "claude"])
+        self.assertEqual(out["decisions"][1]["verdict"], "approve")
+
+    def test_provider_order_is_the_full_orchestrator_preference_order(self):
+        with mock.patch.object(pa, "usage_cli") as usage:
+            self.assertEqual(pa.provider_order(), ["codex", "claude"])
+        usage.assert_not_called()
 
     def test_no_provider_defers_and_says_why(self):
         req = request(plan("1", 1, ["a"]), plan("2", 2, ["b"]))

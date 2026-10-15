@@ -11,7 +11,7 @@ import tokens  # noqa: E402
 
 class Args:
     def __init__(self, **kw):
-        self.role, self.model, self.round = "worker", "", None
+        self.role, self.model, self.round, self.final = "worker", "", None, ""
         self.__dict__.update(kw)
 
 
@@ -46,10 +46,21 @@ class TokensTests(unittest.TestCase):
 
     def test_non_json_output_passes_through_and_logs_nothing(self):
         src = self.write("in.txt", "You've hit your limit · resets in 2h\n")
-        out = str(self.dir / "out.txt")
-        tokens.cmd_claude_json(Args(input=src, out_text=out, log=self.log))
+        out, final = str(self.dir / "out.txt"), self.dir / "final.txt"
+        tokens.cmd_claude_json(Args(input=src, out_text=out, log=self.log, final=str(final)))
         self.assertEqual(Path(out).read_text(), "You've hit your limit · resets in 2h\n")
         self.assertEqual(self.rows(), [])
+        self.assertFalse(final.exists(), "output with no JSON answer has no final answer")
+
+    def test_final_file_holds_only_the_result_never_the_text_around_it(self):
+        fence = "```WORKER_RESULT_JSON\n{\"outcome\": \"shipped\"}\n```"
+        for cmd in (tokens.cmd_claude_json, tokens.cmd_cursor_json):
+            with self.subTest(cmd=cmd.__name__):
+                src = self.write("in.json", fence + "\n" + json.dumps({"result": "the answer"}) + "\n")
+                out, final = self.dir / "out.txt", self.dir / "final.txt"
+                cmd(Args(input=src, out_text=str(out), log=self.log, final=str(final)))
+                self.assertIn(fence, out.read_text())
+                self.assertEqual(final.read_text(), "the answer")
 
     def test_cursor_json(self):
         src = self.write("in.json", json.dumps({"result": "hi", "usage": {

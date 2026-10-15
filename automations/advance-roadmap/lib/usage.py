@@ -7,8 +7,14 @@ remains policy; this file is what run.sh actually reads.
 Usage:
   usage.py refresh [--root DIR]
   usage.py pick-orchestrator [--root DIR]
+  usage.py pick-orchestrators [--root DIR]        # every eligible planner, in preference order
   usage.py pick-worker-chain [--root DIR]
-  usage.py record-limit --provider P --text T [--scope S] [--root DIR]
+  usage.py gate --role R --provider P [--root DIR]  # exit 0 under its gate, 3 over it
+  usage.py gates --role R [--root DIR]             # every provider's gate for R, as JSON
+  usage.py quota-record --role R [--attempts F] [--hit P=F]... [--primary P] [--root DIR]
+                                                   # who is out for R when a lane stops on quota
+  usage.py record-limit --provider P --text T [--scope S] [--out FILE] [--root DIR]
+  usage.py parse-limit --provider P --text T [--scope S]  # the hit as JSON; writes no state
   usage.py detect-limit --file PATH | --text T
   usage.py probe [--provider codex|cursor|all]   # live read, writes nothing
   usage.py show [--root DIR]
@@ -37,9 +43,10 @@ import threading
 import time
 import urllib.error
 import urllib.request
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 HOME = Path.home()
 DEFAULT_ROOT = Path(os.environ.get(
@@ -62,11 +69,44 @@ CURSOR_KEYCHAIN_SERVICE = os.environ.get(
     "ADVANCE_ROADMAP_CURSOR_KEYCHAIN_SERVICE", "cursor-access-token")
 CURSOR_KEYCHAIN_ACCOUNT = "cursor-user"
 
-MAX_FIVE_HOUR_PCT = 70
-MAX_SEVEN_DAY_PCT = 80
+
+
+def _pct_env(name: str, default: float) -> float:
+    try:
+        return float(os.environ.get(name, default))
+    except ValueError:
+        return default
+
+
+# One gate per provider, applied to every role that calls a model (planner, worker, reviewer,
+# plan approver): stop routing to a provider well before its hard limit, not at it.
+MAX_FIVE_HOUR_PCT = _pct_env("ADVANCE_ROADMAP_MAX_FIVE_HOUR_PCT", 70)
+MAX_SEVEN_DAY_PCT = _pct_env("ADVANCE_ROADMAP_MAX_WEEKLY_PCT", 80)
 # Cursor quotas are monthly and worker.sh fails over within the tick, so gate
 # only when the pool is effectively spent.
-MAX_CURSOR_PCT = 95
+MAX_CURSOR_PCT = _pct_env("ADVANCE_ROADMAP_MAX_CURSOR_PCT", 95)
+
+# `gate`'s exit code for "over its gate". Not 1 (a crash) or 2 (bad arguments): callers skip a
+# provider only on this code, so a broken usage.py never silently skips every provider.
+GATED_EXIT = 3
+
+# Which providers may fill each role, in preference order.
+ROLE_PROVIDERS = {
+    "orchestrator": ("codex", "claude"),
+    "approver": ("codex", "claude"),
+    "worker": ("cursor", "codex", "claude"),
+    "reviewer": ("codex", "cursor", "claude"),
+}
+# Cursor draws on a different pool per role: Auto, or the API pool for a named model.
+CURSOR_MODEL_ENV = {"worker": "ADVANCE_ROADMAP_CURSOR_WORKER_MODEL",
+                    "reviewer": "ADVANCE_ROADMAP_CURSOR_REVIEW_MODEL"}
+
+# A CLI's own limit banner at the start of a line — never prose that merely mentions limits
+# (ORCHESTRATOR.md and old logs say "session limit" too). Same pattern as the rg calls in
+# run.sh, worker.sh and review.sh.
+LIMIT_BANNER = re.compile(
+    r"^(?:you.?ve hit your (?:session |usage )?limit|hit your session limit|rate limit exceeded"
+    r"|quota exceeded|out of (?:usage|credits|quota)\b)", re.I | re.M)
 
 LIMIT_PATTERNS = [
     re.compile(r"hit your session limit", re.I),
@@ -180,22 +220,87 @@ def window_exhausted(used_pct: Any, reset_epoch: Any, max_pct: int, now: float) 
     return pct >= max_pct
 
 
-def claude_available(prov: dict[str, Any], now: float) -> bool:
-    """Claude is gated only by an observed limit hit, never by usage percentage.
+def windows_gate(windows: list[tuple[str, Any, float]], now: float) -> dict[str, Any]:
+    """Gate (label, window, cap) triples: over when any window is at or past its cap.
 
-    The 5h/7d thresholds existed when Claude did all the implementation; now Codex
-    orchestrates and Cursor builds, so Claude is the fallback and runs until it
-    actually hits a limit. The windows are still probed for the dashboard.
+    A window whose reset has passed reads as 0%. A window with no reading is skipped; when no
+    window has one the gate is "unknown", which never blocks but is reported as such.
     """
-    hit = prov.get("last_limit_hit") or {}
-    reset_epoch = hit.get("reset_epoch")
-    if reset_epoch:
-        try:
-            if float(reset_epoch) > now:
-                return False
-        except (TypeError, ValueError):
-            pass
-    return True
+    over, resets, known = [], [], False
+    for label, window, cap in windows:
+        w = window if isinstance(window, dict) else {}
+        pct = _num(w.get("used_pct"))
+        if pct is None:
+            continue
+        known = True
+        if window_exhausted(pct, w.get("reset_epoch"), cap, now):
+            over.append(f"{label} {pct:g}% >= {cap:g}%")
+            resets.append(_num(w.get("reset_epoch")))
+    if over:
+        # Usable again only once every window over its cap has reset.
+        reset = None if None in resets else max(resets)
+        return {"state": "over", "reason": ", ".join(over), "reset_epoch": reset}
+    if not known:
+        return {"state": "unknown", "reason": "no usage reading", "reset_epoch": None}
+    return {"state": "ok", "reason": None, "reset_epoch": None}
+
+
+def claude_gate(prov: dict[str, Any], now: float) -> dict[str, Any]:
+    return windows_gate([("5h", prov.get("five_hour"), MAX_FIVE_HOUR_PCT),
+                         ("7d", prov.get("seven_day"), MAX_SEVEN_DAY_PCT)], now)
+
+
+def codex_gate(prov: dict[str, Any], now: float) -> dict[str, Any]:
+    five = prov.get("five_hour") or {}
+    weekly = prov.get("weekly") or {}
+    gate = windows_gate([("5h", five, MAX_FIVE_HOUR_PCT), ("weekly", weekly, MAX_SEVEN_DAY_PCT)], now)
+    if gate["state"] != "over" and prov.get("rate_limit_reached"):
+        # Holds only until the next window rolls over; a still-full weekly
+        # window is caught by its threshold above. Waiting for every reset
+        # would gate Codex for days while no fresh reading can arrive.
+        resets = [r for r in (_num(w.get("reset_epoch")) for w in (five, weekly)) if r]
+        if resets and min(resets) > now:
+            return {"state": "over", "reason": f"rate limit reached ({prov['rate_limit_reached']})",
+                    "reset_epoch": min(resets)}
+    return gate
+
+
+def cursor_gate(prov: dict[str, Any], now: float, role: str = "worker") -> dict[str, Any]:
+    """Gate on the pool this role actually draws from (Auto vs a named model's API pool)."""
+    inc = prov.get("included") or {}
+    model = os.environ.get(CURSOR_MODEL_ENV.get(role, CURSOR_MODEL_ENV["worker"]), "auto")
+    pool = "auto" if model == "auto" else "api"
+    return windows_gate([(f"{pool} pool", {"used_pct": inc.get(f"{pool}_pct"),
+                                           "reset_epoch": inc.get("reset_epoch")}, MAX_CURSOR_PCT)], now)
+
+
+def limit_gate(prov: dict[str, Any], now: float) -> dict[str, Any] | None:
+    if provider_available_from_limit(prov, now):
+        return None
+    reset = _num((prov.get("last_limit_hit") or {}).get("reset_epoch"))
+    when = epoch_to_iso(reset)
+    return {"state": "limited", "reason": f"limit hit, resets {when}" if when else "limit hit within the last hour",
+            "reset_epoch": reset}
+
+
+def provider_gate(state: dict[str, Any], name: str, role: str, now: float | None = None) -> dict[str, Any]:
+    """{'available', 'state', 'reason', 'reset_epoch'} for one provider in one role. state is
+    ok | unknown (no reading: available) | over (past its usage gate) | limited (an observed
+    limit hit); reset_epoch is when an over/limited provider frees up, when known."""
+    now = time.time() if now is None else now
+    if name not in ROLE_PROVIDERS.get(role, ()):
+        return {"available": False, "state": "n/a", "reason": f"{name} does not fill the {role} role",
+                "reset_epoch": None}
+    prov = state["providers"][name]
+    gate = limit_gate(prov, now)
+    if gate is None:
+        if name == "cursor":
+            gate = cursor_gate(prov, now, role)
+        elif name == "codex":
+            gate = codex_gate(prov, now)
+        else:
+            gate = claude_gate(prov, now)
+    return {"available": gate["state"] in ("ok", "unknown"), **gate}
 
 
 def provider_available_from_limit(prov: dict[str, Any], now: float) -> bool:
@@ -560,46 +665,16 @@ def probe_cursor_into(state: dict[str, Any]) -> None:
     apply_cursor(state, probe_cursor())
 
 
-def codex_quota_ok(prov: dict[str, Any], now: float) -> bool:
-    five = prov.get("five_hour") or {}
-    weekly = prov.get("weekly") or {}
-    if window_exhausted(five.get("used_pct"), five.get("reset_epoch"), MAX_FIVE_HOUR_PCT, now):
-        return False
-    if window_exhausted(weekly.get("used_pct"), weekly.get("reset_epoch"), MAX_SEVEN_DAY_PCT, now):
-        return False
-    if prov.get("rate_limit_reached"):
-        # Holds only until the next window rolls over; a still-full weekly
-        # window is caught by its threshold above. Waiting for every reset
-        # would gate Codex for days while no fresh reading can arrive.
-        resets = [r for r in (_num(w.get("reset_epoch")) for w in (five, weekly)) if r]
-        if resets and min(resets) > now:
-            return False
-    return True
-
-
-def cursor_quota_ok(prov: dict[str, Any], now: float) -> bool:
-    """Gate on the pool worker.sh actually draws from (Auto vs named model)."""
-    inc = prov.get("included") or {}
-    model = os.environ.get("ADVANCE_ROADMAP_CURSOR_WORKER_MODEL", "auto")
-    pct = inc.get("auto_pct") if model == "auto" else inc.get("api_pct")
-    return not window_exhausted(pct, inc.get("reset_epoch"), MAX_CURSOR_PCT, now)
-
-
 def recompute_flags(state: dict[str, Any]) -> None:
+    """Stored per-provider flags for the dashboard and the pick-* commands. The gate recorded is
+    the worker one; Codex and Claude gate identically in every role."""
     now = time.time()
-    claude = state["providers"]["claude"]
-    ok = claude_available(claude, now) and provider_available_from_limit(claude, now)
-    claude["available_for_orchestrator"] = ok
-    claude["available_for_worker"] = ok
-
-    codex = state["providers"]["codex"]
-    ok = provider_available_from_limit(codex, now) and codex_quota_ok(codex, now)
-    codex["available_for_orchestrator"] = ok
-    codex["available_for_worker"] = ok
-
-    cursor = state["providers"]["cursor"]
-    cursor["available_for_worker"] = (
-        provider_available_from_limit(cursor, now) and cursor_quota_ok(cursor, now))
+    for name, prov in state["providers"].items():
+        gate = provider_gate(state, name, "worker", now)
+        prov["available_for_worker"] = gate["available"]
+        prov["gate"] = {k: gate[k] for k in ("state", "reason", "reset_epoch")}
+        if name in ROLE_PROVIDERS["orchestrator"]:
+            prov["available_for_orchestrator"] = gate["available"]
 
 
 def refresh(root: Path) -> dict[str, Any]:
@@ -613,28 +688,35 @@ def refresh(root: Path) -> dict[str, Any]:
     return state
 
 
+def pick_orchestrators(state: dict[str, Any]) -> list[str]:
+    """Codex Sol, then Claude Opus — each only while under its gate."""
+    return [n for n in ROLE_PROVIDERS["orchestrator"]
+            if state["providers"][n].get("available_for_orchestrator")]
+
+
 def pick_orchestrator(state: dict[str, Any]) -> str | None:
-    """Prefer Codex Sol; fall back to Claude Opus. None if both hot."""
-    if state["providers"]["codex"].get("available_for_orchestrator"):
-        return "codex"
-    if state["providers"]["claude"].get("available_for_orchestrator"):
-        return "claude"
-    return None
+    """The preferred eligible planner. None if both are over their gates."""
+    return next(iter(pick_orchestrators(state)), None)
 
 
 def pick_worker_chain(state: dict[str, Any]) -> list[str]:
-    """Cursor → Codex → Claude, skipping exhausted providers."""
-    chain: list[str] = []
-    if state["providers"]["cursor"].get("available_for_worker"):
-        chain.append("cursor")
-    if state["providers"]["codex"].get("available_for_worker"):
-        chain.append("codex")
-    if state["providers"]["claude"].get("available_for_worker"):
-        chain.append("claude")
-    return chain
+    """Cursor → Codex → Claude, skipping providers over their gates."""
+    return [n for n in ROLE_PROVIDERS["worker"] if state["providers"][n].get("available_for_worker")]
 
 
-def parse_reset_epoch_from_text(text: str, observed: float) -> int | None:
+_CLOCK_RESET = re.compile(
+    r"(?:resets?\s+(?:at\s+)?|try\s+again\s+at\s+)(\d{1,2})(?::(\d{2}))?\s*(?:([ap])\.?\s*m\b\.?)?"
+    r"(?:\s*\(\s*([A-Za-z_]+(?:/[A-Za-z0-9_+\-]+)*)\s*\))?", re.I)
+
+
+def parse_reset_epoch_from_text(text: str, observed: float, tz: Any = None) -> int | None:
+    """Reset time from a CLI limit banner, as an epoch.
+
+    Relative ("resets in 2h 30m", "resets in 45m") counts from `observed`. A clock time
+    ("resets 11:50am (America/New_York)", "resets 3pm", "try again at 5:00 PM") is
+    read in the named zone, else `tz`, else local time; a time already past at `observed`
+    means the next day's. A bare hour needs am/pm, so "resets 2026" is not a clock.
+    """
     m = re.search(r"resets?\s+in\s+(\d+)\s*h(?:ours?)?\s*(\d+)?\s*m?", text, re.I)
     if m:
         hours = int(m.group(1))
@@ -643,7 +725,37 @@ def parse_reset_epoch_from_text(text: str, observed: float) -> int | None:
     m = re.search(r"resets?\s+in\s+(\d+)\s*m", text, re.I)
     if m:
         return int(observed + int(m.group(1)) * 60)
+    for m in _CLOCK_RESET.finditer(text):
+        hour, minute, ampm, zone_name = int(m.group(1)), int(m.group(2) or 0), m.group(3), m.group(4)
+        if ampm is None and m.group(2) is None:
+            continue
+        if ampm:
+            if not 1 <= hour <= 12:
+                continue
+            hour = hour % 12 + (12 if ampm.lower() == "p" else 0)
+        if hour > 23 or minute > 59:
+            continue
+        zone = tz
+        if zone_name:
+            try:
+                zone = ZoneInfo(zone_name)
+            except (ZoneInfoNotFoundError, ValueError):
+                zone = tz
+        today = datetime.fromtimestamp(observed, zone).date()
+        later = [t for day in (today, today + timedelta(days=1))
+                 for t in _wall_clock_epochs(day, hour, minute, zone) if t > observed]
+        return min(later) if later else None
     return None
+
+
+def _wall_clock_epochs(day: Any, hour: int, minute: int, zone: Any) -> list[int]:
+    """Every instant `day hour:minute` names in `zone` (None: local time, with the target date's
+    DST rules). Two in the repeated fall-back hour; in the skipped spring-forward hour, the one
+    the clock reads after the jump (2:30 → 3:30)."""
+    stamps = [int(datetime(day.year, day.month, day.day, hour, minute, fold=fold, tzinfo=zone).timestamp())
+              for fold in (0, 1)]
+    real = sorted({t for t in stamps if datetime.fromtimestamp(t, zone).timetuple()[3:5] == (hour, minute)})
+    return real or [max(stamps)]
 
 
 def record_limit(
@@ -656,19 +768,27 @@ def record_limit(
         return _record_limit_locked(root, provider, text, scope)
 
 
+def limit_hit(provider: str, text: str, scope: str = "unknown", observed: float | None = None) -> dict[str, Any]:
+    """A limit banner as a hit record (provider, the CLI's words, its reset), touching no state —
+    so a caller can save what it saw before the best-effort shared-state update."""
+    observed = time.time() if observed is None else observed
+    reset_epoch = parse_reset_epoch_from_text(text, observed)
+    return {
+        "observed_at": epoch_to_iso(observed),
+        "provider": provider,
+        "scope": scope,
+        "exact_cli_text": text.strip()[:500],
+        "reset_epoch": reset_epoch,
+        "reset_at": epoch_to_iso(reset_epoch),
+        "reset_source": "derived" if reset_epoch else "unknown",
+    }
+
+
 def _record_limit_locked(root: Path, provider: str, text: str, scope: str) -> dict[str, Any]:
     state = load(root)
     if provider not in state["providers"]:
         raise SystemExit(f"unknown provider: {provider}")
-    observed = time.time()
-    reset_epoch = parse_reset_epoch_from_text(text, observed)
-    hit = {
-        "observed_at": now_iso(),
-        "scope": scope,
-        "exact_cli_text": text.strip()[:500],
-        "reset_epoch": reset_epoch,
-        "reset_source": "derived" if reset_epoch else "unknown",
-    }
+    hit = limit_hit(provider, text, scope)
     state["providers"][provider]["last_limit_hit"] = hit
     state["history"].append({
         "observed_at": hit["observed_at"],
@@ -687,6 +807,15 @@ def detect_limit(text: str) -> bool:
     return any(p.search(text or "") for p in LIMIT_PATTERNS)
 
 
+def limit_banner(text: str) -> str | None:
+    """The first line that is a CLI's own limit banner, or None."""
+    m = LIMIT_BANNER.search(text or "")
+    if not m:
+        return None
+    end = text.find("\n", m.start())
+    return text[m.start():end if end >= 0 else len(text)].strip()
+
+
 def cmd_refresh(args: argparse.Namespace) -> None:
     state = refresh(Path(args.root))
     orch = pick_orchestrator(state)
@@ -699,10 +828,125 @@ def cmd_refresh(args: argparse.Namespace) -> None:
             name: {
                 "orchestrator": p.get("available_for_orchestrator"),
                 "worker": p.get("available_for_worker"),
+                "gate": p.get("gate"),
             }
             for name, p in state["providers"].items()
         },
     }, indent=2))
+
+
+def cmd_pick_orchestrators(args: argparse.Namespace) -> None:
+    names = pick_orchestrators(refresh(Path(args.root)))
+    print(" ".join(names))
+    sys.exit(0 if names else 2)
+
+
+def cmd_gate(args: argparse.Namespace) -> None:
+    """Refresh, then exit 0 when the provider may take this role now and GATED_EXIT when it is
+    over its gate or limited. Prints the gate as one JSON line (state, reason, reset)."""
+    gate = provider_gate(refresh(Path(args.root)), args.provider, args.role)
+    print(json.dumps({"provider": args.provider, "role": args.role, **gate,
+                      "reset_at": epoch_to_iso(gate.get("reset_epoch"))}))
+    sys.exit(0 if gate["available"] else GATED_EXIT)
+
+
+def role_gates(state: dict[str, Any], role: str) -> list[dict[str, Any]]:
+    """Every provider that fills `role`, in preference order, with its gate right now."""
+    out = []
+    for name in ROLE_PROVIDERS[role]:
+        gate = provider_gate(state, name, role)
+        out.append({"provider": name, **gate, "reset_at": epoch_to_iso(gate.get("reset_epoch"))})
+    return out
+
+
+OUT_STATES = ("over", "limited")
+
+
+def quota_record(state: dict[str, Any], role: str, attempts: Any = (), primary: str | None = None,
+                 now: float | None = None) -> dict[str, Any]:
+    """Who is out for `role` when a lane stops or skips on quota — the one shape every run record
+    and the batch summary use.
+
+    `providers` lists every provider in the role's full preference list, not only the ones the lane
+    tried: a quota-filtered or explicit chain must not hide a provider that was already gated, or
+    its reset. `attempts` are what the lane itself saw ({provider, state, cause/reason, reset_epoch,
+    reset_at}): they win over the live gate for that provider, which still fills in a missing reset.
+    `provider` is `primary` (the one the lane stopped on) when it is out, else the out provider that
+    frees up first; it is None when nobody in the role is out. `cause` is the primary's own words,
+    or every out provider's reason joined when there is no primary.
+    """
+    now = time.time() if now is None else now
+    seen = {a["provider"]: a for a in attempts or ()
+            if isinstance(a, dict) and a.get("provider") in ROLE_PROVIDERS[role]}
+    providers = []
+    for name in ROLE_PROVIDERS[role]:
+        gate = provider_gate(state, name, role, now)
+        entry = {"provider": name, "state": gate["state"], "cause": gate["reason"],
+                 "reset_epoch": gate["reset_epoch"], "reset_at": epoch_to_iso(gate["reset_epoch"])}
+        a = seen.get(name)
+        if a:
+            entry["state"] = a.get("state") if a.get("state") in OUT_STATES else "limited"
+            entry["cause"] = a.get("cause") or a.get("reason") or entry["cause"]
+            if _num(a.get("reset_epoch")) is not None:
+                entry["reset_epoch"] = a["reset_epoch"]
+                entry["reset_at"] = a.get("reset_at") or epoch_to_iso(a["reset_epoch"])
+        providers.append(entry)
+    out = [p for p in providers if p["state"] in OUT_STATES]
+    first = next((p for p in out if p["provider"] == primary), None)
+    if first is None and out:
+        resets = [p for p in out if p["reset_epoch"]]
+        first = min(resets, key=lambda p: p["reset_epoch"]) if resets else out[0]
+    if first is not None and first["provider"] == primary:
+        cause = first["cause"]
+    else:
+        cause = "; ".join(f"{p['provider']}: {p['cause'] or p['state']}" for p in out) or None
+    return {"role": role, "provider": first and first["provider"],
+            "reset_epoch": first and first["reset_epoch"], "reset_at": first and first["reset_at"],
+            "cause": cause, "providers": providers}
+
+
+def saved_quota_record(root: Path, role: str, attempts: Any = (), primary: str | None = None) -> dict[str, Any]:
+    """quota_record() from the gates as last saved, without a refresh: the fallback when
+    `quota-record` (which refreshes first) fails, so the observed gates still reach the record."""
+    return quota_record(load(Path(root)), role, attempts, primary)
+
+
+def read_attempts(path: str | None, hits: list[str]) -> list[dict[str, Any]]:
+    """--attempts (JSON lines, one per provider) plus --hit P=FILE (a record-limit --out file)."""
+    attempts: list[dict[str, Any]] = []
+    if path:
+        try:
+            lines = Path(path).read_text(encoding="utf-8").splitlines()
+        except OSError:
+            lines = []
+        for line in lines:
+            try:
+                entry = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(entry, dict):
+                attempts.append(entry)
+    for spec in hits:
+        name, _, file = spec.partition("=")
+        try:
+            hit = json.loads(Path(file).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            hit = {}
+        hit = hit if isinstance(hit, dict) else {}
+        attempts.append({"provider": name, "state": "limited", "cause": hit.get("exact_cli_text"),
+                         "reset_epoch": hit.get("reset_epoch"), "reset_at": hit.get("reset_at")})
+    return attempts
+
+
+def cmd_gates(args: argparse.Namespace) -> None:
+    """Refresh, then print {"role", "gates": [...]}: every provider's gate for the role right now."""
+    print(json.dumps({"role": args.role, "gates": role_gates(refresh(Path(args.root)), args.role)}))
+
+
+def cmd_quota_record(args: argparse.Namespace) -> None:
+    """Refresh, then print quota_record() as one JSON object."""
+    state = refresh(Path(args.root))
+    print(json.dumps(quota_record(state, args.role, read_attempts(args.attempts, args.hit), args.primary)))
 
 
 def cmd_pick_orchestrator(args: argparse.Namespace) -> None:
@@ -724,8 +968,14 @@ def cmd_pick_worker_chain(args: argparse.Namespace) -> None:
 
 
 def cmd_record_limit(args: argparse.Namespace) -> None:
-    record_limit(Path(args.root), args.provider, args.text, args.scope)
+    state = record_limit(Path(args.root), args.provider, args.text, args.scope)
+    if args.out:
+        Path(args.out).write_text(json.dumps(state["providers"][args.provider]["last_limit_hit"], indent=2) + "\n")
     print("ok")
+
+
+def cmd_parse_limit(args: argparse.Namespace) -> None:
+    print(json.dumps(limit_hit(args.provider, args.text, args.scope)))
 
 
 def cmd_detect(args: argparse.Namespace) -> None:
@@ -760,14 +1010,41 @@ def main() -> None:
     p = sub.add_parser("pick-orchestrator")
     p.set_defaults(func=cmd_pick_orchestrator)
 
+    p = sub.add_parser("pick-orchestrators")
+    p.set_defaults(func=cmd_pick_orchestrators)
+
     p = sub.add_parser("pick-worker-chain")
     p.set_defaults(func=cmd_pick_worker_chain)
+
+    p = sub.add_parser("gate")
+    p.add_argument("--role", required=True, choices=sorted(ROLE_PROVIDERS))
+    p.add_argument("--provider", required=True, choices=["claude", "codex", "cursor"])
+    p.set_defaults(func=cmd_gate)
+
+    p = sub.add_parser("gates")
+    p.add_argument("--role", required=True, choices=sorted(ROLE_PROVIDERS))
+    p.set_defaults(func=cmd_gates)
+
+    p = sub.add_parser("quota-record")
+    p.add_argument("--role", required=True, choices=sorted(ROLE_PROVIDERS))
+    p.add_argument("--attempts", help="JSON lines the lane wrote, one per provider it tried or skipped")
+    p.add_argument("--hit", action="append", default=[], metavar="PROVIDER=FILE",
+                   help="a record-limit --out file for a provider that hit its limit (repeatable)")
+    p.add_argument("--primary", help="the provider the lane stopped on")
+    p.set_defaults(func=cmd_quota_record)
 
     p = sub.add_parser("record-limit")
     p.add_argument("--provider", required=True, choices=["claude", "codex", "cursor"])
     p.add_argument("--text", required=True)
     p.add_argument("--scope", default="unknown")
+    p.add_argument("--out", help="also write the recorded hit (reset time included) here as JSON")
     p.set_defaults(func=cmd_record_limit)
+
+    p = sub.add_parser("parse-limit")
+    p.add_argument("--provider", required=True, choices=["claude", "codex", "cursor"])
+    p.add_argument("--text", required=True)
+    p.add_argument("--scope", default="unknown")
+    p.set_defaults(func=cmd_parse_limit)
 
     p = sub.add_parser("detect-limit")
     p.add_argument("--text", default="")

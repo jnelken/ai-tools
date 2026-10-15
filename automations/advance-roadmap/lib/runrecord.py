@@ -8,7 +8,7 @@ from result files the agents wrote; nothing here reads the run log.
 
   runrecord.py --root R append --stamp S --status ran|skipped-backoff|skipped-quota|skipped-lock|skipped-unchanged|skipped-superset|aborted
                [--detail TEXT] [--orch-provider P] [--orch-exit N] [--orch-result FILE]
-               [--worker-status FILE] [--worker-result FILE] [--usage-log FILE] [--exit N]
+               [--worker-status FILE] [--worker-result FILE] [--usage-log FILE] [--quota-gates FILE] [--exit N]
   runrecord.py --root R alert        # prints a Slack line when the error streak warrants one
 """
 import argparse
@@ -24,6 +24,9 @@ import tokens  # noqa: E402
 
 ERROR_OUTCOMES = ("error", "failed", "incomplete", "shipped-deploy-failed")
 SKIP_OUTCOMES = ("skipped-backoff", "skipped-quota", "skipped-lock", "skipped-unchanged", "skipped-superset")
+# A provider's usage ran out mid-run (planner banner, every worker over its gate or limited).
+# Not a tooling failure: it neither counts toward nor breaks an error streak, and never alerts.
+QUOTA_OUTCOMES = ("quota-paused",)
 # Alert on the 2nd consecutive error, then again every 4 more (~8h at the 2h cadence).
 ALERT_FIRST, ALERT_EVERY = 2, 4
 
@@ -56,6 +59,10 @@ def derive(a, orch, wstatus, wresult):
     action = (orch or {}).get("action") or ""
     if orch is None:
         return "error", "orchestrator result unreadable"
+    perr = orch.get("planner_error") or {}
+    if perr.get("kind") == "quota":
+        reset = f", resets {perr['reset_at']}" if perr.get("reset_at") else ""
+        return "quota-paused", f"planner {perr.get('provider') or '?'} hit its usage limit{reset}; nothing dispatched"
     if orch.get("parse_error"):
         return "error", f"orchestrator: {orch['parse_error']}"
 
@@ -65,6 +72,9 @@ def derive(a, orch, wstatus, wresult):
     if wstatus.get("fatal"):
         return "error", f"worker.sh: {wstatus['fatal']}"
     if not wstatus.get("used"):
+        if wstatus.get("limited") and not wstatus.get("missing"):
+            names = ", ".join(l.get("provider") or "?" for l in wstatus["limited"])
+            return "quota-paused", f"every worker provider was over its usage gate or limited ({names})"
         return "error", "every worker provider was limited or missing"
 
     if wresult:
@@ -74,7 +84,7 @@ def derive(a, orch, wstatus, wresult):
         if o == "blocked-branch-left":
             return "blocked", wresult.get("summary", "")[:200]
         if o == "limit_hit":
-            return "error", f"worker hit a limit: {wresult.get('limit_text') or '?'}"
+            return "quota-paused", f"worker hit a limit: {wresult.get('limit_text') or '?'}"
         if o in ("shipped", "failed", "archive-only"):
             return o, ""
         if o == "shipped-deploy-failed":
@@ -90,6 +100,66 @@ def derive(a, orch, wstatus, wresult):
     return (orch.get("outcome_token") or "blocked-no-item"), "no worker result (bookkeeping)"
 
 
+def quota_info(orch, wstatus, wresult):
+    """Who ran out, when it resets and the CLI's own words — for a quota-paused run."""
+    perr = (orch or {}).get("planner_error") or {}
+    if perr.get("kind") == "quota":
+        info = {"role": "orchestrator", "provider": perr.get("provider"), "reset_epoch": perr.get("reset_epoch"),
+                "reset_at": perr.get("reset_at"), "cause": perr.get("limit_text"), "tried": perr.get("tried")}
+        limits = [l for l in perr.get("limits") or [] if isinstance(l, dict)]
+        if limits:
+            info["providers"] = limits  # every planner that ran out, when one failed over to another
+        return info
+    # worker.sh wrote `usage.py quota-record --role worker` into its status: every worker provider.
+    w = wstatus or {}
+    quota = recorded_quota(w.get("quota"))
+    if quota:
+        return quota
+    # No record (usage.py failed): rebuild it from the gates and limits worker.sh logged itself,
+    # and still say who stopped and why.
+    limit_hit = (wresult or {}).get("outcome") == "limit_hit"
+    primary = (wresult.get("provider") or w.get("used")) if limit_hit else None
+    quota = attempts_quota("worker", w.get("limited"), primary)
+    if limit_hit:
+        if quota is None or (primary and quota["provider"] != primary):
+            quota = {"role": "worker", "provider": primary, "reset_epoch": None, "reset_at": None,
+                     "cause": None, "providers": (quota or {}).get("providers", [])}
+        quota["cause"] = quota["cause"] or wresult.get("limit_text")
+    return quota
+
+
+def recorded_quota(record):
+    """A `usage.py quota-record` result as the row's quota, or None when nobody in it is out."""
+    return record if isinstance(record, dict) and record.get("provider") else None
+
+
+def attempts_quota(role, attempts, primary=None):
+    """`usage.py quota-record`'s shape from only the attempts a lane saw ({provider, state,
+    cause/reason, reset_epoch, reset_at}), or None when none names a provider. `provider` is
+    `primary` when it is among them, else the one that frees up first."""
+    seen = {}
+    for a in attempts or ():
+        if isinstance(a, dict) and a.get("provider"):
+            seen[a["provider"]] = {
+                "provider": a["provider"],
+                "state": a.get("state") if a.get("state") in ("over", "limited") else "limited",
+                "cause": a.get("cause") or a.get("reason"),
+                "reset_epoch": a.get("reset_epoch"), "reset_at": a.get("reset_at")}
+    out = list(seen.values())
+    if not out:
+        return None
+    first = seen.get(primary)
+    if first is None:
+        resets = [p for p in out if isinstance(p["reset_epoch"], (int, float))]
+        first = min(resets, key=lambda p: p["reset_epoch"]) if resets else out[0]
+    if first["provider"] == primary:
+        cause = first["cause"]
+    else:
+        cause = "; ".join(f"{p['provider']}: {p['cause'] or p['state']}" for p in out)
+    return {"role": role, "provider": first["provider"], "reset_epoch": first["reset_epoch"],
+            "reset_at": first["reset_at"], "cause": cause, "providers": out}
+
+
 def read_reviews(worker_result_path):
     """Step 5b rounds, from the log review.sh writes beside the worker result."""
     if not worker_result_path:
@@ -100,6 +170,18 @@ def read_reviews(worker_result_path):
             return [json.loads(l) for l in f if l.strip()]
     except (OSError, ValueError):
         return []
+
+
+def review_limits(reviews):
+    """Every reviewer a limit banner stopped in Step 5b (provider, cause, reset), the latest per
+    provider — straight from the review log, whatever happened to the shared usage file."""
+    latest = {}
+    for r in reviews:
+        hits = r.get("limited") if isinstance(r, dict) else None
+        for hit in hits if isinstance(hits, list) else ():
+            if isinstance(hit, dict) and hit.get("provider"):
+                latest[hit["provider"]] = hit
+    return list(latest.values())
 
 
 def cmd_append(a):
@@ -148,8 +230,11 @@ def cmd_append(a):
         "reviewer": reviews[-1].get("reviewer") if reviews else None,
         "review_verdict": reviews[-1].get("verdict") if reviews else None,
         "review_unresolved": (w.get("review") or {}).get("unresolved"),
+        "review_limits": review_limits(reviews),
         "summary": (w.get("summary") or o.get("summary") or "")[:1000],
         "slack_summary": (w.get("slack_summary") or "")[:400] or None,
+        "quota": (quota_info(orch, wstatus, wresult) if outcome in QUOTA_OUTCOMES
+                  else recorded_quota(load_json(a.quota_gates)) if outcome == "skipped-quota" else None),
         # Tokens this run spent, per (role, review round, model): see lib/tokens.py.
         "tokens": tokens.summarize(a.usage_log),
     }
@@ -177,10 +262,10 @@ def read_records(root):
 
 
 def error_streak(records):
-    """Consecutive error runs, newest first; skipped ticks are not evidence."""
+    """Consecutive error runs, newest first; skipped ticks and quota pauses are not evidence."""
     n = 0
     for r in reversed(records):
-        if r.get("outcome") in SKIP_OUTCOMES:
+        if r.get("outcome") in SKIP_OUTCOMES + QUOTA_OUTCOMES:
             continue
         if r.get("outcome") in ERROR_OUTCOMES:
             n += 1
@@ -190,7 +275,7 @@ def error_streak(records):
 
 
 def alert_text(records):
-    ran = [r for r in records if r.get("outcome") not in SKIP_OUTCOMES]
+    ran = [r for r in records if r.get("outcome") not in SKIP_OUTCOMES + QUOTA_OUTCOMES]
     if not ran:
         return ""
     streak = error_streak(records)
@@ -228,6 +313,8 @@ def main(argv=None):
     ap.add_argument("--worker-status", default="")
     ap.add_argument("--worker-result", default="")
     ap.add_argument("--usage-log", default="")
+    ap.add_argument("--quota-gates", default="",
+                    help="usage.py quota-record output saved when the run skipped for quota")
     ap.add_argument("--lane", type=int, default=None)
     ap.add_argument("--expect-pr", action="store_true",
                     help="the worker ran in a Superset workspace, so a ship must name its PR")

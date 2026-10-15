@@ -6,7 +6,7 @@
 #
 # --result-file: where the agent writes its WORKER_RESULT_JSON (the record run.sh
 #   keeps). If the agent doesn't, we fall back to the last valid fence in that
-#   provider's own stdout — never the combined run log.
+#   provider's final answer — never its transcript, which echoes WORKER.md's examples.
 # --status-file: what this script observed (provider used, exit, fatal reason).
 set -u
 
@@ -51,14 +51,52 @@ while [ $# -gt 0 ]; do
   esac
 done
 
+LIMITED_LOG=""   # one JSON line per provider skipped over its usage gate or stopped by a limit
+MISSING=""       # providers whose CLI was not installed
+
 write_status() {
-  # write_status USED EXIT [FATAL]
+  # write_status USED EXIT [FATAL] [STOPPED_ON] — STOPPED_ON: the provider whose limit ended the run.
   [ -n "$STATUS_FILE" ] || return 0
-  python3 - "$STATUS_FILE" "$1" "$2" "${3:-}" <<'PY2'
+  local quota="" primary=()
+  if [ -s "$LIMITED_LOG" ] && { [ -z "$1" ] || [ -n "${4:-}" ]; }; then
+    # Every provider in the worker role, not only this (possibly quota-filtered) chain.
+    quota="$tmpdir/quota.json"
+    [ -n "${4:-}" ] && primary=(--primary "$4")
+    python3 "$USAGE_PY" --root "$ROOT" quota-record --role worker --attempts "$LIMITED_LOG" \
+      "${primary[@]}" > "$quota" 2>/dev/null \
+      || python3 - "$USAGE_PY" "$ROOT" "$LIMITED_LOG" "${4:-}" > "$quota" 2>/dev/null <<'PY' || quota=""
 import json, sys
-path, used, rc, fatal = sys.argv[1:5]
+from pathlib import Path
+sys.path.insert(0, str(Path(sys.argv[1]).parent))
+import usage
+# quota-record refreshes first; the gates as last saved still name every worker provider.
+print(json.dumps(usage.saved_quota_record(Path(sys.argv[2]), "worker", usage.read_attempts(sys.argv[3], []),
+                                          sys.argv[4] or None)))
+PY
+  fi
+  python3 - "$STATUS_FILE" "$1" "$2" "${3:-}" "$LIMITED_LOG" "$MISSING" "$quota" <<'PY2'
+import json, sys
+path, used, rc, fatal, limited_log, missing, quota_path = sys.argv[1:8]
+quota = None
+try:
+    quota = json.load(open(quota_path)) if quota_path else None
+except (OSError, ValueError):
+    pass
+limited = []
+try:
+    for line in open(limited_log) if limited_log else ():
+        try:
+            entry = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(entry, dict):
+            limited.append(entry)
+except OSError:
+    pass
 json.dump({"used": used or None, "exit": int(rc) if rc.lstrip("-").isdigit() else None,
-           "fatal": fatal or None}, open(path, "w"), indent=1)
+           "fatal": fatal or None, "limited": limited, "missing": missing.split(),
+           "quota": quota if isinstance(quota, dict) else None},
+          open(path, "w"), indent=1)
 PY2
 }
 
@@ -104,7 +142,8 @@ fi
 # shellcheck disable=SC2206
 providers=(${=PROVIDERS_STR})
 if [ ${#providers[@]} -eq 0 ]; then
-  # Bookkeeping with Claude still possible if chain empty but claude binary exists
+  # Bookkeeping with Claude is still possible if the chain came back empty — but only if
+  # Claude is under its gate, which the loop below checks like any other provider.
   providers=(claude)
   echo "(worker chain empty — falling back to claude for bookkeeping attempt)"
 fi
@@ -176,8 +215,8 @@ run_cursor() {
     --output-format json \
     "$prompt" >"$out.json" 2>&1
   local rc=$?
-  python3 "$TOKENS_PY" cursor-json "$out.json" "$out" --role worker --model "$CURSOR_WORKER_MODEL" \
-    --log "$USAGE_LOG" 2>&1
+  python3 "$TOKENS_PY" cursor-json "$out.json" "$out" --final "$out.last" --role worker \
+    --model "$CURSOR_WORKER_MODEL" --log "$USAGE_LOG" 2>&1
   [ -s "$out" ] || cp "$out.json" "$out" 2>/dev/null   # tokens.py missing or broken: keep the raw output
   return $rc
 }
@@ -189,6 +228,7 @@ run_codex() {
   command -v "$CODEX" >/dev/null 2>&1 || return 127
   # WORKDIR may be the multi-repo parent, not a git checkout — skip the repo check.
   "$CODEX" exec \
+    -o "$out.last" \
     -m "$CODEX_WORKER_MODEL" \
     -c model_reasoning_effort=high \
     -C "$WORKDIR" \
@@ -215,21 +255,50 @@ run_claude() {
     --add-dir "$ROOT" \
     --output-format json >"$out.json" 2>&1
   local rc=$?
-  python3 "$TOKENS_PY" claude-json "$out.json" "$out" --role worker --model "$CLAUDE_WORKER_MODEL" \
-    --log "$USAGE_LOG" 2>&1
+  python3 "$TOKENS_PY" claude-json "$out.json" "$out" --final "$out.last" --role worker \
+    --model "$CLAUDE_WORKER_MODEL" --log "$USAGE_LOG" 2>&1
   [ -s "$out" ] || cp "$out.json" "$out" 2>/dev/null   # tokens.py missing or broken: keep the raw output
   return $rc
 }
 
 tmpdir="$(mktemp -d "${TMPDIR:-/tmp}/advance-roadmap-worker.XXXXXX")"
 trap 'rm -rf "$tmpdir"' EXIT INT TERM
+LIMITED_LOG="$tmpdir/limited.jsonl"
+
+record_limit() {
+  # record_limit PROVIDER TEXT — note the limit and its reset in the status, then gate the provider
+  # for later lanes. The note comes first, so a failed shared-state update can't lose the reset.
+  python3 "$USAGE_PY" parse-limit --provider "$1" --text "$2" --scope worker > "$tmpdir/hit-$1.json" 2>/dev/null \
+    || rm -f "$tmpdir/hit-$1.json"
+  python3 -c 'import json, sys
+hit = {}
+try:
+    hit = json.load(open(sys.argv[2]))
+except (OSError, ValueError):
+    pass
+print(json.dumps({"provider": sys.argv[1], "state": "limited", "cause": sys.argv[3],
+                  "reset_epoch": hit.get("reset_epoch"), "reset_at": hit.get("reset_at")}))' \
+    "$1" "$tmpdir/hit-$1.json" "$2" >> "$LIMITED_LOG"
+  python3 "$USAGE_PY" --root "$ROOT" record-limit --provider "$1" --text "$2" --scope worker || true
+}
 
 final_rc=1
 used=""
+stopped_on=""   # the provider whose result-only limit_hit ended the run
+last_hit=""     # the last provider stopped by a limit banner
 for provider in "${providers[@]}"; do
   out="$tmpdir/$provider.log"
+  # Fresh usage before every attempt — an explicit --providers list included. Exit 3 is the
+  # only "over its gate"; a usage.py failure (1, 2) is no reading, which never blocks.
+  gate="$(python3 "$USAGE_PY" --root "$ROOT" gate --role worker --provider "$provider" 2>/dev/null)"
+  if [ $? -eq 3 ]; then
+    echo "(skipping $provider — over its usage gate: $gate)"
+    print -r -- "$gate" >> "$LIMITED_LOG"
+    continue
+  fi
   echo "=== worker try provider=$provider mode=$WORKER_MODE stamp=$STAMP ($(date)) ==="
   rc=0
+  rm -f "$out.last"
   [ -n "$RESULT_FILE" ] && rm -f "$RESULT_FILE"   # a failed-over attempt's result must not count
   rm -f "$REVIEW_LOG"                              # nor its review rounds
   if [ -n "${SUPERSET_TERMINAL_ID:-}" ]; then
@@ -250,12 +319,14 @@ for provider in "${providers[@]}"; do
       '^(you.?ve hit your (session |usage )?limit|hit your session limit|rate limit exceeded|quota exceeded|out of (usage|credits|quota)\b)' \
       "$out" || true)" && [ -n "$text" ]; then
     echo "(limit for $provider — recording and failing over)"
-    python3 "$USAGE_PY" --root "$ROOT" record-limit --provider "$provider" --text "$text" || true
+    record_limit "$provider" "$text"
+    last_hit="$provider"
     continue
   fi
 
   if [ "$rc" -eq 127 ]; then
     echo "(binary missing for $provider — failing over)"
+    MISSING="$MISSING $provider"
     continue
   fi
 
@@ -266,13 +337,13 @@ done
 
 if [ -z "$used" ]; then
   echo "=== worker exhausted all providers ==="
-  write_status "" 3
+  write_status "" 3 "" "$last_hit"
   exit 3
 fi
 
-# The agent's file is the record. Fall back to this provider's own stdout only.
+# The agent's file is the record. Fall back to this provider's own final answer only.
 if [ -n "$RESULT_FILE" ]; then
-  python3 - "$RESULT_FILE" "$tmpdir/$used.log" <<'PY2'
+  python3 - "$RESULT_FILE" "$tmpdir/$used.log.last" <<'PY2'
 import json, sys
 path, out = sys.argv[1], sys.argv[2]
 try:
@@ -280,7 +351,10 @@ try:
         sys.exit(0)
 except (OSError, ValueError):
     pass
-text = open(out, encoding="utf-8", errors="replace").read()
+try:
+    text = open(out, encoding="utf-8", errors="replace").read()
+except OSError:
+    text = ""
 label, end = "```WORKER_RESULT_JSON", len(text)
 while (i := text.rfind(label, 0, end)) >= 0:
     end = i
@@ -295,12 +369,25 @@ while (i := text.rfind(label, 0, end)) >= 0:
     if isinstance(obj, dict):
         obj["_source"] = "stdout-fence"
         json.dump(obj, open(path, "w"), indent=1)
-        print("(worker result file missing — recovered from stdout fence)")
+        print("(worker result file missing — recovered from its final answer's fence)")
         sys.exit(0)
 print("(worker wrote no result file and no valid fence)")
 PY2
+  # A limit the agent only reported in its result (no banner on stdout) must still gate it.
+  limit_text="$(python3 -c 'import json, sys
+try:
+    r = json.load(open(sys.argv[1], encoding="utf-8"))
+except (OSError, ValueError):
+    sys.exit(0)
+if isinstance(r, dict) and r.get("outcome") == "limit_hit":
+    print(" ".join(str(r.get("limit_text") or "").split()) or "worker reported limit_hit")' "$RESULT_FILE")"
+  if [ -n "$limit_text" ]; then
+    echo "(worker result reports a limit for $used — recording it)"
+    record_limit "$used" "$limit_text"
+    stopped_on="$used"
+  fi
 fi
-write_status "$used" "$final_rc"
+write_status "$used" "$final_rc" "" "$stopped_on"
 
 echo "=== worker used=$used exit=$final_rc finished $(date) ==="
 exit $final_rc

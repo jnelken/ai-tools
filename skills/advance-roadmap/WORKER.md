@@ -72,7 +72,8 @@ rewrite on master; Vercel deploy succeeded. DEV-87 Done."
 
 `outcome`: `shipped` | `shipped-deploy-failed` | `blocked-branch-left` | `failed` | `limit_hit` |
 `archive-only` | `bookkeeping` (bookkeeping mode only — `run.sh` then records the orchestrator's
-`outcome_token`). `shipped` means the PR merged **and** the deploy is green (or there is no deploy);
+`outcome_token`). `run.sh` records `limit_hit` as `quota-paused`, which pauses the lane without
+counting toward the error alert. `shipped` means the PR merged **and** the deploy is green (or there is no deploy);
 `shipped-deploy-failed` means it merged but Step 7b's cap was hit with production still red.
 
 ---
@@ -289,7 +290,7 @@ working tree.
 
   Commit the markers on their own (`chore: mark unresolved review findings`), list each one in the
   final summary, and carry on to Step 6. Don't call the review a fourth time.
-- **`VERDICT: unavailable`** (every reviewer limited) → merge without review and say so in the
+- **`VERDICT: unavailable`** (every reviewer over its usage gate, limited or missing) → merge without review and say so in the
   summary. The run record flags it.
 
 Only the three rounds count toward the cap — a rebase-and-reverify in Step 7 doesn't trigger a new

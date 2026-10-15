@@ -2,6 +2,9 @@
 # End-to-end: run.sh + worker.sh with fake providers → one runs.jsonl row per run,
 # outcomes from result files and exit codes (never log text), and the error alert.
 set -eu
+# A worker session exports these; inherited, they would retarget run.sh away from the fixture repo.
+unset ADVANCE_ROADMAP_TARGET_REPO ADVANCE_ROADMAP_LANE ADVANCE_ROADMAP_THREAD ADVANCE_ROADMAP_BATCH_PID \
+  SUPERSET_WORKSPACE_PATH SUPERSET_TERMINAL_ID
 
 HERE="$(cd "$(dirname "$0")/.." && pwd)"
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/advance-roadmap-record-test.XXXXXX")"
@@ -15,9 +18,21 @@ cp "$HERE/lib/runrecord.py" "$HERE/lib/tokens.py" "$HERE/lib/workspaces.py" "$HE
 for f in ORCHESTRATOR.md SAFETY.md WORKER.md; do echo stub > "$SKILLS/$f"; done
 
 cat > "$ROOT/lib/usage.py" <<'PY'
-import sys
+import json, os, sys
 cmd = sys.argv[-1]
-print({"pick-orchestrator": "codex", "pick-worker-chain": "cursor"}.get(cmd, ""))
+if "quota-record" in sys.argv:
+    print(json.dumps({"role": "orchestrator", "provider": "claude", "reset_epoch": 1791906600,
+                      "reset_at": "2026-10-13T11:50:00-04:00", "cause": "codex: weekly 85%; claude: session limit",
+                      "providers": [
+        {"provider": "codex", "state": "over", "cause": "weekly 85%", "reset_epoch": None, "reset_at": None},
+        {"provider": "claude", "state": "limited", "cause": "session limit",
+         "reset_epoch": 1791906600, "reset_at": "2026-10-13T11:50:00-04:00"}]}))
+    sys.exit(0)
+if os.environ.get("FAKE_NO_PLANNER") and cmd in ("pick-orchestrator", "pick-orchestrators"):
+    print("none")
+    sys.exit(2)
+print({"pick-orchestrator": "codex", "pick-orchestrators": "codex",
+       "pick-worker-chain": "cursor"}.get(cmd, ""))
 PY
 
 # Fake Codex orchestrator: echoes a decoy fence into stdout (like the real one
@@ -50,7 +65,11 @@ res='{"outcome":"shipped","provider":"cursor","repo":"demo","item":"DEV-1 thing"
 case "$FAKE_WORKER" in
   file)  print -r -- "$res" > "$rf"; print "=== advance-roadmap exit=2 finished (decoy) ==="
          print -r -- '{"type":"result","result":"done","usage":{"inputTokens":100,"outputTokens":50,"cacheReadTokens":900,"cacheWriteTokens":10}}' ;;
-  fence) print -r -- '```WORKER_RESULT_JSON'; print -r -- "$res"; print -r -- '```' ;;
+  # No result file: the fence is only in the CLI's JSON final answer.
+  fence) python3 -c 'import json, sys; print(json.dumps({"type": "result", "result": "```WORKER_RESULT_JSON\n" + sys.argv[1] + "\n```"}))' "$res" ;;
+  # An echoed WORKER.md example on the transcript, and a final answer without a fence.
+  echo)  print -r -- '```WORKER_RESULT_JSON'; print -r -- "$res"; print -r -- '```'
+         print -r -- '{"type":"result","result":"I stopped before writing a result."}' ;;
   fail)  print "boom"; exit 1 ;;
   reviewed) print -r -- "$prompt" | grep -q -- '--worker cursor --round <N> --log .*/reviews.jsonl' || exit 9
          print -r -- '{"round":1,"worker":"cursor","reviewer":"codex","verdict":"findings"}' >> "${rf:h}/reviews.jsonl"
@@ -198,10 +217,21 @@ for n in {1..200}; do
   sleep .1
 done
 [ -f "$ROOT/runs/$batch_stamp/batch-ready" ] || { echo "FAIL: batch never reached barrier"; exit 1; }
+# daily_batch.py saves the worker quota record beside a plan it defers for quota, then cancels it.
+print -r -- '{"role":"worker","provider":"cursor","reset_epoch":1792000000,"reset_at":"2026-10-24T00:00:00-04:00","cause":"cursor: auto pool 96%","providers":[{"provider":"cursor","state":"over","cause":"auto pool 96%","reset_epoch":1792000000,"reset_at":"2026-10-24T00:00:00-04:00"}]}' \
+  > "$ROOT/runs/$batch_stamp/quota-gates.json"
 touch "$ROOT/runs/$batch_stamp/batch-cancel"
 wait $batch_pid
 check "quota defers batch worker" "$(last outcome)" skipped-quota
 [ ! -f "$ROOT/runs/$batch_stamp/worker-result.json" ] || { echo "FAIL: canceled batch ran worker"; exit 1; }
+check "a quota deferral names who ran out" "$(last quota | python3 -c 'import ast,sys; q=ast.literal_eval(sys.stdin.read()); print(q["role"], q["provider"], q["reset_epoch"])')" "worker cursor 1792000000"
+
+# No planner under its gate (an earlier lane's limit gated both): a skip that still says who is out.
+FAKE_NO_PLANNER=1 run good file
+check "no planner → skipped-quota"           "$(last outcome)" skipped-quota
+check "the skip names the planner that is out" "$(last quota | python3 -c 'import ast,sys; q=ast.literal_eval(sys.stdin.read()); print(q["role"], q["provider"], q["reset_at"])')" \
+  "orchestrator claude 2026-10-13T11:50:00-04:00"
+check "a quota skip does not alert"          "$(python3 "$ROOT/lib/runrecord.py" --root "$ROOT" alert)" ""
 
 SUPERSET=1 run good ws
 check "workspace run → shipped"               "$(last outcome)" shipped
@@ -238,4 +268,8 @@ if [ "$(date +%H)" != "03" ]; then
   check "off-grid tick records nothing"        "$(wc -l < "$ROOT/runs.jsonl" | tr -d ' ')" "$rows_before"
   check "off-grid tick leaves no log"          "$(ls "$ROOT"/logs | wc -l)" "$logs_before"
 fi
+# A valid WORKER.md example echoed on the transcript is never recovered as the worker's result.
+run good echo
+check "echoed example fence is not a result" "$(last worker_result_source)" None
+check "echoed example does not ship"         "$(last outcome)" incomplete
 echo "all passed"

@@ -107,10 +107,20 @@ Skipped runs never reach the Slack step, so only completed runs post.
 1. Refreshes `providers-usage.json` (`lib/usage.py` — Claude, Codex and Cursor quota probes ∪
    prior limit hits; see [Provider usage sources](#provider-usage-sources)).
 2. Launches a **read-only orchestrator**: **Codex Sol high** by default, Claude Opus high if Sol
-   is exhausted. Sandbox / tool deny-list — triage only, no edits.
+   is over its gate. Sandbox / tool deny-list — triage only, no edits. A planner that prints a
+   limit banner instead of a plan is recorded and the tick fails over to the next planner still
+   under its gate.
 3. Parses `ORCHESTRATOR_RESULT_JSON`, then dispatches `worker.sh` along
-   **Cursor Auto → Codex Sol → Claude Opus**, failing over on `limit_hit` within the same tick.
+   **Cursor Auto → Codex Sol → Claude Opus**, skipping any provider over its usage gate and failing
+   over on a limit banner within the same tick.
 4. Records provider limits so the **next** run routes differently.
+
+**A failed plan dispatches nothing.** When no planner returns a valid `ORCHESTRATOR_RESULT_JSON`
+(every one limited, or output that isn't a plan), `run.sh` writes a `planner_error` into the
+orchestrator result — `kind: quota` with the provider, its limit text and reset, or
+`kind: invalid_output` with the parse error — and stops: no worker, no batch-ready signal, no
+bookkeeping, no pending plan and no carried-forward verdict. A valid `blocked-no-item` /
+`nothing-qualified` plan still keeps its bookkeeping.
 
 Skill sources of truth: [`SKILL.md`](../skills/advance-roadmap/SKILL.md) (router),
 [`ORCHESTRATOR.md`](../skills/conductor/ORCHESTRATOR.md),
@@ -134,16 +144,36 @@ Step 0 uses to tell a finished run from a killed one.
 
 Every run — shipped, blocked, skipped, crashed — appends exactly one row to `runs.jsonl`. `run.sh`
 writes it (`lib/runrecord.py append`) from exit codes it observed and two result files: the
-orchestrator's (Codex's `exec -o` final message, so echoed prompts can't be mistaken for it) and
-the worker's, which the agent writes to `runs/<stamp>/worker-result.json`. If the agent skips that
-file, `worker.sh` recovers it from the provider's own stdout fence and labels it `stdout-fence`.
-An EXIT trap records aborts. **Nothing reads the run log to decide an outcome**; the dashboard,
+orchestrator's and the worker's, which the agent writes to `runs/<stamp>/worker-result.json`. Both
+are read only from a provider's final answer — Codex's `exec -o` file, or the `result` field of
+Claude's or Cursor's JSON — never from the transcript, which echoes the prompt and the docs' valid
+example fences. A planner with no final answer produced no plan, even when it printed a fence. If the
+worker skips its file, `worker.sh` recovers it from a fence in that final answer and labels it
+`stdout-fence`. An EXIT trap records aborts. **Nothing reads the run log to decide an outcome**; the dashboard,
 `state.json` and the Slack summary all read the record, and fall back to log parsing only for
 runs from before 2026-09-24.
 
 Two consecutive `error` / `failed` / `incomplete` runs post a separate `<!here>` Slack alert and a
 macOS notification, then again every 4 failures; the first success afterwards posts a recovery
 line. (A routine "error" summary line went unnoticed for 4.5 days in Sep 2026.)
+
+A run stopped by usage — the planner hit its limit, or every worker provider was over its gate or
+limited — is recorded as **`quota-paused`**, not `error`. Its row carries a `quota` field (provider,
+reset and cause); it neither counts toward nor breaks an error streak, and the batch supervisor
+pauses that lane instead of alerting. A run that never started because its providers were already
+gated (`skipped-quota`: no planner under its gate, the daily batch deferring saved plans for lack
+of worker quota, or a plan approver that ran out) carries the same field. Every one of them —
+planner, worker, approver, skip — comes from `usage.py quota-record --role R`, which lists every
+provider in the role's full preference list with its gate state and reset, not only the providers
+that lane tried, so a provider filtered out of a quota-filtered chain still shows up. The daily
+batch's quota summary counts every provider a row lists as over its gate or limited, so a limit
+one lane hit is reported for every repo it held back.
+
+**Carried-forward verdicts are checked for contamination.** `lib/verdict.py` refuses to save a
+no-work verdict from a run whose planner failed or whose worker hit a limit, and `verdict.py check`
+discards an existing one whose source run shows a planner error, a limit banner, or an
+`error` / `incomplete` / `quota-paused` outcome in `runs.jsonl`, forcing full triage. Bad verdicts
+written before this check heal on the next check of that repo.
 
 The live folder links each file individually, so a new `lib/` module needs its own link:
 
@@ -210,16 +240,27 @@ lower). Runs before this was added have no token data. Codex subagent rollouts a
 `lib/usage.py refresh` reads live quota for every provider before routing, so a hot provider is
 skipped *before* a run hits its limit. Every probe is best-effort and returns nothing on failure;
 the observed-limit-hit path (`record-limit`, parsed from CLI output) stays as the fallback, and a
-provider with no reading at all is assumed available until it hits a limit.
+provider with no reading at all is available with gate state `unknown` until it hits a limit.
+
+The same gate applies to **every role**: the planner (`run.sh`, `planapproval.py`), the worker
+(`worker.sh` checks each provider before trying it, an explicit `--providers` list included, and
+exits 3 when none remain) and the reviewer (`review.sh`). Check one by hand with
+`usage.py gate --role orchestrator|worker|reviewer --provider P` (exit 0 available, 3 gated; any other code is a usage.py failure, which never blocks).
 
 | Provider | Source (in order) | Gate |
 | --- | --- | --- |
-| Claude | `~/.claude/state/claude-usage.json` (statusline) | none by percentage — shown on the dashboard only; gated solely by an observed limit hit |
+| Claude | `~/.claude/state/claude-usage.json` (statusline) | 5h ≥ 70% or 7d ≥ 80% while that window is unexpired, or an observed limit hit until its reset |
 | Codex | 1. short-lived `codex app-server` → `account/rateLimits/read` (fresh, ~1s) · 2. newest `token_count.rate_limits` in `~/.codex/sessions/**/rollout-*.jsonl` (as fresh as the last Codex turn; never overwrites a newer stored reading) | 5h ≥ 70%, 7d ≥ 80%, or `rateLimitReachedType` set while a window is unexpired |
-| Cursor | `POST api2.cursor.sh/aiserver.v1.DashboardService/GetCurrentPeriodUsage` with the Agent CLI's Keychain token (`cursor-access-token` / `cursor-user`) — the RPC behind the CLI's own `/usage` | the pool the worker draws from ≥ 95%: `autoPercentUsed` when `ADVANCE_ROADMAP_CURSOR_WORKER_MODEL` is `auto` (default), `apiPercentUsed` otherwise; clears at `billingCycleEnd` |
+| Cursor | `POST api2.cursor.sh/aiserver.v1.DashboardService/GetCurrentPeriodUsage` with the Agent CLI's Keychain token (`cursor-access-token` / `cursor-user`) — the RPC behind the CLI's own `/usage` | the pool the role draws from ≥ 95%: `autoPercentUsed` when that role's model (`ADVANCE_ROADMAP_CURSOR_WORKER_MODEL` / `ADVANCE_ROADMAP_CURSOR_REVIEW_MODEL`) is `auto` (default), `apiPercentUsed` otherwise; clears at `billingCycleEnd` |
+
+Thresholds are env-overridable: `ADVANCE_ROADMAP_MAX_FIVE_HOUR_PCT` (70),
+`ADVANCE_ROADMAP_MAX_WEEKLY_PCT` (80) and `ADVANCE_ROADMAP_MAX_CURSOR_PCT` (95).
 
 Only the `codex` limit id is read (the separate `base_model_inference` / gpt-reserve pool is
 ignored). A window whose reset time has passed counts as 0% even without a fresh probe.
+
+Limit banners carry their reset as relative time ("in 2h 13m") or a clock time ("5pm",
+"11:50 AM (America/New_York)"); a clock time already past rolls over to the next day.
 
 Reproduce (read-only, writes nothing, exit 1 if any provider returned no data):
 

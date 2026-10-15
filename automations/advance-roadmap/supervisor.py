@@ -52,6 +52,8 @@ SHIPPED = {"shipped", "shipped-deploy-failed"}
 # Outcomes that count toward the consecutive-error breaker (runrecord.ERROR_OUTCOMES minus a red
 # deploy, which shipped; plus a lane that died before recording anything).
 ERRORS = {"error", "failed", "incomplete", "aborted", "unrecorded"}
+# A provider ran out (before or during the run): pause new lanes, and neither count nor clear errors.
+QUOTA = {"skipped-quota", "quota-paused"}
 
 LOG = None
 
@@ -266,11 +268,11 @@ class Supervisor:
                 self.next_idle_check = time.time() + IDLE_CHECK_MIN * 60
             else:
                 self.queue_empty = False  # a repo just freed up, and a ship may unblock others
-            if outcome == "skipped-quota":
+            if outcome in QUOTA:
                 self.quota_until = time.time() + QUOTA_PAUSE_MIN * 60
             if outcome in ERRORS:
                 self.consecutive_errors += 1
-            elif outcome not in ("skipped-superset", "skipped-quota", "skipped-lock"):
+            elif outcome not in QUOTA | {"skipped-superset", "skipped-lock"}:
                 self.consecutive_errors = 0
 
     def can_dispatch(self, now):
