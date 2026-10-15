@@ -42,6 +42,18 @@ ORCH_FAILURE = re.compile(
     r"orchestrator|worker\.sh|ORCHESTRATOR_RESULT|left no status|"
     r"without (?:a |writing a )?result|unknown worker outcome|parse_error|planner",
     re.I)
+# Deliberate SAFETY.md / gate stops — correct behavior, never a tooling repair finding.
+SAFETY_STOP = re.compile(
+    r"\.noroadmap|opted out|dirty (?:tree|working)|live session|"
+    r"git-safe-to-autocommit|Needs Input|human-only|"
+    r"origin is not a jnelken|not a jnelken GitHub|"
+    r"plan approval|quota.?paus",
+    re.I)
+# Follow-up blocker kinds that are the repair pipeline itself failing (worth a tooling finding).
+REPAIR_BLOCKER_KINDS = frozenset({
+    "builder", "review", "review-unavailable", "land", "crash",
+    "unknown-usage", "unknown-builder", "linear",
+})
 
 
 def finding_id(stage, repo, kind, key):
@@ -260,6 +272,21 @@ def orchestration_failure_evidence(row, orch, run, src):
     return None
 
 
+def blocker_repair_evidence(blocker, stage):
+    """Evidence a follow-up blocker is an orchestration/repair defect. None = expected safety stop."""
+    kind = blocker.get("kind") or ""
+    reason = str(blocker.get("reason") or "")
+    if kind == "quota" or SAFETY_STOP.search(reason):
+        return None
+    # safe_repo / eligibility gates are deliberate SAFETY.md stops, not defects to repair.
+    if kind in ("unsafe-repo", "interrupted"):
+        return None
+    src = f"followups/{stage.get('key')}/state.json"
+    if kind in REPAIR_BLOCKER_KINDS or ORCH_FAILURE.search(reason):
+        return evidence(src, reason or kind)
+    return None
+
+
 def tooling_scan(root, stamps, stages=(), run_dirs=None):
     """Findings for one finished batch/run: what in the automation itself got in the way.
 
@@ -367,14 +394,19 @@ def tooling_scan(root, stamps, stages=(), run_dirs=None):
                     "Refuse to save (and invalidate) verdicts whose source run had a planner error.",
                     evidence(path, m.group(0)))
 
-    # 8. Follow-up stages this run started that stopped on something other than quota.
+    # 8. Follow-up stages this run started: only blockers that evidence an orchestration defect.
     for st in stages:
         for b in st.get("blockers") or []:
-            if b.get("kind") == "quota":
-                continue
-            hit("fragile-tooling", f"followup-{b.get('kind')}", f"a follow-up stage was blocked: {b.get('reason', '')[:100]}",
-                "Fix the step that blocked the follow-up so it can finish unattended.",
-                evidence(f"followups/{st.get('key')}/state.json", b.get("reason")))
+            ev = blocker_repair_evidence(b, st)
+            if ev:
+                hit("fragile-tooling", f"followup-{b.get('kind')}",
+                    f"a follow-up stage was blocked: {(b.get('reason') or '')[:100]}",
+                    "Fix the step that blocked the follow-up so it can finish unattended.", ev)
+            elif b.get("kind") != "quota":
+                quiet.append(non_finding(
+                    f"{st.get('key')} blocked ({b.get('kind')})",
+                    "an expected safety stop or deliberate gate is not a tooling defect",
+                    [evidence(f"followups/{st.get('key')}/state.json", b.get("reason") or b.get("kind"))]))
 
     findings = list(groups.values())
     # One stdout-fence fallback is the recovery path working; only a repeat is friction.

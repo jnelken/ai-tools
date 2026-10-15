@@ -289,6 +289,22 @@ class FollowupTest(unittest.TestCase):
         [f] = [f for f in findings if f["kind"] == "fragile-tooling"]
         self.assertIn("missing ORCHESTRATOR_RESULT_JSON", f["evidence"][0]["quote"])
 
+    def test_tooling_scan_skips_expected_safety_blockers(self):
+        """`.noroadmap` and other SAFETY.md stops are deliberate; only repair-pipeline blockers find."""
+        stages = [
+            {"key": "cleanup-noroadmap", "blockers": [
+                {"kind": "unsafe-repo", "reason": "demo has opted out (.noroadmap)"}]},
+            {"key": "cleanup-dirty", "blockers": [
+                {"kind": "unsafe-repo", "reason": "dirty tree (3 files)"}]},
+            {"key": "cleanup-land", "blockers": [
+                {"kind": "land", "reason": "PR checks failed on https://example/pull/1"}]},
+        ]
+        findings, quiet = followscan.tooling_scan(self.root, [], stages=stages)
+        titles = [f["title"] for f in findings if f["kind"] == "fragile-tooling"]
+        self.assertEqual(titles, ["a follow-up stage was blocked: PR checks failed on https://example/pull/1"])
+        self.assertTrue(any("noroadmap" in n["title"] or "unsafe-repo" in n["title"] for n in quiet), quiet)
+        self.assertTrue(any("cleanup-dirty" in n["title"] for n in quiet), quiet)
+
     # ── repair lifecycle ──
 
     def test_a_clean_review_with_passing_checks_merges_and_records_the_repair(self):
@@ -902,6 +918,63 @@ class FollowupTest(unittest.TestCase):
                    and c["issue"] == "DEV-501" and "Fixed by" in (c["body"] or "")]
         self.assertEqual(len(closing), 1)   # the retry only moves it to Done
         self.assertEqual(len(self.calls("worker")), 1)   # the finished repair never ran again
+
+    def test_finish_closes_a_ticket_only_when_every_tracked_finding_is_fixed(self):
+        """A new stage that repairs one finding must not Done a multi-finding ticket."""
+        # Blocked sibling still owns an open finding on the shared ticket.
+        self.shipped_item("20261014-050000")
+        self.run_followup("hook", "item-done", "--stamp", "20261014-050000")
+        self.set("stub-usage.json", {"fail": True})
+        self.run_followup("drain")
+        key_a = "cleanup-20261014-050000"
+        fid2 = "bbbbbbbbbbbb"
+        st_a = self.state(key_a)
+        st_a["findings"] = [{
+            "id": fid2, "stage": "project-cleanup", "repo": "demo", "kind": "unresolved-review",
+            "title": "second finding still open", "fix": "fix the other bug", "status": "open",
+            "ticket": "DEV-501", "evidence": [{"source": "test", "quote": "second finding still open"}],
+        }]
+        st_a.update(status="blocked", blockers=[{"kind": "builder", "reason": "builder crashed"}],
+                    owned_tickets=["DEV-501"])
+        (self.root / "followups" / key_a / "state.json").write_text(json.dumps(st_a))
+        # New stage scans its own finding, then we attach the multi-finding ticket before repair.
+        self.shipped_item("20261014-060000")
+        self.run_followup("hook", "item-done", "--stamp", "20261014-060000")
+        self.run_followup("drain")   # still usage-fail: scan only
+        key_b = "cleanup-20261014-060000"
+        st_b = self.state(key_b)
+        fid1 = st_b["findings"][0]["id"]
+        st_b["findings"][0]["ticket"] = "DEV-501"
+        (self.root / "followups" / key_b / "state.json").write_text(json.dumps(st_b))
+        ticket = self.meta_ticket("DEV-501", {
+            "key": key_a, "stage": "project-cleanup", "finding_ids": [fid1, fid2],
+            "finding_status": {fid1: "open", fid2: "open"},
+        })
+        (self.root / "followups" / "tickets.json").write_text(json.dumps({
+            fid1: {"ticket": "DEV-501", "key": key_a, "at": time.time()},
+            fid2: {"ticket": "DEV-501", "key": key_a, "at": time.time()},
+        }))
+        self.set("stub-usage.json", {})
+        self.set("stub-linear.json", {"pages": [[ticket]]})
+        self.run_followup("drain", "--stage", "cleanup")
+        st_b = self.state(key_b)
+        self.assertEqual(st_b["status"], "done", self.report())
+        self.assertEqual(st_b["findings"][0]["status"], "fixed")
+        self.assertEqual(st_b["findings"][0]["ticket"], "DEV-501")
+        done = [c for c in self.calls("linear") if c["cmd"] == "issue update DEV-501" and "Done" in c["args"]]
+        self.assertEqual(done, [], "must not close while fid2 is still open")
+        partial = [c for c in self.calls("linear") if c["cmd"].startswith("issue comment")
+                   and c["issue"] == "DEV-501" and "partial progress" in (c["body"] or "")]
+        self.assertTrue(partial, self.calls("linear"))
+        self.assertIn(fid1, partial[0]["body"])
+        self.assertIn(fid2, partial[0]["body"])
+        updates = [c for c in self.calls("linear") if c["cmd"] == "issue update DEV-501"
+                   and "--description-file" in (c["args"] or [])]
+        self.assertTrue(updates, "metadata must record per-finding status")
+        self.assertIn(f'"{fid1}": "fixed"', updates[0]["body"])
+        self.assertIn(f'"{fid2}": "open"', updates[0]["body"])
+        self.assertEqual(st_b.get("pending_close"), [])
+        self.assertEqual(st_b.get("pending_partial"), [])
 
     def test_a_finding_already_ticketed_gets_evidence_not_a_duplicate(self):
         self.shipped_item("20261014-050000")

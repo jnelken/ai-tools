@@ -136,21 +136,26 @@ def render_findings(findings):
     return "\n".join(lines)
 
 
-def description(stage, findings, quota=None, next_step="", validation=None):
+def description(stage, findings, quota=None, next_step="", validation=None, finding_status=None):
+    ids = [f["id"] for f in findings]
+    status = dict(finding_status or {})
+    for f in findings:
+        status.setdefault(f["id"], f.get("status") or "open")
     meta = {"workflow": WORKFLOW, "key": stage["key"], "stage": stage["stage"], "repo": stage["repo"],
             "origin": stage.get("origin"), "stamp": stage.get("stamp"), "item": stage.get("item"),
-            "finding_ids": [f["id"] for f in findings], "branch": stage.get("branch"),
+            "finding_ids": ids, "finding_status": status, "branch": stage.get("branch"),
             "pr_url": stage.get("pr_url"),
             # Which provider built the branch: the reviewer on another machine must be a different one.
             "builder_provider": stage.get("builder_provider"),
             # When this block was written: a recovery trusts it over older local state.
             "updated_at": stage.get("ticket_meta_at")}
     q = quota or {}
+    remaining = [f for f in findings if status.get(f["id"]) != "fixed"]
     parts = [
         f"advance-roadmap's {stage['stage']} follow-up for "
         + (f"`{stage.get('item')}` ({stage.get('stamp')})" if stage.get("item") else f"run `{stage.get('origin')}`")
         + " found these and could not finish them: a provider usage gate stopped it.",
-        "## Remaining findings", render_findings(findings),
+        "## Remaining findings", render_findings(remaining) if remaining else "_(none — awaiting close)_",
         "## State",
         f"- Branch: `{stage.get('branch') or 'not created yet'}`" + (f" · PR: {stage['pr_url']}" if stage.get("pr_url") else ""),
         f"- Validation so far: {render_validation(validation or stage.get('validation'))}",
@@ -158,8 +163,8 @@ def description(stage, findings, quota=None, next_step="", validation=None):
         + (f"; resets {q['reset_at']}" if q.get("reset_at") else ""),
         f"- Next step: {next_step}",
         "Owned by `followup.py` (not the roadmap planner): it resumes this on its own once the provider resets, "
-        "and closes the ticket only after checks pass, an independent review is clean, the PR merges and the "
-        "deploy is verified.",
+        "and closes the ticket only after every tracked finding is verified fixed (checks, clean review, merge, "
+        "deploy).",
         f"```{WORKFLOW}\n{json.dumps(meta)}\n```",
     ]
     return "\n\n".join(parts) + "\n"

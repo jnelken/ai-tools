@@ -708,6 +708,86 @@ def block(st, kind, reason, retry=True):
                 report(st, "linear", f"could not update {ident}: {e}")
 
 
+def stage_repair_verified(ost):
+    """True when a stage's repair landed with checks, a clean review, merge and deploy verified."""
+    v = ost.get("validation") or {}
+    if not (ost.get("merge_commit") or ost.get("merged")):
+        return False
+    if v.get("checks") not in ("passed", "none"):
+        return False
+    if not any(r.get("verdict") == "clean" for r in (v.get("reviews") or [])):
+        return False
+    return v.get("deploy") in ("success", "none")
+
+
+def finding_verified_fixed(fid, current=None):
+    """A finding is fixed only after some stage verified its repair end-to-end."""
+    seen = set()
+    for ost in ([current] if current else []) + all_stages():
+        key = ost.get("key")
+        if key in seen:
+            continue
+        seen.add(key)
+        for f in ost.get("findings") or []:
+            if f.get("id") == fid and f.get("status") == "fixed" and stage_repair_verified(ost):
+                return True
+    return False
+
+
+def ticket_tracked_ids(ident, current=None, extras=()):
+    """Every finding_id the ticket still tracks: index, metadata on sibling stages, and extras."""
+    ids = set(extras)
+    with TicketIndex() as index:
+        for fid, e in index.entries.items():
+            if e.get("ticket") == ident:
+                ids.add(fid)
+    for ost in ([current] if current else []) + all_stages():
+        for f in ost.get("findings") or []:
+            if f.get("ticket") == ident and f.get("id"):
+                ids.add(f["id"])
+        for owned in ost.get("owned_tickets") or []:
+            if owned != ident:
+                continue
+            # Prefer the authoritative metadata block when a stage still carries the ticket body.
+            meta = followticket.parse_meta(ost.get("ticket_body") or "")
+            if meta:
+                ids.update(meta.get("finding_ids") or [])
+                ids.update((meta.get("finding_status") or {}).keys())
+    return ids
+
+
+def note_partial_progress(st, ident, status_map):
+    """Comment partial progress and rewrite metadata; never mark Done while findings remain open."""
+    remaining = sorted(fid for fid, s in status_map.items() if s != "fixed")
+    fixed_ids = sorted(fid for fid, s in status_map.items() if s == "fixed")
+    body = (f"advance-roadmap follow-up `{st['key']}` verified partial progress on `{ident}`: "
+            f"fixed {', '.join(f'`{i}`' for i in fixed_ids) or '(none)'}; "
+            f"still open {', '.join(f'`{i}`' for i in remaining)}. "
+            f"PR {st.get('pr_url')}, merge `{st.get('merge_commit')}`; "
+            f"{followticket.render_validation(st.get('validation'))}. "
+            "Ticket stays open until every tracked finding_id is verified fixed.")
+    # Synthesize finding rows for the description rewrite (titles from any stage that has them).
+    by_id = {}
+    for ost in [st] + all_stages():
+        for f in ost.get("findings") or []:
+            if f.get("id") in status_map:
+                by_id.setdefault(f["id"], dict(f))
+    findings = []
+    for fid, status in status_map.items():
+        row = by_id.get(fid) or {"id": fid, "title": fid, "kind": "ticket", "fix": f"see {ident}",
+                                 "evidence": []}
+        row = {**row, "status": status, "ticket": ident}
+        findings.append(row)
+    st["ticket_meta_at"] = time.time()
+    desc = followticket.description(
+        st, findings, st.get("quota"),
+        next_step=f"repair remaining finding(s): {', '.join(remaining)}" if remaining else "close when ready",
+        validation=st.get("validation"), finding_status=status_map)
+    followticket.comment(ident, body)
+    followticket.update_description(ident, desc)
+    log(f"{st['key']}: partial progress on {ident} (fixed {len(fixed_ids)}/{len(status_map)})")
+
+
 def finish(st, findings):
     for f in findings:
         f["status"] = "fixed"
@@ -715,9 +795,39 @@ def finish(st, findings):
     st["close_note"] = (f"Fixed by advance-roadmap follow-up `{st['key']}`: PR {st.get('pr_url')}, merge "
                         f"`{st.get('merge_commit')}`, deploy {st['validation'].get('deploy')}; "
                         f"{followticket.render_validation(st.get('validation'))}.")
-    st["pending_close"] = [{"ticket": ident, "commented": False}
-                           for ident in sorted({f["ticket"] for f in findings if f.get("ticket")})]
+    close, partial = [], []
+    for ident in sorted({f["ticket"] for f in findings if f.get("ticket")}):
+        tracked = ticket_tracked_ids(ident, current=st,
+                                     extras={f["id"] for f in findings if f.get("ticket") == ident})
+        status_map = {fid: ("fixed" if finding_verified_fixed(fid, current=st) else "open")
+                      for fid in tracked}
+        if tracked and all(s == "fixed" for s in status_map.values()):
+            close.append(ident)
+        else:
+            partial.append((ident, status_map))
+    st["pending_close"] = [{"ticket": ident, "commented": False} for ident in close]
+    st["pending_partial"] = [{"ticket": ident, "status": status_map, "done": False}
+                             for ident, status_map in partial]
+    apply_partial_progress(st, findings)
     close_tickets(st)
+
+
+def apply_partial_progress(st, findings=None):
+    """Persist partial-progress comments/metadata; retried by later drains like pending_close."""
+    if os.environ.get("ADVANCE_ROADMAP_FOLLOWUP_LINEAR", "1") != "1":
+        st["pending_partial"] = []
+        return
+    for entry in st.get("pending_partial") or []:
+        if entry.get("done"):
+            continue
+        ident = entry["ticket"]
+        try:
+            note_partial_progress(st, ident, entry.get("status") or {})
+            entry["done"] = True
+        except followticket.LinearError as e:
+            report(st, "linear", f"could not record partial progress on {ident}: {e}",
+                   "the next drain retries the partial-progress update")
+    st["pending_partial"] = [e for e in st.get("pending_partial") or [] if not e.get("done")]
 
 
 def close_tickets(st):
@@ -751,13 +861,16 @@ def retry_closes():
     the identifiers it closed."""
     closed = set()
     for st in all_stages():
-        if not st.get("pending_close"):
+        if not st.get("pending_close") and not st.get("pending_partial"):
             continue
         c = claim_stage(st["key"])
         if not c:
             continue
         try:
             st = load(st["key"]) or st
+            if st.get("pending_partial"):
+                apply_partial_progress(st)
+                save(st)
             if st.get("pending_close"):
                 closed |= close_tickets(st)
                 save(st)
