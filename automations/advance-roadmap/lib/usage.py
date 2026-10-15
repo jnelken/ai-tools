@@ -887,8 +887,10 @@ def live_limit_banner(
     """Banner text when this CLI call actually hit a limit; None when a banner is only echoed.
 
     A limit banner in a transcript counts only when the call failed for that invocation — non-zero
-    exit or no final answer — or when it appears in the provider's own error/result record. A
-    successful final answer means ignore banners quoted from files, prompts, or prior logs.
+    exit, structured provider error (`is_error`), or no final answer — or when it appears in the
+    provider's own error/result record. A successful final answer means ignore banners quoted from
+    files, prompts, or prior logs. Zero-exit JSON with `is_error:true` is never a success even when
+    `.result` is a generic nonempty string (the live banner may only be on stderr).
     """
     reported = provider_reported_limit(provider_result)
     if reported:
@@ -896,11 +898,17 @@ def live_limit_banner(
     banner = limit_banner(transcript or "")
     if not banner:
         return None
-    succeeded = bool((final_answer or "").strip()) and (exit_code is None or exit_code == 0)
+    succeeded = (
+        bool((final_answer or "").strip())
+        and (exit_code is None or exit_code == 0)
+        and not provider_is_error(provider_result)
+    )
     if succeeded:
         return None
-    # No final answer, or a non-zero exit: the banner is a live CLI limit.
+    # No final answer, non-zero exit, or structured provider error: the banner is a live CLI limit.
     if exit_code is not None and exit_code != 0:
+        return banner
+    if provider_is_error(provider_result):
         return banner
     if not (final_answer or "").strip():
         return banner

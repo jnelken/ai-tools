@@ -484,6 +484,19 @@ class LimitBannerTests(unittest.TestCase):
         self.assertIsNone(
             usage.live_limit_banner("ok\n", exit_code=0, final_answer=banner,
                                     provider_result=None))
+        # Zero exit + is_error:true + generic nonempty result must not suppress a stderr banner.
+        stderr_banner = f"noise\n{banner}\n"
+        generic = "An unexpected error occurred. Please try again."
+        self.assertEqual(
+            usage.live_limit_banner(
+                stderr_banner, exit_code=0, final_answer=generic,
+                provider_result={"type": "result", "subtype": "success", "is_error": True,
+                                 "result": generic}),
+            banner)
+        self.assertIsNone(
+            usage.live_limit_banner(
+                stderr_banner, exit_code=0, final_answer=generic,
+                provider_result={"type": "result", "is_error": False, "result": generic}))
 
     def test_load_provider_result_finds_json_amid_noise(self):
         with tempfile.TemporaryDirectory() as tmp:
