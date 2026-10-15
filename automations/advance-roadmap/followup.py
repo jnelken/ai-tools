@@ -59,6 +59,7 @@ STALE_S = float(os.environ.get("ADVANCE_ROADMAP_FOLLOWUP_STALE_H", "12")) * 3600
 POLL_S = float(os.environ.get("ADVANCE_ROADMAP_FOLLOWUP_POLL_S", "15"))
 CODEX = os.environ.get("ADVANCE_ROADMAP_CODEX_BIN", "/opt/homebrew/bin/codex")
 CLAUDE = os.environ.get("ADVANCE_ROADMAP_CLAUDE_BIN", "/Users/jake/.local/bin/claude")
+ANALYST_TIMEOUT_S = float(os.environ.get("ADVANCE_ROADMAP_FOLLOWUP_ANALYST_TIMEOUT_S", "1800"))
 
 
 # ── shared helpers (slice 3 will share these with the repair module) ─────────
@@ -332,21 +333,28 @@ def recover_interrupted():
 # ── ANALYZE ──────────────────────────────────────────────────────────────────
 
 def scan(st):
+    st.pop("analyst_error", None)
     if st["stage"] == STAGES["cleanup"]:
         run_dir = Path(st.get("run_dir") or ROOT / "runs" / st["stamp"])
         repo_dir = repo_path(st["repo"])
         findings, quiet = followscan.cleanup_scan(run_dir, repo_dir if repo_dir and repo_dir.is_dir() else None)
         files = [p for p in (run_dir / n for n in ("worker-result.json", "reviews.jsonl", "worker-output.log"))
                  if p.exists()]
+        child_stamps = [st["stamp"]] if st.get("stamp") else []
     else:
         children = st.get("children") or []
+        child_stamps = children
         cleanups = [s for s in all_stages() if s.get("stamp") in children]
+        corpus_dir = stage_dir(st["key"]) / "corpus"
         findings, quiet = followscan.tooling_scan(ROOT, children, cleanups, st.get("run_dirs"))
-        files = followscan.corpus_files(ROOT, children, st.get("run_dirs"))
-    more, rejected = analyze(st, findings, files)
+        files = followscan.corpus_files(ROOT, children, st.get("run_dirs"), excerpt_dir=corpus_dir)
+    more, rejected = analyze(st, findings, files, child_stamps)
     st["findings"] = findings + more
     st["non_findings"] = quiet + rejected
     st["corpus"] = [str(p) for p in files]
+    if st.get("analyst_error"):
+        report(st, "analyst", st.get("analyst") or "analyst failed", next_step="analyze")
+        return st
     st["scanned"] = True
     return st
 
@@ -354,14 +362,21 @@ def scan(st):
 ANALYST_FENCE = "FOLLOWUP_FINDINGS_JSON"
 
 
-def analyze(st, findings, files):
+def analyze(st, findings, files, stamps=None):
     """Optional read-only model pass over the corpus. Only findings whose every quote is really in
-    a corpus file are kept; the rest are recorded as rejected non-findings. Off with
-    ADVANCE_ROADMAP_FOLLOWUP_ANALYST=0; skipped when no analyst is under its usage gate."""
+    a corpus file for this stage's stamps are kept; the rest are recorded as rejected non-findings.
+    Off with ADVANCE_ROADMAP_FOLLOWUP_ANALYST=0; skipped when no analyst is under its usage gate.
+
+    Missing binary, timeout, or non-zero exit without a live-limit banner fails over to the next
+    eligible provider. When every attempt hard-fails, sets analyst_error so the stage stays
+    retryable (not scanned/done).
+    """
     if os.environ.get("ADVANCE_ROADMAP_FOLLOWUP_ANALYST", "1") != "1" or not files:
         return [], []
     prompt = analyst_prompt(st, findings, files)
-    limited = []
+    limited, hard_failures = [], []
+    provider = answer = transcript = None
+    exit_code, provider_result = 0, None
     for provider in ("codex", "claude"):
         gate = gate_one("analyst", provider)
         st["usage_snapshots"].append({"at": now_iso(), "role": "analyst", "provider": provider, "gate": gate})
@@ -370,8 +385,8 @@ def analyze(st, findings, files):
         try:
             transcript, answer, exit_code, provider_result = run_analyst(st, provider, prompt)
         except (OSError, subprocess.TimeoutExpired) as e:
-            st["analyst"] = f"failed: {e}"
-            return [], []
+            hard_failures.append(f"{provider}: {e}")
+            continue
         # Echoed banners in a successful final answer are not a live limit (shared live-limit rule).
         banner = usagelib.live_limit_banner(
             transcript, exit_code=exit_code, final_answer=answer, provider_result=provider_result)
@@ -379,13 +394,23 @@ def analyze(st, findings, files):
             record_analyst_limit(st, provider, banner)
             limited.append(provider)
             continue
+        if exit_code != 0:
+            hard_failures.append(f"{provider}: exit {exit_code}")
+            continue
         break
     else:
+        if hard_failures:
+            detail = "; ".join(hard_failures)
+            if limited:
+                detail += f"; {' and '.join(limited)} hit {'their limits' if len(limited) > 1 else 'its limit'}"
+            st["analyst"] = f"failed: {detail}"
+            st["analyst_error"] = True
+            return [], []
         st["analyst"] = (f"skipped: {' and '.join(limited)} hit {'their limits' if len(limited) > 1 else 'its limit'}"
                          if limited else "skipped: no analyst under its usage gate")
         return [], []
     # The findings come only from the final answer: the transcript echoes the prompt's example fence.
-    m = re.findall(r"```" + ANALYST_FENCE + r"\s*\n(.*?)\n```", answer, re.S)
+    m = re.findall(r"```" + ANALYST_FENCE + r"\s*\n(.*?)\n```", answer or "", re.S)
     try:
         doc = json.loads(m[-1]) if m else {}
     except ValueError:
@@ -393,11 +418,12 @@ def analyze(st, findings, files):
     st["analyst"] = f"{provider}: {'answered' if m else 'no findings block'}"
     known = {f["id"] for f in findings}
     kept, rejected = [], []
+    stage_stamps = list(stamps or st.get("children") or ([st.get("stamp")] if st.get("stamp") else []))
     for raw in doc.get("findings") or []:
         if not isinstance(raw, dict) or not raw.get("title"):
             continue
         ev = [e for e in raw.get("evidence") or [] if isinstance(e, dict)]
-        if not ev or not all(followscan.evidence_holds(e, files) for e in ev):
+        if not ev or not all(followscan.evidence_holds(e, files, stage_stamps) for e in ev):
             rejected.append(followscan.non_finding(raw["title"], "rejected: its evidence is not in the corpus", ev))
             continue
         f = followscan.finding(st["stage"], st["repo"], str(raw.get("kind") or "analyst"), raw["title"],
@@ -428,8 +454,8 @@ def run_analyst(st, provider, prompt):
     provider_result = None
     if provider == "codex":
         p = subprocess.run([CODEX, "exec", "-o", str(final), "-s", "read-only", "-C", str(ROOT),
-                            "--skip-git-repo-check", prompt], capture_output=True, text=True, timeout=1800,
-                           stdin=subprocess.DEVNULL)
+                            "--skip-git-repo-check", prompt], capture_output=True, text=True,
+                           timeout=ANALYST_TIMEOUT_S, stdin=subprocess.DEVNULL)
         raw.write_text(p.stdout + p.stderr)
         subprocess.run([*tokens, "codex", str(raw), "--role", "analyst",
                         "--log", str(d / "model-usage.jsonl"), "--session-out", str(session)],
@@ -438,7 +464,8 @@ def run_analyst(st, provider, prompt):
     else:
         p = subprocess.run([CLAUDE, "-p", prompt, "--permission-mode", "plan",
                             "--disallowedTools", "Edit,Write,NotebookEdit", "--output-format", "json"],
-                           capture_output=True, text=True, timeout=1800, stdin=subprocess.DEVNULL, cwd=str(ROOT))
+                           capture_output=True, text=True, timeout=ANALYST_TIMEOUT_S,
+                           stdin=subprocess.DEVNULL, cwd=str(ROOT))
         raw_json = d / "analyst-claude.json"
         raw_json.write_text(p.stdout + p.stderr)
         subprocess.run([*tokens, "claude-json", str(raw_json), str(raw), "--final", str(final), "--role", "analyst",
@@ -508,6 +535,12 @@ def process(st):
     if not st.get("scanned"):
         scan(st)
         save(st)
+    if not st.get("scanned"):
+        # Analyst hard-failed: leave retryable (or blocked after MAX_ATTEMPTS). report() already ran.
+        st["status"] = "pending" if st.get("attempts", 0) < MAX_ATTEMPTS else "blocked"
+        st["next"] = {"step": "analyze"}
+        save(st)
+        return
     st["next"] = {"step": "report"}
     fs = st.get("findings") or []
     quiet = st.get("non_findings") or []

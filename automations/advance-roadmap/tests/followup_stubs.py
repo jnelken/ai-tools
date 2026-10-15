@@ -73,6 +73,11 @@ def usage(args):
 
 def codex(args):
     note("codex", args=args[:2])
+    if (ROOT / "stub-codex-hang").exists():
+        time.sleep(120)
+    if (ROOT / "stub-codex-crash").exists():
+        print("codex crashed", file=sys.stderr)
+        sys.exit(2)
     try:
         print((ROOT / "stub-codex-transcript.txt").read_text())
     except OSError:
@@ -86,6 +91,11 @@ def codex(args):
 
 def claude(args):
     note("claude", args=args[:1])
+    if (ROOT / "stub-claude-crash").exists():
+        print("claude crashed", file=sys.stderr)
+        sys.exit(2)
+    if (ROOT / "stub-claude-hang").exists():
+        time.sleep(120)
     print(json.dumps({"type": "result", "result": (ROOT / "stub-claude-analyst.txt").read_text(),
                       "session_id": "claude-analyst-session"}))
 

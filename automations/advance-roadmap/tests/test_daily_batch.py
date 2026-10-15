@@ -497,6 +497,44 @@ class DailyBatchTest(unittest.TestCase):
         self.assertFalse([c for c in calls if '--repo' in c['args']])
         self.assertTrue([c for c in calls if c['args'][:2] == ['hook', 'run-end']])
 
+    def test_followup_timeout_reaps_the_whole_process_group(self):
+        """Timing out drain must kill followup.py and its children before the claim can reopen."""
+        import time
+        child_pid = self.root / 'child.pid'
+        child_script = self.root / 'child.py'
+        child_script.write_text(
+            "import os, time\n"
+            f"open({str(child_pid)!r}, 'w').write(str(os.getpid()))\n"
+            "time.sleep(120)\n"
+        )
+        (self.root / 'followup.py').write_text(
+            "import os, subprocess, sys, time\n"
+            f"subprocess.Popen([sys.executable, {str(child_script)!r}])\n"
+            f"open({str(self.root / 'parent.pid')!r}, 'w').write(str(os.getpid()))\n"
+            "time.sleep(120)\n"
+        )
+        with patch.object(daily_batch, 'ROOT', self.root), \
+                patch.object(daily_batch.shared, 'log', lambda *_: None):
+            t0 = time.time()
+            result = daily_batch.followup('drain', '--origin', 'batch-x', timeout=0.4)
+            elapsed = time.time() - t0
+        self.assertIsNone(result)
+        self.assertLess(elapsed, 8)
+        deadline = time.time() + 3
+        while time.time() < deadline and not child_pid.exists():
+            time.sleep(0.05)
+        self.assertTrue(child_pid.exists(), 'child never started')
+        pid = int(child_pid.read_text())
+        dead = False
+        for _ in range(40):
+            try:
+                os.kill(pid, 0)
+            except OSError:
+                dead = True
+                break
+            time.sleep(0.05)
+        self.assertTrue(dead, f'child pid {pid} still alive after group reap')
+
     def test_dashboard_schedule_preserves_history_and_uses_one_daily_slot(self):
         with patch.dict(os.environ, self.env):
             spec = importlib.util.spec_from_file_location('batch_dashboard', HERE / 'gen-dashboard.py')

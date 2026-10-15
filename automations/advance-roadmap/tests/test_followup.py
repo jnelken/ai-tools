@@ -347,9 +347,85 @@ class FollowupTest(unittest.TestCase):
         self.assertNotIn(bad["title"], titles)
         self.assertTrue(any(n["title"] == bad["title"] and "rejected" in n["why"] for n in doc["non_findings"]))
         self.assertTrue(all(f["repo"] == "ai-tools" and f["evidence"] for f in doc["findings"]))
+        # Deterministic findings preserve verbatim source lines (Oct 13 fixture reproduces this).
+        corpus = followscan.corpus_files(self.root, [stamp])
+        for f in doc["findings"]:
+            if f["title"] == good["title"]:
+                continue
+            for ev in f["evidence"]:
+                self.assertTrue(followscan.evidence_holds(ev, corpus, [stamp]), (f["title"], ev))
         self.assertEqual(doc["analyst"], "codex: answered")
         self.assertEqual(self.calls("worker"), [])
         self.assertFalse((self.root / "followups" / "tooling-batch-2026-10-13").exists())
+
+    def test_corpus_and_evidence_are_scoped_to_stage_child_stamps(self):
+        stamp = "20261013-103004"
+        row = json.loads((FIXTURES / "runs-row.json").read_text())
+        other = {**row, "stamp": "20261012-999999",
+                 "summary": "unrelated historical quote for another stage",
+                 "detail": "unrelated historical quote for another stage"}
+        (self.root / "runs.jsonl").write_text(json.dumps(other) + "\n" + json.dumps(row) + "\n")
+        (self.root / "runs" / stamp).mkdir(parents=True)
+        (self.root / "batch-verdicts").mkdir()
+        (self.root / "batch-verdicts" / "apt-sqft.json").write_text((FIXTURES / "batch-verdict-apt-sqft.json").read_text())
+        (self.root / "batch-verdicts" / "other.json").write_text(json.dumps({
+            "stamp": "20261012-999999", "summary": "You've hit your session limit · resets never\n"}))
+        corpus = followscan.corpus_files(self.root, [stamp], excerpt_dir=self.root / "corpus-x")
+        self.assertEqual([p for p in corpus if p.name == "runs.jsonl"], [self.root / "corpus-x" / "runs.jsonl"])
+        self.assertNotIn(self.root / "batch-verdicts" / "other.json", corpus)
+        self.assertIn(self.root / "batch-verdicts" / "apt-sqft.json", corpus)
+        borrowed = {"source": str(self.root / "runs.jsonl"),
+                    "quote": "unrelated historical quote for another stage"}
+        self.assertFalse(followscan.evidence_holds(borrowed, [self.root / "runs.jsonl"], [stamp]))
+        own = {"source": str(self.root / "runs.jsonl"),
+               "quote": "the orchestrator hit its session limit before triage"}
+        self.assertTrue(followscan.evidence_holds(own, [self.root / "runs.jsonl"], [stamp]))
+
+    def test_analyst_missing_binary_fails_over_then_hard_fail_stays_retryable(self):
+        stamp = "20261013-103004"
+        (self.root / "runs" / stamp).mkdir(parents=True)
+        (self.root / "runs.jsonl").write_text(json.dumps(json.loads((FIXTURES / "runs-row.json").read_text())) + "\n")
+        (self.root / "stub-claude-analyst.txt").write_text(self.analyst_fence())
+        missing = str(self.root / "no-such-codex")
+        p = self.run_followup("scan", "--stage", "tooling", "--origin", "batch-2026-10-13", "--stamp", stamp,
+                              env={"ADVANCE_ROADMAP_FOLLOWUP_ANALYST": "1",
+                                   "ADVANCE_ROADMAP_CODEX_BIN": missing})
+        doc = json.loads(p.stdout)
+        self.assertEqual(doc["analyst"], "claude: answered")
+        self.assertIn(self.ANALYST_FINDING["title"], [f["title"] for f in doc["findings"]])
+        # Both providers hard-fail → durable drain leaves the stage unscanned/retryable.
+        (self.root / "stub-claude-crash").write_text("")
+        self.run_followup("hook", "run-end", "--origin", "batch-fail-analyst", "--stamp", stamp)
+        self.run_followup("drain", "--stage", "tooling", "--origin", "batch-fail-analyst",
+                          env={"ADVANCE_ROADMAP_FOLLOWUP_ANALYST": "1",
+                               "ADVANCE_ROADMAP_CODEX_BIN": missing})
+        st = self.state("tooling-batch-fail-analyst")
+        self.assertFalse(st.get("scanned"))
+        self.assertEqual(st["status"], "pending")
+        self.assertTrue(any(b["kind"] == "analyst" for b in st["blockers"]), st["blockers"])
+        self.assertTrue(any(r["kind"] == "analyst" for r in self.report()), self.report())
+
+    def test_analyst_timeout_fails_over_to_claude(self):
+        (self.root / "stub-codex-hang").write_text("")
+        (self.root / "stub-claude-analyst.txt").write_text(self.analyst_fence())
+        stamp = "20261013-103004"
+        (self.root / "runs" / stamp).mkdir(parents=True)
+        (self.root / "runs.jsonl").write_text(json.dumps(json.loads((FIXTURES / "runs-row.json").read_text())) + "\n")
+        p = self.run_followup("scan", "--stage", "tooling", "--origin", "batch-2026-10-13", "--stamp", stamp,
+                              env={"ADVANCE_ROADMAP_FOLLOWUP_ANALYST": "1",
+                                   "ADVANCE_ROADMAP_FOLLOWUP_ANALYST_TIMEOUT_S": "0.3"},
+                              check=True)
+        doc = json.loads(p.stdout)
+        self.assertEqual(doc["analyst"], "claude: answered")
+        self.assertIn(self.ANALYST_FINDING["title"], [f["title"] for f in doc["findings"]])
+
+    def test_analyst_non_zero_without_limit_fails_over_to_claude(self):
+        (self.root / "stub-codex-crash").write_text("")
+        doc, titles = self.analyst_scan("stub-claude-analyst.txt", answer=True)
+        self.assertEqual(doc["analyst"], "claude: answered")
+        self.assertIn(self.ANALYST_FINDING["title"], titles)
+        self.assertTrue(any(c["tool"] == "codex" for c in self.calls()))
+        self.assertTrue(any(c["tool"] == "claude" for c in self.calls()))
 
     ANALYST_FINDING = {"title": "Bookkeeping summary blames the orchestrator limit", "kind": "misleading-surface",
                        "quote": "the orchestrator hit its session limit before triage"}

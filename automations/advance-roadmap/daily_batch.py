@@ -60,15 +60,51 @@ def followup_env():
                          "ADVANCE_ROADMAP_STAMP", "ADVANCE_ROADMAP_TARGET_REPO"}}
 
 
-def followup(*args, timeout=300, log=None):
-    """followup.py, synchronously. None when it could not run (a follow-up never fails the batch)."""
+def _reap_group(proc, grace=5.0):
+    """SIGTERM (then SIGKILL) the process group and wait until the leader is gone.
+
+    Drain runs start_new_session so an analyst child shares this group; releasing the stage claim
+    only after the group is reaped stops recovery from launching a duplicate analyst.
+    """
     try:
-        return subprocess.run([sys.executable, str(ROOT / "followup.py"), *args], text=True, timeout=timeout,
-                              stdin=subprocess.DEVNULL, env=followup_env(),
-                              **({"stdout": log, "stderr": subprocess.STDOUT} if log else {"capture_output": True}))
-    except (OSError, subprocess.TimeoutExpired) as error:
+        os.killpg(proc.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+    try:
+        proc.wait(timeout=grace)
+        return
+    except subprocess.TimeoutExpired:
+        pass
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    proc.wait()
+
+
+def followup(*args, timeout=300, log=None):
+    """followup.py in its own process group. None when it could not run (never fails the batch)."""
+    try:
+        kwargs = {"stdin": subprocess.DEVNULL, "env": followup_env(), "start_new_session": True, "text": True}
+        if log:
+            kwargs.update(stdout=log, stderr=subprocess.STDOUT)
+        else:
+            kwargs.update(stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        proc = subprocess.Popen([sys.executable, str(ROOT / "followup.py"), *args], **kwargs)
+    except OSError as error:
         shared.log(f"followup.py {args[0]}: {error}")
         return None
+    try:
+        stdout, stderr = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired as error:
+        _reap_group(proc)
+        try:
+            proc.communicate(timeout=1)  # drain/close pipes after the group is gone
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+        shared.log(f"followup.py {args[0]}: {error}")
+        return None
+    return subprocess.CompletedProcess(proc.args, proc.returncode, stdout, stderr)
 
 
 def save(path, value):
@@ -254,11 +290,13 @@ class Batch:
             try:
                 proc.wait(timeout=max(1.0, deadline - time.time()))
             except subprocess.TimeoutExpired:
-                os.killpg(proc.pid, signal.SIGTERM)   # its stage resumes on the next drain
+                _reap_group(proc)   # claim stays held until the group is gone; stage resumes next drain
                 shared.log(f"follow-up cleanup for {repo} ran out of time; it resumes next drain")
         stamps = [s for i in self.state["queue"] if i["stamp"] in self.procs for s in ("--stamp", i["stamp"])]
         followup("hook", "run-end", "--origin", self.origin, *stamps)
         with open(ROOT / "logs" / f"followup-{self.origin}.log", "a") as out:
+            # Own process group: timeout reaps followup.py and any analyst it started before
+            # the stage claim can be considered released.
             followup("drain", "--origin", self.origin, "--wait-s", FOLLOWUP_WAIT_S,
                      timeout=max(60.0, deadline - time.time()), log=out)
         status = followup("status", "--origin", self.origin, "--json", timeout=60)
