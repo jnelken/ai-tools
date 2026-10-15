@@ -149,6 +149,43 @@ record() {
     --worker-status "$WORKER_STATUS" --worker-result "$WORKER_RESULT" \
     --usage-log "$USAGE_LOG" >> "$LOG" 2>&1 || true
 }
+# ── Follow-ups (report-only until Phase B slice 3) ────────────────────────────
+# A lone run (not a batch lane) queues its own follow-ups (followup.py): a project cleanup when
+# a link shipped, and once the chain stops, one tooling-hardening pass over every link. The batch
+# does this itself for its lanes. Slice 2 analyzes and reports findings only — no repair/PR/Linear.
+FOLLOWUP_PY="$ROOT/followup.py"
+CHAIN_STAMPS="${ADVANCE_ROADMAP_CHAIN_STAMPS:+$ADVANCE_ROADMAP_CHAIN_STAMPS }$STAMP"
+CHAIN_ORIGIN="${ADVANCE_ROADMAP_CHAIN_ORIGIN:-run-$STAMP}"
+followups=0
+if [ -z "$LANE" ] && [ -z "$BATCH_PID" ] && [ "${ADVANCE_ROADMAP_FOLLOWUP:-}" != "1" ] \
+   && [ "${ADVANCE_ROADMAP_FOLLOWUPS:-1}" = "1" ] && [ -f "$FOLLOWUP_PY" ]; then
+  followups=1
+fi
+link_started=0   # this link got past the cadence/window gates and is a real run
+item_hooked=0
+chain_finalized=0
+followup_item_done() {
+  [ "$followups" = 1 ] && [ "$item_hooked" = 0 ] || return 0
+  item_hooked=1
+  python3 "$FOLLOWUP_PY" hook item-done --stamp "$STAMP" --origin "$CHAIN_ORIGIN" >> "$LOG" 2>&1 || true
+}
+# The chain stopped, however this link exited: queue its tooling pass, then drain detached so this
+# run's locks are released first (the cleanup waits for the repo to be quiescent; --wait-s bounds
+# that wait). Runs from the EXIT trap, which the chain's re-exec clears; a link-1 tick that never
+# started a run has nothing to follow up.
+followup_chain_end() {
+  [ "$followups" = 1 ] && [ "$chain_finalized" = 0 ] || return 0
+  [ "$CHAIN_LINK" -gt 1 ] || [ "$link_started" = 1 ] || return 0
+  chain_finalized=1
+  followup_item_done
+  local -a fu_args=()
+  local s
+  for s in ${=CHAIN_STAMPS}; do fu_args+=(--stamp "$s"); done
+  python3 "$FOLLOWUP_PY" hook run-end --origin "$CHAIN_ORIGIN" "${fu_args[@]}" >> "$LOG" 2>&1 || true
+  nohup python3 "$FOLLOWUP_PY" drain --origin "$CHAIN_ORIGIN" --wait-s "${ADVANCE_ROADMAP_FOLLOWUP_WAIT_S:-1800}" \
+    >> "$LOGDIR/followup-$CHAIN_ORIGIN.log" 2>&1 < /dev/null &!
+  echo "=== follow-ups: queued for $CHAIN_ORIGIN ($CHAIN_STAMPS); draining in the background ===" >> "$LOG"
+}
 planner_quota_record() {
   # planner_quota_record OUT [--primary P] [--hit P=FILE]... — every planner who is out and until
   # when. When quota-record (which refreshes first) fails, the gates as last saved still name them.
@@ -177,9 +214,11 @@ save_quota_gates() {
 on_exit() {
   local rc=$?
   [ -n "${LOCK:-}" ] && [ "${HOLDS_LOCK:-0}" -eq 1 ] && rm -rf "$LOCK"
-  [ "$RECORDED" -eq 1 ] && return
-  record aborted "run.sh exited $rc before recording" "$rc"
-  regen_dashboard
+  if [ "$RECORDED" -eq 0 ]; then
+    record aborted "run.sh exited $rc before recording" "$rc"
+    regen_dashboard
+  fi
+  followup_chain_end
 }
 trap on_exit EXIT
 trap 'exit 143' INT TERM
@@ -531,6 +570,7 @@ if [ -z "$(print -l "$PENDING_DIR"/pending-plan*.json(N))" ] && python3 "$VERDIC
   exit 0
 fi
 
+link_started=1
 {
   echo "=== advance-roadmap run $STAMP ($(date)) ==="
   [ "$CHAIN_LINK" -gt 1 ] && echo "(chain link $CHAIN_LINK, started $(date -r "$CHAIN_START" '+%H:%M:%S'))"
@@ -1064,6 +1104,9 @@ if [ -n "$alert" ]; then
   fi
 fi
 
+# Queue this link's cleanup before a chain re-exec can skip the EXIT trap.
+followup_item_done
+
 # ── Chain ─────────────────────────────────────────────────────────────────────
 # Only a clean feature ship continues: blocked, failed, red deploys and quota
 # skips all mean the next link would likely hit the same wall, and a code-health
@@ -1080,6 +1123,8 @@ elif [ "$last_outcome" = "shipped feature" ] && [ "$elapsed" -lt $(( CHAIN_MINUT
   trap - EXIT
   rm -rf "$LOCK"
   export ADVANCE_ROADMAP_CHAIN_START="$CHAIN_START" ADVANCE_ROADMAP_CHAIN_LINK=$(( CHAIN_LINK + 1 ))
+  export ADVANCE_ROADMAP_CHAIN_STAMPS="$CHAIN_STAMPS" ADVANCE_ROADMAP_CHAIN_ORIGIN="$CHAIN_ORIGIN"
   sleep 1  # stamps are per-second; the next link must not reuse this one's
   exec /bin/zsh "${0:A}"
 fi
+# The chain stops here: the EXIT trap queues its tooling pass (followup_chain_end).

@@ -242,7 +242,7 @@ def main():
         if name != "codex":
             p.add_argument("out_text")
             p.add_argument("--final", default="", help="also write only the final message here")
-        p.add_argument("--role", required=True, choices=["orchestrator", "worker", "reviewer"])
+        p.add_argument("--role", required=True, choices=["orchestrator", "worker", "reviewer", "analyst"])
         p.add_argument("--log", required=True)
         p.add_argument("--model", default="")
         p.add_argument("--round", type=int, default=None, help="review round (reviewer role)")

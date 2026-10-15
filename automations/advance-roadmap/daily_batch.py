@@ -42,6 +42,33 @@ RELEASE_GAP_S = float(os.environ.get("ADVANCE_ROADMAP_THREAD_RELEASE_GAP_S", "20
 APPROVAL_TIMEOUT_S = float(os.environ.get("ADVANCE_ROADMAP_APPROVAL_TIMEOUT_S", "1800"))
 # Outcomes whose row carries a `quota` field: who ran out and when it resets.
 QUOTA_OUTCOMES = {"quota-paused", "skipped-quota"}
+SHIPPED = {"shipped", "shipped-deploy-failed"}
+# A repo's threads are all still somewhere in these: its cleanup waits until none is.
+ACTIVE = {"queued", "planning", "ready", "running", "canceling"}
+FOLLOWUP_TIMEOUT_S = float(os.environ.get("ADVANCE_ROADMAP_FOLLOWUP_TIMEOUT_S", str(4 * 3600)))
+FOLLOWUP_WAIT_S = os.environ.get("ADVANCE_ROADMAP_FOLLOWUP_WAIT_S", "600")
+
+
+def followups_on():
+    return os.environ.get("ADVANCE_ROADMAP_FOLLOWUPS", "1") == "1" and (ROOT / "followup.py").exists()
+
+
+def followup_env():
+    """Follow-ups are the batch's, not a lane's: none of a lane's identity leaks into them."""
+    return {k: v for k, v in os.environ.items()
+            if k not in {"ADVANCE_ROADMAP_LANE", "ADVANCE_ROADMAP_BATCH_PID", "ADVANCE_ROADMAP_THREAD",
+                         "ADVANCE_ROADMAP_STAMP", "ADVANCE_ROADMAP_TARGET_REPO"}}
+
+
+def followup(*args, timeout=300, log=None):
+    """followup.py, synchronously. None when it could not run (a follow-up never fails the batch)."""
+    try:
+        return subprocess.run([sys.executable, str(ROOT / "followup.py"), *args], text=True, timeout=timeout,
+                              stdin=subprocess.DEVNULL, env=followup_env(),
+                              **({"stdout": log, "stderr": subprocess.STDOUT} if log else {"capture_output": True}))
+    except (OSError, subprocess.TimeoutExpired) as error:
+        shared.log(f"followup.py {args[0]}: {error}")
+        return None
 
 
 def save(path, value):
@@ -89,6 +116,8 @@ class Batch:
         self.limit = lanes
         self.threads = threads
         self.procs = {}
+        self.cleanups = {}   # repo → its follow-up cleanup drain
+        self.origin = f"batch-{directory.name}"
         self.state = {"date": directory.name, "phase": "preparing", "lanes_max": self.limit,
                       "threads_max": self.threads,
                       "started_at": datetime.now().isoformat(timespec="seconds"), "queue": []}
@@ -163,6 +192,10 @@ class Batch:
                             pr_url=row.get("pr_url"), exit_code=proc.returncode, detail=row.get("detail"))
                 if row.get("quota"):
                     item["quota"] = row["quota"]  # who ran out, when it resets, the CLI's words
+                if item["outcome"] in SHIPPED and followups_on():
+                    done = followup("hook", "item-done", "--stamp", item["stamp"], "--origin", self.origin)
+                    if done and done.returncode == 0:
+                        item["followup"] = "queued"
                 continue
             run = ROOT / "runs" / item["stamp"]
             if item["status"] == "planning" and (run / "batch-ready").exists():
@@ -180,6 +213,61 @@ class Batch:
                     os.killpg(proc.pid, signal.SIGKILL)
                     proc.wait()
                 item.update(status="finished", outcome="planning-timeout")
+
+    def live_cleanups(self):
+        return sum(p.poll() is None for p in self.cleanups.values())
+
+    def start_cleanups(self, slots):
+        """One cleanup drain per repo whose shipped items are queued and whose threads have all
+        stopped — never beside a sibling still working in it. Each takes a lane slot."""
+        started = 0
+        for repo in sorted({i["repo"] for i in self.state["queue"] if i.get("followup") == "queued"}):
+            if started >= slots:
+                break
+            if repo in self.cleanups and self.cleanups[repo].poll() is None:
+                continue
+            if any(i["repo"] == repo and i["status"] in ACTIVE for i in self.state["queue"]):
+                continue
+            with open(ROOT / "logs" / f"followup-{self.origin}.log", "a") as out:
+                self.cleanups[repo] = subprocess.Popen(
+                    [sys.executable, str(ROOT / "followup.py"), "drain", "--repo", repo, "--stage", "cleanup",
+                     "--origin", self.origin, "--wait-s", FOLLOWUP_WAIT_S],
+                    env=followup_env(), stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT,
+                    start_new_session=True)
+            for item in self.state["queue"]:
+                if item["repo"] == repo and item.get("followup") == "queued":
+                    item["followup"] = "draining"
+            started += 1
+            shared.log(f"follow-up cleanup started for {repo}")
+        return started
+
+    def finish_followups(self):
+        """After every thread: let the cleanups finish, queue this batch's tooling pass, drain what
+        is ready, and keep the outcome for the summary. Report-only: no repairs or Linear."""
+        if not followups_on():
+            return
+        self.state["phase"] = "follow-ups"
+        self.write()
+        deadline = time.time() + FOLLOWUP_TIMEOUT_S
+        self.start_cleanups(len(self.state["queue"]) + 1)
+        for repo, proc in self.cleanups.items():
+            try:
+                proc.wait(timeout=max(1.0, deadline - time.time()))
+            except subprocess.TimeoutExpired:
+                os.killpg(proc.pid, signal.SIGTERM)   # its stage resumes on the next drain
+                shared.log(f"follow-up cleanup for {repo} ran out of time; it resumes next drain")
+        stamps = [s for i in self.state["queue"] if i["stamp"] in self.procs for s in ("--stamp", i["stamp"])]
+        followup("hook", "run-end", "--origin", self.origin, *stamps)
+        with open(ROOT / "logs" / f"followup-{self.origin}.log", "a") as out:
+            followup("drain", "--origin", self.origin, "--wait-s", FOLLOWUP_WAIT_S,
+                     timeout=max(60.0, deadline - time.time()), log=out)
+        status = followup("status", "--origin", self.origin, "--json", timeout=60)
+        try:
+            self.state["followups"] = json.loads(status.stdout) if status and status.returncode == 0 else []
+        except ValueError:
+            self.state["followups"] = []
+        line = followup("status", "--origin", self.origin, timeout=60)
+        self.state["followups_line"] = line.stdout.strip() if line and line.returncode == 0 else ""
 
     def spawn_threads(self):
         """Once a thread has planned a feature, queue the repo's next thread (up to --threads).
@@ -328,8 +416,10 @@ class Batch:
         self.write()
         while any(i["status"] in {"ready", "running", "canceling"} for i in self.state["queue"]):
             self.poll()
-            slots = self.limit - sum(i["status"] in {"running", "canceling"}
-                                    for i in self.state["queue"])
+            slots = self.limit - self.live_cleanups() - sum(i["status"] in {"running", "canceling"}
+                                                            for i in self.state["queue"])
+            if followups_on():
+                slots -= self.start_cleanups(slots)
             ready, chosen = sorted(
                 (i for i in self.state["queue"] if i["status"] == "ready"),
                 key=lambda i: (i.get("action") not in {"dispatch_worker", "resume_worker"}, i["thread"])), []
@@ -351,6 +441,7 @@ class Batch:
                         shared.log(f'released {item["repo"]} thread {item["thread"]} {item.get("linear_id") or ""}')
             self.write()
             time.sleep(POLL_S)
+        self.finish_followups()
         self.state["phase"] = "done"
         self.state["quota_paused"] = quota_paused(self.state)
         self.write()
@@ -447,6 +538,8 @@ def post_slack_summary(directory):
     state = shared.read_json(directory / "batch.json") or {}
     text = text or " ".join(filter(None, [f'advance-roadmap batch {state.get("date")}: {state.get("phase")}.',
                                           quota_line(state)]))
+    if state.get("followups_line") and state["followups_line"] not in text:
+        text = f'{text} {state["followups_line"]}'
     try:
         import urllib.request
         request = urllib.request.Request(url, data=json.dumps({"text": text}).encode(),
