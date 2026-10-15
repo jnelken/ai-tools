@@ -435,6 +435,67 @@ class DailyBatchTest(unittest.TestCase):
         self.assertFalse(self.state()['summary_posted'])
         self.assertEqual(self.state()['phase'], 'done')
 
+    def fake_followup(self):
+        (self.root / 'followup.py').write_text(
+            "import json, os, sys, time\n"
+            "root, a = os.environ['ADVANCE_ROADMAP_ROOT'], sys.argv[1:]\n"
+            "def note(kind):\n"
+            "    with open(root + '/followup-calls.jsonl', 'a') as f:\n"
+            "        f.write(json.dumps({'kind': kind, 'args': a, 'time': time.time(),\n"
+            "                            'lane': os.environ.get('ADVANCE_ROADMAP_LANE')}) + '\\n')\n"
+            "note('start')\n"
+            "if a[0] == 'drain':\n"
+            "    time.sleep(.2)\n"
+            "    note('end')\n"
+            "if a[0] == 'status' and '--json' in a:\n"
+            "    print(json.dumps([{'key': 'cleanup-x', 'status': 'done', 'findings': 1, 'open_findings': 1}]))\n"
+            "elif a[0] == 'status':\n"
+            "    print('Follow-ups: 1 follow-up(s) reported (1 finding(s), 1 open).')\n")
+
+    def followup_calls(self):
+        path = self.root / 'followup-calls.jsonl'
+        return [json.loads(l) for l in path.read_text().splitlines()] if path.exists() else []
+
+    def test_follow_ups_wait_for_every_sibling_then_tooling_runs_last(self):
+        self.fake_followup()
+        events = self.threaded(FAKE_VERDICT='serialize')
+        calls = self.followup_calls()
+        origin = f"batch-{self.state()['date']}"
+        done = [c for c in calls if c['args'][:2] == ['hook', 'item-done'] and c['kind'] == 'start']
+        self.assertEqual(sorted(c['args'][3] for c in done), sorted(i['stamp'] for i in self.state()['queue']))
+        self.assertTrue(all(c['args'][c['args'].index('--origin') + 1] == origin and c['lane'] is None
+                            for c in calls if c['args'][0] == 'hook'))
+        [cleanup] = [c for c in calls if c['args'][:3] == ['drain', '--repo', 'a'] and c['kind'] == 'start']
+        # Thread 1 shipped first, but its repo's cleanup waits for thread 2 (serialized after it).
+        self.assertGreaterEqual(cleanup['time'], max(e['time'] for e in events if e['kind'] == 'work-end'))
+        cleanup_end = next(c['time'] for c in calls if c['args'][:3] == ['drain', '--repo', 'a'] and c['kind'] == 'end')
+        [run_end] = [c for c in calls if c['args'][:2] == ['hook', 'run-end']]
+        self.assertGreaterEqual(run_end['time'], cleanup_end)
+        self.assertEqual(run_end['args'].count('--stamp'), 2)
+        [final] = [c for c in calls if c['args'][:2] == ['drain', '--origin'] and c['kind'] == 'start']
+        self.assertGreater(final['time'], run_end['time'])
+        state = self.state()
+        self.assertEqual(state['phase'], 'done')
+        self.assertEqual(state['followups'], [{'key': 'cleanup-x', 'status': 'done', 'findings': 1, 'open_findings': 1}])
+        self.assertEqual(state['followups_line'], 'Follow-ups: 1 follow-up(s) reported (1 finding(s), 1 open).')
+
+    def test_follow_ups_off_runs_no_hooks(self):
+        self.fake_followup()
+        self.env['ADVANCE_ROADMAP_FOLLOWUPS'] = '0'
+        self.repo('a')
+        self.run_batch()
+        self.assertEqual(self.followup_calls(), [])
+        self.assertNotIn('followups', self.state())
+
+    def test_unshipped_items_queue_no_cleanup(self):
+        self.fake_followup()
+        self.env['FAKE_FAILED_REPO'] = 'a'
+        self.repo('a')
+        self.run_batch()
+        calls = self.followup_calls()
+        self.assertFalse([c for c in calls if c['args'][:2] == ['hook', 'item-done']])
+        self.assertFalse([c for c in calls if '--repo' in c['args']])
+        self.assertTrue([c for c in calls if c['args'][:2] == ['hook', 'run-end']])
 
     def test_dashboard_schedule_preserves_history_and_uses_one_daily_slot(self):
         with patch.dict(os.environ, self.env):
