@@ -975,6 +975,40 @@ class FollowupTest(unittest.TestCase):
         self.assertIn(f'"{fid2}": "open"', updates[0]["body"])
         self.assertEqual(st_b.get("pending_close"), [])
         self.assertEqual(st_b.get("pending_partial"), [])
+        meta = followticket.parse_meta(updates[0]["body"])
+        self.assertEqual(meta["finding_status"][fid1], "fixed")
+        self.assertEqual(meta["finding_status"][fid2], "open")
+        # Unfinished work keeps key_a's ownership — never B's merged PR.
+        self.assertEqual(meta["key"], key_a)
+        self.assertIsNone(meta.get("pr_url"))
+        self.assertEqual((meta.get("finding_owners") or {}).get(fid2, {}).get("key"), key_a)
+        self.assertNotEqual((meta.get("finding_owners") or {}).get(fid1, {}).get("key"), key_a)
+
+    def test_recovery_resumes_open_findings_at_build_not_under_a_sibling_pr(self):
+        """A fresh machine reading partial-progress metadata must not review the completed PR."""
+        key_a, key_b = "cleanup-20261014-050000", "cleanup-20261014-060000"
+        fid_open, fid_fixed = "aaaaaaaaaaaa", "bbbbbbbbbbbb"
+        ticket = self.meta_ticket("DEV-501", {
+            "key": key_a, "stage": "project-cleanup", "repo": "demo",
+            "finding_ids": [fid_fixed, fid_open],
+            "finding_status": {fid_fixed: "fixed", fid_open: "open"},
+            "finding_owners": {
+                fid_fixed: {"key": key_b, "branch": "roadmap/done", "pr_url": "https://example/pr/9",
+                            "builder_provider": "codex"},
+                fid_open: {"key": key_a, "branch": None, "pr_url": None},
+            },
+            "branch": None, "pr_url": None, "updated_at": time.time(),
+        })
+        self.set("stub-usage.json", {"fail": True})
+        self.set("stub-linear.json", {"pages": [[ticket]]})
+        self.run_followup("drain", "--stage", "cleanup")
+        st = self.state(key_a)
+        self.assertIsNotNone(st)
+        self.assertEqual([f["id"] for f in st["findings"]], [fid_open])
+        self.assertIsNone(st.get("pr_url"))
+        self.assertEqual((st.get("next") or {}).get("step"), "build")
+        self.assertFalse((self.root / "followups" / key_b / "state.json").exists(),
+                         "must not rebuild the completed sibling stage")
 
     def test_a_finding_already_ticketed_gets_evidence_not_a_duplicate(self):
         self.shipped_item("20261014-050000")
@@ -1077,6 +1111,15 @@ class FollowupTest(unittest.TestCase):
         cmds = [c.get("cmd") or c["tool"] for c in self.calls() if c["tool"] in ("usage", "usage-record-limit")]
         self.assertLess(cmds.index("parse-limit"), cmds.index("usage-record-limit"))
         self.assertEqual([(c["provider"], c["scope"]) for c in self.calls("usage-record-limit")], [("codex", "analyst")])
+
+    def test_analyst_ignores_an_echoed_limit_banner_when_its_final_answer_succeeded(self):
+        # Codex stdout quotes a prior corpus log's banner; -o still has a real findings fence.
+        (self.root / "stub-codex-transcript.txt").write_text(
+            "reading runs.jsonl\nYou've hit your usage limit. Upgrade to Pro or try again at 7:00 PM.\n")
+        doc, titles = self.analyst_scan("stub-analyst.txt", answer=True)
+        self.assertEqual(doc["analyst"], "codex: answered")
+        self.assertIn(self.ANALYST_FINDING["title"], titles)
+        self.assertEqual(self.calls("usage-record-limit"), [])
 
     def test_only_an_executed_git_stash_is_a_finding_never_an_echoed_rule(self):
         run = self.root / "runs" / "s1"

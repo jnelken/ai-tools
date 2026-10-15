@@ -350,24 +350,48 @@ def recover_tickets():
                          if e.get("ticket") in open_ids or (e.get("at") or 0) >= fetched_at}
     for issue, meta in followticket.followup_tickets(issues):
         ident = issue.get("identifier")
-        key = meta.get("key")
+        status_map = meta.get("finding_status") or {}
+        owners = meta.get("finding_owners") or {}
+        all_ids = list(meta.get("finding_ids") or status_map)
+        # Partial progress: some findings fixed under another stage's PR. Deferral tickets also
+        # carry finding_status (all "open") — only mixed fixed/open or an owners map is partial.
+        open_ids = [fid for fid in all_ids if status_map.get(fid, "open") != "fixed"]
+        partial = bool(owners) or (any(status_map.get(fid) == "fixed" for fid in all_ids)
+                                   and bool(open_ids) and bool(status_map))
+        head_owner = {}
+        if partial:
+            if not open_ids:
+                continue  # every tracked finding is already fixed; nothing to rebuild
+            head_owner = next((owners[fid] for fid in open_ids if isinstance(owners.get(fid), dict)
+                               and (owners[fid] or {}).get("key")), None) or {}
+        key = (head_owner.get("key") if partial else None) or meta.get("key")
         if not key or not re.fullmatch(r"[A-Za-z0-9._-]+", key):
             continue
         st = load(key)
         if st is None:
-            st = new_stage(key, meta.get("stage") or STAGES["cleanup"], meta.get("repo") or followticket.repo_label(issue),
+            if partial:
+                resume_branch, resume_pr = head_owner.get("branch"), head_owner.get("pr_url")
+                next_step, todo_ids = "build", open_ids
+                builder = head_owner.get("builder_provider")
+                stage_name = head_owner.get("stage") or meta.get("stage") or STAGES["cleanup"]
+            else:
+                resume_branch, resume_pr = meta.get("branch"), meta.get("pr_url")
+                next_step = "review" if resume_pr else "build"
+                todo_ids, builder = all_ids, meta.get("builder_provider")
+                stage_name = meta.get("stage") or STAGES["cleanup"]
+            st = new_stage(key, stage_name, meta.get("repo") or followticket.repo_label(issue),
                            meta.get("origin"), stamp=meta.get("stamp"), item=meta.get("item"),
                            recovered_from=ident, ticket_body=(issue.get("description") or "")[:6000])
             if st is None:
                 continue
-            st.update(status="deferred", branch=meta.get("branch"), pr_url=meta.get("pr_url"), scanned=True,
-                      builder_provider=meta.get("builder_provider"), owned_tickets=[ident],
+            st.update(status="deferred", branch=resume_branch, pr_url=resume_pr, scanned=True,
+                      builder_provider=builder, owned_tickets=[ident],
                       ticket_meta_at=meta.get("updated_at"),
                       findings=[{"id": fid, "stage": st["stage"], "repo": st["repo"], "kind": "ticket",
                                  "title": issue.get("title"), "fix": f"see {ident}", "status": "deferred",
                                  "ticket": ident, "evidence": [{"source": ident, "quote": issue.get("title")}]}
-                                for fid in meta.get("finding_ids") or []],
-                      next={"step": "review" if meta.get("pr_url") else "build", "round": 1})
+                                for fid in todo_ids],
+                      next={"step": next_step, "round": 1})
             log(f"{key}: rebuilt from {ident} (no local state on this machine)")
             save(st)
             continue
@@ -466,13 +490,15 @@ def analyze(st, findings, files):
         if gate is not None and not gate.get("available"):
             continue
         try:
-            transcript, answer = run_analyst(st, provider, prompt)
+            transcript, answer, exit_code, provider_result = run_analyst(st, provider, prompt)
         except (OSError, subprocess.TimeoutExpired) as e:
             st["analyst"] = f"failed: {e}"
             return [], []
-        banner = followscan.LIMIT_BANNER.search(transcript)
+        # Echoed banners in a successful final answer are not a live limit (shared live-limit rule).
+        banner = followrepair.usagelib.live_limit_banner(
+            transcript, exit_code=exit_code, final_answer=answer, provider_result=provider_result)
         if banner:
-            record_analyst_limit(st, provider, transcript[banner.start():].splitlines()[0].strip())
+            record_analyst_limit(st, provider, banner)
             limited.append(provider)
             continue
         break
@@ -509,13 +535,18 @@ def analyze(st, findings, files):
 
 
 def run_analyst(st, provider, prompt):
-    """(transcript, final answer) of one read-only analyst call. Limit banners are read from the
-    transcript; findings only from the final answer (Codex's -o file, Claude's JSON result)."""
+    """(transcript, final answer, exit code, provider_result) of one read-only analyst call.
+
+    Findings come only from the final answer (Codex's -o file, Claude's JSON result). Live limits
+    use usage.live_limit_banner — exit status and provider error records, never a quoted banner
+    alone.
+    """
     d = stage_dir(st["key"])
     final, raw, session = d / f"analyst-{provider}.last", d / f"analyst-{provider}.log", d / f"analyst-{provider}.session"
     for f in (final, session):
         f.unlink(missing_ok=True)
     tokens = [sys.executable, str(HERE / "lib" / "tokens.py")]
+    provider_result = None
     if provider == "codex":
         p = subprocess.run([CODEX, "exec", "-o", str(final), "-s", "read-only", "-C", str(ROOT),
                             "--skip-git-repo-check", prompt], capture_output=True, text=True, timeout=1800,
@@ -535,10 +566,19 @@ def run_analyst(st, provider, prompt):
                         "--log", str(d / "model-usage.jsonl"), "--session-out", str(session)],
                        capture_output=True, stdin=subprocess.DEVNULL, timeout=60)
         transcript = followscan.read_text(raw) or raw_json.read_text(errors="replace")
+        try:
+            for line in raw_json.read_text(errors="replace").splitlines():
+                if line.startswith("{"):
+                    obj = json.loads(line)
+                    if isinstance(obj, dict) and "result" in obj:
+                        provider_result = obj
+                        break
+        except (OSError, ValueError):
+            provider_result = None
     sid = followscan.read_text(session).strip()
     if sid:
         st.setdefault("sessions", []).append({"role": "analyst", "provider": provider, "session_id": sid})
-    return transcript, followscan.read_text(final)
+    return transcript, followscan.read_text(final), p.returncode, provider_result
 
 
 def record_analyst_limit(st, provider, text):
@@ -756,6 +796,53 @@ def ticket_tracked_ids(ident, current=None, extras=()):
     return ids
 
 
+def stage_owner_snapshot(ost):
+    """Owning stage/branch/PR for a finding still tracked by ost (may have no PR yet)."""
+    return {"key": ost.get("key"), "stage": ost.get("stage"), "branch": ost.get("branch"),
+            "pr_url": ost.get("pr_url"), "builder_provider": ost.get("builder_provider")}
+
+
+def finding_owners_for_partial(st, status_map, prev_meta=None):
+    """Per-finding ownership for a partial-progress rewrite.
+
+    Fixed findings credit the completing stage. Unfinished ones keep their prior owner (index,
+    sibling stage, or previous ticket meta) and never inherit this stage's merged PR — recovery
+    must resume them at a build step under their own branch/PR (or none).
+    """
+    prev_meta = prev_meta or {}
+    prev_owners = prev_meta.get("finding_owners") or {}
+    prev_ticket = {k: prev_meta.get(k) for k in ("key", "stage", "branch", "pr_url", "builder_provider")}
+    index_keys = {}
+    with TicketIndex() as index:
+        for fid in status_map:
+            entry = index.entries.get(fid) or {}
+            if entry.get("key"):
+                index_keys[fid] = entry["key"]
+    by_stage = {ost["key"]: ost for ost in all_stages() if ost.get("key")}
+    by_stage[st["key"]] = st
+    owners = {}
+    for fid, status in status_map.items():
+        if status == "fixed":
+            owners[fid] = stage_owner_snapshot(st)
+            continue
+        prior = prev_owners.get(fid) if isinstance(prev_owners.get(fid), dict) else None
+        owner_key = (prior or {}).get("key") or index_keys.get(fid) or prev_ticket.get("key")
+        if owner_key and owner_key != st["key"] and owner_key in by_stage:
+            owners[fid] = stage_owner_snapshot(by_stage[owner_key])
+        elif prior and prior.get("key") and prior["key"] != st["key"]:
+            owners[fid] = followticket.owner_fields(prior)
+        elif owner_key and owner_key != st["key"]:
+            owners[fid] = {"key": owner_key, "stage": prev_ticket.get("stage") or st.get("stage"),
+                           "branch": None, "pr_url": None,
+                           "builder_provider": (prior or {}).get("builder_provider") or prev_ticket.get("builder_provider")}
+        else:
+            # Still attributed to this stage but unfinished: strip the merged PR so recovery builds.
+            snap = stage_owner_snapshot(st)
+            snap.update(branch=None, pr_url=None)
+            owners[fid] = snap
+    return owners
+
+
 def note_partial_progress(st, ident, status_map):
     """Comment partial progress and rewrite metadata; never mark Done while findings remain open."""
     remaining = sorted(fid for fid, s in status_map.items() if s != "fixed")
@@ -768,21 +855,25 @@ def note_partial_progress(st, ident, status_map):
             "Ticket stays open until every tracked finding_id is verified fixed.")
     # Synthesize finding rows for the description rewrite (titles from any stage that has them).
     by_id = {}
+    prev_meta = None
     for ost in [st] + all_stages():
         for f in ost.get("findings") or []:
             if f.get("id") in status_map:
                 by_id.setdefault(f["id"], dict(f))
+        if not prev_meta:
+            prev_meta = followticket.parse_meta(ost.get("ticket_body") or "")
     findings = []
     for fid, status in status_map.items():
         row = by_id.get(fid) or {"id": fid, "title": fid, "kind": "ticket", "fix": f"see {ident}",
                                  "evidence": []}
         row = {**row, "status": status, "ticket": ident}
         findings.append(row)
+    owners = finding_owners_for_partial(st, status_map, prev_meta)
     st["ticket_meta_at"] = time.time()
     desc = followticket.description(
         st, findings, st.get("quota"),
         next_step=f"repair remaining finding(s): {', '.join(remaining)}" if remaining else "close when ready",
-        validation=st.get("validation"), finding_status=status_map)
+        validation=st.get("validation"), finding_status=status_map, finding_owners=owners)
     followticket.comment(ident, body)
     followticket.update_description(ident, desc)
     log(f"{st['key']}: partial progress on {ident} (fixed {len(fixed_ids)}/{len(status_map)})")

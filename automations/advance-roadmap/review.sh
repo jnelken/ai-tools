@@ -146,9 +146,13 @@ for who in "${reviewers[@]}"; do
   rm -f "$out.last" "$out.session"   # a limited Codex attempt must not supply the next reviewer's text
   run_reviewer "$who" "$out" || rc=$?
   [ "$rc" -eq 127 ] && continue
-  if text="$(rg -m1 -i \
-      '^(you.?ve hit your (session |usage )?limit|hit your session limit|rate limit exceeded|quota exceeded|out of (usage|credits|quota)\b)' \
-      "$out" || true)" && [ -n "$text" ]; then
+  # Only the final answer carries the verdict: a transcript echoes the prompt, which quotes both
+  # verdict lines. No final answer is no verdict (unparsed, never clean).
+  found=""
+  [ -s "$out.last" ] && found="$(rg -o '^VERDICT: (clean|findings)\s*$' -r '$1' "$out.last" | tail -1)"
+  # Live-limit rule (usage.py live-limit): ignore banners when the final answer succeeded.
+  if text="$(python3 "$USAGE_PY" live-limit --transcript-file "$out" --exit "$rc" \
+      --final-file "$out.last" 2>/dev/null)" && [ -n "$text" ]; then
     # Into this round's log line first, so a failed shared-state update can't lose it.
     python3 "$USAGE_PY" parse-limit --provider "$who" --text "$text" --scope reviewer 2>/dev/null >> "$limited" \
       || python3 -c 'import json, sys; print(json.dumps({"provider": sys.argv[1], "exact_cli_text": sys.argv[2]}))' \
@@ -156,10 +160,6 @@ for who in "${reviewers[@]}"; do
     python3 "$USAGE_PY" --root "$ROOT" record-limit --provider "$who" --text "$text" >/dev/null 2>&1 || true
     continue
   fi
-  # Only the final answer carries the verdict: a transcript echoes the prompt, which quotes both
-  # verdict lines. No final answer is no verdict (unparsed, never clean).
-  found=""
-  [ -s "$out.last" ] && found="$(rg -o '^VERDICT: (clean|findings)\s*$' -r '$1' "$out.last" | tail -1)"
   if [ -z "$found" ] && [ "$rc" -ne 0 ] && rg -q -i "$CAPACITY" "$out"; then
     echo "(skipping reviewer $who — its model is at capacity: $(rg -m1 -i -o "$CAPACITY" "$out"))"
     capacity="$capacity $who"

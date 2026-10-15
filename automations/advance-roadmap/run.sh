@@ -696,11 +696,19 @@ Previous no-work verdict and what changed since (carry unchanged verdicts forwar
       if [ -s "$orch_out.last" ] && extract_json_fence ORCHESTRATOR_RESULT_JSON "$orch_out.last" "$result"; then
         had_json=1; break
       fi
-      # Limit failover only when the orchestrator failed to produce a result JSON.
-      # Successful triage dumps skill text that mentions "session limit" historically
-      # and must not burn a second orchestrator turn.
+      # Live-limit rule: a banner counts only when this planner produced no final answer
+      # (successful triage dumps skill text that mentions "session limit" historically).
+      if ! text="$(python3 "$USAGE_PY" live-limit --transcript-file "$orch_out" --exit "$orch_rc" \
+          --final-file "$orch_out.last" 2>/dev/null)" || [ -z "$text" ]; then
+        planner_hit=""; break
+      fi
       planner_hit="$RUN_DIR/orchestrator-limit-$ORCH.json"
-      record_limit_from_log "$ORCH" "$orch_out" "$planner_hit" || { planner_hit=""; break; }
+      python3 "$USAGE_PY" parse-limit --provider "$ORCH" --text "$text" --scope orchestrator \
+        > "$planner_hit" 2>/dev/null \
+        || python3 -c 'import json, sys; print(json.dumps({"provider": sys.argv[1], "exact_cli_text": sys.argv[2]}))' \
+             "$ORCH" "$text" > "$planner_hit"
+      python3 "$USAGE_PY" --root "$ROOT" record-limit --provider "$ORCH" --text "$text" --scope orchestrator \
+        || true
       # The planner that just hit its limit is gated now; try the next one still under its gate.
       alt=""
       for p in ${=$(python3 "$USAGE_PY" --root "$ROOT" pick-orchestrators 2>/dev/null | tr -d '\r')}; do

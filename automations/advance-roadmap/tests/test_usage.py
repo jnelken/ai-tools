@@ -461,6 +461,21 @@ class LimitBannerTests(unittest.TestCase):
         self.assertIsNone(usage.limit_banner("The doc says you've hit your session limit sometimes."))
         self.assertIsNone(usage.limit_banner(""))
 
+    def test_live_limit_ignores_echoed_banner_when_final_answer_succeeded(self):
+        banner = "You've hit your usage limit. Resets 5pm."
+        transcript = f"echoed from a prior log:\n{banner}\nthen the real answer"
+        self.assertIsNone(usage.live_limit_banner(transcript, exit_code=0, final_answer="VERDICT: clean\n"))
+        self.assertEqual(usage.live_limit_banner(transcript, exit_code=1, final_answer=""), banner)
+        self.assertEqual(usage.live_limit_banner(transcript, exit_code=0, final_answer=""), banner)
+        self.assertEqual(
+            usage.live_limit_banner("no banner", exit_code=0, final_answer="ok",
+                                    provider_result={"outcome": "limit_hit", "limit_text": banner}),
+            banner)
+        self.assertEqual(
+            usage.live_limit_banner("ok\n", exit_code=1, final_answer="",
+                                    provider_result={"is_error": True, "result": banner}),
+            banner)
+
 
 class ProbeTests(unittest.TestCase):
     def setUp(self):

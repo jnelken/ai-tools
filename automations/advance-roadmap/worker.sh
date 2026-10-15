@@ -324,9 +324,11 @@ for provider in "${providers[@]}"; do
   cat "$out"
   echo "=== worker provider=$provider exit=$rc ==="
 
-  if text="$(rg -m1 -i \
-      '^(you.?ve hit your (session |usage )?limit|hit your session limit|rate limit exceeded|quota exceeded|out of (usage|credits|quota)\b)' \
-      "$out" || true)" && [ -n "$text" ]; then
+  # Live-limit rule (usage.py live-limit): a banner in the transcript counts only when this
+  # call failed — non-zero exit or no final answer — never when a successful answer merely
+  # quoted docs or prior logs. Result-only limit_hit is handled below after the loop.
+  if text="$(python3 "$USAGE_PY" live-limit --transcript-file "$out" --exit "$rc" \
+      --final-file "$out.last" 2>/dev/null)" && [ -n "$text" ]; then
     echo "(limit for $provider — recording and failing over)"
     record_limit "$provider" "$text"
     last_hit="$provider"

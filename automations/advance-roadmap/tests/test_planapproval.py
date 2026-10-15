@@ -207,6 +207,17 @@ class Approve(unittest.TestCase):
             out = pa.approve("/root", req, "DOC.md", "/code", runners=runners, providers=["codex"])
         self.assertIn("codex: no PLAN_APPROVAL_JSON fence", out["error"])
 
+    def test_successful_fence_ignores_an_echoed_limit_banner_in_the_log(self):
+        req = request(plan("1", 1, ["a"]), plan("2", 2, ["b"]))
+        ruling = {"decisions": [{"stamp": "2", "verdict": "approve", "reason": "disjoint"}]}
+        banner = "You've hit your usage limit. Try again at 5:00 PM."
+        runners = {"codex": lambda prompt, code: (self.fence(ruling), f"prior log said:\n{banner}\n")}
+        with mock.patch.object(pa, "usage_cli", side_effect=self.gates(set())) as usage:
+            out = pa.approve("/root", req, "DOC.md", "/code", runners=runners, providers=["codex"])
+        self.assertEqual(out["decisions"][1]["verdict"], "approve")
+        self.assertNotIn("error", out)
+        self.assertEqual([c.args[3] for c in usage.call_args_list if c.args[1] == "record-limit"], [])
+
     @staticmethod
     def gates(over):
         """A usage_cli stand-in whose `gate` exits 3 for each provider in `over` at call time."""

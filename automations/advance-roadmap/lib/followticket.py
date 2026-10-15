@@ -136,28 +136,59 @@ def render_findings(findings):
     return "\n".join(lines)
 
 
-def description(stage, findings, quota=None, next_step="", validation=None, finding_status=None):
+def owner_fields(owner):
+    """The subset of a finding_owners entry that recovery needs (key/branch/PR/builder)."""
+    if not isinstance(owner, dict):
+        return {}
+    return {k: owner.get(k) for k in ("key", "stage", "branch", "pr_url", "builder_provider")
+            if owner.get(k) is not None}
+
+
+def description(stage, findings, quota=None, next_step="", validation=None, finding_status=None,
+                finding_owners=None):
     ids = [f["id"] for f in findings]
     status = dict(finding_status or {})
     for f in findings:
         status.setdefault(f["id"], f.get("status") or "open")
-    meta = {"workflow": WORKFLOW, "key": stage["key"], "stage": stage["stage"], "repo": stage["repo"],
+    owners = {fid: owner_fields(o) for fid, o in (finding_owners or {}).items() if owner_fields(o)}
+    remaining = [f for f in findings if status.get(f["id"]) != "fixed"]
+    # Ticket-level identity is the owner of remaining work — never a sibling stage that only
+    # finished other findings and whose merged PR must not be resumed. Deferrals omit
+    # finding_owners and keep this stage's branch/PR.
+    head = remaining[0] if remaining else (findings[0] if findings else None)
+    head_owner = owners.get(head["id"]) if head else None
+    if remaining and head_owner and head_owner.get("key"):
+        meta_key = head_owner["key"]
+        meta_stage = head_owner.get("stage") or stage["stage"]
+        meta_branch = head_owner.get("branch")
+        meta_pr = head_owner.get("pr_url")
+        meta_builder = head_owner.get("builder_provider")
+    elif remaining and finding_owners is not None:
+        # Partial-progress rewrite with no owner for the remainder: strip this stage's merged PR.
+        meta_key, meta_stage = stage["key"], stage["stage"]
+        meta_branch = meta_pr = meta_builder = None
+    else:
+        meta_key, meta_stage = stage["key"], stage["stage"]
+        meta_branch, meta_pr = stage.get("branch"), stage.get("pr_url")
+        meta_builder = stage.get("builder_provider")
+    meta = {"workflow": WORKFLOW, "key": meta_key, "stage": meta_stage, "repo": stage["repo"],
             "origin": stage.get("origin"), "stamp": stage.get("stamp"), "item": stage.get("item"),
-            "finding_ids": ids, "finding_status": status, "branch": stage.get("branch"),
-            "pr_url": stage.get("pr_url"),
+            "finding_ids": ids, "finding_status": status,
+            "branch": meta_branch, "pr_url": meta_pr,
             # Which provider built the branch: the reviewer on another machine must be a different one.
-            "builder_provider": stage.get("builder_provider"),
+            "builder_provider": meta_builder,
             # When this block was written: a recovery trusts it over older local state.
             "updated_at": stage.get("ticket_meta_at")}
+    if owners:
+        meta["finding_owners"] = owners
     q = quota or {}
-    remaining = [f for f in findings if status.get(f["id"]) != "fixed"]
     parts = [
-        f"advance-roadmap's {stage['stage']} follow-up for "
+        f"advance-roadmap's {meta_stage} follow-up for "
         + (f"`{stage.get('item')}` ({stage.get('stamp')})" if stage.get("item") else f"run `{stage.get('origin')}`")
         + " found these and could not finish them: a provider usage gate stopped it.",
         "## Remaining findings", render_findings(remaining) if remaining else "_(none — awaiting close)_",
         "## State",
-        f"- Branch: `{stage.get('branch') or 'not created yet'}`" + (f" · PR: {stage['pr_url']}" if stage.get("pr_url") else ""),
+        f"- Branch: `{meta_branch or 'not created yet'}`" + (f" · PR: {meta_pr}" if meta_pr else ""),
         f"- Validation so far: {render_validation(validation or stage.get('validation'))}",
         f"- Stopped on: {q.get('provider') or '?'} ({q.get('role') or '?'}) — {q.get('cause') or 'over its usage gate'}"
         + (f"; resets {q['reset_at']}" if q.get("reset_at") else ""),

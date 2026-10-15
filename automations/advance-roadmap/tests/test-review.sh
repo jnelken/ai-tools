@@ -16,7 +16,7 @@ cp "$HERE/review.sh" "$ROOT/"
 cp "$HERE/lib/models.sh" "$HERE/lib/tokens.py" "$ROOT/lib/"
 # Fake usage.py: `gate` refuses the providers in FAKE_GATED; anything else records its last arg.
 cat > "$ROOT/lib/usage.py" <<'PY'
-import json, os, sys
+import json, os, re, sys
 args = sys.argv[1:]
 if "gate" in args:
     provider = args[args.index("--provider") + 1]
@@ -27,6 +27,27 @@ if "gate" in args:
 if "parse-limit" in args:
     print(json.dumps({"provider": args[args.index("--provider") + 1], "exact_cli_text": args[args.index("--text") + 1],
                       "reset_epoch": 1760396400, "reset_at": "2025-10-13T19:00:00-04:00"}))
+    sys.exit(0)
+if "live-limit" in args:
+    # Mirror usage.live_limit_banner: banner + (nonzero exit or no final) → print it.
+    transcript = open(args[args.index("--transcript-file") + 1]).read() if "--transcript-file" in args else ""
+    final = ""
+    if "--final-file" in args:
+        try:
+            final = open(args[args.index("--final-file") + 1]).read()
+        except OSError:
+            pass
+    exit_code = int(args[args.index("--exit") + 1]) if "--exit" in args else None
+    m = re.search(
+        r"^(?:you.?ve hit your (?:session |usage )?limit|hit your session limit|rate limit exceeded"
+        r"|quota exceeded|out of (?:usage|credits|quota)\b)", transcript, re.I | re.M)
+    if not m:
+        sys.exit(1)
+    end = transcript.find("\n", m.start())
+    banner = transcript[m.start():end if end >= 0 else len(transcript)].strip()
+    if final.strip() and (exit_code is None or exit_code == 0):
+        sys.exit(1)
+    print(banner)
     sys.exit(0)
 open(args[1] + "/limits.txt", "a").write(args[-1] + "\n")
 PY
@@ -121,6 +142,23 @@ check "both capacity reviewers logged"       "$(field capacity)" "['codex', 'cur
 
 out="$(review cursor 1 FAKE_CODEX=echo)"
 check "a transcript-only verdict is unparsed" "$(field verdict)" unparsed
+
+# Successful final answer + banner quoted in the transcript is not a live limit.
+: > "$ROOT/limits.txt"
+cat > "$BIN/codex" <<'SH'
+#!/bin/zsh
+last=""; while [ $# -gt 0 ]; do [ "$1" = "-o" ] && { last="$2"; shift; }; shift; done
+print "echoed prior log: You've hit your usage limit. Resets 5pm."
+print -r -- "reviewer=codex
+VERDICT: clean" > "$last"
+print "session id: 11111111-2222-3333-4444-555555555555"
+SH
+chmod +x "$BIN/codex"
+review cursor 1 >/dev/null
+check "echoed banner + clean final is clean" "$(field verdict)" clean
+check "echoed banner does not fail over"     "$(field reviewer)" codex
+[ -s "$ROOT/limits.txt" ] && { echo "FAIL: echoed banner recorded as a limit"; exit 1; } \
+  || echo "ok   echoed banner is not a live limit"
 case "$out" in *"VERDICT: unparsed"*) echo "ok   unparsed printed" ;; *) echo "FAIL: no unparsed note"; exit 1 ;; esac
 out="$(review codex 1 FAKE_AGENT=findings)"
 check "cursor's JSON final answer is parsed" "$(field verdict)" findings
