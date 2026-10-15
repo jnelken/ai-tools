@@ -16,11 +16,14 @@ and nothing else, to FILE as well — the only text a result fence may be read f
 isn't the expected JSON (a crash, a banner) it is copied to OUT_TEXT verbatim, FILE is not
 written and nothing is logged. Every command exits 0: accounting must never fail a run.
 
+Each also takes --session-out FILE: the CLI session id (Claude/Cursor JSON `session_id`, Codex's
+"session id:" header) is written there, so a conductor can link the session; records carry it too.
+
 Record fields (token counts are disjoint; total = input + cache_write + output, i.e. what the model
 newly processed — cache_read is kept apart because it dwarfs the rest and is billed far lower.
 Codex's own "tokens used" line excludes cached input the same way):
   at, role, round (review round N, else null), provider, model, input (uncached), cache_read, cache_write, output,
-  total, cost_usd (Claude reports it; null elsewhere), source
+  total, cost_usd (Claude reports it; null elsewhere), source, session_id
 Codex's `output` includes reasoning tokens, as its own total does.
 """
 import argparse
@@ -40,12 +43,13 @@ def num(v):
     return int(v) if isinstance(v, (int, float)) and not isinstance(v, bool) else 0
 
 
-def record(role, provider, model, input_, cache_read, cache_write, output, cost, source, rnd=None):
+def record(role, provider, model, input_, cache_read, cache_write, output, cost, source, rnd=None,
+           session_id=None):
     r = {"at": int(time.time()), "role": role, "round": rnd, "provider": provider, "model": model,
          "input": num(input_), "cache_read": num(cache_read), "cache_write": num(cache_write),
          "output": num(output),
          "cost_usd": round(cost, 4) if isinstance(cost, (int, float)) else None,
-         "source": source}
+         "source": source, "session_id": session_id or None}
     r["total"] = r["input"] + r["cache_write"] + r["output"]  # newly processed; cache reads are tracked apart
     return r
 
@@ -93,6 +97,16 @@ def write_text(path, noise, result, final=None):
             f.write(str(result or ""))
 
 
+def write_session(path, session_id):
+    if not path or not isinstance(session_id, str) or not session_id.strip():
+        return
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(session_id.strip() + "\n")
+    except OSError:
+        pass
+
+
 def passthrough(src, dst):
     try:
         shutil.copyfile(src, dst)
@@ -103,7 +117,8 @@ def passthrough(src, dst):
 def summarize(path):
     """Fold a run's model-usage.jsonl into {total, input, cache_read, cache_write, output,
     cost_usd, calls}. `calls` has one row per (role, round, provider, model) — a review round
-    is one row per reviewer — in first-seen order. None when nothing was logged."""
+    is one row per reviewer — in first-seen order, with the CLI session ids it saw. None when
+    nothing was logged."""
     rows = []
     try:
         with open(path, encoding="utf-8") as f:
@@ -123,7 +138,9 @@ def summarize(path):
         key = (r.get("role"), r.get("round"), r.get("provider"), r.get("model"))
         c = calls.setdefault(key, {"role": key[0], "round": key[1], "provider": key[2], "model": key[3],
                                    "input": 0, "cache_read": 0, "cache_write": 0, "output": 0,
-                                   "total": 0, "cost_usd": None})
+                                   "total": 0, "cost_usd": None, "sessions": []})
+        if r.get("session_id") and r["session_id"] not in c["sessions"]:
+            c["sessions"].append(r["session_id"])
         for k in FIELDS + ("total",):
             c[k] += num(r.get(k))
         if isinstance(r.get("cost_usd"), (int, float)):
@@ -140,16 +157,19 @@ def cmd_claude_json(a):
     if not data:
         return passthrough(a.input, a.out_text)
     write_text(a.out_text, noise, data.get("result"), a.final)
+    sid = data.get("session_id")
+    write_session(getattr(a, "session_out", ""), sid)
     # modelUsage has one entry per model the session touched, subagents included.
     mu = data.get("modelUsage") or {}
     recs = [record(a.role, "claude", model, u.get("inputTokens"), u.get("cacheReadInputTokens"),
-                   u.get("cacheCreationInputTokens"), u.get("outputTokens"), u.get("costUSD"), "claude-json", a.round)
+                   u.get("cacheCreationInputTokens"), u.get("outputTokens"), u.get("costUSD"), "claude-json", a.round,
+                   sid)
             for model, u in mu.items() if isinstance(u, dict)]
     if not recs and isinstance(data.get("usage"), dict):  # older CLI: session-wide, model unknown
         u = data["usage"]
         recs = [record(a.role, "claude", a.model or "claude", u.get("input_tokens"),
                        u.get("cache_read_input_tokens"), u.get("cache_creation_input_tokens"),
-                       u.get("output_tokens"), data.get("total_cost_usd"), "claude-json", a.round)]
+                       u.get("output_tokens"), data.get("total_cost_usd"), "claude-json", a.round, sid)]
     append(a.log, recs)
 
 
@@ -158,10 +178,12 @@ def cmd_cursor_json(a):
     if not data:
         return passthrough(a.input, a.out_text)
     write_text(a.out_text, noise, data.get("result"), a.final)
+    sid = data.get("session_id")
+    write_session(getattr(a, "session_out", ""), sid)
     u = data.get("usage") or {}
     # Cursor reports the pool ("auto"), not the model it routed to.
     append(a.log, [record(a.role, "cursor", a.model or "auto", u.get("inputTokens"), u.get("cacheReadTokens"),
-                          u.get("cacheWriteTokens"), u.get("outputTokens"), None, "cursor-json", a.round)])
+                          u.get("cacheWriteTokens"), u.get("outputTokens"), None, "cursor-json", a.round, sid)])
 
 
 def codex_rollout_usage(session_id):
@@ -195,15 +217,19 @@ def cmd_codex(a):
     # Header: "session id: <uuid>". The prompt and ORCHESTRATOR.md are echoed after it and
     # may quote older headers, so the first match is this run's.
     m = re.search(r"^session id: ([0-9a-f-]{36})\s*$", text, re.M)
-    u = codex_rollout_usage(m.group(1)) if m else None
+    sid = m.group(1) if m else None
+    write_session(getattr(a, "session_out", ""), sid)
+    u = codex_rollout_usage(sid) if sid else None
     if u:
         cached = num(u.get("cached_input_tokens"))
         recs = [record(a.role, "codex", a.model, num(u.get("input_tokens")) - cached, cached,
-                       u.get("cache_write_input_tokens"), u.get("output_tokens"), None, "codex-rollout", a.round)]
+                       u.get("cache_write_input_tokens"), u.get("output_tokens"), None, "codex-rollout", a.round,
+                       sid)]
     else:
         # Fallback: the closing "tokens used\n111,291" line is a total with no split.
         t = re.findall(r"^tokens used\s*\n\s*([\d,]+)\s*$", text, re.M)
-        recs = [record(a.role, "codex", a.model, 0, 0, 0, int(t[-1].replace(",", "")), None, "codex-total", a.round)] if t else []
+        recs = [record(a.role, "codex", a.model, 0, 0, 0, int(t[-1].replace(",", "")), None, "codex-total", a.round,
+                       sid)] if t else []
     append(a.log, recs)
 
 
@@ -220,6 +246,7 @@ def main():
         p.add_argument("--log", required=True)
         p.add_argument("--model", default="")
         p.add_argument("--round", type=int, default=None, help="review round (reviewer role)")
+        p.add_argument("--session-out", default="", help="write the CLI session id here")
         p.set_defaults(func=fn)
     a = ap.parse_args()
     try:

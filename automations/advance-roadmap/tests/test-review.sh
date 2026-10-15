@@ -1,7 +1,7 @@
 #!/bin/zsh
 # review.sh with fake providers: reviewer is never the worker's provider, limits
-# fail over, the last VERDICT line wins over the one echoed in the prompt, and
-# every round leaves one line in the review log.
+# fail over, the verdict comes only from the reviewer's final answer (never the
+# echoed prompt), and every round leaves one line in the review log.
 set -eu
 
 HERE="$(cd "$(dirname "$0")/.." && pwd)"
@@ -16,7 +16,7 @@ cp "$HERE/review.sh" "$ROOT/"
 cp "$HERE/lib/models.sh" "$HERE/lib/tokens.py" "$ROOT/lib/"
 # Fake usage.py: `gate` refuses the providers in FAKE_GATED; anything else records its last arg.
 cat > "$ROOT/lib/usage.py" <<'PY'
-import json, os, sys
+import json, os, re, sys
 args = sys.argv[1:]
 if "gate" in args:
     provider = args[args.index("--provider") + 1]
@@ -27,6 +27,27 @@ if "gate" in args:
 if "parse-limit" in args:
     print(json.dumps({"provider": args[args.index("--provider") + 1], "exact_cli_text": args[args.index("--text") + 1],
                       "reset_epoch": 1760396400, "reset_at": "2025-10-13T19:00:00-04:00"}))
+    sys.exit(0)
+if "live-limit" in args:
+    # Mirror usage.live_limit_banner: banner + (nonzero exit or no final) → print it.
+    transcript = open(args[args.index("--transcript-file") + 1]).read() if "--transcript-file" in args else ""
+    final = ""
+    if "--final-file" in args:
+        try:
+            final = open(args[args.index("--final-file") + 1]).read()
+        except OSError:
+            pass
+    exit_code = int(args[args.index("--exit") + 1]) if "--exit" in args else None
+    m = re.search(
+        r"^(?:you.?ve hit your (?:session |usage )?limit|hit your session limit|rate limit exceeded"
+        r"|quota exceeded|out of (?:usage|credits|quota)\b)", transcript, re.I | re.M)
+    if not m:
+        sys.exit(1)
+    end = transcript.find("\n", m.start())
+    banner = transcript[m.start():end if end >= 0 else len(transcript)].strip()
+    if final.strip() and (exit_code is None or exit_code == 0):
+        sys.exit(1)
+    print(banner)
     sys.exit(0)
 open(args[1] + "/limits.txt", "a").write(args[-1] + "\n")
 PY
@@ -43,12 +64,20 @@ for p in codex agent claude; do
 #!/bin/zsh
 name=$p; mode="\${FAKE_${p:u}:-clean}"
 last=""; while [ \$# -gt 0 ]; do [ "\$1" = "-o" ] && { last="\$2"; shift; }; shift; done
+[ "\$name" = codex ] && print "session id: 11111111-2222-3333-4444-555555555555"
 print -r -- "echoed prompt: VERDICT: clean      (no findings)"
 [ "\$mode" = limit ] && { print "You've hit your usage limit. Resets 5pm."; exit 1; }
+[ "\$mode" = capacity ] && { print "ERROR: Selected model is at capacity. Please try a different model."; exit 1; }
+[ "\$mode" = http503 ] && { print "stream error: unexpected status 503 Service Unavailable"; exit 1; }
 body="reviewer=\$name
 x.py:1 bug: something
 VERDICT: \$mode"
-if [ -n "\$last" ]; then print -r -- "\$body" > "\$last"; else print -r -- "\$body"; fi
+# echo: the transcript carries a verdict line, the final answer none.
+[ "\$mode" = echo ] && { print "VERDICT: clean"; body="reviewer=\$name
+I ran out of time before deciding."; }
+if [ -n "\$last" ]; then print -r -- "\$body" > "\$last"
+else python3 -c 'import json, sys; print(json.dumps({"type": "result", "result": sys.argv[1], "session_id": sys.argv[2] + "-session"}))' "\$body" "\$name"
+fi
 SH
   chmod +x "$BIN/$p"
 done
@@ -64,7 +93,8 @@ check() { [ "$2" = "$3" ] || { echo "FAIL [$1]: expected '$3', got '$2'"; exit 1
 
 out="$(review cursor 1 FAKE_CODEX=findings)"
 check "cursor's work → codex reviews"        "$(field reviewer)" codex
-check "last VERDICT wins over echoed prompt" "$(field verdict)" findings
+check "reviewer session id logged"           "$(field session_id)" 11111111-2222-3333-4444-555555555555
+check "verdict from the final answer only"   "$(field verdict)" findings
 case "$out" in *"x.py:1 bug"*) echo "ok   findings printed" ;; *) echo "FAIL: no findings in output"; exit 1 ;; esac
 
 review codex 2 FAKE_AGENT=clean >/dev/null
@@ -95,4 +125,43 @@ check "gated reviewer logged"                "$(field gated)" "['codex']"
 rc=0; review claude 1 FAKE_GATED="codex cursor" >/dev/null || rc=$?
 check "every reviewer gated → exit 3"        "$rc" 3
 check "gated round logged as unavailable"    "$(field verdict)" unavailable
+
+: > "$ROOT/limits.txt"
+out="$(review cursor 1 FAKE_CODEX=capacity FAKE_CLAUDE=clean)"
+check "codex at capacity → claude reviews"   "$(field reviewer)" claude
+check "capacity is not unparsed"             "$(field verdict)" clean
+check "capacity reviewer logged"             "$(field capacity)" "['codex']"
+check "skipped reviewer's session not kept"  "$(field session_id)" claude-session
+[ -s "$ROOT/limits.txt" ] && { echo "FAIL: capacity recorded as a quota limit"; exit 1; } || echo "ok   capacity is not a quota hit"
+case "$out" in *"at capacity"*) echo "ok   capacity skip printed" ;; *) echo "FAIL: no capacity note"; exit 1 ;; esac
+
+rc=0; review claude 1 FAKE_CODEX=capacity FAKE_AGENT=http503 >/dev/null || rc=$?
+check "every reviewer at capacity → exit 3"  "$rc" 3
+check "capacity round logged as unavailable" "$(field verdict)" unavailable
+check "both capacity reviewers logged"       "$(field capacity)" "['codex', 'cursor']"
+
+out="$(review cursor 1 FAKE_CODEX=echo)"
+check "a transcript-only verdict is unparsed" "$(field verdict)" unparsed
+
+# Successful final answer + banner quoted in the transcript is not a live limit.
+: > "$ROOT/limits.txt"
+cat > "$BIN/codex" <<'SH'
+#!/bin/zsh
+last=""; while [ $# -gt 0 ]; do [ "$1" = "-o" ] && { last="$2"; shift; }; shift; done
+print "echoed prior log: You've hit your usage limit. Resets 5pm."
+print -r -- "reviewer=codex
+VERDICT: clean" > "$last"
+print "session id: 11111111-2222-3333-4444-555555555555"
+SH
+chmod +x "$BIN/codex"
+review cursor 1 >/dev/null
+check "echoed banner + clean final is clean" "$(field verdict)" clean
+check "echoed banner does not fail over"     "$(field reviewer)" codex
+[ -s "$ROOT/limits.txt" ] && { echo "FAIL: echoed banner recorded as a limit"; exit 1; } \
+  || echo "ok   echoed banner is not a live limit"
+case "$out" in *"VERDICT: unparsed"*) echo "ok   unparsed printed" ;; *) echo "FAIL: no unparsed note"; exit 1 ;; esac
+out="$(review codex 1 FAKE_AGENT=findings)"
+check "cursor's JSON final answer is parsed" "$(field verdict)" findings
+check "cursor reviewer session id logged"    "$(field session_id)" agent-session
+case "$out" in *"echoed prompt"*) echo "FAIL: transcript printed instead of the final answer"; exit 1 ;; *) echo "ok   only the final answer printed" ;; esac
 echo "all passed"

@@ -27,6 +27,31 @@ if "gate" in args:
 if "parse-limit" in args:
     print(json.dumps({"provider": args[args.index("--provider") + 1], "exact_cli_text": args[args.index("--text") + 1],
                       "reset_epoch": 1760403600, "reset_at": "2025-10-13T21:00:00-04:00"}))
+if "live-limit" in args:
+    import re
+    transcript = ""
+    if "--transcript-file" in args:
+        transcript = open(args[args.index("--transcript-file") + 1]).read()
+    elif "--text" in args:
+        transcript = args[args.index("--text") + 1]
+    final = args[args.index("--final") + 1] if "--final" in args else ""
+    if "--final-file" in args:
+        try:
+            final = open(args[args.index("--final-file") + 1]).read()
+        except OSError:
+            pass
+    exit_code = int(args[args.index("--exit") + 1]) if "--exit" in args else None
+    m = re.search(
+        r"^(?:you.?ve hit your (?:session |usage )?limit|hit your session limit|rate limit exceeded"
+        r"|quota exceeded|out of (?:usage|credits|quota)\b)", transcript, re.I | re.M)
+    if not m:
+        sys.exit(1)
+    end = transcript.find("\n", m.start())
+    banner = transcript[m.start():end if end >= 0 else len(transcript)].strip()
+    if final.strip() and (exit_code is None or exit_code == 0):
+        sys.exit(1)
+    print(banner)
+    sys.exit(0)
 if "record-limit" in args:
     provider, text = args[args.index("--provider") + 1], args[args.index("--text") + 1]
     with open(os.environ["LIMITS"], "a") as f:
@@ -106,5 +131,13 @@ PY
 FAKE_RESULT='{"outcome": "shipped", "provider": "cursor"}' run_worker "" "$TMP_ROOT/status-5.json" \
   || fail "a shipped result failed the worker"
 [ ! -s "$TMP_ROOT/limits" ] || fail "a shipped result recorded a limit: $(cat "$TMP_ROOT/limits")"
+
+# live-limit CLI (what worker.sh calls): successful final answer + echoed banner → not limited;
+# real failure → limited. Mirrors usage.live_limit_banner.
+banner=$'echoed prior log\nYou\'ve hit your usage limit. Resets 5pm.\n'
+python3 "$TMP_ROOT/root/lib/usage.py" live-limit --text "$banner" --exit 0 --final "done" >/dev/null 2>&1 \
+  && fail "live-limit treated a successful final answer as limited"
+python3 "$TMP_ROOT/root/lib/usage.py" live-limit --text "$banner" --exit 1 --final "" >/dev/null 2>&1 \
+  || fail "live-limit missed a real limit failure"
 
 print -- "worker usage gate: ok"

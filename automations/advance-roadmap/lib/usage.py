@@ -15,6 +15,8 @@ Usage:
                                                    # who is out for R when a lane stops on quota
   usage.py record-limit --provider P --text T [--scope S] [--out FILE] [--root DIR]
   usage.py parse-limit --provider P --text T [--scope S]  # the hit as JSON; writes no state
+  usage.py live-limit [--transcript-file F] [--exit N] [--final-file F] [--result-json F]
+                                                   # live CLI limit only (not an echoed banner)
   usage.py detect-limit --file PATH | --text T
   usage.py probe [--provider codex|cursor|all]   # live read, writes nothing
   usage.py show [--root DIR]
@@ -816,6 +818,55 @@ def limit_banner(text: str) -> str | None:
     return text[m.start():end if end >= 0 else len(text)].strip()
 
 
+def provider_reported_limit(result: dict | None) -> str | None:
+    """Limit text from a provider's own result/error record, or None.
+
+    Transcripts quote docs and prior logs that contain banner-shaped lines; those must not gate a
+    provider. A structured error or `limit_hit` outcome is authoritative.
+    """
+    if not isinstance(result, dict):
+        return None
+    if result.get("outcome") == "limit_hit":
+        text = " ".join(str(result.get("limit_text") or "").split()) or "provider reported limit_hit"
+        return text
+    # Claude/Cursor --output-format json: is_error / error subtype carry the CLI's own message.
+    err = result.get("is_error") or result.get("subtype") in ("error", "error_during_execution")
+    if not err:
+        return None
+    blob = "\n".join(str(result.get(k) or "") for k in ("result", "error", "error_message", "message"))
+    return limit_banner(blob) or (blob.strip().splitlines()[0].strip() if detect_limit(blob) and blob.strip() else None)
+
+
+def live_limit_banner(
+    transcript: str | None = None,
+    *,
+    exit_code: int | None = None,
+    final_answer: str | None = None,
+    provider_result: dict | None = None,
+) -> str | None:
+    """Banner text when this CLI call actually hit a limit; None when a banner is only echoed.
+
+    A limit banner in a transcript counts only when the call failed for that invocation — non-zero
+    exit or no final answer — or when it appears in the provider's own error/result record. A
+    successful final answer means ignore banners quoted from files, prompts, or prior logs.
+    """
+    reported = provider_reported_limit(provider_result)
+    if reported:
+        return reported
+    banner = limit_banner(transcript or "")
+    if not banner:
+        return None
+    succeeded = bool((final_answer or "").strip()) and (exit_code is None or exit_code == 0)
+    if succeeded:
+        return None
+    # No final answer, or a non-zero exit: the banner is a live CLI limit.
+    if exit_code is not None and exit_code != 0:
+        return banner
+    if not (final_answer or "").strip():
+        return banner
+    return None
+
+
 def cmd_refresh(args: argparse.Namespace) -> None:
     state = refresh(Path(args.root))
     orch = pick_orchestrator(state)
@@ -978,6 +1029,30 @@ def cmd_parse_limit(args: argparse.Namespace) -> None:
     print(json.dumps(limit_hit(args.provider, args.text, args.scope)))
 
 
+def cmd_live_limit(args: argparse.Namespace) -> None:
+    """Print the live limit banner (exit 0) or nothing (exit 1) — shared by shell callers."""
+    transcript = args.text or ""
+    if args.transcript_file:
+        transcript = Path(args.transcript_file).read_text(encoding="utf-8", errors="replace")
+    final = args.final or ""
+    if args.final_file:
+        try:
+            final = Path(args.final_file).read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            final = ""
+    result = None
+    if args.result_json:
+        try:
+            result = json.loads(Path(args.result_json).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            result = None
+    banner = live_limit_banner(transcript, exit_code=args.exit, final_answer=final,
+                               provider_result=result if isinstance(result, dict) else None)
+    if not banner:
+        sys.exit(1)
+    print(banner)
+
+
 def cmd_detect(args: argparse.Namespace) -> None:
     text = args.text
     if args.file:
@@ -1045,6 +1120,16 @@ def main() -> None:
     p.add_argument("--text", required=True)
     p.add_argument("--scope", default="unknown")
     p.set_defaults(func=cmd_parse_limit)
+
+    p = sub.add_parser("live-limit")
+    p.add_argument("--text", default="", help="transcript text (or use --transcript-file)")
+    p.add_argument("--transcript-file")
+    p.add_argument("--exit", type=int, dest="exit", default=None,
+                   help="CLI exit code; omit when unknown")
+    p.add_argument("--final", default="", help="final answer text")
+    p.add_argument("--final-file", help="path to the CLI's final-answer file (-o / .last)")
+    p.add_argument("--result-json", help="provider result JSON (worker result, Claude/Cursor object)")
+    p.set_defaults(func=cmd_live_limit)
 
     p = sub.add_parser("detect-limit")
     p.add_argument("--text", default="")
