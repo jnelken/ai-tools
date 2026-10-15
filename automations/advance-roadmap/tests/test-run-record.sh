@@ -28,7 +28,8 @@ if "quota-record" in sys.argv:
         {"provider": "claude", "state": "limited", "cause": "session limit",
          "reset_epoch": 1791906600, "reset_at": "2026-10-13T11:50:00-04:00"}]}))
     sys.exit(0)
-if os.environ.get("FAKE_NO_PLANNER") and cmd in ("pick-orchestrator", "pick-orchestrators"):
+no_planner = os.environ.get("FAKE_NO_PLANNER") or os.path.exists(os.environ.get("FAKE_NO_PLANNER_FILE") or "/nonexistent")
+if no_planner and cmd in ("pick-orchestrator", "pick-orchestrators"):
     print("none")
     sys.exit(2)
 print({"pick-orchestrator": "codex", "pick-orchestrators": "codex",
@@ -73,6 +74,8 @@ case "$FAKE_WORKER" in
          print -r -- "$res" > "$rf" ;;
   chain) n=$(( $(cat "$CHAIN_COUNT" 2>/dev/null || echo 0) + 1 )); print $n > "$CHAIN_COUNT"
          [ $n -le 2 ] && print -r -- "$res" > "$rf" || { print "boom"; exit 1; } ;;
+  chainquota)  # ships, then every planner is out for the next link
+         print -r -- "$res" > "$rf"; touch "$FAKE_NO_PLANNER_FILE" ;;
   ws)    # Superset mode: must run in the workspace, pointed at it, under Cursor's agent identity.
          [ "${PWD:A}" = "${SUPERSET_WORKSPACE_PATH:A}" ] && [ "$SUPERSET_AGENT_ID" = cursor-agent ] \
            && [[ " $* " == *" --workspace $SUPERSET_WORKSPACE_PATH "* ]] \
@@ -291,4 +294,27 @@ if [ "$(date +%H)" != "03" ]; then
   check "off-grid tick records nothing"        "$(wc -l < "$ROOT/runs.jsonl" | tr -d ' ')" "$rows_before"
   check "off-grid tick leaves no log"          "$(ls "$ROOT"/logs | wc -l)" "$logs_before"
 fi
+# A later chain link that exits early (no planner under its gate) still finishes the chain's follow-ups.
+print -r -- 'import os, sys; open(os.environ["ADVANCE_ROADMAP_ROOT"] + "/followup-calls.log", "a").write(" ".join(sys.argv[1:]) + "\n")' \
+  > "$ROOT/followup.py"
+rm -f "$ROOT/followup-calls.log" "$TMP/no-planner"
+rows_before=$(wc -l < "$ROOT/runs.jsonl" | tr -d ' ')
+FAKE_NO_PLANNER_FILE="$TMP/no-planner" CHAIN_MINUTES=40 run good chainquota
+check "the quota link records its skip"           "$(last outcome)" skipped-quota
+check "after the shipped link"                    "$(wc -l < "$ROOT/runs.jsonl" | tr -d ' ')" $(( rows_before + 2 ))
+sleep 1
+check "an early exit still queues the tooling pass" "$(grep '^hook run-end' "$ROOT/followup-calls.log" | grep -o -- '--stamp' | wc -l | tr -d ' ')" 2
+check "and drains once"                           "$(grep -c '^drain --origin run-' "$ROOT/followup-calls.log")" 1
+check "each link's cleanup is queued once"        "$(grep -c '^hook item-done' "$ROOT/followup-calls.log")" 2
+# A lone tick that never started a run (another run holds the lock) queues nothing.
+rm -f "$ROOT/followup-calls.log" "$TMP/no-planner"
+: >> "$ROOT/run.lock.f"
+python3 -c 'import fcntl,sys,time; f=open(sys.argv[1],"a"); fcntl.lockf(f,fcntl.LOCK_EX); time.sleep(4)' "$ROOT/run.lock.f" &
+holder=$!; sleep 1
+run good file
+wait $holder
+check "a skipped first link records its skip"     "$(last outcome)" skipped-lock
+[ ! -f "$ROOT/followup-calls.log" ] && echo "ok   a skipped first link queues no follow-ups" \
+  || { echo "FAIL: a skipped tick ran follow-up hooks"; cat "$ROOT/followup-calls.log"; exit 1; }
+rm -f "$ROOT/followup.py"
 echo "all passed"
