@@ -89,6 +89,7 @@ don't poll):
   --result-file "<dir>/worker-result.json" --status-file "<dir>/worker-status.json"
 ```
 
+Name `<dir>` for the run's stamp (`<scratch>/<stamp>/`); section 4's follow-ups find the run by it.
 `--providers cursor` pins the builder to Cursor. If Cursor is over its usage gate (95% of its
 pool), limited or missing, `worker.sh` exits `3` and says why in the status file's `limited` /
 `missing` lists; **ask the user** before failing over (`--providers "codex claude"`) —
@@ -114,6 +115,29 @@ with no logged review is flagged). Then tell the user plainly:
 
 On `failed`, `limit_hit` or an incomplete result, report what the log shows and ask how to proceed;
 never retry silently in a loop. Don't clean up the builder's branch.
+
+## 4. Follow-ups (end of the session — report-only)
+
+The scheduled batch runs its follow-ups itself; a conductor session runs the same three commands
+(`F=~/.claude/automations/advance-roadmap/followup.py`). Slice 2 is **report-only**: drain
+analyzes and records findings; it does not repair, open PRs, or write Linear.
+
+1. After each item that ended `shipped` / `shipped-deploy-failed` — not for blocked, failed or
+   incomplete items, which are the next run's work — queue its cleanup, pointing at the dir that
+   holds its `worker-result.json` and `reviews.jsonl`:
+   `python3 $F hook item-done --stamp <stamp> --run-dir <dir> --origin conductor-<session stamp>`.
+2. When you are done dispatching for the session (every builder you started has exited), queue one
+   tooling pass over every run of the session — shipped or not — by its run dir:
+   `python3 $F hook run-end --origin conductor-<session stamp> --run-dir <dir> [--run-dir …]`.
+   Conductor runs write no `runs.jsonl` row, so the tooling pass reads each dir directly and counts
+   a run finished once its `worker-result.json` exists. Each dir must be named for its run's stamp
+   (`<scratch>/<stamp>/`, as in section 2) — that name is how the pass matches it to its cleanup.
+3. Drain: `python3 $F drain --origin conductor-<session stamp> --wait-s 600` (background is fine).
+   Report `python3 $F status --origin conductor-<session stamp>` to the user: reported findings and
+   any blocked stages (`followups/report.jsonl`).
+
+Each hook is idempotent, so re-running one is harmless. Ask before step 3 if the user wants to keep
+the session's provider quota for something else (the optional analyst call).
 
 ## What this skill does not do
 

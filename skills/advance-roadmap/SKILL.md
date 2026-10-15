@@ -70,6 +70,14 @@ windows are the retired scheduler; its helpers are still imported.) The batch ru
    runs inside a batch post nothing; the consecutive-failure alert is separate and still fires.
    A lone `run.sh` outside a batch still posts its own line.
 
+**Then report what the run proved went wrong (report-only).** After an item *ships* and its repo is
+quiet, a **project-cleanup** follow-up reads that run's records (review markers its merge left,
+unresolved review, a red deploy); after a whole batch / chain / conductor session, one
+**tooling-hardening** follow-up reads every run's records for automation friction. `followup.py`
+analyzes and records findings with stable ids — it does **not** repair, open PRs, or write Linear
+yet (DEV-232 Phase B slice 2; repair arrives in slice 3). Unfinished items are not cleanup
+triggers — they are the next run's work. Details: `automations/README.md` → *Follow-ups*.
+
 **Never depends on Claude.** Every role has a non-Claude first choice: Codex orchestrates, Cursor
 builds, the reviewer is never Claude first, and the scheduling around them is plain shell and
 Python. Claude is only ever a fallback, so the job keeps shipping when Jake's Claude usage is spent.
@@ -99,6 +107,7 @@ only (see `SAFETY.md`) — from [[unblock-roadmap]] (the only dirty-tree excepti
 | **Worker** | Cursor Auto → Codex Sol → Claude Opus | **Yes** | [`WORKER.md`](WORKER.md) |
 | **Plan approver** | Codex **Sol** high → Claude Opus high | **No** | [`PLAN_APPROVAL.md`](PLAN_APPROVAL.md) |
 | **Reviewer** | a provider other than the worker's (Cursor ↔ Codex; Claude → Codex) | **No** | [`WORKER.md`](WORKER.md) Step 5b |
+| **Follow-up analyst** | Codex → Claude (`usage.py` role `analyst`) | **No** | `automations/README.md` *Follow-ups* |
 | **Safety** | — | binds both | [`SAFETY.md`](SAFETY.md) |
 
 `run.sh` owns routing and `providers-usage.json` (`lib/usage.py`):
