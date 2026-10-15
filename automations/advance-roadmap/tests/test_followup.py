@@ -4,6 +4,7 @@ analyst. Nothing here reaches Linear or GitHub."""
 import fcntl
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -21,6 +22,7 @@ MARKER_LINE = "# TODO(advance-roadmap review): reject an empty listing before sa
 sys.path.insert(0, str(ADV))
 sys.path.insert(0, str(ADV / "lib"))
 import followscan  # noqa: E402
+import followticket  # noqa: E402
 import supervisor  # noqa: E402
 
 
@@ -649,6 +651,51 @@ class FollowupTest(unittest.TestCase):
         self.assertTrue(any(c["issue"] == "DEV-900" and second["key"] in c["body"] for c in comments), comments)
         index = json.loads((self.root / "followups" / "tickets.json").read_text())
         self.assertEqual(index[first["findings"][0]["id"]]["ticket"], "DEV-900")
+
+    def test_recovery_after_deferrals_by_different_builders_reviews_against_the_latest_builder(self):
+        self.shipped_item("20261014-050000")
+        self.run_followup("hook", "item-done", "--stamp", "20261014-050000")
+        key = "cleanup-20261014-050000"
+        past = time.time() - 1
+        reviewers_out = {"reviewer": {"codex": "over", "cursor": "over", "claude": "over"},
+                         "reset_at": "2026-10-14T15:00:00", "reset_epoch": past}
+        # Deferral 1: cursor builds, then every reviewer is out.
+        self.set("stub-worker.json", {"mode": "ok", "after_usage": reviewers_out})
+        self.run_followup("drain")
+        st = self.state(key)
+        self.assertEqual((st["status"], st["builder_provider"], st["owned_tickets"]), ("deferred", "cursor", ["DEV-900"]))
+        [created] = self.calls("jlin")
+        self.assertEqual(followticket.parse_meta(created["description"])["builder_provider"], "cursor")
+        stale = json.dumps(st)   # what a machine that only saw deferral 1 has on disk
+        # Deferral 2: the round-1 review finds issues, cursor is out as a worker so codex rebuilds,
+        # then every reviewer is out again.
+        self.set("stub-usage.json", {"worker": {"cursor": "over"}, "reset_at": "2026-10-14T15:00:00",
+                                     "reset_epoch": past})
+        self.set("stub-review.json", {"verdicts": ["findings", "clean"]})
+        self.set("stub-worker.json", {"mode": "ok", "after_usage": reviewers_out})
+        self.run_followup("drain")
+        st = self.state(key)
+        self.assertEqual((st["status"], st["builder_provider"], st["next"]["step"]), ("deferred", "codex", "review"))
+        updates = [c for c in self.calls("linear") if c["cmd"] == "issue update DEV-900" and "--description-file" in c["args"]]
+        self.assertEqual(len(updates), 1)
+        meta = followticket.parse_meta(updates[-1]["body"])
+        self.assertEqual((meta["key"], meta["builder_provider"]), (key, "codex"))
+        ticket = {**self.legacy_ticket("DEV-900", "Follow-up (project-cleanup): x"), "description": updates[-1]["body"]}
+        self.set("stub-usage.json", {})
+        self.set("stub-review.json", {"verdicts": ["clean"]})
+        self.set("stub-linear.json", {"pages": [[ticket]]})
+        followups = self.root / "followups"
+        for machine in ("no local state", "stale local state"):
+            with self.subTest(machine):
+                (self.root / "stub-calls.jsonl").unlink(missing_ok=True)
+                shutil.rmtree(followups)
+                if machine == "stale local state":
+                    (followups / key).mkdir(parents=True)
+                    (followups / key / "state.json").write_text(stale)
+                self.run_followup("drain")
+                [review] = self.calls("review")
+                self.assertEqual(review["worker"], "codex")   # so review.sh never picks codex to review itself
+                self.assertEqual(self.state(key)["status"], "done", self.report())
 
     def test_a_recovered_pr_with_no_recorded_builder_is_never_reviewed(self):
         meta = {"key": "cleanup-20261001-000000", "stage": "project-cleanup", "finding_ids": ["aaaaaaaaaaaa"],

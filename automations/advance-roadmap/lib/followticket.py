@@ -4,7 +4,8 @@
 A follow-up ticket exists only for work a usage gate stopped: it carries the remaining findings,
 their evidence, the branch/PR, what was already validated, when the provider resets and the exact
 next step. Every one has exactly one repo/* label (created through jnelken-linear's jlin.py) and a
-fenced metadata block that later runs — on any machine — read back:
+fenced metadata block in its description — rewritten on every deferral, so it is authoritative —
+that later runs on any machine read back:
 
     ```advance-roadmap-followup
     {"workflow": "advance-roadmap-followup", "key": "...", "stage": "...", "finding_ids": [...],
@@ -141,7 +142,9 @@ def description(stage, findings, quota=None, next_step="", validation=None):
             "finding_ids": [f["id"] for f in findings], "branch": stage.get("branch"),
             "pr_url": stage.get("pr_url"),
             # Which provider built the branch: the reviewer on another machine must be a different one.
-            "builder_provider": stage.get("builder_provider")}
+            "builder_provider": stage.get("builder_provider"),
+            # When this block was written: a recovery trusts it over older local state.
+            "updated_at": stage.get("ticket_meta_at")}
     q = quota or {}
     parts = [
         f"advance-roadmap's {stage['stage']} follow-up for "
@@ -221,6 +224,11 @@ def create(stage, findings, quota, next_step):
 
 def comment(identifier, body):
     with_file(body, lambda path: linear("issue", "comment", "add", identifier, "--body-file", path))
+
+
+def update_description(identifier, body):
+    """Rewrite the description, whose metadata block is the one recovery reads."""
+    with_file(body, lambda path: linear("issue", "update", identifier, "--description-file", path))
 
 
 def mark_done(identifier):

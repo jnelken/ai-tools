@@ -208,7 +208,8 @@ def linear(args):
         print(json.dumps({"data": {"issues": {"nodes": pages[i], "pageInfo": {
             "hasNextPage": i + 1 < len(pages), "endCursor": str(i + 1)}}}}))
         return
-    body = Path(opt(args, "--body-file")).read_text() if "--body-file" in args else None
+    body_file = opt(args, "--body-file") or opt(args, "--description-file")
+    body = Path(body_file).read_text() if body_file else None
     failed = any(" ".join(args).startswith(prefix) for prefix in lin.get("fail") or [])
     note("linear", cmd=" ".join(args[:3]), issue=args[3] if len(args) > 3 else None, body=body, args=args,
          failed=failed)

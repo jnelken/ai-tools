@@ -340,7 +340,8 @@ def recover_tickets():
             if st is None:
                 continue
             st.update(status="deferred", branch=meta.get("branch"), pr_url=meta.get("pr_url"), scanned=True,
-                      builder_provider=meta.get("builder_provider"),
+                      builder_provider=meta.get("builder_provider"), owned_tickets=[ident],
+                      ticket_meta_at=meta.get("updated_at"),
                       findings=[{"id": fid, "stage": st["stage"], "repo": st["repo"], "kind": "ticket",
                                  "title": issue.get("title"), "fix": f"see {ident}", "status": "deferred",
                                  "ticket": ident, "evidence": [{"source": ident, "quote": issue.get("title")}]}
@@ -350,8 +351,21 @@ def recover_tickets():
             save(st)
             continue
         changed = False
-        if not st.get("builder_provider") and meta.get("builder_provider"):
-            st["builder_provider"] = meta["builder_provider"]
+        own = meta.get("key") == key
+        if own and ident not in st.setdefault("owned_tickets", []):
+            st["owned_tickets"].append(ident)
+            changed = True
+        newer = own and isinstance(meta.get("updated_at"), (int, float)) \
+            and meta["updated_at"] > (st.get("ticket_meta_at") or 0)
+        if meta.get("builder_provider") and (not st.get("builder_provider") or newer) \
+                and meta["builder_provider"] != st.get("builder_provider") and st.get("status") != "running":
+            # Another machine rebuilt the branch since this state was saved: its builder must not review it.
+            log(f"{key}: {ident} says {meta['builder_provider']} built {meta.get('branch') or 'the branch'} "
+                f"(local state said {st.get('builder_provider')})")
+            st.update(builder_provider=meta["builder_provider"], reviewed_sha=None)
+            changed = True
+        if newer:
+            st["ticket_meta_at"] = meta["updated_at"]
             changed = True
         for f in st.get("findings") or []:
             if f["id"] in (meta.get("finding_ids") or []) and f.get("ticket") != ident:
@@ -529,18 +543,26 @@ def defer(st, findings, quota, step, issues=None):
         for f in findings:
             if f.get("ticket"):
                 ticketed.setdefault(f["ticket"], []).append(f)
-        note = f"{step}|{quota.get('provider')}|{quota.get('reset_at')}"
+        note = (f"{step}|{quota.get('provider')}|{quota.get('reset_at')}|{st.get('builder_provider')}"
+                f"|{st.get('branch')}|{st.get('pr_url')}")
         if note == st.get("last_deferral"):
-            # Same stop, same reset: the ticket already says so (unless it is new to this stage).
+            # Same stop, same reset, same branch state: the ticket already says so (unless it is new to this stage).
             ticketed = {k: v for k, v in ticketed.items() if k in attached}
         st["last_deferral"] = note
+        st["ticket_meta_at"] = time.time()
+        owned = set(st.setdefault("owned_tickets", []))
         try:
             for ident, fs in ticketed.items():
-                followticket.comment(ident, "advance-roadmap follow-up deferred again for quota.\n\n"
-                                     + followticket.description(st, fs, quota, next_step))
+                body = followticket.description(st, fs, quota, next_step)
+                if ident in owned:
+                    # Recovery on another machine reads the description, so it must carry this
+                    # deferral's builder, branch and PR — not the first deferral's.
+                    followticket.update_description(ident, body)
+                followticket.comment(ident, "advance-roadmap follow-up deferred again for quota.\n\n" + body)
             fresh = [f for f in findings if not f.get("ticket")]
             if fresh:
                 ident = followticket.create(st, fresh, quota, next_step)
+                st["owned_tickets"].append(ident)
                 for f in fresh:
                     f["ticket"] = ident
                     index.add(f["id"], ident, st["key"])
