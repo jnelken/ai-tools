@@ -7,7 +7,9 @@
   followup_stubs.py gh ...        gh: PR checks / merge / merge commit / deploy status from $ROOT/stub-gh.json
   followup_stubs.py linear ...    linear: paginated issues (and failing commands) from $ROOT/stub-linear.json
   followup_stubs.py jlin ...      jlin.py new: files DEV-900
-  followup_stubs.py codex ...     codex exec -o FILE: the analyst answer in $ROOT/stub-analyst.txt
+  followup_stubs.py codex ...     codex exec -o FILE: the analyst answer in $ROOT/stub-analyst.txt; its stdout is
+                                  $ROOT/stub-codex-transcript.txt, and $ROOT/stub-codex-limit stops it on a banner
+  followup_stubs.py claude ...    claude -p --output-format json: the answer in $ROOT/stub-claude-analyst.txt
   followup_stubs.py workspaces .. lib/workspaces.py launch: a worktree, the command run detached
 
 Every call is appended to $ROOT/stub-calls.jsonl. Nothing here reaches GitHub or Linear.
@@ -60,7 +62,16 @@ def usage(args):
         g = gate(opt(args, "--provider"))
         print(json.dumps(g))
         sys.exit(0 if g["available"] else 3)
+    elif cmd == "parse-limit":
+        print(json.dumps({"provider": opt(args, "--provider"), "exact_cli_text": opt(args, "--text"),
+                          "scope": opt(args, "--scope"), "reset_epoch": 1760396400, "reset_at": "2025-10-13T19:00:00"}))
+    elif cmd == "record-limit":
+        note("usage-record-limit", provider=opt(args, "--provider"), scope=opt(args, "--scope"))
+        if u.get("record_limit_fails"):
+            sys.exit(1)
     elif cmd == "quota-record":
+        if u.get("quota_record_fails"):
+            sys.exit(1)
         out = [gate(p) for p in ROLES[role] if not gate(p)["available"]]
         first = out[0] if out else {}
         print(json.dumps({"role": role, "provider": first.get("provider"), "reset_epoch": first.get("reset_epoch"),
@@ -119,6 +130,10 @@ def review(args):
     if r.get("after_usage") is not None:
         (ROOT / "stub-usage.json").write_text(json.dumps(r["after_usage"]))
     if r.get("unavailable"):
+        if r.get("limited"):   # review.sh's own log line for a round every reviewer was limited in
+            with open(opt(args, "--log"), "a") as f:
+                f.write(json.dumps({"round": rnd, "reviewer": None, "verdict": "unavailable",
+                                    "limited": r["limited"]}) + "\n")
         print("no reviewer available")
         sys.exit(3)
     verdicts = r["verdicts"]
@@ -226,10 +241,23 @@ def jlin(args):
 
 def codex(args):
     note("codex", args=args[:2])
-    out = opt(args, "-o")
-    Path(out).write_text((ROOT / "stub-analyst.txt").read_text())
+    try:
+        print((ROOT / "stub-codex-transcript.txt").read_text())
+    except OSError:
+        pass
+    if (ROOT / "stub-codex-limit").exists():
+        print("You've hit your usage limit. Upgrade to Pro or try again at 7:00 PM.")
+        sys.exit(1)
+    print("session id: 11111111-2222-3333-4444-555555555555")
+    Path(opt(args, "-o")).write_text((ROOT / "stub-analyst.txt").read_text())
+
+
+def claude(args):
+    note("claude", args=args[:1])
+    print(json.dumps({"type": "result", "result": (ROOT / "stub-claude-analyst.txt").read_text(),
+                      "session_id": "claude-analyst-session"}))
 
 
 if __name__ == "__main__":
     {"usage": usage, "worker": worker, "review": review, "gh": gh, "linear": linear, "jlin": jlin,
-     "codex": codex, "workspaces": workspaces}[sys.argv[1]](sys.argv[2:])
+     "codex": codex, "claude": claude, "workspaces": workspaces}[sys.argv[1]](sys.argv[2:])

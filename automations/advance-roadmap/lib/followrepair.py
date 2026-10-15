@@ -23,6 +23,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import followscan  # noqa: E402
 import followticket  # noqa: E402
 import supervisor as shared  # noqa: E402
+import usage as usagelib  # noqa: E402
 
 ROOT = shared.ROOT
 STATE = ROOT / "followups"
@@ -94,11 +95,18 @@ def gate_one(role, provider):
 
 
 def quota_record(role, primary=None):
+    """usage.py quota-record (refreshed); when that fails, the same record from the gates as last
+    saved, so a provider already known to be out still names its reset."""
     try:
         rc, out = usage("quota-record", "--role", role, *(["--primary", primary] if primary else []))
         doc = json.loads(out) if rc == 0 else None
     except (OSError, ValueError, subprocess.TimeoutExpired):
         doc = None
+    if not isinstance(doc, dict):
+        try:
+            doc = usagelib.saved_quota_record(ROOT, role, (), primary)
+        except (OSError, ValueError, TypeError, KeyError):
+            doc = None
     return doc if isinstance(doc, dict) else None
 
 
@@ -135,19 +143,29 @@ def feasibility(st, step, builder=None):
     return "unknown", "no reviewer is available and none reports a usage gate"
 
 
-def reviewer_quota(eligible):
+def reviewer_quota(eligible, limited=()):
     """usage.py's reviewer quota record narrowed to the reviewers review.sh would actually try,
     or None when none of them is over its gate or limited. An excluded reviewer (the builder
-    itself) being out says nothing about when this review can run."""
-    q = quota_record("reviewer")
-    rows = [p for p in (q or {}).get("providers") or []
-            if isinstance(p, dict) and p.get("provider") in eligible]
+    itself) being out says nothing about when this review can run. `limited` is the hits a review
+    round logged itself (reviews.jsonl `limited`): they win over the shared record, which may
+    never have heard of them."""
+    q = quota_record("reviewer") or {}
+    rows = {p["provider"]: p for p in q.get("providers") or []
+            if isinstance(p, dict) and p.get("provider") in eligible}
+    for hit in limited or ():
+        name = hit.get("provider") if isinstance(hit, dict) else None
+        if name in eligible:
+            prev = rows.get(name) or {}
+            rows[name] = {"provider": name, "state": "limited", "cause": hit.get("cause") or prev.get("cause"),
+                          "reset_epoch": hit.get("reset_epoch") or prev.get("reset_epoch"),
+                          "reset_at": hit.get("reset_at") or prev.get("reset_at")}
+    rows = list(rows.values())
     out = [p for p in rows if p.get("state") in OUT]
     if not out:
         return None
     resets = [p for p in out if p.get("reset_epoch")]
     first = min(resets, key=lambda p: p["reset_epoch"]) if resets else out[0]
-    return {**q, "provider": first["provider"], "reset_epoch": first.get("reset_epoch"),
+    return {"role": "reviewer", **q, "provider": first["provider"], "reset_epoch": first.get("reset_epoch"),
             "reset_at": first.get("reset_at"), "providers": rows,
             "cause": "; ".join(f"{p['provider']}: {p.get('cause') or p.get('reason') or p['state']}" for p in out)}
 
@@ -526,7 +544,8 @@ def run_review(st, repo_dir, rnd):
     # review.sh logs a short head; the full SHA it reviewed is what landing must match.
     reviewed = sha if sha and row.get("head") and sha.startswith(str(row["head"])) else None
     st["validation"]["reviews"].append({"round": rnd, "verdict": verdict, "reviewer": row.get("reviewer"),
-                                        "head": row.get("head"), "sha": reviewed})
+                                        "head": row.get("head"), "sha": reviewed,
+                                        "limited": row.get("limited") or []})
     st["reviewed_sha"] = reviewed if verdict == "clean" else None
     if row.get("reviewer"):
         st["sessions"].append({"role": "reviewer", "round": rnd, "provider": row["reviewer"],

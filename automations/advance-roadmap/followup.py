@@ -437,35 +437,30 @@ def analyze(st, findings, files):
     ADVANCE_ROADMAP_FOLLOWUP_ANALYST=0; skipped when no analyst is under its usage gate."""
     if os.environ.get("ADVANCE_ROADMAP_FOLLOWUP_ANALYST", "1") != "1" or not files:
         return [], []
+    prompt = analyst_prompt(st, findings, files)
+    limited = []
     for provider in ("codex", "claude"):
         gate = gate_one("analyst", provider)
         st["usage_snapshots"].append({"at": now_iso(), "role": "analyst", "provider": provider, "gate": gate})
-        if gate is None or gate.get("available"):
-            break
+        if gate is not None and not gate.get("available"):
+            continue
+        try:
+            transcript, answer = run_analyst(st, provider, prompt)
+        except (OSError, subprocess.TimeoutExpired) as e:
+            st["analyst"] = f"failed: {e}"
+            return [], []
+        banner = followscan.LIMIT_BANNER.search(transcript)
+        if banner:
+            record_analyst_limit(st, provider, transcript[banner.start():].splitlines()[0].strip())
+            limited.append(provider)
+            continue
+        break
     else:
-        st["analyst"] = "skipped: no analyst under its usage gate"
+        st["analyst"] = (f"skipped: {' and '.join(limited)} hit {'their limits' if len(limited) > 1 else 'its limit'}"
+                         if limited else "skipped: no analyst under its usage gate")
         return [], []
-    out = stage_dir(st["key"]) / "analyst.txt"
-    prompt = analyst_prompt(st, findings, files)
-    try:
-        if provider == "codex":
-            subprocess.run([CODEX, "exec", "-o", str(out), "-s", "read-only", "-C", str(ROOT),
-                            "--skip-git-repo-check", prompt], capture_output=True, text=True, timeout=1800,
-                           stdin=subprocess.DEVNULL)
-        else:
-            p = subprocess.run([CLAUDE, "-p", prompt, "--permission-mode", "plan",
-                                "--disallowedTools", "Edit,Write,NotebookEdit", "--output-format", "json"],
-                               capture_output=True, text=True, timeout=1800, stdin=subprocess.DEVNULL, cwd=str(ROOT))
-            (stage_dir(st["key"]) / "analyst.json").write_text(p.stdout)
-            out.write_text(str((json.loads(p.stdout.splitlines()[-1]) if p.stdout.strip() else {}).get("result") or ""))
-    except (OSError, ValueError, subprocess.TimeoutExpired) as e:
-        st["analyst"] = f"failed: {e}"
-        return [], []
-    text = followscan.read_text(out)
-    if followscan.LIMIT_BANNER.search(text):
-        st["analyst"] = f"{provider} hit its limit"
-        return [], []
-    m = re.findall(r"```" + ANALYST_FENCE + r"\s*\n(.*?)\n```", text, re.S)
+    # The findings come only from the final answer: the transcript echoes the prompt's example fence.
+    m = re.findall(r"```" + ANALYST_FENCE + r"\s*\n(.*?)\n```", answer, re.S)
     try:
         doc = json.loads(m[-1]) if m else {}
     except ValueError:
@@ -490,6 +485,57 @@ def analyze(st, findings, files):
         if isinstance(raw, dict) and raw.get("title"):
             rejected.append(followscan.non_finding(raw["title"], raw.get("why") or "", []))
     return kept, rejected
+
+
+def run_analyst(st, provider, prompt):
+    """(transcript, final answer) of one read-only analyst call. Limit banners are read from the
+    transcript; findings only from the final answer (Codex's -o file, Claude's JSON result)."""
+    d = stage_dir(st["key"])
+    final, raw, session = d / f"analyst-{provider}.last", d / f"analyst-{provider}.log", d / f"analyst-{provider}.session"
+    for f in (final, session):
+        f.unlink(missing_ok=True)
+    tokens = [sys.executable, str(HERE / "lib" / "tokens.py")]
+    if provider == "codex":
+        p = subprocess.run([CODEX, "exec", "-o", str(final), "-s", "read-only", "-C", str(ROOT),
+                            "--skip-git-repo-check", prompt], capture_output=True, text=True, timeout=1800,
+                           stdin=subprocess.DEVNULL)
+        raw.write_text(p.stdout + p.stderr)
+        subprocess.run([*tokens, "codex", str(raw), "--role", "analyst",
+                        "--log", str(d / "model-usage.jsonl"), "--session-out", str(session)],
+                       capture_output=True, stdin=subprocess.DEVNULL, timeout=60)
+        transcript = raw.read_text(errors="replace")
+    else:
+        p = subprocess.run([CLAUDE, "-p", prompt, "--permission-mode", "plan",
+                            "--disallowedTools", "Edit,Write,NotebookEdit", "--output-format", "json"],
+                           capture_output=True, text=True, timeout=1800, stdin=subprocess.DEVNULL, cwd=str(ROOT))
+        raw_json = d / "analyst-claude.json"
+        raw_json.write_text(p.stdout + p.stderr)
+        subprocess.run([*tokens, "claude-json", str(raw_json), str(raw), "--final", str(final), "--role", "analyst",
+                        "--log", str(d / "model-usage.jsonl"), "--session-out", str(session)],
+                       capture_output=True, stdin=subprocess.DEVNULL, timeout=60)
+        transcript = followscan.read_text(raw) or raw_json.read_text(errors="replace")
+    sid = followscan.read_text(session).strip()
+    if sid:
+        st.setdefault("sessions", []).append({"role": "analyst", "provider": provider, "session_id": sid})
+    return transcript, followscan.read_text(final)
+
+
+def record_analyst_limit(st, provider, text):
+    """Keep the hit (and its reset) in the stage first, then gate the provider for everyone else:
+    a failed shared-state update must not lose it."""
+    try:
+        rc, out = followrepair.usage("parse-limit", "--provider", provider, "--text", text, "--scope", "analyst")
+        hit = json.loads(out) if rc == 0 else None
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        hit = None
+    if not isinstance(hit, dict):
+        hit = {"provider": provider, "exact_cli_text": text}
+    st.setdefault("limits", []).append({"role": "analyst", "at": now_iso(), **hit})
+    write_json(stage_dir(st["key"]) / f"analyst-limit-{provider}.json", hit)
+    try:
+        followrepair.usage("record-limit", "--provider", provider, "--text", text, "--scope", "analyst")
+    except (OSError, subprocess.TimeoutExpired):
+        pass
 
 
 def analyst_prompt(st, findings, files):
@@ -717,7 +763,8 @@ def repair(st, repo_dir, todo, issues=None):
                 return defer(st, todo, detail, f"review round {rnd}", issues)
             verdict, text = run_review(st, repo_dir, rnd)
             if verdict == "unavailable":
-                q = followrepair.reviewer_quota(followrepair.REVIEWERS[st["builder_provider"]])
+                q = followrepair.reviewer_quota(followrepair.REVIEWERS[st["builder_provider"]],
+                                                st["validation"]["reviews"][-1].get("limited"))
                 if q:
                     return defer(st, todo, q, f"review round {rnd}", issues)
                 return block(st, "review-unavailable", "every reviewer was at capacity or missing")

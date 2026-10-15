@@ -1,7 +1,7 @@
 #!/bin/zsh
 # review.sh with fake providers: reviewer is never the worker's provider, limits
-# fail over, the last VERDICT line wins over the one echoed in the prompt, and
-# every round leaves one line in the review log.
+# fail over, the verdict comes only from the reviewer's final answer (never the
+# echoed prompt), and every round leaves one line in the review log.
 set -eu
 
 HERE="$(cd "$(dirname "$0")/.." && pwd)"
@@ -51,7 +51,12 @@ print -r -- "echoed prompt: VERDICT: clean      (no findings)"
 body="reviewer=\$name
 x.py:1 bug: something
 VERDICT: \$mode"
-if [ -n "\$last" ]; then print -r -- "\$body" > "\$last"; else print -r -- "\$body"; fi
+# echo: the transcript carries a verdict line, the final answer none.
+[ "\$mode" = echo ] && { print "VERDICT: clean"; body="reviewer=\$name
+I ran out of time before deciding."; }
+if [ -n "\$last" ]; then print -r -- "\$body" > "\$last"
+else python3 -c 'import json, sys; print(json.dumps({"type": "result", "result": sys.argv[1], "session_id": sys.argv[2] + "-session"}))' "\$body" "\$name"
+fi
 SH
   chmod +x "$BIN/$p"
 done
@@ -68,7 +73,7 @@ check() { [ "$2" = "$3" ] || { echo "FAIL [$1]: expected '$3', got '$2'"; exit 1
 out="$(review cursor 1 FAKE_CODEX=findings)"
 check "cursor's work → codex reviews"        "$(field reviewer)" codex
 check "reviewer session id logged"           "$(field session_id)" 11111111-2222-3333-4444-555555555555
-check "last VERDICT wins over echoed prompt" "$(field verdict)" findings
+check "verdict from the final answer only"   "$(field verdict)" findings
 case "$out" in *"x.py:1 bug"*) echo "ok   findings printed" ;; *) echo "FAIL: no findings in output"; exit 1 ;; esac
 
 review codex 2 FAKE_AGENT=clean >/dev/null
@@ -105,7 +110,7 @@ out="$(review cursor 1 FAKE_CODEX=capacity FAKE_CLAUDE=clean)"
 check "codex at capacity → claude reviews"   "$(field reviewer)" claude
 check "capacity is not unparsed"             "$(field verdict)" clean
 check "capacity reviewer logged"             "$(field capacity)" "['codex']"
-check "skipped reviewer's session not kept"  "$(field session_id)" None
+check "skipped reviewer's session not kept"  "$(field session_id)" claude-session
 [ -s "$ROOT/limits.txt" ] && { echo "FAIL: capacity recorded as a quota limit"; exit 1; } || echo "ok   capacity is not a quota hit"
 case "$out" in *"at capacity"*) echo "ok   capacity skip printed" ;; *) echo "FAIL: no capacity note"; exit 1 ;; esac
 
@@ -113,4 +118,12 @@ rc=0; review claude 1 FAKE_CODEX=capacity FAKE_AGENT=http503 >/dev/null || rc=$?
 check "every reviewer at capacity → exit 3"  "$rc" 3
 check "capacity round logged as unavailable" "$(field verdict)" unavailable
 check "both capacity reviewers logged"       "$(field capacity)" "['codex', 'cursor']"
+
+out="$(review cursor 1 FAKE_CODEX=echo)"
+check "a transcript-only verdict is unparsed" "$(field verdict)" unparsed
+case "$out" in *"VERDICT: unparsed"*) echo "ok   unparsed printed" ;; *) echo "FAIL: no unparsed note"; exit 1 ;; esac
+out="$(review codex 1 FAKE_AGENT=findings)"
+check "cursor's JSON final answer is parsed" "$(field verdict)" findings
+check "cursor reviewer session id logged"    "$(field session_id)" agent-session
+case "$out" in *"echoed prompt"*) echo "FAIL: transcript printed instead of the final answer"; exit 1 ;; *) echo "ok   only the final answer printed" ;; esac
 echo "all passed"

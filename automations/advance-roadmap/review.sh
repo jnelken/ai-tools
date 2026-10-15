@@ -109,7 +109,7 @@ run_reviewer() {
       "$AGENT" -p --mode ask --trust --model "$CURSOR_REVIEW_MODEL" --workspace "$REPO" \
         --output-format json "$PROMPT" >"$out.json" 2>&1
       local rc=$?
-      python3 "$TOKENS_PY" cursor-json "$out.json" "$out" --role reviewer --round "$ROUND" \
+      python3 "$TOKENS_PY" cursor-json "$out.json" "$out" --final "$out.last" --role reviewer --round "$ROUND" \
         --model "$CURSOR_REVIEW_MODEL" --log "$USAGE_LOG" --session-out "$out.session" >/dev/null 2>&1
       [ -s "$out" ] || cp "$out.json" "$out" 2>/dev/null
       return $rc ;;
@@ -119,7 +119,7 @@ run_reviewer() {
         --permission-mode plan --disallowedTools "Edit,Write,NotebookEdit" \
         --output-format json ) >"$out.json" 2>&1
       local rc=$?
-      python3 "$TOKENS_PY" claude-json "$out.json" "$out" --role reviewer --round "$ROUND" \
+      python3 "$TOKENS_PY" claude-json "$out.json" "$out" --final "$out.last" --role reviewer --round "$ROUND" \
         --model "$CLAUDE_REVIEW_MODEL" --log "$USAGE_LOG" --session-out "$out.session" >/dev/null 2>&1
       [ -s "$out" ] || cp "$out.json" "$out" 2>/dev/null
       return $rc ;;
@@ -156,8 +156,10 @@ for who in "${reviewers[@]}"; do
     python3 "$USAGE_PY" --root "$ROOT" record-limit --provider "$who" --text "$text" >/dev/null 2>&1 || true
     continue
   fi
-  # Codex echoes the prompt (which quotes both verdict lines) — trust the last one.
-  found="$(rg -o '^VERDICT: (clean|findings)\s*$' -r '$1' "$out" | tail -1)"
+  # Only the final answer carries the verdict: a transcript echoes the prompt, which quotes both
+  # verdict lines. No final answer is no verdict (unparsed, never clean).
+  found=""
+  [ -s "$out.last" ] && found="$(rg -o '^VERDICT: (clean|findings)\s*$' -r '$1' "$out.last" | tail -1)"
   if [ -z "$found" ] && [ "$rc" -ne 0 ] && rg -q -i "$CAPACITY" "$out"; then
     echo "(skipping reviewer $who — its model is at capacity: $(rg -m1 -i -o "$CAPACITY" "$out"))"
     capacity="$capacity $who"

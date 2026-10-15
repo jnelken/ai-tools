@@ -154,7 +154,11 @@ An item that did not ship (`blocked-branch-left`, `failed`, `incomplete`, `quota
 recoverable work for the next run, never a cleanup trigger. Findings come from recognition tests in
 [`lib/followscan.py`](advance-roadmap/lib/followscan.py) (each cites a file and a quote; deliberate
 non-findings are recorded too) plus an optional read-only analyst call (`usage.py` role `analyst`:
-Codex, then Claude) whose findings are kept only when every quote is really in the corpus.
+Codex, then Claude) whose findings are kept only when every quote is really in the corpus. Like
+every other model call here, its findings come only from its final answer (Codex's `-o` file,
+Claude's JSON `result`); a limit banner in its transcript is saved to the stage (`limits`,
+`analyst-limit-<provider>.json`) before `usage.py record-limit` gates that provider, and the next
+analyst takes over.
 
 **Repairs are delegated** ([`lib/followrepair.py`](advance-roadmap/lib/followrepair.py)): `worker.sh`
 (Cursor first) builds on `roadmap/followup-<stage key>` in its own Superset workspace
@@ -165,7 +169,9 @@ the last review is clean, then verifies the deploy (and for ai-tools runs `~/.ai
 which counts only once the deploy clone's HEAD contains the merge commit — `install.sh` exits 0
 when it skips a dirty clone or a failed fetch).
 It never merges past unresolved findings or an unavailable reviewer: the branch and PR stay for the
-next drain. Follow-up builders run with `ADVANCE_ROADMAP_FOLLOWUP=1`, and their run dirs carry a
+next drain. `review.sh` takes the verdict only from the reviewer's final answer, so a verdict line
+echoed in a transcript is never `clean`; a round every reviewer was limited in defers on the limits
+that round logged, even when the shared quota record can't be read. Follow-up builders run with `ADVANCE_ROADMAP_FOLLOWUP=1`, and their run dirs carry a
 `followup-child` marker, so a follow-up never starts follow-ups.
 
 **Usage** is re-read before every builder and reviewer step, and a builder is only started when a
