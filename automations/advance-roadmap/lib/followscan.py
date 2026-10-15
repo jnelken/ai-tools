@@ -50,8 +50,9 @@ SAFETY_STOP = re.compile(
     r"plan approval|quota.?paus",
     re.I)
 # Follow-up blocker kinds that are the repair pipeline itself failing (worth a tooling finding).
+# "analyst" is a hard tooling defect (missing binary, crash, non-zero exit) — not a safety stop.
 REPAIR_BLOCKER_KINDS = frozenset({
-    "builder", "review", "review-unavailable", "land", "crash",
+    "builder", "review", "review-unavailable", "land", "crash", "analyst",
     "unknown-usage", "unknown-builder", "linear",
 })
 
@@ -66,9 +67,19 @@ def evidence(source, quote):
     return {"source": str(source), "quote": " ".join(str(quote).split())[:400]}
 
 
+def iter_jsonl_lines(path):
+    """Yield raw lines from a JSONL file with no size cap (streamed end-to-end)."""
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            for line in f:
+                yield line.rstrip("\n")
+    except OSError:
+        return
+
+
 def jsonl_stamp_line(path, stamp):
-    """The raw JSONL line whose stamp field matches, or None."""
-    for line in read_text(path).splitlines():
+    """The raw JSONL line whose stamp field matches, or None. Streams the whole file."""
+    for line in iter_jsonl_lines(path):
         try:
             if json.loads(line).get("stamp") == stamp:
                 return line
@@ -78,11 +89,17 @@ def jsonl_stamp_line(path, stamp):
 
 
 def row_evidence(src, stamp, needle=None):
-    """Evidence citing a verbatim source line for this stamp (never a synthetic summary)."""
+    """Evidence citing a verbatim source line for this stamp (never a synthetic summary).
+
+    For runs.jsonl (and other stamp-keyed JSONL), stream the whole file and cite only that
+    stamp's row. A missing stamp is missing evidence — never fall back to another row.
+    """
     src = Path(src)
-    line = jsonl_stamp_line(src, stamp) if src.name.endswith(".jsonl") or src.name == "runs.jsonl" else None
-    if line:
-        return evidence(src, line)
+    if src.name.endswith(".jsonl") or src.name == "runs.jsonl":
+        line = jsonl_stamp_line(src, stamp)
+        if line:
+            return evidence(src, line)
+        return evidence(src, stamp)
     text = read_text(src)
     if needle and " ".join(str(needle).split()) in " ".join(text.split()):
         for raw in text.splitlines():
@@ -467,7 +484,7 @@ def corpus_files(root, stamps, run_dirs=None, excerpt_dir=None):
     runs_path = root / "runs.jsonl"
     if runs_path.exists():
         lines, other = [], False
-        for line in read_text(runs_path).splitlines():
+        for line in iter_jsonl_lines(runs_path):
             try:
                 stamp = json.loads(line).get("stamp")
             except ValueError:
@@ -504,21 +521,23 @@ def evidence_holds(ev, files, stamps=None):
     quote = " ".join(str(ev.get("quote") or "").split())
     if not path or len(quote) < 8:
         return False
+    path = Path(path)
+    # runs.jsonl is stamp-keyed and can exceed the capped read_text budget — stream it.
+    if path.name == "runs.jsonl":
+        if not stamps:
+            return any(quote in " ".join(line.split()) for line in iter_jsonl_lines(path))
+        return _runs_quote_in_stamps(path, quote, set(stamps))
     if quote not in " ".join(read_text(path).split()):
         return False
     if not stamps:
         return True
-    wanted = set(stamps)
-    path = Path(path)
-    if path.name == "runs.jsonl":
-        return _runs_quote_in_stamps(path, quote, wanted)
     if path.parent.name == "batch-verdicts":
-        return (read_json(path) or {}).get("stamp") in wanted
+        return (read_json(path) or {}).get("stamp") in set(stamps)
     return True
 
 
 def _runs_quote_in_stamps(path, quote, wanted):
-    for line in read_text(path).splitlines():
+    for line in iter_jsonl_lines(path):
         if quote not in " ".join(line.split()):
             continue
         try:

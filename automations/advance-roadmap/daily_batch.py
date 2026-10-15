@@ -60,26 +60,70 @@ def followup_env():
                          "ADVANCE_ROADMAP_STAMP", "ADVANCE_ROADMAP_TARGET_REPO"}}
 
 
+def _group_pids(pgid):
+    """PIDs still in the process group (empty when the group is gone)."""
+    try:
+        out = subprocess.run(
+            ["ps", "-g", str(pgid), "-o", "pid="],
+            capture_output=True, text=True, timeout=2)
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+    return [int(line) for line in out.stdout.splitlines() if line.strip().isdigit()]
+
+
+def _group_alive(pgid):
+    """True when any member of the process group still exists."""
+    if _group_pids(pgid):
+        return True
+    try:
+        os.killpg(pgid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        # macOS can return EPERM for a group after its session leader exits; trust ps above first.
+        return False
+
+
+def _signal_group(pgid, sig):
+    try:
+        os.killpg(pgid, sig)
+    except (ProcessLookupError, PermissionError):
+        pass
+    if sig == signal.SIGKILL:
+        for pid in _group_pids(pgid):
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                pass
+
+
 def _reap_group(proc, grace=5.0):
-    """SIGTERM (then SIGKILL) the process group and wait until the leader is gone.
+    """SIGTERM (then SIGKILL) the process group until no members remain.
 
     Drain runs start_new_session so an analyst child shares this group; releasing the stage claim
-    only after the group is reaped stops recovery from launching a duplicate analyst.
+    only after the group is reaped stops recovery from launching a duplicate analyst. After the
+    grace period, SIGKILL whenever any member survives — even if the leader has already exited.
     """
-    try:
-        os.killpg(proc.pid, signal.SIGTERM)
-    except ProcessLookupError:
-        pass
+    pgid = proc.pid
+    _signal_group(pgid, signal.SIGTERM)
     try:
         proc.wait(timeout=grace)
-        return
     except subprocess.TimeoutExpired:
         pass
-    try:
-        os.killpg(proc.pid, signal.SIGKILL)
-    except ProcessLookupError:
-        pass
-    proc.wait()
+    # Leader exit alone is not enough: descendants that ignore SIGTERM must still be killed.
+    if _group_alive(pgid):
+        _signal_group(pgid, signal.SIGKILL)
+    if proc.poll() is None:
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            pass
+    # Confirm the group is empty before the caller releases any stage claim.
+    deadline = time.time() + 2.0
+    while _group_alive(pgid) and time.time() < deadline:
+        _signal_group(pgid, signal.SIGKILL)
+        time.sleep(0.05)
 
 
 def followup(*args, timeout=300, log=None):
@@ -242,12 +286,7 @@ class Batch:
             elif item["status"] == "planning" and time.time() - item["started"] > PLAN_TIMEOUT_S:
                 # Only planning gets this deadline. Already dispatched workers retain run.sh's
                 # existing timeout/recovery behavior and are never killed by this controller.
-                os.killpg(proc.pid, signal.SIGTERM)
-                try:
-                    proc.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    os.killpg(proc.pid, signal.SIGKILL)
-                    proc.wait()
+                _reap_group(proc)
                 item.update(status="finished", outcome="planning-timeout")
 
     def live_cleanups(self):

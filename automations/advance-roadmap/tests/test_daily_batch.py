@@ -498,12 +498,17 @@ class DailyBatchTest(unittest.TestCase):
         self.assertTrue([c for c in calls if c['args'][:2] == ['hook', 'run-end']])
 
     def test_followup_timeout_reaps_the_whole_process_group(self):
-        """Timing out drain must kill followup.py and its children before the claim can reopen."""
+        """Timing out drain must kill followup.py and its children before the claim can reopen.
+
+        The child ignores SIGTERM so a leader-only wait would leave it alive; SIGKILL after grace
+        must still clear the group.
+        """
         import time
         child_pid = self.root / 'child.pid'
         child_script = self.root / 'child.py'
         child_script.write_text(
-            "import os, time\n"
+            "import os, signal, time\n"
+            "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
             f"open({str(child_pid)!r}, 'w').write(str(os.getpid()))\n"
             "time.sleep(120)\n"
         )
@@ -534,6 +539,41 @@ class DailyBatchTest(unittest.TestCase):
                 break
             time.sleep(0.05)
         self.assertTrue(dead, f'child pid {pid} still alive after group reap')
+
+    def test_reap_group_sigkills_survivors_after_leader_exits(self):
+        """Leader exit alone must not release the claim while a descendant ignores SIGTERM."""
+        import time
+        child_pid = self.root / 'orphan.pid'
+        child_script = self.root / 'orphan.py'
+        child_script.write_text(
+            "import os, signal, time\n"
+            "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+            f"open({str(child_pid)!r}, 'w').write(str(os.getpid()))\n"
+            "time.sleep(120)\n"
+        )
+        leader = subprocess.Popen(
+            [sys.executable, '-c',
+             "import subprocess, sys, time\n"
+             f"subprocess.Popen([sys.executable, {str(child_script)!r}])\n"
+             "time.sleep(120)\n"],
+            start_new_session=True)
+        deadline = time.time() + 3
+        while time.time() < deadline and not child_pid.exists():
+            time.sleep(0.05)
+        self.assertTrue(child_pid.exists(), 'orphan child never started')
+        pid = int(child_pid.read_text())
+        # Mimic the old bug surface: leader dies on SIGTERM within grace; child survives SIGTERM.
+        daily_batch._reap_group(leader, grace=0.3)
+        self.assertIsNotNone(leader.poll())
+        for _ in range(40):
+            try:
+                os.kill(pid, 0)
+            except OSError:
+                break
+            time.sleep(0.05)
+        else:
+            self.fail(f'orphan pid {pid} still alive after _reap_group')
+        self.assertFalse(daily_batch._group_alive(leader.pid))
 
     def test_dashboard_schedule_preserves_history_and_uses_one_daily_slot(self):
         with patch.dict(os.environ, self.env):

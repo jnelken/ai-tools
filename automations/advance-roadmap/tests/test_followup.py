@@ -306,6 +306,19 @@ class FollowupTest(unittest.TestCase):
         self.assertTrue(any("noroadmap" in n["title"] or "unsafe-repo" in n["title"] for n in quiet), quiet)
         self.assertTrue(any("cleanup-dirty" in n["title"] for n in quiet), quiet)
 
+    def test_tooling_scan_classifies_hard_analyst_failures_as_tooling_defects(self):
+        """Missing binaries / crashes are tooling findings, not expected safety non-findings."""
+        stages = [
+            {"key": "tooling-batch-fail-analyst", "blockers": [
+                {"kind": "analyst",
+                 "reason": "failed: codex: [Errno 2] No such file; claude: exit 1"}]},
+        ]
+        findings, quiet = followscan.tooling_scan(self.root, [], stages=stages)
+        [f] = [x for x in findings if x["kind"] == "fragile-tooling"]
+        self.assertIn("failed: codex", f["title"])
+        self.assertTrue(f["evidence"])
+        self.assertFalse([n for n in quiet if "analyst" in n["title"]], quiet)
+
     def test_an_interrupted_stage_resumes_where_it_stopped(self):
         self.shipped_item("20261014-050000")
         self.run_followup("hook", "item-done", "--stamp", "20261014-050000")
@@ -379,6 +392,37 @@ class FollowupTest(unittest.TestCase):
         self.assertFalse(followscan.evidence_holds(borrowed, [self.root / "runs.jsonl"], [stamp]))
         own = {"source": str(self.root / "runs.jsonl"),
                "quote": "the orchestrator hit its session limit before triage"}
+        self.assertTrue(followscan.evidence_holds(own, [self.root / "runs.jsonl"], [stamp]))
+
+    def test_runs_jsonl_stamp_selection_streams_past_read_limit(self):
+        """Past the 2 MB capped read, stamp rows must still be found; never cite another stamp."""
+        stamp = "20261015-tail"
+        other = {"stamp": "20261001-head", "outcome": "shipped",
+                 "summary": "unrelated historical quote for another stage",
+                 "detail": "unrelated historical quote for another stage"}
+        target = {"stamp": stamp, "outcome": "incomplete",
+                  "summary": "recent row after the size cap",
+                  "detail": "recent row after the size cap"}
+        pad = json.dumps({"stamp": "pad", "detail": "x" * 2000}) + "\n"
+        with open(self.root / "runs.jsonl", "w", encoding="utf-8") as f:
+            f.write(json.dumps(other) + "\n")
+            while f.tell() < 2_000_000 + 50_000:
+                f.write(pad)
+            f.write(json.dumps(target) + "\n")
+        line = followscan.jsonl_stamp_line(self.root / "runs.jsonl", stamp)
+        self.assertIsNotNone(line)
+        self.assertIn(stamp, line)
+        self.assertIn("recent row after the size cap", line)
+        ev = followscan.row_evidence(self.root / "runs.jsonl", stamp)
+        self.assertIn(stamp, ev["quote"])
+        self.assertNotIn("unrelated historical quote", ev["quote"])
+        missing = followscan.row_evidence(self.root / "runs.jsonl", "no-such-stamp")
+        self.assertEqual(missing["quote"], "no-such-stamp")
+        corpus = followscan.corpus_files(self.root, [stamp], excerpt_dir=self.root / "corpus-big")
+        excerpt = next(p for p in corpus if p.name == "runs.jsonl")
+        self.assertIn(stamp, excerpt.read_text())
+        self.assertNotIn("unrelated historical quote", excerpt.read_text())
+        own = {"source": str(self.root / "runs.jsonl"), "quote": "recent row after the size cap"}
         self.assertTrue(followscan.evidence_holds(own, [self.root / "runs.jsonl"], [stamp]))
 
     def test_analyst_missing_binary_fails_over_then_hard_fail_stays_retryable(self):
