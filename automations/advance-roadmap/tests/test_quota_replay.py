@@ -46,20 +46,38 @@ with open(os.environ["FAKE_CALLS"], "a") as f:
     f.write(json.dumps({{"bin": name, "role": role}}) + "\n")
 mode = os.environ.get(f"FAKE_{{name.upper()}}_{{role.upper()}}") or os.environ.get("FAKE_" + name.upper(), "plan")
 fence = "```ORCHESTRATOR_RESULT_JSON\n" + os.environ.get("FAKE_PLAN", "{{}}") + "\n```"
+# What Codex echoes while it reads ORCHESTRATOR.md / WORKER.md: their examples, which are valid JSON.
+label = "WORKER_RESULT_JSON" if role == "worker" else "ORCHESTRATOR_RESULT_JSON"
+echo = "```" + label + "\n" + json.dumps({{**json.loads({no_work!r}), "outcome": "shipped",
+                                          "summary": "ECHOED EXAMPLE"}}) + "\n```"
+final = fence if role == "orchestrator" else "```WORKER_RESULT_JSON\n" + json.dumps(
+    {{"outcome": "failed", "provider": "codex", "repo": "demo", "summary": "FINAL ANSWER"}}) + "\n```"
 if name == "agent":
     path = next(l.split(": ", 1)[1] for l in prompt.splitlines() if l.startswith("(raw JSON, no fence) to: "))
     json.dump({{"outcome": "bookkeeping", "provider": "cursor", "repo": "demo", "summary": "bookkeeping done"}},
               open(path, "w"))
     print(json.dumps({{"type": "result", "result": "done", "usage": {{"inputTokens": 1, "outputTokens": 1}}}}))
 elif name == "codex":
+    out = args[args.index("-o") + 1] if "-o" in args else None
+    if mode.startswith("echo-"):
+        print("user\n" + prompt + "\n" + echo)
+        if mode == "echo-limit":
+            print("You've hit your usage limit · resets in 2h 30m")
+            sys.exit(1)
+        if mode == "echo-final" and out:
+            open(out, "w").write(final)
+        print("codex done")
+        sys.exit(0)
     if mode == "limit":
         print("You've hit your usage limit · resets in 2h 30m")
         sys.exit(1)
-    out = args[args.index("-o") + 1] if "-o" in args else None
     if out:
         open(out, "w").write(fence if mode == "plan" else "no fence here")
     print("codex done")
 elif name == "claude":
+    if mode == "raw":  # a fence printed outside the CLI's JSON is not its final answer
+        print(fence)
+        sys.exit(1)
     if mode == "limit":
         print(json.dumps(json.load(open(os.environ["FAKE_LIMIT_FIXTURE"]))))  # one line, as the CLI prints it
         sys.exit(1)
@@ -94,7 +112,7 @@ class QuotaReplayTest(unittest.TestCase):
                         "git@github.com:jnelken/demo.git"], check=True)
         for name in ("claude", "codex", "agent"):
             p = self.bin / name
-            p.write_text(FAKE.format(python=sys.executable))
+            p.write_text(FAKE.format(python=sys.executable, no_work=json.dumps(NO_WORK)))
             p.chmod(0o755)
         # deploysnap.py's gh: fails like an offline machine, so nothing reaches GitHub. It runs after
         # the planner is picked and before it launches, so it can also stand in for another lane
@@ -472,6 +490,62 @@ exec(compile(open(__file__).read(), __file__, "exec"))
                 self.assertEqual(rec["outcome"], "error", rec)
                 self.assertTrue(rec["detail"].startswith("orchestrator: "), rec["detail"])
                 self.assertIsNone(rec["quota"])
+
+    def test_raw_claude_fence_outside_its_json_answer_is_not_a_plan(self):
+        self.usage_state(codex={"weekly": {"used_pct": 85, "reset_epoch": FUTURE}})
+        run = self.run_lane(FAKE_CLAUDE="raw")
+        self.assert_nothing_dispatched(run)
+        rec = self.record()
+        self.assertEqual(rec["outcome"], "error", rec)
+        self.assertIn("no final answer", rec["detail"])
+
+    # ── a plan is read only from the planner's final answer ──────────────────
+
+    def test_codex_echoing_orchestrator_examples_then_hitting_quota_dispatches_nothing(self):
+        # The transcript holds a valid blocked_no_item example from ORCHESTRATOR.md, then the banner.
+        self.usage_state(claude={"five_hour": {"used_pct": 90, "reset_epoch": FUTURE}})
+        run = self.run_lane(FAKE_CODEX="echo-limit")
+        self.assert_nothing_dispatched(run)
+        self.assertEqual(self.calls(), [{"bin": "codex", "role": "orchestrator"}])
+        self.assertIn("ECHOED EXAMPLE", (run / "orchestrator-stdout.txt").read_text())
+        rec = self.record()
+        self.assertEqual((rec["outcome"], rec["quota"]["provider"]), ("quota-paused", "codex"), rec)
+        self.assertNotIn("ECHOED EXAMPLE", json.dumps(rec))
+
+    def test_codex_echoing_orchestrator_examples_with_no_final_answer_is_an_error(self):
+        self.usage_state(claude={"five_hour": {"used_pct": 90, "reset_epoch": FUTURE}})
+        run = self.run_lane(FAKE_CODEX="echo-silent")
+        self.assert_nothing_dispatched(run)
+        rec = self.record()
+        self.assertEqual(rec["outcome"], "error", rec)
+        self.assertIn("no final answer", rec["detail"])
+        self.assertIsNone(rec["quota"])
+
+    def test_codex_echoing_orchestrator_examples_plans_from_its_final_answer(self):
+        self.usage_state(claude={"five_hour": {"used_pct": 90, "reset_epoch": FUTURE}})
+        self.run_lane(FAKE_CODEX="echo-final")
+        self.assertTrue(self.reached_barrier)
+        self.assertEqual(self.record()["outcome"], "blocked-no-item")
+        self.assertEqual(json.loads(self.verdict.read_text())["summary"], NO_WORK["summary"])
+
+    def test_codex_worker_result_comes_only_from_its_final_answer(self):
+        # Cursor is over its gate, so Codex works. Its transcript echoes WORKER.md's shipped example.
+        over_cursor = {"included": {"auto_pct": 99, "reset_epoch": LATER}}
+        for mode, source, summary in (("echo-silent", None, None), ("echo-final", "stdout-fence", "FINAL ANSWER")):
+            with self.subTest(mode=mode):
+                self.tearDown()
+                self.setUp()
+                self.usage_state(cursor=over_cursor)
+                run = self.run_lane(FAKE_CODEX_ORCHESTRATOR="plan", FAKE_CODEX_WORKER=mode,
+                                    FAKE_PLAN=self.worker_plan())
+                self.assertEqual([c["bin"] for c in self.calls()], ["codex", "codex"])
+                rec = self.record()
+                self.assertNotEqual(rec["outcome"], "shipped", rec)
+                self.assertEqual(rec["worker_result_source"], source, rec)
+                if summary:
+                    self.assertEqual(json.loads((run / "worker-result.json").read_text())["summary"], summary)
+                else:
+                    self.assertFalse((run / "worker-result.json").exists())
 
     # ── a real no-work plan keeps its bookkeeping ────────────────────────────
 

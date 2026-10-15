@@ -167,6 +167,39 @@ class Approve(unittest.TestCase):
         self.assertEqual(out["error"], f"claude: {banner}")
         self.assertEqual(out["decisions"][1]["verdict"], "defer")
 
+    def test_codex_ruling_comes_only_from_its_final_answer_file(self):
+        # The real Codex runner, with a CLI that echoes PLAN_APPROVAL.md's valid example ruling to
+        # stdout. Without an -o answer that echo is no ruling; a quota banner after it is a limit.
+        req = request(plan("1", 1, ["a"]), plan("2", 2, ["b"]))
+        echoed = self.fence({"decisions": [{"stamp": "2", "verdict": "approve", "reason": "doc example"}]})
+        final = self.fence({"decisions": [{"stamp": "2", "verdict": "serialize", "reason": "real answer"}]})
+        banner = "You've hit your usage limit. Try again at 5:00 PM."
+        script = ("#!/usr/bin/env python3\nimport os, sys\na = sys.argv[1:]\n"
+                  f"print({echoed!r})\n"
+                  "if os.environ.get('FAKE_FINAL'):\n"
+                  "    open(a[a.index('-o') + 1], 'w').write(os.environ['FAKE_FINAL'])\n"
+                  "else:\n"
+                  f"    print({banner!r}); sys.exit(1)\n")
+        with tempfile.TemporaryDirectory() as tmp:
+            cli = Path(tmp) / "codex"
+            cli.write_text(script)
+            cli.chmod(0o755)
+            for final_answer, verdict, reason in (("", "defer", None), (final, "serialize", "real answer")):
+                with self.subTest(final_answer=bool(final_answer)), \
+                        mock.patch.dict(os.environ, {"ADVANCE_ROADMAP_CODEX_BIN": str(cli),
+                                                     "FAKE_FINAL": final_answer}), \
+                        mock.patch.object(pa, "usage_cli", side_effect=self.gates(set())) as usage:
+                    out = pa.approve("/root", req, "DOC.md", "/code", providers=["codex"])
+                    self.assertEqual(out["decisions"][1]["verdict"], verdict)
+                    recorded = [c.args[3] for c in usage.call_args_list if c.args[1] == "record-limit"]
+                    if reason:
+                        self.assertEqual(out["decisions"][1]["reason"], reason)
+                        self.assertNotIn("error", out)
+                        self.assertEqual(recorded, [])
+                    else:
+                        self.assertEqual(out["error"], f"codex: {banner}")
+                        self.assertEqual(recorded, ["codex"])
+
     def test_fence_is_read_from_the_answer_not_the_log(self):
         req = request(plan("1", 1, ["a"]), plan("2", 2, ["b"]))
         runners = {"codex": lambda prompt, code: ("no fence here", self.fence({"decisions": []}))}

@@ -173,7 +173,8 @@ def run_codex(prompt, code_dir):
             [codex, "exec", "-o", str(last), "-m", model, "-c", "model_reasoning_effort=high",
              "-s", "read-only", "-C", code_dir, "--add-dir", code_dir, "--skip-git-repo-check", prompt],
             capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=1500)
-        answer = (last.read_text(errors="replace") if last.exists() else "") or proc.stdout
+        # Only the -o file is the answer: stdout echoes the prompt and PLAN_APPROVAL.md's examples.
+        answer = last.read_text(errors="replace") if last.exists() else ""
         return answer, f"{proc.stdout}\n{proc.stderr}"
 
 

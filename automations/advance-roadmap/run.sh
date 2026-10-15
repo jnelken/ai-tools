@@ -394,8 +394,8 @@ import json, sys
 label, infile, outfile = sys.argv[1], sys.argv[2], sys.argv[3]
 text = open(infile, encoding="utf-8", errors="replace").read()
 start = f"```{label}"
-# Codex echoes the prompt and the ORCHESTRATOR.md it reads into stdout, and both
-# contain this label — so take the last fence whose body actually parses.
+# Callers pass a final answer only, never a transcript. That answer may still quote a
+# malformed fence before its own, so take the last fence whose body actually parses.
 end = len(text)
 while (i := text.rfind(start, 0, end)) >= 0:
     end = i
@@ -460,6 +460,7 @@ run_orchestrator_codex() {
 
 run_orchestrator_claude() {
   local out="$1" prompt="$2"
+  rm -f "$out.last"
   "$CLAUDE" -p "$prompt" \
     --model "$ORCH_CLAUDE_MODEL" \
     --effort high \
@@ -469,9 +470,10 @@ run_orchestrator_claude() {
     --add-dir "$CODE_DIR" \
     --output-format json >"$out.json" 2>&1
   local rc=$?
-  # json carries the per-model token counts; tokens.py turns it back into plain text at $out.
-  python3 "$TOKENS_PY" claude-json "$out.json" "$out" --role orchestrator --model "$ORCH_CLAUDE_MODEL" \
-    --log "$USAGE_LOG" >> "$LOG" 2>&1
+  # json carries the per-model token counts; tokens.py turns it back into plain text at $out,
+  # and writes the json's final answer alone to $out.last, as Codex's -o does.
+  python3 "$TOKENS_PY" claude-json "$out.json" "$out" --final "$out.last" --role orchestrator \
+    --model "$ORCH_CLAUDE_MODEL" --log "$USAGE_LOG" >> "$LOG" 2>&1
   [ -s "$out" ] || cp "$out.json" "$out" 2>/dev/null   # tokens.py missing or broken: keep the raw output
   return $rc
 }
@@ -648,9 +650,9 @@ Previous no-work verdict and what changed since (carry unchanged verdicts forwar
       cat "$orch_out" 2>/dev/null
       echo ""
       echo "=== orchestrator provider=$ORCH exit=$orch_rc ==="
+      # The plan comes only from the planner's final answer. The transcript echoes the prompt and
+      # ORCHESTRATOR.md, whose example fences are valid plans; no final answer means no plan.
       if [ -s "$orch_out.last" ] && extract_json_fence ORCHESTRATOR_RESULT_JSON "$orch_out.last" "$result"; then
-        had_json=1; break
-      elif extract_json_fence ORCHESTRATOR_RESULT_JSON "$orch_out" "$result"; then
         had_json=1; break
       fi
       # Limit failover only when the orchestrator failed to produce a result JSON.
@@ -696,6 +698,10 @@ sys.exit(0 if ok else 1)' "$result")" || had_json=0
       python3 - "$orch_out" "$ORCH_RESULT" "$ORCH" "$tried" "$planner_hit" "$orch_rc" "$invalid" "$planner_quota" <<'PY'
 import json, os, sys
 out, dest, provider, tried, hit_path, rc, invalid, quota_path = sys.argv[1:9]
+try:
+    answered = os.path.getsize(out + ".last") > 0
+except OSError:
+    answered = False
 hit, quota = {}, {}
 try:
     hit = json.load(open(hit_path)) if hit_path else {}
@@ -727,7 +733,8 @@ if hit_path:
                     + (f" (resets {hit['reset_at']})" if hit.get("reset_at") else "")
                     + "; no other planner was under its gate, so nothing was dispatched.")
 else:
-    cause = invalid or ("the planner CLI was not found" if rc == "127" else "missing ORCHESTRATOR_RESULT_JSON")
+    cause = invalid or ("the planner CLI was not found" if rc == "127"
+                        else "missing ORCHESTRATOR_RESULT_JSON" if answered else "no final answer")
     try:
         tail = open(out, encoding="utf-8", errors="replace").read()[-2000:]
     except OSError:

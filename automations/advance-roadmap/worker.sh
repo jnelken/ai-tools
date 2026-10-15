@@ -6,7 +6,7 @@
 #
 # --result-file: where the agent writes its WORKER_RESULT_JSON (the record run.sh
 #   keeps). If the agent doesn't, we fall back to the last valid fence in that
-#   provider's own stdout — never the combined run log.
+#   provider's final answer — never its transcript, which echoes WORKER.md's examples.
 # --status-file: what this script observed (provider used, exit, fatal reason).
 set -u
 
@@ -215,8 +215,8 @@ run_cursor() {
     --output-format json \
     "$prompt" >"$out.json" 2>&1
   local rc=$?
-  python3 "$TOKENS_PY" cursor-json "$out.json" "$out" --role worker --model "$CURSOR_WORKER_MODEL" \
-    --log "$USAGE_LOG" 2>&1
+  python3 "$TOKENS_PY" cursor-json "$out.json" "$out" --final "$out.last" --role worker \
+    --model "$CURSOR_WORKER_MODEL" --log "$USAGE_LOG" 2>&1
   [ -s "$out" ] || cp "$out.json" "$out" 2>/dev/null   # tokens.py missing or broken: keep the raw output
   return $rc
 }
@@ -228,6 +228,7 @@ run_codex() {
   command -v "$CODEX" >/dev/null 2>&1 || return 127
   # WORKDIR may be the multi-repo parent, not a git checkout — skip the repo check.
   "$CODEX" exec \
+    -o "$out.last" \
     -m "$CODEX_WORKER_MODEL" \
     -c model_reasoning_effort=high \
     -C "$WORKDIR" \
@@ -254,8 +255,8 @@ run_claude() {
     --add-dir "$ROOT" \
     --output-format json >"$out.json" 2>&1
   local rc=$?
-  python3 "$TOKENS_PY" claude-json "$out.json" "$out" --role worker --model "$CLAUDE_WORKER_MODEL" \
-    --log "$USAGE_LOG" 2>&1
+  python3 "$TOKENS_PY" claude-json "$out.json" "$out" --final "$out.last" --role worker \
+    --model "$CLAUDE_WORKER_MODEL" --log "$USAGE_LOG" 2>&1
   [ -s "$out" ] || cp "$out.json" "$out" 2>/dev/null   # tokens.py missing or broken: keep the raw output
   return $rc
 }
@@ -297,6 +298,7 @@ for provider in "${providers[@]}"; do
   fi
   echo "=== worker try provider=$provider mode=$WORKER_MODE stamp=$STAMP ($(date)) ==="
   rc=0
+  rm -f "$out.last"
   [ -n "$RESULT_FILE" ] && rm -f "$RESULT_FILE"   # a failed-over attempt's result must not count
   rm -f "$REVIEW_LOG"                              # nor its review rounds
   if [ -n "${SUPERSET_TERMINAL_ID:-}" ]; then
@@ -339,9 +341,9 @@ if [ -z "$used" ]; then
   exit 3
 fi
 
-# The agent's file is the record. Fall back to this provider's own stdout only.
+# The agent's file is the record. Fall back to this provider's own final answer only.
 if [ -n "$RESULT_FILE" ]; then
-  python3 - "$RESULT_FILE" "$tmpdir/$used.log" <<'PY2'
+  python3 - "$RESULT_FILE" "$tmpdir/$used.log.last" <<'PY2'
 import json, sys
 path, out = sys.argv[1], sys.argv[2]
 try:
@@ -349,7 +351,10 @@ try:
         sys.exit(0)
 except (OSError, ValueError):
     pass
-text = open(out, encoding="utf-8", errors="replace").read()
+try:
+    text = open(out, encoding="utf-8", errors="replace").read()
+except OSError:
+    text = ""
 label, end = "```WORKER_RESULT_JSON", len(text)
 while (i := text.rfind(label, 0, end)) >= 0:
     end = i
@@ -364,7 +369,7 @@ while (i := text.rfind(label, 0, end)) >= 0:
     if isinstance(obj, dict):
         obj["_source"] = "stdout-fence"
         json.dump(obj, open(path, "w"), indent=1)
-        print("(worker result file missing — recovered from stdout fence)")
+        print("(worker result file missing — recovered from its final answer's fence)")
         sys.exit(0)
 print("(worker wrote no result file and no valid fence)")
 PY2

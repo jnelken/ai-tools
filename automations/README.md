@@ -144,10 +144,12 @@ Step 0 uses to tell a finished run from a killed one.
 
 Every run — shipped, blocked, skipped, crashed — appends exactly one row to `runs.jsonl`. `run.sh`
 writes it (`lib/runrecord.py append`) from exit codes it observed and two result files: the
-orchestrator's (Codex's `exec -o` final message, so echoed prompts can't be mistaken for it) and
-the worker's, which the agent writes to `runs/<stamp>/worker-result.json`. If the agent skips that
-file, `worker.sh` recovers it from the provider's own stdout fence and labels it `stdout-fence`.
-An EXIT trap records aborts. **Nothing reads the run log to decide an outcome**; the dashboard,
+orchestrator's and the worker's, which the agent writes to `runs/<stamp>/worker-result.json`. Both
+are read only from a provider's final answer — Codex's `exec -o` file, or the `result` field of
+Claude's or Cursor's JSON — never from the transcript, which echoes the prompt and the docs' valid
+example fences. A planner with no final answer produced no plan, even when it printed a fence. If the
+worker skips its file, `worker.sh` recovers it from a fence in that final answer and labels it
+`stdout-fence`. An EXIT trap records aborts. **Nothing reads the run log to decide an outcome**; the dashboard,
 `state.json` and the Slack summary all read the record, and fall back to log parsing only for
 runs from before 2026-09-24.
 
