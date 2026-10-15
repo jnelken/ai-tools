@@ -63,6 +63,10 @@ elif name == "claude":
     if mode == "limit":
         print(json.dumps(json.load(open(os.environ["FAKE_LIMIT_FIXTURE"]))))  # one line, as the CLI prints it
         sys.exit(1)
+    if mode == "result-limit":  # the limit only in the worker's result file, no banner on stdout
+        path = next(l.split(": ", 1)[1] for l in prompt.splitlines() if l.startswith("(raw JSON, no fence) to: "))
+        json.dump({{"outcome": "limit_hit", "provider": "claude", "repo": "demo",
+                    "limit_text": os.environ["FAKE_RESULT_LIMIT"]}}, open(path, "w"))
     result = fence if mode == "plan" else "I looked around and decided nothing."
     print(json.dumps({{"type": "result", "subtype": "success", "is_error": False, "result": result, "modelUsage": {{}}}}))
 '''
@@ -332,6 +336,119 @@ class QuotaReplayTest(unittest.TestCase):
                                                                "quota": rec["quota"]}]})
                 self.assertEqual({q["provider"]: (q["repos"], q["reset_epoch"]) for q in summary},
                                  {n: (["demo"], p["reset_epoch"]) for n, p in by.items()})
+
+    # ── a failing usage.py helper never loses an observed limit ──────────────
+
+    FAILING_USAGE = '''import sys
+from pathlib import Path
+if __name__ == "__main__" and {{"record-limit", "quota-record"}} & set(sys.argv[1:]):
+    with open(Path(__file__).with_name("failed-helpers.log"), "a") as f:
+        f.write(next(a for a in sys.argv[1:] if a in ("record-limit", "quota-record")) + "\\n")
+    sys.stderr.write("usage.py: simulated helper failure\\n")
+    sys.exit(1)
+__file__ = {real!r}
+exec(compile(open(__file__).read(), __file__, "exec"))
+'''
+
+    def fail_usage_helpers(self):
+        """record-limit and quota-record exit 1; every other usage.py call (and an import) is real."""
+        stub = self.root / "lib" / "usage.py"
+        stub.unlink()
+        stub.write_text(self.FAILING_USAGE.format(real=str(HERE / "lib" / "usage.py")))
+        return self.root / "lib" / "failed-helpers.log"
+
+    def worker_plan(self):
+        return json.dumps({"action": "dispatch_worker", "outcome_token": None, "repo": "demo", "item": "DEV-1 thing",
+                           "branch": "roadmap/thing", "worker_mode": "standard", "work_kind": "feature",
+                           "archives": [], "blockers": [], "considered": [], "summary": "do the thing"})
+
+    def reviewer_row(self):
+        (self.root / "review.sh").symlink_to(HERE / "review.sh")
+        repo = self.dir / "reviewed"
+        git = ["git", "-c", "user.name=t", "-c", "user.email=t@t", "-C", str(repo)]
+        subprocess.run(["git", "init", "-q", "-b", "main", str(repo)], check=True)
+        subprocess.run([*git, "commit", "-q", "--allow-empty", "-m", "base"], check=True)
+        subprocess.run([*git, "checkout", "-q", "-b", "roadmap/x"], check=True)
+        (repo / "x.py").write_text("x = 1\n")
+        subprocess.run([*git, "add", "x.py"], check=True)
+        subprocess.run([*git, "commit", "-q", "-m", "feat"], check=True)
+        env = self.env(FAKE_CODEX="limit")
+        run = self.root / "runs" / self.stamp
+        run.mkdir(parents=True)
+        # Codex (Cursor's reviewer) answers only its banner; Claude reviews instead.
+        subprocess.run(["/bin/zsh", str(self.root / "review.sh"), "--repo", str(repo), "--worker", "cursor",
+                        "--round", "1", "--log", str(run / "reviews.jsonl"), "--base", "main"],
+                       env=env, capture_output=True, check=False)
+        (run / "worker-result.json").write_text(json.dumps({"outcome": "failed", "provider": "cursor"}))
+        runrecord.main(["--root", str(self.root), "append", "--stamp", self.stamp, "--status", "ran",
+                        "--worker-result", str(run / "worker-result.json")])
+        rec = self.record()
+        self.assertEqual([h["provider"] for h in rec["review_limits"]], ["codex"], rec)
+        return rec["review_limits"][0]
+
+    def batch_skip_row(self):
+        self.env()
+        run = self.root / "runs" / self.stamp
+        run.mkdir(parents=True)
+        batch = daily_batch.Batch.__new__(daily_batch.Batch)
+        batch.state = {"queue": [{"stamp": self.stamp, "status": "ready"}]}
+        with mock.patch.object(daily_batch, "ROOT", self.root), \
+                mock.patch.object(daily_batch.shared, "LIB", self.root / "lib"):
+            batch.defer_ready("no worker quota available", batch.worker_quota())
+        runrecord.main(["--root", str(self.root), "append", "--stamp", self.stamp, "--status", "skipped-quota",
+                        "--detail", "daily batch deferred", "--quota-gates", str(run / "quota-gates.json")])
+        return self.record()["quota"]
+
+    def test_failing_usage_helpers_never_lose_an_observed_limit(self):
+        # Each path observes a limit (banner, result-only limit_hit, or a gate) and then calls a
+        # usage.py helper that fails. The run record must still carry the provider, cause and reset.
+        over_codex = {"weekly": {"used_pct": 85, "reset_epoch": FUTURE}}
+        over_cursor = {"included": {"auto_pct": 99, "reset_epoch": LATER}}
+        over_claude = {"five_hour": {"used_pct": 90, "reset_epoch": LATER}}
+        def at_1150(reset):
+            return datetime.fromtimestamp(reset, NY).strftime("%H:%M") == "11:50"
+
+        def lane(**fake):
+            def row():
+                self.run_lane(**fake)
+                return self.record()["quota"]
+            return row
+
+        cases = [
+            ("planner banner", dict(codex=over_codex), lane(FAKE_CLAUDE="limit"),
+             "claude", BANNER, at_1150, {"record-limit", "quota-record"}),
+            ("planner skipped over its gate", dict(codex=over_codex, claude=over_claude), lane(),
+             "codex", "weekly 85%", lambda r: r == FUTURE, {"quota-record"}),
+            ("worker banner", dict(codex=over_codex, cursor=over_cursor),
+             lane(FAKE_CLAUDE="plan", FAKE_CLAUDE_WORKER="limit", FAKE_PLAN=self.worker_plan()),
+             "claude", BANNER, at_1150, {"record-limit", "quota-record"}),
+            ("worker result-only limit_hit", dict(codex=over_codex, cursor=over_cursor),
+             lane(FAKE_CLAUDE="plan", FAKE_CLAUDE_WORKER="result-limit", FAKE_PLAN=self.worker_plan(),
+                  FAKE_RESULT_LIMIT=BANNER),
+             "claude", BANNER, at_1150, {"record-limit", "quota-record"}),
+            ("reviewer banner", {}, self.reviewer_row,
+             "codex", "You've hit your usage limit · resets in 2h 30m",
+             lambda r: time.time() + 2 * 3600 < r <= time.time() + 3 * 3600, {"record-limit"}),
+            ("approver banner", dict(codex=over_codex), lambda: self.approver_row()["quota"],
+             "claude", BANNER, at_1150, {"record-limit", "quota-record"}),
+            # Every worker out with none stopped on: the one that frees up first, the others' reasons too.
+            ("daily batch skipped-quota", dict(codex=over_codex, cursor=over_cursor, claude=over_claude),
+             self.batch_skip_row, "codex", "cursor: auto pool 99%", lambda r: r == FUTURE, {"quota-record"}),
+        ]
+        for name, gated, row, provider, cause, reset_ok, failed in cases:
+            with self.subTest(path=name):
+                self.tearDown()
+                self.setUp()
+                failures = self.fail_usage_helpers()
+                self.usage_state(**gated)
+                quota = row()
+                self.assertIsNotNone(quota, name)
+                self.assertEqual(quota["provider"], provider, quota)
+                self.assertIn(cause, quota["cause"], quota)
+                self.assertTrue(quota["reset_epoch"] and reset_ok(quota["reset_epoch"]), quota)
+                self.assertTrue(quota["reset_at"], quota)
+                self.assertTrue(failed <= set(failures.read_text().split()),
+                                f"{name}: expected {failed} to fail, log: {failures.read_text()}")
 
     # ── malformed output is an error, still with no worker ───────────────────
 

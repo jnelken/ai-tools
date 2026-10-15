@@ -22,6 +22,10 @@ if "gate" in args:
         print(json.dumps({"provider": provider, "state": "over", "reason": "5h 71% >= 70%"}))
         sys.exit(3)
     sys.exit(0)
+if "parse-limit" in args:
+    print(json.dumps({"provider": args[args.index("--provider") + 1], "exact_cli_text": args[args.index("--text") + 1],
+                      "reset_epoch": 1760396400, "reset_at": "2025-10-13T19:00:00-04:00"}))
+    sys.exit(0)
 open(args[1] + "/limits.txt", "a").write(args[-1] + "\n")
 PY
 
@@ -70,6 +74,9 @@ out="$(review cursor 1 FAKE_CODEX=limit FAKE_CLAUDE=clean)"
 check "limited codex → claude reviews"       "$(field reviewer)" claude
 case "$out" in *"reviewer=codex"*) echo "FAIL: limited reviewer's text leaked"; exit 1 ;; *) echo "ok   no stale text from limited reviewer" ;; esac
 grep -q "usage limit" "$ROOT/limits.txt" && echo "ok   limit recorded" || { echo "FAIL: limit not recorded"; exit 1; }
+check "limited reviewer logged with its reset" \
+  "$(python3 -c "import json; l = json.loads(open('$LOG').readlines()[-1])['limited']; print([(h['provider'], h['cause'], h['reset_epoch']) for h in l])")" \
+  "[('codex', \"You've hit your usage limit. Resets 5pm.\", 1760396400)]"
 
 rc=0; review claude 1 FAKE_CODEX=limit FAKE_AGENT=limit >/dev/null || rc=$?
 check "all reviewers limited → exit 3"       "$rc" 3

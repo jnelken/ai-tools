@@ -172,6 +172,18 @@ def read_reviews(worker_result_path):
         return []
 
 
+def review_limits(reviews):
+    """Every reviewer a limit banner stopped in Step 5b (provider, cause, reset), the latest per
+    provider — straight from the review log, whatever happened to the shared usage file."""
+    latest = {}
+    for r in reviews:
+        hits = r.get("limited") if isinstance(r, dict) else None
+        for hit in hits if isinstance(hits, list) else ():
+            if isinstance(hit, dict) and hit.get("provider"):
+                latest[hit["provider"]] = hit
+    return list(latest.values())
+
+
 def cmd_append(a):
     orch = load_json(a.orch_result)
     wstatus = load_json(a.worker_status)
@@ -218,6 +230,7 @@ def cmd_append(a):
         "reviewer": reviews[-1].get("reviewer") if reviews else None,
         "review_verdict": reviews[-1].get("verdict") if reviews else None,
         "review_unresolved": (w.get("review") or {}).get("unresolved"),
+        "review_limits": review_limits(reviews),
         "summary": (w.get("summary") or o.get("summary") or "")[:1000],
         "slack_summary": (w.get("slack_summary") or "")[:400] or None,
         "quota": (quota_info(orch, wstatus, wresult) if outcome in QUOTA_OUTCOMES

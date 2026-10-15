@@ -14,6 +14,7 @@ Usage:
   usage.py quota-record --role R [--attempts F] [--hit P=F]... [--primary P] [--root DIR]
                                                    # who is out for R when a lane stops on quota
   usage.py record-limit --provider P --text T [--scope S] [--out FILE] [--root DIR]
+  usage.py parse-limit --provider P --text T [--scope S]  # the hit as JSON; writes no state
   usage.py detect-limit --file PATH | --text T
   usage.py probe [--provider codex|cursor|all]   # live read, writes nothing
   usage.py show [--root DIR]
@@ -767,14 +768,13 @@ def record_limit(
         return _record_limit_locked(root, provider, text, scope)
 
 
-def _record_limit_locked(root: Path, provider: str, text: str, scope: str) -> dict[str, Any]:
-    state = load(root)
-    if provider not in state["providers"]:
-        raise SystemExit(f"unknown provider: {provider}")
-    observed = time.time()
+def limit_hit(provider: str, text: str, scope: str = "unknown", observed: float | None = None) -> dict[str, Any]:
+    """A limit banner as a hit record (provider, the CLI's words, its reset), touching no state —
+    so a caller can save what it saw before the best-effort shared-state update."""
+    observed = time.time() if observed is None else observed
     reset_epoch = parse_reset_epoch_from_text(text, observed)
-    hit = {
-        "observed_at": now_iso(),
+    return {
+        "observed_at": epoch_to_iso(observed),
         "provider": provider,
         "scope": scope,
         "exact_cli_text": text.strip()[:500],
@@ -782,6 +782,13 @@ def _record_limit_locked(root: Path, provider: str, text: str, scope: str) -> di
         "reset_at": epoch_to_iso(reset_epoch),
         "reset_source": "derived" if reset_epoch else "unknown",
     }
+
+
+def _record_limit_locked(root: Path, provider: str, text: str, scope: str) -> dict[str, Any]:
+    state = load(root)
+    if provider not in state["providers"]:
+        raise SystemExit(f"unknown provider: {provider}")
+    hit = limit_hit(provider, text, scope)
     state["providers"][provider]["last_limit_hit"] = hit
     state["history"].append({
         "observed_at": hit["observed_at"],
@@ -898,6 +905,12 @@ def quota_record(state: dict[str, Any], role: str, attempts: Any = (), primary: 
             "cause": cause, "providers": providers}
 
 
+def saved_quota_record(root: Path, role: str, attempts: Any = (), primary: str | None = None) -> dict[str, Any]:
+    """quota_record() from the gates as last saved, without a refresh: the fallback when
+    `quota-record` (which refreshes first) fails, so the observed gates still reach the record."""
+    return quota_record(load(Path(root)), role, attempts, primary)
+
+
 def read_attempts(path: str | None, hits: list[str]) -> list[dict[str, Any]]:
     """--attempts (JSON lines, one per provider) plus --hit P=FILE (a record-limit --out file)."""
     attempts: list[dict[str, Any]] = []
@@ -961,6 +974,10 @@ def cmd_record_limit(args: argparse.Namespace) -> None:
     print("ok")
 
 
+def cmd_parse_limit(args: argparse.Namespace) -> None:
+    print(json.dumps(limit_hit(args.provider, args.text, args.scope)))
+
+
 def cmd_detect(args: argparse.Namespace) -> None:
     text = args.text
     if args.file:
@@ -1022,6 +1039,12 @@ def main() -> None:
     p.add_argument("--scope", default="unknown")
     p.add_argument("--out", help="also write the recorded hit (reset time included) here as JSON")
     p.set_defaults(func=cmd_record_limit)
+
+    p = sub.add_parser("parse-limit")
+    p.add_argument("--provider", required=True, choices=["claude", "codex", "cursor"])
+    p.add_argument("--text", required=True)
+    p.add_argument("--scope", default="unknown")
+    p.set_defaults(func=cmd_parse_limit)
 
     p = sub.add_parser("detect-limit")
     p.add_argument("--text", default="")

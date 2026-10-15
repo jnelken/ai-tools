@@ -127,7 +127,8 @@ run_reviewer() {
 }
 
 out="$(mktemp "${TMPDIR:-/tmp}/advance-roadmap-review.XXXXXX")"
-trap 'rm -f "$out" "$out.last" "$out.json"' EXIT INT TERM
+limited="$out.limited"   # one parse-limit hit per reviewer stopped by a limit banner
+trap 'rm -f "$out" "$out.last" "$out.json" "$limited"' EXIT INT TERM
 used="" verdict="unavailable" gated=""
 for who in "${reviewers[@]}"; do
   # Exit 3 is the only "over its gate"; a usage.py failure (1, 2) is no reading, which never blocks.
@@ -144,6 +145,10 @@ for who in "${reviewers[@]}"; do
   if text="$(rg -m1 -i \
       '^(you.?ve hit your (session |usage )?limit|hit your session limit|rate limit exceeded|quota exceeded|out of (usage|credits|quota)\b)' \
       "$out" || true)" && [ -n "$text" ]; then
+    # Into this round's log line first, so a failed shared-state update can't lose it.
+    python3 "$USAGE_PY" parse-limit --provider "$who" --text "$text" --scope reviewer 2>/dev/null >> "$limited" \
+      || python3 -c 'import json, sys; print(json.dumps({"provider": sys.argv[1], "exact_cli_text": sys.argv[2]}))' \
+           "$who" "$text" >> "$limited"
     python3 "$USAGE_PY" --root "$ROOT" record-limit --provider "$who" --text "$text" >/dev/null 2>&1 || true
     continue
   fi
@@ -154,13 +159,26 @@ for who in "${reviewers[@]}"; do
   break
 done
 
-python3 - "$LOG" "$ROUND" "$WORKER" "${used:-}" "$verdict" "$(git -C "$REPO" rev-parse --short HEAD)" "$gated" <<'PY'
+python3 - "$LOG" "$ROUND" "$WORKER" "${used:-}" "$verdict" "$(git -C "$REPO" rev-parse --short HEAD)" "$gated" \
+  "$limited" <<'PY'
 import json, sys, time
-log, rnd, worker, reviewer, verdict, head, gated = sys.argv[1:8]
+log, rnd, worker, reviewer, verdict, head, gated, limited_path = sys.argv[1:9]
+limited = []
+try:
+    for line in open(limited_path, encoding="utf-8"):
+        try:
+            h = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(h, dict):
+            limited.append({"provider": h.get("provider"), "cause": h.get("exact_cli_text"),
+                            "reset_epoch": h.get("reset_epoch"), "reset_at": h.get("reset_at")})
+except OSError:
+    pass
 with open(log, "a", encoding="utf-8") as f:
     f.write(json.dumps({"round": int(rnd), "worker": worker, "reviewer": reviewer or None,
                         "verdict": verdict, "head": head, "at": int(time.time()),
-                        "gated": gated.split()}) + "\n")
+                        "gated": gated.split(), "limited": limited}) + "\n")
 PY
 
 if [ -z "$used" ]; then

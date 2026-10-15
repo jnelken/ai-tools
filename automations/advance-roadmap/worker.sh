@@ -63,7 +63,16 @@ write_status() {
     quota="$tmpdir/quota.json"
     [ -n "${4:-}" ] && primary=(--primary "$4")
     python3 "$USAGE_PY" --root "$ROOT" quota-record --role worker --attempts "$LIMITED_LOG" \
-      "${primary[@]}" > "$quota" 2>/dev/null || quota=""
+      "${primary[@]}" > "$quota" 2>/dev/null \
+      || python3 - "$USAGE_PY" "$ROOT" "$LIMITED_LOG" "${4:-}" > "$quota" 2>/dev/null <<'PY' || quota=""
+import json, sys
+from pathlib import Path
+sys.path.insert(0, str(Path(sys.argv[1]).parent))
+import usage
+# quota-record refreshes first; the gates as last saved still name every worker provider.
+print(json.dumps(usage.saved_quota_record(Path(sys.argv[2]), "worker", usage.read_attempts(sys.argv[3], []),
+                                          sys.argv[4] or None)))
+PY
   fi
   python3 - "$STATUS_FILE" "$1" "$2" "${3:-}" "$LIMITED_LOG" "$MISSING" "$quota" <<'PY2'
 import json, sys
@@ -256,9 +265,10 @@ trap 'rm -rf "$tmpdir"' EXIT INT TERM
 LIMITED_LOG="$tmpdir/limited.jsonl"
 
 record_limit() {
-  # record_limit PROVIDER TEXT — gate the provider for later lanes and note its reset in the status.
-  python3 "$USAGE_PY" --root "$ROOT" record-limit --provider "$1" --text "$2" --scope worker \
-    --out "$tmpdir/hit-$1.json" || true
+  # record_limit PROVIDER TEXT — note the limit and its reset in the status, then gate the provider
+  # for later lanes. The note comes first, so a failed shared-state update can't lose the reset.
+  python3 "$USAGE_PY" parse-limit --provider "$1" --text "$2" --scope worker > "$tmpdir/hit-$1.json" 2>/dev/null \
+    || rm -f "$tmpdir/hit-$1.json"
   python3 -c 'import json, sys
 hit = {}
 try:
@@ -268,6 +278,7 @@ except (OSError, ValueError):
 print(json.dumps({"provider": sys.argv[1], "state": "limited", "cause": sys.argv[3],
                   "reset_epoch": hit.get("reset_epoch"), "reset_at": hit.get("reset_at")}))' \
     "$1" "$tmpdir/hit-$1.json" "$2" >> "$LIMITED_LOG"
+  python3 "$USAGE_PY" --root "$ROOT" record-limit --provider "$1" --text "$2" --scope worker || true
 }
 
 final_rc=1

@@ -21,7 +21,7 @@ import tempfile
 from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
-from usage import ROLE_PROVIDERS, limit_banner  # noqa: E402
+from usage import ROLE_PROVIDERS, limit_banner, limit_hit, read_attempts, saved_quota_record  # noqa: E402
 
 SEVERITY = {"approve": 0, "serialize": 1, "defer": 2}
 FENCE = "PLAN_APPROVAL_JSON"
@@ -214,14 +214,21 @@ def still_under_gate(root, name):
 
 def quota_record(root, hits, primary):
     """`usage.py quota-record --role approver`: every approver provider, with the limits hit here
-    (`hits`: (provider, record-limit --out file)). None when the read fails or nobody is out."""
-    args = [a for name, path in hits for a in ("--hit", f"{name}={path}")]
+    (`hits`: (provider, hit file)). When that fails, the same record from the gates as last saved.
+    None when nobody is out."""
+    specs = [f"{name}={path}" for name, path in hits]
+    args = [a for spec in specs for a in ("--hit", spec)]
     if primary:
         args += ["--primary", primary]
     try:
         record = json.loads(usage_cli(root, "quota-record", "--role", "approver", *args).stdout)
     except (OSError, subprocess.SubprocessError, ValueError, TypeError):
-        return None
+        record = None
+    if not isinstance(record, dict):
+        try:
+            record = saved_quota_record(Path(root), "approver", read_attempts(None, specs), primary)
+        except (OSError, ValueError, TypeError, KeyError):
+            return None
     return record if isinstance(record, dict) and record.get("provider") else None
 
 
@@ -251,13 +258,12 @@ def _approve(root, request, doc, code_dir, runners, providers, tmp):
             break
         banner = limit_banner(answer) or limit_banner(log)
         if banner:
-            # Gate this provider for every other role too, until its reset. The banner stays the
-            # cause in the quota record even if usage.py can't write the hit back.
+            # Saved before the shared usage file is touched: the quota record keeps the banner and
+            # its reset even if that update fails. Then gate this provider for every other role too.
             hit = tmp / f"limit-{name}.json"
-            hit.write_text(json.dumps({"exact_cli_text": banner}))
+            hit.write_text(json.dumps(limit_hit(name, banner, "approver")))
             try:
-                usage_cli(root, "record-limit", "--provider", name, "--text", banner, "--scope", "approver",
-                          "--out", str(hit))
+                usage_cli(root, "record-limit", "--provider", name, "--text", banner, "--scope", "approver")
             except (OSError, subprocess.SubprocessError):
                 pass
             hits.append((name, hit))
