@@ -24,6 +24,14 @@ import followscan  # noqa: E402
 import supervisor  # noqa: E402
 
 
+def pid_alive(pid):
+    try:
+        os.kill(pid, 0)
+        return True
+    except OSError:
+        return False
+
+
 class FollowupTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -31,13 +39,15 @@ class FollowupTest(unittest.TestCase):
         self.root, self.code = t / "root", t / "code"
         (self.root / "lib").mkdir(parents=True)
         self.code.mkdir()
-        self.env = {**{k: v for k, v in os.environ.items() if not k.startswith(("ADVANCE_ROADMAP_", "GIT_"))},
+        # SUPERSET_*: a run from a workspace terminal must never aim a stub builder at that workspace.
+        self.env = {**{k: v for k, v in os.environ.items()
+                       if not k.startswith(("ADVANCE_ROADMAP_", "GIT_", "SUPERSET_"))},
                     "ADVANCE_ROADMAP_ROOT": str(self.root), "PERSONAL_CODE_DIR": str(self.code),
                     "ADVANCE_ROADMAP_SUPERSET": "0", "ADVANCE_ROADMAP_FOLLOWUP_ANALYST": "0",
                     "ADVANCE_ROADMAP_FOLLOWUP_INSTALL": "0", "ADVANCE_ROADMAP_FOLLOWUP_POLL_S": "0.2",
                     "ADVANCE_ROADMAP_FOLLOWUP_WORKTREES": str(t / "worktrees"),
                     "ADVANCE_ROADMAP_FOLLOWUP_DEPLOY_NONE_S": "0", "ADVANCE_ROADMAP_FOLLOWUP_DEPLOY_TIMEOUT_S": "2",
-                    "ADVANCE_ROADMAP_FOLLOWUP_CHECKS_TIMEOUT_S": "2",
+                    "ADVANCE_ROADMAP_FOLLOWUP_CHECKS_TIMEOUT_S": "2", "ADVANCE_ROADMAP_WORKER_POLL_S": "0.1",
                     "ADVANCE_ROADMAP_GH_BIN": self.wrapper(t, "gh"),
                     "ADVANCE_ROADMAP_LINEAR_BIN": self.wrapper(t, "linear"),
                     "ADVANCE_ROADMAP_CODEX_BIN": self.wrapper(t, "codex"),
@@ -368,6 +378,79 @@ class FollowupTest(unittest.TestCase):
         while not list((self.root / "followups" / key).glob("build-*/worker.exit")) and time.time() < deadline:
             time.sleep(0.1)
         self.assertFalse(registry.exists())   # the launcher unregisters before recording its exit
+
+    def start_plain_build_then_kill_the_drain(self, key, sleep):
+        """A plain-worktree drain whose builder is mid-run when the drain is killed: the build dir."""
+        self.set("stub-worker.json", {"mode": "ok", "sleep": sleep})
+        drain = subprocess.Popen([sys.executable, str(FOLLOWUP), "drain"], stdout=subprocess.DEVNULL,
+                                 stderr=subprocess.DEVNULL, env=self.env)
+        deadline = time.time() + 30
+        while not list((self.root / "followups" / key).glob("build-*/worker.pid")) and time.time() < deadline:
+            time.sleep(0.1)
+        drain.kill()
+        drain.wait()
+        [bdir] = (self.root / "followups" / key).glob("build-*")
+        return bdir
+
+    def test_a_plain_worktree_builder_is_registered_and_never_doubled_after_its_drain_dies(self):
+        self.shipped_item("20261014-050000")
+        self.run_followup("hook", "item-done", "--stamp", "20261014-050000")
+        key = "cleanup-20261014-050000"
+        bdir = self.start_plain_build_then_kill_the_drain(key, 3)
+        registry = self.root / "inflight" / "demo" / f"followup-{key}.pid"
+        self.assertTrue(registry.exists())
+        os.kill(int(registry.read_text().strip()), 0)   # the builder outlived its drain
+        self.assertIn("demo", supervisor.inflight_repos(self.root))
+        self.run_followup("drain")
+        self.assertEqual(self.state(key)["status"], "running")   # left alone, never a second builder
+        self.assertEqual(len(list((self.root / "followups" / key).glob("build-*"))), 1)
+        deadline = time.time() + 30
+        while not (bdir / "worker.exit").exists() and time.time() < deadline:
+            time.sleep(0.1)
+        self.assertFalse(registry.exists())
+        self.set("stub-worker.json", {"mode": "ok"})
+        self.run_followup("drain")
+        self.assertEqual(self.state(key)["status"], "done", self.report())
+
+    def test_a_dead_launchers_builder_group_is_reaped_before_recovery(self):
+        self.shipped_item("20261014-050000")
+        self.run_followup("hook", "item-done", "--stamp", "20261014-050000")
+        key = "cleanup-20261014-050000"
+        bdir = self.start_plain_build_then_kill_the_drain(key, 60)
+        launcher = int((bdir / "worker.pid").read_text().strip())
+        pgid = int((bdir / "worker.pgid").read_text().strip())
+        self.assertEqual(pgid, launcher)
+        os.kill(launcher, 9)   # the launcher dies; the builder it started keeps running
+        deadline = time.time() + 10
+        while pid_alive(launcher) and time.time() < deadline:
+            time.sleep(0.1)
+        os.killpg(pgid, 0)
+        self.set("stub-worker.json", {"mode": "ok"})
+        out = self.run_followup("drain").stdout
+        self.assertIn("reaped the builder", out)
+        with self.assertRaises(ProcessLookupError):
+            os.killpg(pgid, 0)
+        st = self.state(key)
+        self.assertEqual(st["status"], "done", self.report())
+        self.assertTrue(any(b["kind"] == "interrupted" for b in st["blockers"]))
+        self.assertFalse((self.root / "inflight" / "demo" / f"followup-{key}.pid").exists())
+        self.assertEqual(len(self.calls("worker")), 1)   # only the recovery's builder finished
+
+    def test_a_drain_from_a_workspace_terminal_never_builds_in_that_workspace(self):
+        self.py_wrapper(Path(self.tmp.name), "workspaces").rename(self.root / "lib" / "workspaces.py")
+        decoy = Path(self.tmp.name) / "decoy"
+        subprocess.run(["git", "init", "-q", str(decoy)], check=True, env=self.env)
+        for superset, stamp in (("1", "20261014-050000"), ("0", "20261014-060000")):
+            with self.subTest(superset=superset):
+                self.shipped_item(stamp)
+                self.run_followup("hook", "item-done", "--stamp", stamp)
+                self.run_followup("drain", env={"ADVANCE_ROADMAP_SUPERSET": superset,
+                                                "SUPERSET_WORKSPACE_PATH": str(decoy)})
+                key = f"cleanup-{stamp}"
+                self.assertEqual(self.state(key)["status"], "done", self.report())
+                self.assertEqual(list(decoy.glob("fix-*.txt")), [])
+                [launcher] = (self.root / "followups" / key).glob("build-*/worker-launch.zsh")
+                self.assertNotIn(str(decoy), launcher.read_text())
 
     def test_a_pr_head_that_moved_after_the_review_is_re_reviewed_never_merged(self):
         self.shipped_item("20261014-050000")

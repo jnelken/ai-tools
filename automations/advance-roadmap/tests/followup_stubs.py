@@ -89,6 +89,8 @@ def worker(args):
         rc = 3
     else:
         wt = os.environ["SUPERSET_WORKSPACE_PATH"]
+        if not Path(wt).resolve().is_relative_to(ROOT.parent.resolve()):
+            sys.exit(f"stub worker: refusing to commit outside the test's temp dir: {wt}")
         n = len(list(Path(wt).glob("fix-*.txt")))
         Path(wt, f"fix-{n}.txt").write_text(orch["worker_brief"][:200])
         git(wt, "add", "-A")

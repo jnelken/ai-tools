@@ -11,6 +11,7 @@ Shared stage-state helpers live here too, so followup.py and this module agree o
 import json
 import os
 import re
+import signal
 import subprocess
 import sys
 import time
@@ -290,7 +291,9 @@ def builder_request(st, findings, rnd, review_text, branch, resume):
 def child_env(st, extra=None):
     env = {**os.environ, FOLLOWUP_ENV: "1", "ADVANCE_ROADMAP_TARGET_REPO": st["repo"],
            "PERSONAL_CODE_DIR": shared.code_dir() or ""}
-    for k in ("ADVANCE_ROADMAP_LANE", "ADVANCE_ROADMAP_BATCH_PID", "ADVANCE_ROADMAP_THREAD"):
+    # A drain started from a Superset terminal must never point its builder at that terminal's workspace.
+    for k in ("ADVANCE_ROADMAP_LANE", "ADVANCE_ROADMAP_BATCH_PID", "ADVANCE_ROADMAP_THREAD",
+              "SUPERSET_WORKSPACE_PATH", "SUPERSET_TERMINAL_ID"):
         env.pop(k, None)
     env.update(extra or {})
     return env
@@ -312,13 +315,10 @@ def run_builder(st, repo_dir, findings, rnd, chain, review_text):
     st["branch"] = branch
     if os.environ.get("ADVANCE_ROADMAP_SUPERSET", "1") == "1":
         rc, why = run_in_superset(st, repo_dir, branch, bdir, cmd)
-        if why:
-            return "failed", why
     else:
-        wt = ensure_worktree(st, repo_dir, branch)
-        with open(bdir / "worker-output.log", "w") as out:
-            rc = subprocess.run(["/bin/zsh", *cmd], env=child_env(st, {"SUPERSET_WORKSPACE_PATH": str(wt)}),
-                                stdout=out, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL).returncode
+        rc, why = run_in_worktree(st, ensure_worktree(st, repo_dir, branch), bdir, cmd)
+    if why:
+        return "failed", why
     stat, res = read_json(status) or {}, read_json(result) or {}
     if stat.get("used"):
         st["builder_provider"] = stat["used"]
@@ -347,21 +347,25 @@ def run_builder(st, repo_dir, findings, rnd, chain, review_text):
     return "ok", None
 
 
-def run_in_superset(st, repo_dir, branch, bdir, cmd):
-    """Run worker.sh in a Superset workspace terminal for the branch and wait: (rc, why_not_run)."""
+def write_launcher(st, bdir, cmd, extra_env=None):
+    """The one builder lifecycle both paths run. The launcher registers itself in the shared
+    in-flight registry (supervisor.inflight_repos) before the builder starts and unregisters before
+    recording its exit, so every lane, thread and drain stays out of the repo even if the drain that
+    launched it dies first. It records its process group too, so a recovery can reap what a dead
+    launcher left behind (reap_orphans)."""
     launcher = bdir / "worker-launch.zsh"
-    env = child_env(st)
+    for name in ("worker.pid", "worker.pgid", "worker.exit"):   # a reused build dir's last launch
+        (bdir / name).unlink(missing_ok=True)
+    env = child_env(st, extra_env)
     lines = ["#!/bin/zsh"]
     for k, v in sorted(env.items()):
-        if (k.startswith("ADVANCE_ROADMAP_") or k in ("PERSONAL_CODE_DIR", FOLLOWUP_ENV)) \
+        if (k.startswith("ADVANCE_ROADMAP_") or k in ("PERSONAL_CODE_DIR", FOLLOWUP_ENV, *(extra_env or {}))) \
                 and not re.search(r"WEBHOOK|SECRET|TOKEN|KEY", k):
             lines.append(f"export {k}={shell_quote(v)}")
-    # The launcher registers itself in the shared in-flight registry (supervisor.inflight_repos)
-    # before the builder starts and unregisters before recording its exit, so every lane, thread
-    # and drain stays out of the repo even if the drain that launched it dies first.
     registry = shell_quote(str(inflight_file(st)))
     lines += [f"mkdir -p {shell_quote(str(inflight_file(st).parent))}",
               f"print -r -- $$ > {registry}",
+              f"print -r -- ${{$(ps -o pgid= -p $$)// /}} > {shell_quote(str(bdir / 'worker.pgid'))}",
               f"print -r -- $$ > {shell_quote(str(bdir / 'worker.pid'))}",
               " ".join(shell_quote(c) for c in cmd) + f" 2>&1 | tee {shell_quote(str(bdir / 'worker-output.log'))}",
               "rc=${pipestatus[1]}",
@@ -369,12 +373,32 @@ def run_in_superset(st, repo_dir, branch, bdir, cmd):
               f"print -r -- $rc > {shell_quote(str(bdir / 'worker.exit'))}"]
     launcher.write_text("\n".join(lines) + "\n")
     launcher.chmod(0o700)
+    return launcher
+
+
+def run_in_superset(st, repo_dir, branch, bdir, cmd):
+    """Run worker.sh in a Superset workspace terminal for the branch and wait: (rc, why_not_run)."""
+    launcher = write_launcher(st, bdir, cmd)
     p = subprocess.run([sys.executable, str(ROOT / "lib" / "workspaces.py"), "launch", "--repo", str(repo_dir),
                         "--branch", branch, "--name", f"followup {st['repo']} {st['key']}",
                         "--command", f"/bin/zsh {shell_quote(str(launcher))}", "--out", str(bdir / "workspace.json")],
                        capture_output=True, text=True, timeout=600, stdin=subprocess.DEVNULL)
     if p.returncode != 0:
         return None, f"could not create the Superset workspace for {branch}: {(p.stderr or p.stdout).strip()[-300:]}"
+    return wait_builder(st, bdir, "workspace terminal")
+
+
+def run_in_worktree(st, wt, bdir, cmd):
+    """Run worker.sh in a plain worktree (ADVANCE_ROADMAP_SUPERSET=0) and wait: (rc, why_not_run).
+    Detached in its own session, like a terminal, so a killed drain leaves a registered builder."""
+    launcher = write_launcher(st, bdir, cmd, {"SUPERSET_WORKSPACE_PATH": str(wt)})
+    subprocess.Popen(["/bin/zsh", str(launcher)], env=child_env(st, {"SUPERSET_WORKSPACE_PATH": str(wt)}),
+                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                     start_new_session=True)
+    return wait_builder(st, bdir, "worktree launcher")
+
+
+def wait_builder(st, bdir, where):
     waited, pid = 0.0, None
     while not (bdir / "worker.exit").exists():
         time.sleep(WORKER_POLL_S)
@@ -382,10 +406,10 @@ def run_in_superset(st, repo_dir, branch, bdir, cmd):
         if pid is None and (bdir / "worker.pid").exists():
             pid = int((bdir / "worker.pid").read_text().strip() or 0) or None
         if pid is None and waited >= 180:
-            return None, "the workspace terminal never started the builder"
+            return None, f"the {where} never started the builder"
         if pid and not pid_alive(pid) and not (bdir / "worker.exit").exists():
-            inflight_file(st).unlink(missing_ok=True)   # its terminal died before it could unregister
-            return None, "the builder's terminal exited without an exit code"
+            reap_orphans(st["key"])   # its launcher died before it could unregister
+            return None, f"the builder's {where} exited without an exit code"
         if waited >= WORKER_TIMEOUT_S:
             return None, f"the builder was still running after {WORKER_TIMEOUT_S / 60:.0f}m"
     try:
@@ -399,7 +423,10 @@ def inflight_file(st):
 
 
 def builder_alive(key):
-    """True while a builder this stage launched is still running (its terminal outlived a drain)."""
+    """True while a builder this stage launched is still running (its launcher outlived a drain).
+    A launcher that died without recording its exit has its process group reaped first, so a
+    recovery never starts a second builder beside the first one's leftovers."""
+    reap_orphans(key)
     for pid_file in stage_dir(key).glob("build-*/worker.pid"):
         if (pid_file.parent / "worker.exit").exists():
             continue
@@ -409,6 +436,62 @@ def builder_alive(key):
         except ValueError:
             continue
     return False
+
+
+REAP_GRACE_S = 5.0
+
+
+def reap_orphans(key):
+    """Terminate and reap the process group of every launcher of this stage that died without
+    recording its exit, then unregister it. Only a group the launcher led is touched, so a
+    terminal shell sharing its group is never signalled."""
+    for pid_file in stage_dir(key).glob("build-*/worker.pid"):
+        bdir = pid_file.parent
+        if (bdir / "worker.exit").exists():
+            continue
+        try:
+            pid = int(pid_file.read_text().strip())
+        except (OSError, ValueError):
+            continue
+        if pid_alive(pid):
+            continue
+        try:
+            pgid = int((bdir / "worker.pgid").read_text().strip())
+        except (OSError, ValueError):
+            pgid = None
+        if pgid == pid and pgid != os.getpgid(0):
+            kill_group(pgid)
+        (bdir / "worker.exit").write_text("143\n")
+        for f in (ROOT / "inflight").glob(f"*/followup-{key}.pid"):
+            try:
+                if f.read_text().strip() == str(pid):
+                    f.unlink(missing_ok=True)
+            except OSError:
+                pass
+        log(f"{key}: reaped the builder its dead launcher ({pid}) left behind")
+
+
+def kill_group(pgid):
+    for sig, wait in ((signal.SIGTERM, REAP_GRACE_S), (signal.SIGKILL, REAP_GRACE_S)):
+        try:
+            os.killpg(pgid, sig)
+        except (ProcessLookupError, PermissionError):
+            return
+        deadline = time.time() + wait
+        while time.time() < deadline:
+            if not group_alive(pgid):
+                return
+            time.sleep(0.1)
+
+
+def group_alive(pgid):
+    try:
+        os.killpg(pgid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
 
 
 def shell_quote(s):

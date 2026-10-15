@@ -191,13 +191,16 @@ the new evidence as a comment instead of a duplicate. The orchestrator skips the
 once none of its threads is still active (it takes a lane slot), and after the last thread queues
 and drains the batch's tooling pass. Its outcome — fixed, quota-deferred and blocked follow-ups —
 is saved in `batch.json` (`followups`, `followups_line`) and appended to the webhook summary. A lone
-`run.sh` queues per chain link and drains detached when its chain stops
-(`logs/followup-run-<stamp>.log`). The conductor runs the same commands by hand
+`run.sh` queues per chain link and drains detached when its chain stops — from its EXIT trap, so a
+later link that exits early (quota, a held lock) still finishes the chain; only the chain's own
+re-exec skips it (`logs/followup-run-<stamp>.log`). The conductor runs the same commands by hand
 ([conductor SKILL.md](../skills/conductor/SKILL.md)). Each hook is idempotent (one stage dir per
 stamp / origin), each stage is claimed with a kernel lock, a repair holds the repo's
 `repo-locks/<repo>.lock`, and a stage a killed drain left `running` resumes at its saved step
-(unless its builder is still alive — a Superset builder's launcher registers itself in
-`inflight/<repo>/` before it starts, so lanes and drains stay out even if the drain dies).
+(unless its builder is still alive — both builder paths, Superset terminal and plain worktree,
+run one launcher that registers itself in `inflight/<repo>/` before it starts, so lanes and
+drains stay out even if the drain dies; a launcher that died without recording its exit has its
+process group terminated and reaped before the stage resumes).
 
 ```sh
 F=~/.claude/automations/advance-roadmap/followup.py
