@@ -29,7 +29,7 @@ if "parse-limit" in args:
                       "reset_epoch": 1760396400, "reset_at": "2025-10-13T19:00:00-04:00"}))
     sys.exit(0)
 if "live-limit" in args:
-    # Mirror usage.live_limit_banner: banner + (nonzero exit or no final) → print it.
+    # Mirror usage.live_limit_banner: provider JSON is_error, else banner + (nonzero/no final).
     transcript = open(args[args.index("--transcript-file") + 1]).read() if "--transcript-file" in args else ""
     final = ""
     if "--final-file" in args:
@@ -38,6 +38,41 @@ if "live-limit" in args:
         except OSError:
             pass
     exit_code = int(args[args.index("--exit") + 1]) if "--exit" in args else None
+    result = None
+    if "--result-json" in args:
+        raw = open(args[args.index("--result-json") + 1]).read()
+        try:
+            result = json.loads(raw)
+        except ValueError:
+            for line in reversed(raw.splitlines()):
+                if not line.startswith("{"):
+                    continue
+                try:
+                    obj = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(obj, dict) and "result" in obj:
+                    result = obj
+                    break
+        if not isinstance(result, dict):
+            result = None
+    if isinstance(result, dict):
+        if result.get("outcome") == "limit_hit":
+            print(" ".join(str(result.get("limit_text") or "").split()) or "provider reported limit_hit")
+            sys.exit(0)
+        err = result.get("is_error") or result.get("subtype") in ("error", "error_during_execution")
+        if err:
+            blob = "\n".join(str(result.get(k) or "") for k in ("result", "error", "error_message", "message"))
+            m = re.search(
+                r"^(?:you.?ve hit your (?:session |usage )?limit|hit your session limit|rate limit exceeded"
+                r"|quota exceeded|out of (?:usage|credits|quota)\b)", blob, re.I | re.M)
+            if m:
+                end = blob.find("\n", m.start())
+                print(blob[m.start():end if end >= 0 else len(blob)].strip())
+                sys.exit(0)
+            if re.search(r"usage.?limit|hit your session limit|quota.?exceeded", blob, re.I) and blob.strip():
+                print(blob.strip().splitlines()[0].strip())
+                sys.exit(0)
     m = re.search(
         r"^(?:you.?ve hit your (?:session |usage )?limit|hit your session limit|rate limit exceeded"
         r"|quota exceeded|out of (?:usage|credits|quota)\b)", transcript, re.I | re.M)
@@ -58,7 +93,7 @@ git -C "$REPO" checkout -q -b roadmap/x
 print 'x = 1' > "$REPO/x.py"
 git -C "$REPO" add x.py && git -C "$REPO" -c user.name=t -c user.email=t@t commit -q -m feat
 
-# Each fake says which provider it is; FAKE_<P> picks clean | findings | limit.
+# Each fake says which provider it is; FAKE_<P> picks clean | findings | limit | json-limit.
 for p in codex agent claude; do
   cat > "$BIN/$p" <<SH
 #!/bin/zsh
@@ -69,6 +104,11 @@ print -r -- "echoed prompt: VERDICT: clean      (no findings)"
 [ "\$mode" = limit ] && { print "You've hit your usage limit. Resets 5pm."; exit 1; }
 [ "\$mode" = capacity ] && { print "ERROR: Selected model is at capacity. Please try a different model."; exit 1; }
 [ "\$mode" = http503 ] && { print "stream error: unexpected status 503 Service Unavailable"; exit 1; }
+# Zero-exit JSON with is_error:true — only detectable via --result-json (not transcript alone).
+[ "\$mode" = json-limit ] && {
+  python3 -c 'import json; print(json.dumps({"type":"result","subtype":"success","is_error":True,"result":"You'\''ve hit your usage limit. Resets 5pm.","session_id":"json-limit-session"}))'
+  exit 0
+}
 body="reviewer=\$name
 x.py:1 bug: something
 VERDICT: \$mode"
@@ -143,12 +183,14 @@ check "both capacity reviewers logged"       "$(field capacity)" "['codex', 'cur
 out="$(review cursor 1 FAKE_CODEX=echo)"
 check "a transcript-only verdict is unparsed" "$(field verdict)" unparsed
 
-# Successful final answer + banner quoted in the transcript is not a live limit.
+# Successful final answer + banner on its own line in the transcript is not a live limit.
+# (A prefix like "echoed prior log:" would dodge the anchored detector and not exercise suppression.)
 : > "$ROOT/limits.txt"
 cat > "$BIN/codex" <<'SH'
 #!/bin/zsh
 last=""; while [ $# -gt 0 ]; do [ "$1" = "-o" ] && { last="$2"; shift; }; shift; done
-print "echoed prior log: You've hit your usage limit. Resets 5pm."
+print "echoed prior log:"
+print "You've hit your usage limit. Resets 5pm."
 print -r -- "reviewer=codex
 VERDICT: clean" > "$last"
 print "session id: 11111111-2222-3333-4444-555555555555"
@@ -160,6 +202,30 @@ check "echoed banner does not fail over"     "$(field reviewer)" codex
 [ -s "$ROOT/limits.txt" ] && { echo "FAIL: echoed banner recorded as a limit"; exit 1; } \
   || echo "ok   echoed banner is not a live limit"
 case "$out" in *"VERDICT: unparsed"*) echo "ok   unparsed printed" ;; *) echo "FAIL: no unparsed note"; exit 1 ;; esac
+
+# Zero-exit JSON is_error:true must fail over (needs --result-json); Claude is the next reviewer.
+: > "$ROOT/limits.txt"
+# Recreate the default codex stub first (overwritten above), then run with agent json-limit.
+for p in codex; do
+  cat > "$BIN/$p" <<SH
+#!/bin/zsh
+name=$p; mode="\${FAKE_${p:u}:-clean}"
+last=""; while [ \$# -gt 0 ]; do [ "\$1" = "-o" ] && { last="\$2"; shift; }; shift; done
+print "session id: 11111111-2222-3333-4444-555555555555"
+print -r -- "echoed prompt: VERDICT: clean      (no findings)"
+body="reviewer=\$name
+x.py:1 bug: something
+VERDICT: \$mode"
+if [ -n "\$last" ]; then print -r -- "\$body" > "\$last"; fi
+SH
+  chmod +x "$BIN/$p"
+done
+review codex 1 FAKE_AGENT=json-limit FAKE_CLAUDE=clean >/dev/null
+check "json is_error limit fails over"       "$(field reviewer)" claude
+check "json is_error verdict is clean"       "$(field verdict)" clean
+[ -s "$ROOT/limits.txt" ] || { echo "FAIL: is_error JSON was not recorded as a limit"; exit 1; }
+echo "ok   json is_error is a live limit"
+
 out="$(review codex 1 FAKE_AGENT=findings)"
 check "cursor's JSON final answer is parsed" "$(field verdict)" findings
 check "cursor reviewer session id logged"    "$(field session_id)" agent-session

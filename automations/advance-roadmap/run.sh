@@ -661,8 +661,11 @@ Previous no-work verdict and what changed since (carry unchanged verdicts forwar
       fi
       # Live-limit rule: a banner counts only when this planner produced no final answer
       # (successful triage dumps skill text that mentions "session limit" historically).
+      # Claude JSON with is_error:true is a live limit even on exit 0 (result lands in .last).
+      live_json=()
+      [ -f "$orch_out.json" ] && live_json=(--result-json "$orch_out.json")
       if ! text="$(python3 "$USAGE_PY" live-limit --transcript-file "$orch_out" --exit "$orch_rc" \
-          --final-file "$orch_out.last" 2>/dev/null)" || [ -z "$text" ]; then
+          --final-file "$orch_out.last" "${live_json[@]}" 2>/dev/null)" || [ -z "$text" ]; then
         planner_hit=""; break
       fi
       planner_hit="$RUN_DIR/orchestrator-limit-$ORCH.json"

@@ -79,8 +79,9 @@ elif name == "claude":
         print(fence)
         sys.exit(1)
     if mode == "limit":
+        # Real Claude exits 0 with is_error:true; detection needs --result-json (not exit≠0).
         print(json.dumps(json.load(open(os.environ["FAKE_LIMIT_FIXTURE"]))))  # one line, as the CLI prints it
-        sys.exit(1)
+        sys.exit(0)
     if mode == "result-limit":  # the limit only in the worker's result file, no banner on stdout
         path = next(l.split(": ", 1)[1] for l in prompt.splitlines() if l.startswith("(raw JSON, no fence) to: "))
         json.dump({{"outcome": "limit_hit", "provider": "claude", "repo": "demo",

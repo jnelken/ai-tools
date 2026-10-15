@@ -326,9 +326,12 @@ for provider in "${providers[@]}"; do
 
   # Live-limit rule (usage.py live-limit): a banner in the transcript counts only when this
   # call failed — non-zero exit or no final answer — never when a successful answer merely
-  # quoted docs or prior logs. Result-only limit_hit is handled below after the loop.
+  # quoted docs or prior logs. Claude/Cursor JSON with is_error:true is a live limit even on
+  # exit 0 (the result text is also written to .last). Result-only limit_hit is below.
+  live_json=()
+  [ -f "$out.json" ] && live_json=(--result-json "$out.json")
   if text="$(python3 "$USAGE_PY" live-limit --transcript-file "$out" --exit "$rc" \
-      --final-file "$out.last" 2>/dev/null)" && [ -n "$text" ]; then
+      --final-file "$out.last" "${live_json[@]}" 2>/dev/null)" && [ -n "$text" ]; then
     echo "(limit for $provider — recording and failing over)"
     record_limit "$provider" "$text"
     last_hit="$provider"

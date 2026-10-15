@@ -151,8 +151,11 @@ for who in "${reviewers[@]}"; do
   found=""
   [ -s "$out.last" ] && found="$(rg -o '^VERDICT: (clean|findings)\s*$' -r '$1' "$out.last" | tail -1)"
   # Live-limit rule (usage.py live-limit): ignore banners when the final answer succeeded.
+  # Pass Claude/Cursor JSON so is_error:true counts even on a zero exit with a .last file.
+  live_json=()
+  [ -f "$out.json" ] && live_json=(--result-json "$out.json")
   if text="$(python3 "$USAGE_PY" live-limit --transcript-file "$out" --exit "$rc" \
-      --final-file "$out.last" 2>/dev/null)" && [ -n "$text" ]; then
+      --final-file "$out.last" "${live_json[@]}" 2>/dev/null)" && [ -n "$text" ]; then
     # Into this round's log line first, so a failed shared-state update can't lose it.
     python3 "$USAGE_PY" parse-limit --provider "$who" --text "$text" --scope reviewer 2>/dev/null >> "$limited" \
       || python3 -c 'import json, sys; print(json.dumps({"provider": sys.argv[1], "exact_cli_text": sys.argv[2]}))' \

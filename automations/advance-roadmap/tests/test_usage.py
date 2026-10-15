@@ -475,6 +475,29 @@ class LimitBannerTests(unittest.TestCase):
             usage.live_limit_banner("ok\n", exit_code=1, final_answer="",
                                     provider_result={"is_error": True, "result": banner}),
             banner)
+        # Zero exit + final answer that is the banner text still counts when is_error is set.
+        self.assertEqual(
+            usage.live_limit_banner("ok\n", exit_code=0, final_answer=banner,
+                                    provider_result={"is_error": True, "subtype": "success",
+                                                     "result": banner}),
+            banner)
+        self.assertIsNone(
+            usage.live_limit_banner("ok\n", exit_code=0, final_answer=banner,
+                                    provider_result=None))
+
+    def test_load_provider_result_finds_json_amid_noise(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "out.json"
+            path.write_text(
+                'warn: ignore\n'
+                '{"type":"result","is_error":true,"result":"You\'ve hit your usage limit. Resets 5pm."}\n')
+            obj = usage.load_provider_result(path)
+            self.assertTrue(obj["is_error"])
+            self.assertEqual(
+                usage.live_limit_banner(
+                    "noise", exit_code=0, final_answer="You've hit your usage limit. Resets 5pm.",
+                    provider_result=obj),
+                "You've hit your usage limit. Resets 5pm.")
 
 
 class ProbeTests(unittest.TestCase):

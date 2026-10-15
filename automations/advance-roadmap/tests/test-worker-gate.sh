@@ -10,7 +10,8 @@ trap 'rm -rf "$TMP_ROOT"' EXIT INT TERM
 unset SUPERSET_TERMINAL_ID
 
 mkdir -p "$TMP_ROOT/root/lib" "$TMP_ROOT/bin"
-cp "$TEST_DIR/lib/models.sh" "$TMP_ROOT/root/lib/"
+cp "$TEST_DIR/lib/models.sh" "$TEST_DIR/lib/tokens.py" "$TMP_ROOT/root/lib/"
+# Real usage.py for CLI assertions; the gate/live-limit stub below shadows it for worker.sh.
 
 cat > "$TMP_ROOT/root/lib/usage.py" <<'PY'
 import json, os, sys
@@ -41,6 +42,41 @@ if "live-limit" in args:
         except OSError:
             pass
     exit_code = int(args[args.index("--exit") + 1]) if "--exit" in args else None
+    result = None
+    if "--result-json" in args:
+        raw = open(args[args.index("--result-json") + 1]).read()
+        try:
+            result = json.loads(raw)
+        except ValueError:
+            for line in reversed(raw.splitlines()):
+                if not line.startswith("{"):
+                    continue
+                try:
+                    obj = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(obj, dict) and "result" in obj:
+                    result = obj
+                    break
+        if not isinstance(result, dict):
+            result = None
+    if isinstance(result, dict):
+        if result.get("outcome") == "limit_hit":
+            print(" ".join(str(result.get("limit_text") or "").split()) or "provider reported limit_hit")
+            sys.exit(0)
+        err = result.get("is_error") or result.get("subtype") in ("error", "error_during_execution")
+        if err:
+            blob = "\n".join(str(result.get(k) or "") for k in ("result", "error", "error_message", "message"))
+            m = re.search(
+                r"^(?:you.?ve hit your (?:session |usage )?limit|hit your session limit|rate limit exceeded"
+                r"|quota exceeded|out of (?:usage|credits|quota)\b)", blob, re.I | re.M)
+            if m:
+                end = blob.find("\n", m.start())
+                print(blob[m.start():end if end >= 0 else len(blob)].strip())
+                sys.exit(0)
+            if re.search(r"usage.?limit|hit your session limit|quota.?exceeded", blob, re.I) and blob.strip():
+                print(blob.strip().splitlines()[0].strip())
+                sys.exit(0)
     m = re.search(
         r"^(?:you.?ve hit your (?:session |usage )?limit|hit your session limit|rate limit exceeded"
         r"|quota exceeded|out of (?:usage|credits|quota)\b)", transcript, re.I | re.M)
@@ -62,6 +98,12 @@ cat > "$TMP_ROOT/bin/fake-provider" <<'SH'
 #!/bin/zsh
 print -r -- "$(basename "$0")" >> "$CALLS"
 [ -n "${FAKE_RESULT:-}" ] && print -r -- "$FAKE_RESULT" > "$RESULT_PATH"
+# Zero-exit Claude/Cursor JSON with is_error:true (banner only in the result object).
+# Codex is plain-text; only the JSON CLIs (agent/claude) emit this shape.
+if [ -n "${FAKE_JSON_LIMIT:-}" ] && [ "$(basename "$0")" != "codex" ]; then
+  python3 -c 'import json; print(json.dumps({"type":"result","subtype":"success","is_error":True,"result":"You'\''ve hit your usage limit. Resets 5pm.","session_id":"x"}))'
+  exit 0
+fi
 print -r -- "fake provider completed"
 SH
 chmod +x "$TMP_ROOT/bin/fake-provider"
@@ -132,12 +174,39 @@ FAKE_RESULT='{"outcome": "shipped", "provider": "cursor"}' run_worker "" "$TMP_R
   || fail "a shipped result failed the worker"
 [ ! -s "$TMP_ROOT/limits" ] || fail "a shipped result recorded a limit: $(cat "$TMP_ROOT/limits")"
 
-# live-limit CLI (what worker.sh calls): successful final answer + echoed banner → not limited;
-# real failure → limited. Mirrors usage.live_limit_banner.
+# Cursor JSON is_error:true on exit 0 must fail over (needs --result-json on the live-limit call).
+: > "$TMP_ROOT/calls"; : > "$TMP_ROOT/limits"
+FAKE_JSON_LIMIT=1 FAKE_GATED="" CALLS="$TMP_ROOT/calls" LIMITS="$TMP_ROOT/limits" \
+  PERSONAL_CODE_DIR="$TMP_ROOT" \
+  ADVANCE_ROADMAP_ROOT="$TMP_ROOT/root" \
+  ADVANCE_ROADMAP_SKILL_DIR="$SKILL_DIR" \
+  ADVANCE_ROADMAP_AGENT_BIN="$TMP_ROOT/bin/agent" \
+  ADVANCE_ROADMAP_CODEX_BIN="$TMP_ROOT/bin/codex" \
+  ADVANCE_ROADMAP_CLAUDE_BIN="$TMP_ROOT/bin/claude" \
+  "$TEST_DIR/worker.sh" --stamp test --request-file "$TMP_ROOT/request.json" \
+    --providers "cursor codex" --status-file "$TMP_ROOT/status-json-limit.json" \
+    --result-file "$TMP_ROOT/result.json" >/dev/null \
+  || fail "json is_error worker failed over incorrectly"
+[ "$(cat "$TMP_ROOT/calls")" = $'agent\ncodex' ] \
+  || fail "json is_error did not fail over cursor→codex: $(cat "$TMP_ROOT/calls")"
+case "$(cat "$TMP_ROOT/limits")" in
+  *"cursor|You've hit your usage limit. Resets 5pm."*) ;;
+  *) fail "json is_error was not recorded: $(cat "$TMP_ROOT/limits")" ;;
+esac
+
+# Real usage.py live-limit CLI: echoed banner suppressed; is_error JSON counts on exit 0.
+cp "$TEST_DIR/lib/usage.py" "$TMP_ROOT/real-usage.py"
 banner=$'echoed prior log\nYou\'ve hit your usage limit. Resets 5pm.\n'
-python3 "$TMP_ROOT/root/lib/usage.py" live-limit --text "$banner" --exit 0 --final "done" >/dev/null 2>&1 \
+python3 "$TMP_ROOT/real-usage.py" live-limit --text "$banner" --exit 0 --final "done" >/dev/null 2>&1 \
   && fail "live-limit treated a successful final answer as limited"
-python3 "$TMP_ROOT/root/lib/usage.py" live-limit --text "$banner" --exit 1 --final "" >/dev/null 2>&1 \
+python3 "$TMP_ROOT/real-usage.py" live-limit --text "$banner" --exit 1 --final "" >/dev/null 2>&1 \
   || fail "live-limit missed a real limit failure"
+print -r -- '{"type":"result","is_error":true,"result":"You'\''ve hit your usage limit. Resets 5pm."}' \
+  > "$TMP_ROOT/err.json"
+got="$(python3 "$TMP_ROOT/real-usage.py" live-limit --text ok --exit 0 --final "You'\''ve hit your usage limit. Resets 5pm." \
+  --result-json "$TMP_ROOT/err.json")" \
+  || fail "live-limit missed zero-exit is_error JSON"
+[ "$got" = "You've hit your usage limit. Resets 5pm." ] \
+  || fail "live-limit is_error text wrong: $got"
 
 print -- "worker usage gate: ok"

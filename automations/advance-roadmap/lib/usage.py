@@ -818,6 +818,36 @@ def limit_banner(text: str) -> str | None:
     return text[m.start():end if end >= 0 else len(text)].strip()
 
 
+def load_provider_result(path: str | Path | None) -> dict | None:
+    """Decode a Claude/Cursor --output-format json file, or None.
+
+    The CLI prints one JSON object (a line with a `result` key); stderr warnings may surround it.
+    A whole-file json.loads also works when the file is that object alone.
+    """
+    if not path:
+        return None
+    try:
+        text = Path(path).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    try:
+        obj = json.loads(text)
+        if isinstance(obj, dict):
+            return obj
+    except ValueError:
+        pass
+    for line in reversed(text.splitlines()):
+        if not line.startswith("{"):
+            continue
+        try:
+            obj = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(obj, dict) and "result" in obj:
+            return obj
+    return None
+
+
 def provider_reported_limit(result: dict | None) -> str | None:
     """Limit text from a provider's own result/error record, or None.
 
@@ -1040,14 +1070,9 @@ def cmd_live_limit(args: argparse.Namespace) -> None:
             final = Path(args.final_file).read_text(encoding="utf-8", errors="replace")
         except OSError:
             final = ""
-    result = None
-    if args.result_json:
-        try:
-            result = json.loads(Path(args.result_json).read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            result = None
+    result = load_provider_result(args.result_json) if args.result_json else None
     banner = live_limit_banner(transcript, exit_code=args.exit, final_answer=final,
-                               provider_result=result if isinstance(result, dict) else None)
+                               provider_result=result)
     if not banner:
         sys.exit(1)
     print(banner)
