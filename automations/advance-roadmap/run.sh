@@ -446,7 +446,7 @@ run_orchestrator_codex() {
   local out="$1" prompt="$2"
   # -o writes only the final message, so the fence can't be confused with the
   # prompt or ORCHESTRATOR.md that Codex echoes into stdout.
-  rm -f "$out.last"
+  rm -f "$out.last" "$out.json" "$out.session"
   # CODE_DIR is a multi-repo parent, not a git checkout — skip the repo check.
   "$CODEX" exec \
     -o "$out.last" \
@@ -464,7 +464,7 @@ run_orchestrator_codex() {
 
 run_orchestrator_claude() {
   local out="$1" prompt="$2"
-  rm -f "$out.last"
+  rm -f "$out.last" "$out.json" "$out.session"
   "$CLAUDE" -p "$prompt" \
     --model "$ORCH_CLAUDE_MODEL" \
     --effort high \
@@ -649,7 +649,9 @@ Previous no-work verdict and what changed since (carry unchanged verdicts forwar
       tried="$tried $ORCH"
       orch_rc=0
       planner_hit=""   # only the planner that answers last decides quota vs invalid output
-      rm -f "$orch_out.last"   # a failed-over planner's final message must not be read as the next one's
+      # Per-attempt artifacts: a prior Claude/Cursor .json must not be passed to the next
+      # planner's live-limit (Codex writes no .json; stale is_error would gate the wrong provider).
+      rm -f "$orch_out.last" "$orch_out.json" "$orch_out.session"
       run_orchestrator "$ORCH" "$orch_out" "$ORCH_PROMPT" || orch_rc=$?
       cat "$orch_out" 2>/dev/null
       echo ""

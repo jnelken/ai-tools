@@ -80,6 +80,22 @@ elif name == "claude":
         sys.exit(1)
     if mode == "limit":
         # Real Claude exits 0 with is_error:true; detection needs --result-json (not exit≠0).
+        # Optional FAKE_UNGATE: clear named providers' gates so failover can reach them mid-run
+        # (Codex became eligible while Claude was planning).
+        for p in os.environ.get("FAKE_UNGATE", "").split():
+            path = os.path.join(os.environ["ADVANCE_ROADMAP_ROOT"], "providers-usage.json")
+            try:
+                state = json.load(open(path))
+            except (OSError, ValueError):
+                continue
+            prov = state.setdefault("providers", {{}}).setdefault(p, {{}})
+            for window in ("weekly", "five_hour"):
+                if isinstance(prov.get(window), dict):
+                    prov[window]["used_pct"] = 0
+            prov["last_limit_hit"] = None
+            prov["available_for_orchestrator"] = True
+            prov["available_for_worker"] = True
+            json.dump(state, open(path, "w"))
         print(json.dumps(json.load(open(os.environ["FAKE_LIMIT_FIXTURE"]))))  # one line, as the CLI prints it
         sys.exit(0)
     if mode == "result-limit":  # the limit only in the worker's result file, no banner on stdout
@@ -238,6 +254,21 @@ class QuotaReplayTest(unittest.TestCase):
         self.assertEqual((rec["orchestrator"], rec["outcome"]), ("claude", "blocked-no-item"))
         self.assertIn("failing over to claude", self.log)
         self.assertTrue((run / "orchestrator-limit-codex.json").exists())
+
+    def test_claude_json_limit_does_not_poison_failover_codex_via_stale_json(self):
+        # Codex gated → Claude plans and hits is_error JSON; FAKE_UNGATE opens Codex for failover.
+        # Codex returns no fence (exit 0). Stale Claude .json must not make Codex look limited.
+        self.usage_state(codex={"weekly": {"used_pct": 85, "reset_epoch": FUTURE}})
+        run = self.run_lane(FAKE_CLAUDE="limit", FAKE_UNGATE="codex", FAKE_CODEX="nofence")
+        self.assertEqual([c["bin"] for c in self.calls() if c["role"] == "orchestrator"],
+                         ["claude", "codex"])
+        self.assert_nothing_dispatched(run)
+        rec = self.record()
+        self.assertEqual(rec["outcome"], "error", rec)
+        self.assertIsNone(rec.get("quota"))
+        self.assertTrue((run / "orchestrator-limit-claude.json").exists())
+        self.assertFalse((run / "orchestrator-limit-codex.json").exists(),
+                         "stale Claude .json must not gate the Codex failover attempt")
 
     def test_bad_plan_after_a_limit_failover_is_an_error_not_a_quota_pause(self):
         self.usage_state()

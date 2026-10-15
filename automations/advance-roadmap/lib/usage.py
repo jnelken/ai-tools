@@ -848,6 +848,17 @@ def load_provider_result(path: str | Path | None) -> dict | None:
     return None
 
 
+def provider_is_error(result: dict | None) -> bool:
+    """True when a Claude/Cursor JSON result is a structured provider error (is_error / error subtype).
+
+    A zero-exit CLI can still fail this way; callers that classify capacity or failure must treat it
+    like a non-zero exit, not a successful final answer.
+    """
+    if not isinstance(result, dict):
+        return False
+    return bool(result.get("is_error") or result.get("subtype") in ("error", "error_during_execution"))
+
+
 def provider_reported_limit(result: dict | None) -> str | None:
     """Limit text from a provider's own result/error record, or None.
 
@@ -860,8 +871,7 @@ def provider_reported_limit(result: dict | None) -> str | None:
         text = " ".join(str(result.get("limit_text") or "").split()) or "provider reported limit_hit"
         return text
     # Claude/Cursor --output-format json: is_error / error subtype carry the CLI's own message.
-    err = result.get("is_error") or result.get("subtype") in ("error", "error_during_execution")
-    if not err:
+    if not provider_is_error(result):
         return None
     blob = "\n".join(str(result.get(k) or "") for k in ("result", "error", "error_message", "message"))
     return limit_banner(blob) or (blob.strip().splitlines()[0].strip() if detect_limit(blob) and blob.strip() else None)
@@ -1078,6 +1088,11 @@ def cmd_live_limit(args: argparse.Namespace) -> None:
     print(banner)
 
 
+def cmd_is_error(args: argparse.Namespace) -> None:
+    """Exit 0 when --result-json is a structured provider error; else 1. For shell capacity checks."""
+    sys.exit(0 if provider_is_error(load_provider_result(args.result_json)) else 1)
+
+
 def cmd_detect(args: argparse.Namespace) -> None:
     text = args.text
     if args.file:
@@ -1155,6 +1170,11 @@ def main() -> None:
     p.add_argument("--final-file", help="path to the CLI's final-answer file (-o / .last)")
     p.add_argument("--result-json", help="provider result JSON (worker result, Claude/Cursor object)")
     p.set_defaults(func=cmd_live_limit)
+
+    p = sub.add_parser("is-error")
+    p.add_argument("--result-json", required=True,
+                   help="Claude/Cursor JSON; exit 0 when is_error/error subtype (failed invocation)")
+    p.set_defaults(func=cmd_is_error)
 
     p = sub.add_parser("detect-limit")
     p.add_argument("--text", default="")

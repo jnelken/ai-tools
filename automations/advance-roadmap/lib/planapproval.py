@@ -116,6 +116,34 @@ def extract_fence(text):
     return None
 
 
+def structured_result_from_blobs(*blobs):
+    """First Claude/Cursor-shaped JSON object found in the given answer/log blobs, or None.
+
+    Runners may return --output-format json on stdout (or a path written into a temp file that
+    then becomes the answer). load_provider_result reads a file; here the blob is already text.
+    """
+    for blob in blobs:
+        if not blob or not str(blob).strip():
+            continue
+        text = str(blob)
+        try:
+            obj = json.loads(text)
+            if isinstance(obj, dict) and ("result" in obj or "is_error" in obj or "outcome" in obj):
+                return obj
+        except ValueError:
+            pass
+        for line in reversed(text.splitlines()):
+            if not line.startswith("{"):
+                continue
+            try:
+                obj = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(obj, dict) and ("result" in obj or "is_error" in obj or "outcome" in obj):
+                return obj
+    return None
+
+
 def combine(request, model):
     """Final ruling per plan: the stricter of the mechanical checks and the model; thread 1 always approves."""
     plans = request["plans"]
@@ -261,8 +289,11 @@ def _approve(root, request, doc, code_dir, runners, providers, tmp):
             break
         model = None
         # Live-limit rule: banners only count when there is no successful fence (above) — same as
-        # usage.live_limit_banner with no final answer. Still scan answer+log for the banner text.
-        banner = live_limit_banner(f"{answer or ''}\n{log or ''}", final_answer="")
+        # usage.live_limit_banner with no final answer. Pass structured JSON so is_error:true is a
+        # live limit even on a zero-exit answer that is only the error result text.
+        provider_result = structured_result_from_blobs(answer, log)
+        banner = live_limit_banner(
+            f"{answer or ''}\n{log or ''}", final_answer="", provider_result=provider_result)
         if banner:
             # Saved before the shared usage file is touched: the quota record keeps the banner and
             # its reset even if that update fails. Then gate this provider for every other role too.

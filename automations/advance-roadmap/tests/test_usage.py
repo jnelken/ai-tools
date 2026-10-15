@@ -499,6 +499,23 @@ class LimitBannerTests(unittest.TestCase):
                     provider_result=obj),
                 "You've hit your usage limit. Resets 5pm.")
 
+    def test_provider_is_error_and_is_error_cli(self):
+        self.assertTrue(usage.provider_is_error({"is_error": True}))
+        self.assertTrue(usage.provider_is_error({"subtype": "error_during_execution"}))
+        self.assertFalse(usage.provider_is_error({"is_error": False, "result": "ok"}))
+        self.assertFalse(usage.provider_is_error(None))
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "err.json"
+            path.write_text('{"type":"result","is_error":true,"result":"Selected model is at capacity."}\n')
+            ok = Path(tmp) / "ok.json"
+            ok.write_text('{"type":"result","is_error":false,"result":"VERDICT: clean"}\n')
+            self.assertEqual(
+                subprocess.run([sys.executable, str(SCRIPT), "is-error",
+                                "--result-json", str(path)], capture_output=True).returncode, 0)
+            self.assertEqual(
+                subprocess.run([sys.executable, str(SCRIPT), "is-error",
+                                "--result-json", str(ok)], capture_output=True).returncode, 1)
+
 
 class ProbeTests(unittest.TestCase):
     def setUp(self):

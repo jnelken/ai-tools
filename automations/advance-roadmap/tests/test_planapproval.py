@@ -147,6 +147,19 @@ class Approve(unittest.TestCase):
         self.assertIn("approver", args)
         self.assertEqual(out["decisions"][1]["verdict"], "approve")
 
+    def test_zero_exit_is_error_json_is_a_live_limit_and_fails_over(self):
+        req = request(plan("1", 1, ["a"]), plan("2", 2, ["b"]))
+        ruling = {"decisions": [{"stamp": "2", "verdict": "approve", "reason": "disjoint"}]}
+        err = json.dumps({"type": "result", "subtype": "success", "is_error": True,
+                          "result": "You've hit your usage limit. Try again at 5:00 PM."})
+        runners = {"codex": lambda prompt, code: (err, ""),
+                   "claude": lambda prompt, code: (self.fence(ruling), "")}
+        with mock.patch.object(pa, "usage_cli", return_value=mock.Mock(returncode=0)) as usage:
+            out = pa.approve("/root", req, "DOC.md", "/code", runners=runners, providers=["codex", "claude"])
+        recorded = [c.args[3] for c in usage.call_args_list if c.args[1] == "record-limit"]
+        self.assertEqual(recorded, ["codex"])
+        self.assertEqual(out["decisions"][1]["verdict"], "approve")
+
     def test_stderr_only_limit_banner_is_recorded_and_fails_over(self):
         # The real runners, with CLIs that print the banner to stderr alone and answer nothing.
         req = request(plan("1", 1, ["a"]), plan("2", 2, ["b"]))

@@ -92,7 +92,7 @@ run_reviewer() {
   case "$who" in
     codex)
       command -v "$CODEX" >/dev/null 2>&1 || return 127
-      rm -f "$out.last"
+      rm -f "$out.last" "$out.json" "$out.session"
       # `</dev/null` is load-bearing: codex exec reads instructions from stdin, and with $PROMPT
       # also passed as an argument it appends stdin as a <stdin> block — so an inherited open stdin
       # hangs it forever on "Reading additional input from stdin...". This survived only by
@@ -143,7 +143,8 @@ for who in "${reviewers[@]}"; do
     continue
   fi
   rc=0
-  rm -f "$out.last" "$out.session"   # a limited Codex attempt must not supply the next reviewer's text
+  # Per-attempt artifacts: a prior Claude/Cursor .json must not classify the next reviewer.
+  rm -f "$out.last" "$out.json" "$out.session"
   run_reviewer "$who" "$out" || rc=$?
   [ "$rc" -eq 127 ] && continue
   # Only the final answer carries the verdict: a transcript echoes the prompt, which quotes both
@@ -163,10 +164,18 @@ for who in "${reviewers[@]}"; do
     python3 "$USAGE_PY" --root "$ROOT" record-limit --provider "$who" --text "$text" >/dev/null 2>&1 || true
     continue
   fi
-  if [ -z "$found" ] && [ "$rc" -ne 0 ] && rg -q -i "$CAPACITY" "$out"; then
-    echo "(skipping reviewer $who — its model is at capacity: $(rg -m1 -i -o "$CAPACITY" "$out"))"
+  # Capacity/overload: treat a zero-exit structured provider error like a failed invocation.
+  inv_failed=0
+  [ "$rc" -ne 0 ] && inv_failed=1
+  if [ "$inv_failed" -eq 0 ] && [ -f "$out.json" ] && \
+     python3 "$USAGE_PY" is-error --result-json "$out.json" 2>/dev/null; then
+    inv_failed=1
+  fi
+  if [ -z "$found" ] && [ "$inv_failed" -eq 1 ] && \
+     { rg -q -i "$CAPACITY" "$out" || { [ -f "$out.json" ] && rg -q -i "$CAPACITY" "$out.json"; }; }; then
+    echo "(skipping reviewer $who — its model is at capacity: $(rg -m1 -i -o "$CAPACITY" "$out" "$out.json" 2>/dev/null))"
     capacity="$capacity $who"
-    rm -f "$out.last"
+    rm -f "$out.last" "$out.json"
     continue
   fi
   used="$who"

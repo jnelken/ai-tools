@@ -28,6 +28,30 @@ if "parse-limit" in args:
     print(json.dumps({"provider": args[args.index("--provider") + 1], "exact_cli_text": args[args.index("--text") + 1],
                       "reset_epoch": 1760396400, "reset_at": "2025-10-13T19:00:00-04:00"}))
     sys.exit(0)
+def _load_result(path):
+    raw = open(path).read()
+    try:
+        result = json.loads(raw)
+        if isinstance(result, dict):
+            return result
+    except ValueError:
+        pass
+    for line in reversed(raw.splitlines()):
+        if not line.startswith("{"):
+            continue
+        try:
+            obj = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(obj, dict) and "result" in obj:
+            return obj
+    return None
+
+if "is-error" in args:
+    result = _load_result(args[args.index("--result-json") + 1]) if "--result-json" in args else None
+    err = isinstance(result, dict) and (
+        result.get("is_error") or result.get("subtype") in ("error", "error_during_execution"))
+    sys.exit(0 if err else 1)
 if "live-limit" in args:
     # Mirror usage.live_limit_banner: provider JSON is_error, else banner + (nonzero/no final).
     transcript = open(args[args.index("--transcript-file") + 1]).read() if "--transcript-file" in args else ""
@@ -38,24 +62,7 @@ if "live-limit" in args:
         except OSError:
             pass
     exit_code = int(args[args.index("--exit") + 1]) if "--exit" in args else None
-    result = None
-    if "--result-json" in args:
-        raw = open(args[args.index("--result-json") + 1]).read()
-        try:
-            result = json.loads(raw)
-        except ValueError:
-            for line in reversed(raw.splitlines()):
-                if not line.startswith("{"):
-                    continue
-                try:
-                    obj = json.loads(line)
-                except ValueError:
-                    continue
-                if isinstance(obj, dict) and "result" in obj:
-                    result = obj
-                    break
-        if not isinstance(result, dict):
-            result = None
+    result = _load_result(args[args.index("--result-json") + 1]) if "--result-json" in args else None
     if isinstance(result, dict):
         if result.get("outcome") == "limit_hit":
             print(" ".join(str(result.get("limit_text") or "").split()) or "provider reported limit_hit")
@@ -73,6 +80,8 @@ if "live-limit" in args:
             if re.search(r"usage.?limit|hit your session limit|quota.?exceeded", blob, re.I) and blob.strip():
                 print(blob.strip().splitlines()[0].strip())
                 sys.exit(0)
+            # Capacity/overload in is_error JSON is not a quota limit — leave it for capacity fallback.
+            sys.exit(1)
     m = re.search(
         r"^(?:you.?ve hit your (?:session |usage )?limit|hit your session limit|rate limit exceeded"
         r"|quota exceeded|out of (?:usage|credits|quota)\b)", transcript, re.I | re.M)
@@ -107,6 +116,11 @@ print -r -- "echoed prompt: VERDICT: clean      (no findings)"
 # Zero-exit JSON with is_error:true — only detectable via --result-json (not transcript alone).
 [ "\$mode" = json-limit ] && {
   python3 -c 'import json; print(json.dumps({"type":"result","subtype":"success","is_error":True,"result":"You'\''ve hit your usage limit. Resets 5pm.","session_id":"json-limit-session"}))'
+  exit 0
+}
+# Zero-exit overload in JSON: must fail over as capacity, not end as unparsed.
+[ "\$mode" = json-capacity ] && {
+  python3 -c 'import json; print(json.dumps({"type":"result","subtype":"success","is_error":True,"result":"Selected model is at capacity. Please try a different model.","session_id":"json-capacity-session"}))'
   exit 0
 }
 body="reviewer=\$name
@@ -225,6 +239,16 @@ check "json is_error limit fails over"       "$(field reviewer)" claude
 check "json is_error verdict is clean"       "$(field verdict)" clean
 [ -s "$ROOT/limits.txt" ] || { echo "FAIL: is_error JSON was not recorded as a limit"; exit 1; }
 echo "ok   json is_error is a live limit"
+
+# Zero-exit JSON overload must use capacity fallback (not unparsed), without a quota hit.
+: > "$ROOT/limits.txt"
+out="$(review codex 1 FAKE_AGENT=json-capacity FAKE_CLAUDE=clean)"
+check "json is_error capacity fails over"    "$(field reviewer)" claude
+check "json is_error capacity is clean"      "$(field verdict)" clean
+check "json capacity reviewer logged"        "$(field capacity)" "['cursor']"
+[ -s "$ROOT/limits.txt" ] && { echo "FAIL: json capacity recorded as a quota limit"; exit 1; } \
+  || echo "ok   json capacity is not a quota hit"
+case "$out" in *"at capacity"*) echo "ok   json capacity skip printed" ;; *) echo "FAIL: no json capacity note"; exit 1 ;; esac
 
 out="$(review codex 1 FAKE_AGENT=findings)"
 check "cursor's JSON final answer is parsed" "$(field verdict)" findings

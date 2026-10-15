@@ -307,7 +307,8 @@ for provider in "${providers[@]}"; do
   fi
   echo "=== worker try provider=$provider mode=$WORKER_MODE stamp=$STAMP ($(date)) ==="
   rc=0
-  rm -f "$out.last"
+  # Per-provider out paths already isolate attempts; still clear so a retry never sees stale JSON.
+  rm -f "$out.last" "$out.json" "$out.session"
   [ -n "$RESULT_FILE" ] && rm -f "$RESULT_FILE"   # a failed-over attempt's result must not count
   rm -f "$REVIEW_LOG"                              # nor its review rounds
   if [ -n "${SUPERSET_TERMINAL_ID:-}" ]; then
