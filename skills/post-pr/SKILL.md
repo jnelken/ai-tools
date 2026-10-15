@@ -188,6 +188,8 @@ The repo label and title together form the hyperlink text. Nothing outside the l
 | api | `api` |
 | folio-platform | `platform` |
 
+**Hygiene tag.** When the PR's net diff (`git diff <base>...HEAD`) is *only* code hygiene — codemods, behavior-preserving refactors or moves/renames, test fixes, lint or format fixes, with no user-visible or runtime behavior change — insert `[hygiene]` right after the repo label: `<PR_URL|[api][hygiene] PR_TITLE>`. It tells reviewers the PR is a skim-for-safety read, not a behavior review. One tag covers all of those; don't split it into `[lintfix]` / `[testfix]`. A PR that mixes hygiene with any feature, fix or config change gets no tag. The tag goes in the Slack link text only, never in the PR title itself.
+
 Post as the real user via `chat.postMessage` with the `xoxp` token from the macOS Keychain — not the claude.ai Slack connector, which posts with an app tag:
 
 ```bash
