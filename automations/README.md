@@ -174,8 +174,11 @@ deferred (judged on the reviewers that branch could use — never the builder's 
 remaining findings go on one Linear ticket (`jlin.py new`, exactly one `repo/*`
 label, state Backlog) with the evidence, branch/PR, validation so far, reset time and the exact
 next step, plus a fenced `advance-roadmap-followup` metadata block (`finding_ids`, stage key,
-origin, branch, PR). Unknown usage and every non-quota blocker go to `followups/report.jsonl`,
-never to a new ticket; a ticket the stage already has gets the verified progress as a comment.
+origin, branch, PR, builder, `updated_at`). Every later deferral rewrites the description of a
+ticket its stage owns, so that block is authoritative: a recovery on any machine — with no local
+state, or older local state — reviews against the latest builder, never the first. Unknown usage
+and every non-quota blocker go to `followups/report.jsonl`, never to a new ticket; a ticket the
+stage already has gets the verified progress as a comment.
 A ticket is closed only after checks pass, the review is clean, the PR merged and the deploy
 was verified; a close Linear refuses stays in the stage's `pending_close` and every later drain
 retries it.
