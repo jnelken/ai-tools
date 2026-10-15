@@ -37,6 +37,11 @@ GIT_OPTS_WITH_VALUE = ("-C", "-c", "--git-dir", "--work-tree", "--namespace", "-
 QUOTA_OUTCOMES = ("quota-paused", "skipped-quota")
 ERROR_OUTCOMES = ("error", "failed", "incomplete")
 TOOLING_REPO = "ai-tools"
+# Detail text from runrecord.derive (and similar) that names an automation-side failure.
+ORCH_FAILURE = re.compile(
+    r"orchestrator|worker\.sh|ORCHESTRATOR_RESULT|left no status|"
+    r"without (?:a |writing a )?result|unknown worker outcome|parse_error|planner",
+    re.I)
 
 
 def finding_id(stage, repo, kind, key):
@@ -231,6 +236,30 @@ def segment_runs_git_stash(words, depth):
     return i < len(words) and words[i] == "stash" and words[i + 1:i + 2] != ["list"]
 
 
+def orchestration_failure_evidence(row, orch, run, src):
+    """Evidence the automation itself failed. None = a project/item failure recorded correctly."""
+    stamp = row.get("stamp") or "?"
+    detail = str(row.get("detail") or "")
+    orch_path = Path(run) / "orchestrator-result.json"
+    if orch.get("parse_error"):
+        return evidence(orch_path, orch["parse_error"])
+    perr = orch.get("planner_error")
+    if perr:
+        return evidence(orch_path, perr if isinstance(perr, str) else json.dumps(perr))
+    if detail and ORCH_FAILURE.search(detail):
+        return evidence(src, f"{stamp}: {row.get('outcome')} — {detail}")
+    # Incomplete always means the automation did not finish recording a result.
+    if row.get("outcome") == "incomplete":
+        return evidence(src, f"{stamp}: incomplete — {detail or 'run did not finish recording'}")
+    # A dispatched worker left no result file (and no stdout-fence recovery either).
+    if (row.get("action") in ("dispatch_worker", "resume_worker")
+            and row.get("outcome") in ERROR_OUTCOMES
+            and row.get("worker_result_source") not in ("agent", "stdout-fence")
+            and not (Path(run) / "worker-result.json").exists()):
+        return evidence(src, f"{stamp}: {row.get('outcome')} — missing worker-result after dispatch")
+    return None
+
+
 def tooling_scan(root, stamps, stages=(), run_dirs=None):
     """Findings for one finished batch/run: what in the automation itself got in the way.
 
@@ -274,12 +303,20 @@ def tooling_scan(root, stamps, stages=(), run_dirs=None):
                 "a planner's usage limit was recorded as an error",
                 "Record a limit banner as quota-paused with its provider and reset, not error.",
                 evidence(orch_path, banner.group(0)))
-        # 3. Fragile tooling: a run failed for a reason that is not quota.
+        # 3. Fragile tooling: only when evidence shows the automation itself failed.
         elif row.get("outcome") in ERROR_OUTCOMES:
             detail = row.get("detail") or row.get("outcome")
-            hit("fragile-tooling", re.sub(r"\d+", "N", detail), f"runs ended {row['outcome']}: {detail[:100]}",
-                "Find the failure signature in the run log and make the step fail safe or retry it.",
-                evidence(src, f"{stamp}: {row['outcome']} — {detail}"))
+            ev = orchestration_failure_evidence(row, orch, run, src)
+            if ev:
+                hit("fragile-tooling", re.sub(r"\d+", "N", detail),
+                    f"runs ended {row['outcome']}: {detail[:100]}",
+                    "Find the failure signature in the run log and make the step fail safe or retry it.",
+                    ev)
+            else:
+                quiet.append(non_finding(
+                    f"{stamp} ended {row['outcome']}",
+                    "a project or item failure with correct automation behavior is not a tooling defect",
+                    [evidence(src, f"{stamp}: {row['outcome']} — {detail}")]))
         # 4. A review the worker could not read.
         for r in read_jsonl(run / "reviews.jsonl"):
             if r.get("verdict") == "unparsed":

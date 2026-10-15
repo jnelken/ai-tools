@@ -232,19 +232,62 @@ class FollowupTest(unittest.TestCase):
         self.assertEqual(tooling["status"], "blocked")
         self.assertEqual(self.report()[-1]["kind"], "unsafe-repo")
 
+    def test_tooling_age_bypass_never_skips_an_active_cleanup(self):
+        self.run_followup("hook", "run-end", "--origin", "batch-old", "--stamp", "s1")
+        self.shipped_item("s1")
+        self.run_followup("hook", "item-done", "--stamp", "s1")
+        (self.root / "runs.jsonl").write_text(json.dumps(
+            {"stamp": "s1", "outcome": "shipped", "detail": "PR #1"}) + "\n")
+        tooling = self.state("tooling-batch-old")
+        # Twelve hours old would normally age-bypass a pending cleanup — but not while it is active.
+        tooling["created_at"] = time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(time.time() - 13 * 3600))
+        (self.root / "followups" / tooling["key"] / "state.json").write_text(json.dumps(tooling))
+        pid = self.root / "inflight" / "demo" / "followup-cleanup-s1.pid"
+        pid.parent.mkdir(parents=True)
+        pid.write_text(str(os.getpid()))
+        out = self.run_followup("drain", "--stage", "tooling").stdout
+        self.assertIn("cleanup-s1 has not finished", out)
+        self.assertEqual(self.state("tooling-batch-old")["status"], "pending")
+        self.assertFalse(self.state("tooling-batch-old").get("scanned"))
+        pid.unlink()
+        # Abandoned (no inflight / builder / claim) + stale: age bypass is allowed.
+        out = self.run_followup("drain", "--stage", "tooling",
+                                env={"ADVANCE_ROADMAP_FOLLOWUP_ANALYST": "0"}).stdout
+        self.assertTrue(self.state("tooling-batch-old")["scanned"])
+
     def test_a_conductor_run_dir_counts_once_its_result_exists_and_feeds_the_corpus(self):
         run = Path(self.tmp.name) / "scratch" / "20261014-090000"
         run.mkdir(parents=True)
         self.run_followup("hook", "run-end", "--origin", "conductor-x", "--run-dir", str(run))
         self.assertIn("1 run(s) of conductor-x have not recorded", self.run_followup("drain", "--stage", "tooling").stdout)
         result = run.resolve() / "worker-result.json"
-        result.write_text(json.dumps({"outcome": "failed", "repo": "demo", "summary": "builder crashed"}))
+        # A project/item failure with no orchestration evidence is a deliberate non-finding.
+        result.write_text(json.dumps({"outcome": "failed", "repo": "demo", "summary": "tests failed"}))
         self.run_followup("drain", "--stage", "tooling")
         st = self.state("tooling-conductor-x")
         self.assertTrue(st["scanned"])
         self.assertIn(str(result), st["corpus"])
-        [f] = [f for f in st["findings"] if f["kind"] == "fragile-tooling"]
-        self.assertEqual(f["evidence"][0]["source"], str(result))
+        self.assertFalse([f for f in st["findings"] if f["kind"] == "fragile-tooling"], st["findings"])
+        self.assertTrue(any(n["title"] == "20261014-090000 ended failed" for n in st["non_findings"]),
+                        st["non_findings"])
+
+    def test_tooling_scan_needs_orchestration_evidence_for_error_outcomes(self):
+        run = self.root / "runs" / "s-fail"
+        run.mkdir(parents=True)
+        (self.root / "runs.jsonl").write_text(json.dumps({
+            "stamp": "s-fail", "outcome": "failed", "detail": "npm test failed", "worker": "cursor"}) + "\n")
+        findings, quiet = followscan.tooling_scan(self.root, ["s-fail"])
+        self.assertFalse([f for f in findings if f["kind"] == "fragile-tooling"])
+        self.assertTrue(any(n["title"] == "s-fail ended failed" for n in quiet), quiet)
+        (self.root / "runs.jsonl").write_text(json.dumps({
+            "stamp": "s-err", "outcome": "error",
+            "detail": "orchestrator: missing ORCHESTRATOR_RESULT_JSON", "worker": "none"}) + "\n")
+        run2 = self.root / "runs" / "s-err"
+        run2.mkdir(parents=True)
+        (run2 / "orchestrator-result.json").write_text(json.dumps({"parse_error": "missing ORCHESTRATOR_RESULT_JSON"}))
+        findings, quiet = followscan.tooling_scan(self.root, ["s-err"])
+        [f] = [f for f in findings if f["kind"] == "fragile-tooling"]
+        self.assertIn("missing ORCHESTRATOR_RESULT_JSON", f["evidence"][0]["quote"])
 
     # ── repair lifecycle ──
 
@@ -587,6 +630,49 @@ class FollowupTest(unittest.TestCase):
         # Same reset on the next drain: still deferred, no second ticket.
         self.run_followup("drain")
         self.assertEqual(len(self.calls("jlin")), 1)
+
+    def test_a_failed_deferral_description_update_is_retried_and_does_not_set_last_deferral(self):
+        self.shipped_item("20261014-050000")
+        self.run_followup("hook", "item-done", "--stamp", "20261014-050000")
+        past = time.time() - 1
+        reviewers_out = {"reviewer": {"codex": "over", "cursor": "over", "claude": "over"},
+                         "reset_at": "2026-10-14T15:00:00", "reset_epoch": past}
+        # First deferral creates DEV-900 and records last_deferral.
+        self.set("stub-worker.json", {"mode": "ok", "after_usage": reviewers_out})
+        self.run_followup("drain")
+        key = "cleanup-20261014-050000"
+        st = self.state(key)
+        self.assertEqual(st["owned_tickets"], ["DEV-900"])
+        self.assertIsNotNone(st.get("last_deferral"))
+        first_note = st["last_deferral"]
+        # Second deferral (new builder) must rewrite the description; a failed update must not
+        # record last_deferral, so the next drain retries the same note.
+        self.set("stub-usage.json", {"worker": {"cursor": "over"}, "reset_at": "2026-10-14T15:00:00",
+                                     "reset_epoch": past})
+        self.set("stub-review.json", {"verdicts": ["findings", "clean"]})
+        self.set("stub-worker.json", {"mode": "ok", "after_usage": reviewers_out})
+        self.set("stub-linear.json", {"pages": [[]], "fail": ["issue update DEV-900"]})
+        self.run_followup("drain")
+        st = self.state(key)
+        self.assertEqual(st["status"], "deferred")
+        self.assertEqual(st["builder_provider"], "codex")
+        self.assertTrue(st.get("pending_deferral_sync"), st)
+        self.assertEqual(st.get("last_deferral"), first_note)  # failed sync must not advance it
+        failed = [c for c in self.calls("linear") if c.get("failed")
+                  and c["cmd"] == "issue update DEV-900"]
+        self.assertTrue(failed, self.calls("linear"))
+        # Clear the failure: drain retries pending_deferral_sync and records the new note.
+        self.set("stub-linear.json", {"pages": [[]]})
+        (self.root / "stub-calls.jsonl").unlink(missing_ok=True)
+        self.run_followup("drain")
+        st = self.state(key)
+        self.assertIsNone(st.get("pending_deferral_sync"))
+        self.assertNotEqual(st.get("last_deferral"), first_note)
+        self.assertIn("codex", st["last_deferral"])
+        updates = [c for c in self.calls("linear") if c["cmd"] == "issue update DEV-900"
+                   and "--description-file" in c["args"] and not c.get("failed")]
+        self.assertTrue(updates, self.calls("linear"))
+        self.assertEqual(followticket.parse_meta(updates[-1]["body"])["builder_provider"], "codex")
 
     def test_a_builder_with_no_free_reviewer_is_not_started(self):
         self.shipped_item("20261014-050000")

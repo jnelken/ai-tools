@@ -218,6 +218,23 @@ def take_repo_lock(repo):
     return Claim(ROOT / "repo-locks" / f"{repo}.lock") if repo else None
 
 
+def cleanup_still_active(other):
+    """True when a pending/running cleanup is still being worked and must not be age-bypassed.
+
+    Age only skips confirmed-abandoned cleanups (no live builder, no inflight worker, no drain
+    holding the stage claim). A still-running cleanup keeps the dependency barrier even past STALE_S."""
+    if builder_alive(other["key"]):
+        return True
+    repo = other.get("repo")
+    if repo and repo in shared.inflight_repos(ROOT):
+        return True
+    c = Claim(stage_dir(other["key"]) / "claim.lock")
+    if not c.ok:
+        return True
+    c.close()
+    return False
+
+
 def ready(st):
     if st["stage"] == STAGES["cleanup"]:
         return quiescent(st["repo"])
@@ -232,8 +249,12 @@ def ready(st):
     if running:
         st["unrecorded_children"] = running   # a crashed run never records; analyze what did
     for other in all_stages():
-        if other["stage"] == STAGES["cleanup"] and other.get("stamp") in children \
-                and other.get("status") in ("pending", "running") and not stale:
+        if other["stage"] != STAGES["cleanup"] or other.get("stamp") not in children:
+            continue
+        if other.get("status") not in ("pending", "running"):
+            continue
+        # Never skip a cleanup whose builder/drain is still alive, even past the age gate.
+        if cleanup_still_active(other) or not stale:
             return False, f"{other['key']} has not finished"
     return True, ""
 
@@ -566,19 +587,16 @@ def next_step_text(st, step):
             f"after the reset: it resumes at {step}{where}{pr}.")
 
 
-def defer(st, findings, quota, step, issues=None):
-    """No provider under its gate: ticket the remaining findings (create or update) and wait.
+def deferral_note(st, quota, step):
+    return (f"{step}|{quota.get('provider')}|{quota.get('reset_at')}|{st.get('builder_provider')}"
+            f"|{st.get('branch')}|{st.get('pr_url')}")
 
-    A ticket this creates goes into the local index and the drain's `issues` snapshot, so a later
-    stage carrying the same finding — in this drain or a concurrent one — comments instead."""
-    st.update(status="deferred", quota=quota, deferred_until=quota.get("reset_epoch"))
-    next_step = next_step_text(st, step)
-    for f in findings:
-        f["status"] = "deferred"
-    log(f"{st['key']}: deferred at {step} — {quota.get('provider')} {quota.get('cause') or ''} "
-        f"resets {quota.get('reset_at')}")
-    if os.environ.get("ADVANCE_ROADMAP_FOLLOWUP_LINEAR", "1") != "1":
-        return
+
+def sync_deferral_tickets(st, findings, quota, next_step, note, issues=None):
+    """Create/update Linear tickets for a deferral. Sets last_deferral only after sync succeeds.
+
+    A failed update leaves pending_deferral_sync so a later drain can retry without treating the
+    deferral as already recorded (which would suppress identical retries and leave metadata stale)."""
     with TicketIndex() as index:
         attached = set()
         for f in findings:
@@ -589,15 +607,12 @@ def defer(st, findings, quota, step, issues=None):
         for f in findings:
             if f.get("ticket"):
                 ticketed.setdefault(f["ticket"], []).append(f)
-        note = (f"{step}|{quota.get('provider')}|{quota.get('reset_at')}|{st.get('builder_provider')}"
-                f"|{st.get('branch')}|{st.get('pr_url')}")
         if note == st.get("last_deferral"):
             # Same stop, same reset, same branch state: the ticket already says so (unless it is new to this stage).
             ticketed = {k: v for k, v in ticketed.items() if k in attached}
-        st["last_deferral"] = note
-        st["ticket_meta_at"] = time.time()
         owned = set(st.setdefault("owned_tickets", []))
         try:
+            st["ticket_meta_at"] = time.time()
             for ident, fs in ticketed.items():
                 body = followticket.description(st, fs, quota, next_step)
                 if ident in owned:
@@ -618,7 +633,60 @@ def defer(st, findings, quota, step, issues=None):
                                    "labels": {"nodes": [{"name": st["repo"], "parent": {"name": "repo"}}]}})
                 log(f"{st['key']}: filed {ident} for {len(fresh)} deferred finding(s)")
         except followticket.LinearError as e:
+            st["pending_deferral_sync"] = {
+                "note": note, "next_step": next_step,
+                "quota": {k: quota.get(k) for k in ("provider", "reset_at", "reset_epoch", "cause", "role")
+                          if quota.get(k) is not None},
+            }
             report(st, "linear", f"could not ticket the quota deferral: {e}", next_step)
+            return False
+        st["last_deferral"] = note
+        st.pop("pending_deferral_sync", None)
+        return True
+
+
+def defer(st, findings, quota, step, issues=None):
+    """No provider under its gate: ticket the remaining findings (create or update) and wait.
+
+    A ticket this creates goes into the local index and the drain's `issues` snapshot, so a later
+    stage carrying the same finding — in this drain or a concurrent one — comments instead."""
+    st.update(status="deferred", quota=quota, deferred_until=quota.get("reset_epoch"))
+    next_step = next_step_text(st, step)
+    for f in findings:
+        f["status"] = "deferred"
+    log(f"{st['key']}: deferred at {step} — {quota.get('provider')} {quota.get('cause') or ''} "
+        f"resets {quota.get('reset_at')}")
+    if os.environ.get("ADVANCE_ROADMAP_FOLLOWUP_LINEAR", "1") != "1":
+        return
+    sync_deferral_tickets(st, findings, quota, next_step, deferral_note(st, quota, step), issues=issues)
+
+
+def retry_deferral_syncs():
+    """Retry Linear description/comment sync a prior defer left pending after a transient failure."""
+    if os.environ.get("ADVANCE_ROADMAP_FOLLOWUP_LINEAR", "1") != "1":
+        return
+    for st in all_stages():
+        if not st.get("pending_deferral_sync"):
+            continue
+        c = claim_stage(st["key"])
+        if not c:
+            continue
+        try:
+            st = load(st["key"]) or st
+            pending = st.get("pending_deferral_sync")
+            if not pending:
+                continue
+            findings = [f for f in st.get("findings") or [] if f.get("status") == "deferred"]
+            if not findings:
+                findings = list(st.get("findings") or [])
+            quota = pending.get("quota") or st.get("quota") or {}
+            next_step = pending.get("next_step") or next_step_text(st, (st.get("next") or {}).get("step", "build"))
+            note = pending.get("note") or deferral_note(st, quota, (st.get("next") or {}).get("step", "build"))
+            if sync_deferral_tickets(st, findings, quota, next_step, note):
+                log(f"{st['key']}: retried deferral ticket sync")
+            save(st)
+        finally:
+            c.close()
 
 
 def block(st, kind, reason, retry=True):
@@ -797,6 +865,7 @@ def drain(repo=None, origin=None, stage=None, wait_s=0.0, recover=True):
     recover_interrupted()
     issues = recover_tickets() if recover else []
     closed = retry_closes()
+    retry_deferral_syncs()
     if issues and closed:
         issues[:] = [i for i in issues if i.get("identifier") not in closed]
     deadline = time.time() + wait_s
