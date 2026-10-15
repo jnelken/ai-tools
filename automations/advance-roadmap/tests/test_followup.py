@@ -45,7 +45,8 @@ class FollowupTest(unittest.TestCase):
         (self.root / "lib" / "usage.py").write_text(
             f"import runpy, sys\nsys.argv = [{str(STUBS)!r}, 'usage', *sys.argv[1:]]\nrunpy.run_path({str(STUBS)!r}, run_name='__main__')\n")
         for name, tool in (("worker.sh", "worker"), ("review.sh", "review")):
-            (self.root / name).write_text(f'exec {sys.executable} {STUBS} {tool} "$@"\n')
+            (self.root / name).write_text(f'#!/bin/sh\nexec {sys.executable} {STUBS} {tool} "$@"\n')
+            (self.root / name).chmod(0o755)
         self.make_repo("demo")
 
     def tearDown(self):
@@ -213,6 +214,20 @@ class FollowupTest(unittest.TestCase):
         self.assertEqual(tooling["status"], "blocked")
         self.assertEqual(self.report()[-1]["kind"], "unsafe-repo")
 
+    def test_a_conductor_run_dir_counts_once_its_result_exists_and_feeds_the_corpus(self):
+        run = Path(self.tmp.name) / "scratch" / "20261014-090000"
+        run.mkdir(parents=True)
+        self.run_followup("hook", "run-end", "--origin", "conductor-x", "--run-dir", str(run))
+        self.assertIn("1 run(s) of conductor-x have not recorded", self.run_followup("drain", "--stage", "tooling").stdout)
+        result = run.resolve() / "worker-result.json"
+        result.write_text(json.dumps({"outcome": "failed", "repo": "demo", "summary": "builder crashed"}))
+        self.run_followup("drain", "--stage", "tooling")
+        st = self.state("tooling-conductor-x")
+        self.assertTrue(st["scanned"])
+        self.assertIn(str(result), st["corpus"])
+        [f] = [f for f in st["findings"] if f["kind"] == "fragile-tooling"]
+        self.assertEqual(f["evidence"][0]["source"], str(result))
+
     # ── repair lifecycle ──
 
     def test_a_clean_review_with_passing_checks_merges_and_records_the_repair(self):
@@ -301,6 +316,85 @@ class FollowupTest(unittest.TestCase):
         self.run_followup("drain")
         self.assertEqual(self.state(st["key"])["status"], "done")
 
+    def test_a_builder_that_outlives_its_timeout_blocks_every_retry_until_it_exits(self):
+        self.shipped_item("20261014-050000")
+        self.run_followup("hook", "item-done", "--stamp", "20261014-050000")
+        self.py_wrapper(Path(self.tmp.name), "workspaces").rename(self.root / "lib" / "workspaces.py")
+        self.set("stub-worker.json", {"mode": "ok", "sleep": 4})
+        env = {"ADVANCE_ROADMAP_SUPERSET": "1", "ADVANCE_ROADMAP_WORKER_TIMEOUT_MIN": "0.02",
+               "ADVANCE_ROADMAP_WORKER_POLL_S": "0.1"}
+        self.run_followup("drain", env=env)
+        key = "cleanup-20261014-050000"
+        self.assertEqual(self.state(key)["status"], "pending")
+        self.assertIn("still running", self.report()[-1]["reason"])
+        registry = self.root / "inflight" / "demo" / f"followup-{key}.pid"
+        self.assertTrue(registry.exists())   # the shared registry every lane and drain reads
+        out = self.run_followup("drain", env=env).stdout
+        self.assertIn("still running", out)
+        self.assertEqual(len(self.calls("workspaces")), 1)   # no second builder beside the live one
+        deadline = time.time() + 30
+        while not list((self.root / "followups" / key).glob("build-*/worker.exit")) and time.time() < deadline:
+            time.sleep(0.2)
+        self.set("stub-worker.json", {"mode": "ok"})
+        self.run_followup("drain", env=env)
+        self.assertEqual(self.state(key)["status"], "done", self.report())
+        self.assertEqual(len(self.calls("workspaces")), 2)
+        self.assertFalse(registry.exists())
+
+    def test_a_pr_head_that_moved_after_the_review_is_re_reviewed_never_merged(self):
+        self.shipped_item("20261014-050000")
+        self.run_followup("hook", "item-done", "--stamp", "20261014-050000")
+        self.set("stub-gh.json", {"checks": "pass", "deploy": "success", "head": "0" * 40})
+        self.run_followup("drain")
+        st = self.state("cleanup-20261014-050000")
+        self.assertEqual((st["status"], st["next"]["step"]), ("pending", "review"))
+        self.assertIn("is not the reviewed commit", self.report()[-1]["reason"])
+        self.assertFalse(any(c["args"][:2] == ["pr", "merge"] for c in self.calls("gh")))
+        self.set("stub-gh.json", {"checks": "pass", "deploy": "success"})
+        self.run_followup("drain")
+        st = self.state("cleanup-20261014-050000")
+        self.assertEqual(st["status"], "done", self.report())
+        [merge] = [c["args"] for c in self.calls("gh") if c["args"][:2] == ["pr", "merge"]]
+        head = (self.root / "stub-pr-head.txt").read_text().strip()
+        self.assertEqual(merge[merge.index("--match-head-commit") + 1], head)
+        self.assertEqual(len(self.calls("review")), 2)
+
+    def test_a_deploy_api_error_is_never_read_as_no_deploy(self):
+        self.shipped_item("20261014-050000")
+        self.run_followup("hook", "item-done", "--stamp", "20261014-050000")
+        self.set("stub-gh.json", {"checks": "pass", "deploy": "error"})
+        self.run_followup("drain")
+        st = self.state("cleanup-20261014-050000")
+        self.assertEqual((st["status"], st["validation"]["deploy"]), ("pending", "unverified"))
+        self.assertEqual(st["findings"][0]["status"], "open")
+        self.set("stub-gh.json", {"checks": "pass", "deploy": "none"})
+        self.run_followup("drain")
+        st = self.state("cleanup-20261014-050000")
+        self.assertEqual((st["status"], st["validation"]["deploy"]), ("done", "none"))
+        self.assertEqual(len([c for c in self.calls("gh") if c["args"][:2] == ["pr", "merge"]]), 1)
+
+    def test_an_ai_tools_repair_is_not_done_until_this_machine_installs_it(self):
+        self.make_repo("ai-tools")
+        self.shipped_item("20261014-050000", repo="ai-tools")
+        self.run_followup("hook", "item-done", "--stamp", "20261014-050000")
+        home = Path(self.tmp.name) / "ai-home"
+        home.mkdir()
+        script, ran = home / "install.sh", home / "ran"
+        script.write_text(f"#!/bin/sh\necho run >> {ran}\nexit 1\n")
+        script.chmod(0o755)
+        env = {"AI_TOOLS_HOME": str(home), "ADVANCE_ROADMAP_FOLLOWUP_INSTALL": "1"}
+        self.run_followup("drain", env=env)
+        st = self.state("cleanup-20261014-050000")
+        self.assertEqual(st["status"], "pending")
+        self.assertEqual((st["validation"]["deploy"], st["validation"]["install"]), ("success", "install.sh exit 1"))
+        self.assertIn("install failed", self.report()[-1]["reason"])
+        script.write_text(f"#!/bin/sh\necho run >> {ran}\nexit 0\n")
+        self.run_followup("drain", env=env)
+        st = self.state("cleanup-20261014-050000")
+        self.assertEqual((st["status"], st["validation"]["install"]), ("done", "installed"))
+        self.assertEqual(len([c for c in self.calls("gh") if c["args"][:2] == ["pr", "merge"]]), 1)
+        self.assertEqual(ran.read_text().count("run"), 2)
+
     def test_repairs_in_one_repo_are_serialized(self):
         for stamp in ("20261014-050000", "20261014-060000"):
             self.shipped_item(stamp)
@@ -349,6 +443,7 @@ class FollowupTest(unittest.TestCase):
         self.assertIn(st["branch"], t["description"])
         self.assertIn("resets 2026-10-14T15:00:00", t["description"])
         self.assertIn("it resumes at review round 1", t["description"])
+        self.assertIn('"builder_provider": "cursor"', t["description"])
         self.assertEqual(self.calls("review"), [])
         # Same reset on the next drain: still deferred, no second ticket.
         self.run_followup("drain")
@@ -366,6 +461,46 @@ class FollowupTest(unittest.TestCase):
         [w] = self.calls("worker")
         self.assertEqual(w["providers"], "codex claude")
         self.assertEqual(st["status"], "done")
+
+    def test_worker_exit_3_with_every_cli_missing_is_a_local_blocker_not_quota(self):
+        self.shipped_item("20261014-050000")
+        self.run_followup("hook", "item-done", "--stamp", "20261014-050000")
+        self.set("stub-worker.json", {"mode": "missing"})
+        self.run_followup("drain")
+        st = self.state("cleanup-20261014-050000")
+        self.assertEqual(st["status"], "pending")
+        self.assertEqual(self.calls("jlin"), [])
+        self.assertEqual(self.report()[-1]["kind"], "builder")
+        self.assertIn("missing: cursor codex claude", self.report()[-1]["reason"])
+
+    def test_one_finding_in_two_stages_gets_one_ticket_per_drain(self):
+        for stamp in ("20261014-050000", "20261014-060000"):
+            self.shipped_item(stamp)
+            self.run_followup("hook", "item-done", "--stamp", stamp)
+        self.set("stub-usage.json", {"fail": True})
+        self.run_followup("drain")   # scans both, then stops on unknown usage
+        first, second = self.state("cleanup-20261014-050000"), self.state("cleanup-20261014-060000")
+        second["findings"] = [dict(first["findings"][0])]
+        (self.root / "followups" / second["key"] / "state.json").write_text(json.dumps(second))
+        self.set("stub-usage.json", {"worker": {"cursor": "over", "codex": "over", "claude": "over"},
+                                     "reset_at": "2026-10-14T18:00:00", "reset_epoch": time.time() + 600})
+        self.run_followup("drain")
+        self.assertEqual(len(self.calls("jlin")), 1)
+        self.assertEqual({self.state(k)["findings"][0]["ticket"] for k in (first["key"], second["key"])}, {"DEV-900"})
+        comments = [c for c in self.calls("linear") if c["cmd"].startswith("issue comment")]
+        self.assertTrue(any(c["issue"] == "DEV-900" and second["key"] in c["body"] for c in comments), comments)
+        index = json.loads((self.root / "followups" / "tickets.json").read_text())
+        self.assertEqual(index[first["findings"][0]["id"]]["ticket"], "DEV-900")
+
+    def test_a_recovered_pr_with_no_recorded_builder_is_never_reviewed(self):
+        meta = {"key": "cleanup-20261001-000000", "stage": "project-cleanup", "finding_ids": ["aaaaaaaaaaaa"],
+                "branch": "roadmap/followup-cleanup-20261001-000000", "pr_url": "https://github.com/jnelken/demo/pull/3"}
+        self.set("stub-linear.json", {"pages": [[self.meta_ticket("DEV-321", meta)]]})
+        self.run_followup("drain")
+        st = self.state("cleanup-20261001-000000")
+        self.assertEqual(st["status"], "blocked")
+        self.assertEqual(self.report()[-1]["kind"], "unknown-builder")
+        self.assertEqual(self.calls("review"), [])
 
     def test_unknown_usage_goes_to_the_local_report_not_a_ticket(self):
         self.shipped_item("20261014-050000")
@@ -391,12 +526,13 @@ class FollowupTest(unittest.TestCase):
         self.git(repo, "add", "-A")
         self.git(repo, "commit", "-qm", "half")
         self.git(repo, "push", "-q", "origin", "roadmap/followup-cleanup-20261001-000000")
+        (self.root / "stub-pr-head.txt").write_text(self.git(repo, "rev-parse", "HEAD"))
         self.git(repo, "checkout", "-q", "main")
         self.git(repo, "branch", "-q", "-D", "roadmap/followup-cleanup-20261001-000000")
         self.assertTrue(bare.exists())
         meta = {"key": "cleanup-20261001-000000", "stage": "project-cleanup", "finding_ids": ["aaaaaaaaaaaa"],
                 "branch": "roadmap/followup-cleanup-20261001-000000", "pr_url": "https://github.com/jnelken/demo/pull/3",
-                "stamp": "20261001-000000", "item": "Old item"}
+                "stamp": "20261001-000000", "item": "Old item", "builder_provider": "codex"}
         filler = [self.legacy_ticket(f"DEV-{n}", f"Unrelated {n}") for n in range(3)]
         self.set("stub-linear.json", {"pages": [filler, filler, [self.meta_ticket("DEV-321", meta)]]})
         self.shipped_item("20261014-050000")
@@ -407,6 +543,7 @@ class FollowupTest(unittest.TestCase):
         self.assertEqual((old["status"], old["recovered_from"]), ("done", "DEV-321"))
         reviews = self.calls("review")
         self.assertIn("followup-cleanup-20261001-000000", reviews[0]["repo"] + json.dumps(old))
+        self.assertEqual(reviews[0]["worker"], "codex")   # the ticket's builder, so codex never reviews itself
         first_worker = self.calls("worker")[0]
         self.assertNotEqual(first_worker["branch"], "roadmap/followup-cleanup-20261001-000000")  # resumed at review
         lin = [c for c in self.calls("linear") if c["cmd"] != "api"]

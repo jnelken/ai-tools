@@ -303,8 +303,16 @@ def run_builder(st, repo_dir, findings, rnd, chain, review_text):
         st["builder_provider"] = stat["used"]
         st["sessions"].append({"role": "builder", "round": rnd, "provider": stat["used"],
                                "session_id": stat.get("session_id")})
-    if (not stat.get("used") and stat.get("limited")) or rc == 3 or res.get("outcome") == "limit_hit":
-        return "quota", stat.get("quota") or quota_record("worker", stat.get("used"))
+    if (not stat.get("used") and stat.get("limited")) or res.get("outcome") == "limit_hit":
+        q = stat.get("quota") or quota_record("worker", stat.get("used"))
+        if q and q.get("provider"):
+            return "quota", q
+        return "unknown", "the builder stopped on a usage limit, but no quota record names the provider"
+    if rc == 3 and not stat.get("used"):
+        # worker.sh exits 3 whenever no provider ran; only gate/limit evidence makes that quota.
+        missing = " ".join(stat.get("missing") or [])
+        return "failed", (f"no builder CLI could run (missing: {missing})" if missing
+                          else "worker.sh ran no provider and reported no usage gate or limit")
     if res.get("outcome") == "shipped" or res.get("merge_commit"):
         return "failed", "the builder merged on its own; follow-up merges need the runner's clean review"
     validation = res.get("validation") or {}
@@ -339,21 +347,46 @@ def run_in_superset(st, repo_dir, branch, bdir, cmd):
     if p.returncode != 0:
         return None, f"could not create the Superset workspace for {branch}: {(p.stderr or p.stdout).strip()[-300:]}"
     waited, pid = 0.0, None
+    registry = inflight_file(st)
     while not (bdir / "worker.exit").exists():
         time.sleep(WORKER_POLL_S)
         waited += WORKER_POLL_S
         if pid is None and (bdir / "worker.pid").exists():
             pid = int((bdir / "worker.pid").read_text().strip() or 0) or None
+            if pid:
+                # The shared in-flight registry (supervisor.inflight_repos): every lane, thread and
+                # follow-up drain sees a builder that outlives this wait and stays out of the repo.
+                registry.parent.mkdir(parents=True, exist_ok=True)
+                registry.write_text(f"{pid}\n")
         if pid is None and waited >= 180:
             return None, "the workspace terminal never started the builder"
         if pid and not pid_alive(pid) and not (bdir / "worker.exit").exists():
+            registry.unlink(missing_ok=True)
             return None, "the builder's terminal exited without an exit code"
         if waited >= WORKER_TIMEOUT_S:
             return None, f"the builder was still running after {WORKER_TIMEOUT_S / 60:.0f}m"
+    registry.unlink(missing_ok=True)
     try:
         return int((bdir / "worker.exit").read_text().strip()), None
     except ValueError:
         return 1, None
+
+
+def inflight_file(st):
+    return ROOT / "inflight" / st["repo"] / f"followup-{st['key']}.pid"
+
+
+def builder_alive(key):
+    """True while a builder this stage launched is still running (its terminal outlived a drain)."""
+    for pid_file in stage_dir(key).glob("build-*/worker.pid"):
+        if (pid_file.parent / "worker.exit").exists():
+            continue
+        try:
+            if pid_alive(int(pid_file.read_text().strip())):
+                return True
+        except ValueError:
+            continue
+    return False
 
 
 def shell_quote(s):
@@ -371,19 +404,25 @@ def pid_alive(pid):
 # ── review ───────────────────────────────────────────────────────────────────
 
 def run_review(st, repo_dir, rnd):
-    """(verdict, text) from review.sh on the follow-up branch's checkout."""
+    """(verdict, text) from review.sh on the follow-up branch's checkout. The builder's provider
+    must be known (the caller checks): it is what makes review.sh pick a different one."""
     wt = worktree_of(repo_dir, branch_for(st)) or ensure_worktree(st, repo_dir, branch_for(st))
     log_path = stage_dir(st["key"]) / "reviews.jsonl"
     before = len(followscan.read_jsonl(log_path))
     git("-C", str(wt), "fetch", "--quiet", "origin")
-    p = subprocess.run(["/bin/zsh", str(ROOT / "review.sh"), "--repo", str(wt), "--worker", st.get("builder_provider") or "cursor",
+    git("-C", str(wt), "merge", "--ff-only", "--quiet", f"origin/{branch_for(st)}")
+    sha = git("-C", str(wt), "rev-parse", "HEAD").stdout.strip()
+    p = subprocess.run(["/bin/zsh", str(ROOT / "review.sh"), "--repo", str(wt), "--worker", st["builder_provider"],
                         "--round", str(rnd), "--log", str(log_path)], capture_output=True, text=True,
                        env=child_env(st), timeout=3600, stdin=subprocess.DEVNULL)
     rows = followscan.read_jsonl(log_path)[before:]
     row = rows[-1] if rows else {}
     verdict = row.get("verdict") or ("unavailable" if p.returncode == 3 else "error")
+    # review.sh logs a short head; the full SHA it reviewed is what landing must match.
+    reviewed = sha if sha and row.get("head") and sha.startswith(str(row["head"])) else None
     st["validation"]["reviews"].append({"round": rnd, "verdict": verdict, "reviewer": row.get("reviewer"),
-                                        "head": row.get("head")})
+                                        "head": row.get("head"), "sha": reviewed})
+    st["reviewed_sha"] = reviewed if verdict == "clean" else None
     if row.get("reviewer"):
         st["sessions"].append({"role": "reviewer", "round": rnd, "provider": row["reviewer"],
                                "session_id": row.get("session_id")})
@@ -422,25 +461,27 @@ DEPLOY_NAME = re.compile(r"vercel|netlify|deploy", re.I)
 
 
 def deploy_state(slug, sha):
-    """success | failure | pending | None (nothing deploy-looking reported yet)."""
+    """success | failure | pending | None (both APIs answered; nothing deploy-looking yet) | error
+    (an API call failed or answered garbage, so absence is not proven)."""
     states = []
-    p = gh("api", f"repos/{slug}/commits/{sha}/status")
-    try:
-        for s in json.loads(p.stdout).get("statuses") or []:
-            if DEPLOY_NAME.search(s.get("context") or ""):
-                states.append({"success": "success", "pending": "pending"}.get(s.get("state"), "failure"))
-    except (ValueError, AttributeError):
-        pass
-    p = gh("api", f"repos/{slug}/commits/{sha}/check-runs")
-    try:
-        for c in json.loads(p.stdout).get("check_runs") or []:
-            if DEPLOY_NAME.search(c.get("name") or ""):
-                if c.get("status") != "completed":
+    for path, key in ((f"repos/{slug}/commits/{sha}/status", "statuses"),
+                      (f"repos/{slug}/commits/{sha}/check-runs", "check_runs")):
+        p = gh("api", path)
+        try:
+            doc = json.loads(p.stdout) if p.returncode == 0 else None
+            rows = doc.get(key) if isinstance(doc, dict) else None
+        except ValueError:
+            rows = None
+        if not isinstance(rows, list):
+            return "error"
+        for r in rows:
+            if key == "statuses" and DEPLOY_NAME.search(r.get("context") or ""):
+                states.append({"success": "success", "pending": "pending"}.get(r.get("state"), "failure"))
+            elif key == "check_runs" and DEPLOY_NAME.search(r.get("name") or ""):
+                if r.get("status") != "completed":
                     states.append("pending")
                 else:
-                    states.append("success" if c.get("conclusion") in ("success", "neutral", "skipped") else "failure")
-    except (ValueError, AttributeError):
-        pass
+                    states.append("success" if r.get("conclusion") in ("success", "neutral", "skipped") else "failure")
     if not states:
         return None
     if "failure" in states:
@@ -449,44 +490,72 @@ def deploy_state(slug, sha):
 
 
 def verify_deploy(slug, sha, repo_dir):
-    """Step 7b's watch, without fixing forward: success | none | failed | timeout."""
+    """Step 7b's watch, without fixing forward: success | none | failed | timeout | unverified.
+
+    `none` needs DEPLOY_NONE_AFTER_S of successful, empty API answers in a repo with no deploy
+    config; a failed API call restarts that clock, and ending on one is `unverified`."""
     has_config = any((repo_dir / n).exists() for n in ("vercel.json", ".vercel", "netlify.toml"))
     start = time.time()
+    absent_since = None
     while True:
         s = deploy_state(slug, sha)
         if s == "success":
             return "success"
         if s == "failure":
             return "failed"
-        waited = time.time() - start
-        if s is None and not has_config and waited >= DEPLOY_NONE_AFTER_S:
+        now = time.time()
+        absent_since = (absent_since or now) if s is None else None
+        if absent_since is not None and not has_config and now - absent_since >= DEPLOY_NONE_AFTER_S:
             return "none"
-        if waited >= DEPLOY_TIMEOUT_S:
-            return "timeout"
+        if now - start >= DEPLOY_TIMEOUT_S:
+            return "unverified" if s == "error" else "timeout"
         time.sleep(POLL_S)
 
 
 def land(st, repo_dir, findings):
-    """Checks → merge → deploy → close. Returns (ok, reason)."""
-    checks = pr_checks(st["pr_url"])
-    st["validation"]["checks"] = checks
-    if checks not in ("passed", "none"):
-        return False, f"PR checks {checks} on {st['pr_url']}"
-    p = gh("pr", "merge", st["pr_url"], "--merge")
-    if p.returncode != 0 and re.search(r"merge commits? (are|is) not allowed", p.stdout + p.stderr, re.I):
-        p = gh("pr", "merge", st["pr_url"], "--squash")
-    if p.returncode != 0:
-        return False, f"could not merge {st['pr_url']}: {(p.stderr or p.stdout).strip()[:300]}"
-    sha = gh("pr", "view", st["pr_url"], "--json", "mergeCommit", "--jq", ".mergeCommit.oid").stdout.strip()
-    st["merge_commit"] = sha or None
-    deploy = verify_deploy(origin_slug(repo_dir), sha, repo_dir) if sha else "unknown"
-    st["validation"]["deploy"] = deploy
-    sync_root_checkout(repo_dir)
-    if st["repo"] == followscan.TOOLING_REPO:
-        st["validation"]["install"] = install_ai_tools()
-    if deploy not in ("success", "none"):
-        return False, f"merged {sha[:9] if sha else '?'} but the deploy is {deploy}"
-    return True, ""
+    """Checks → merge → deploy → install, resumable after the merge: (ok, reason, retry).
+
+    Fail-closed: the PR merges only at the head the clean review saw, and a stage is never done
+    until its deploy is verified (and, for ai-tools, this machine's install succeeded)."""
+    v = st["validation"]
+    if not st.get("merged"):
+        reviewed = st.get("reviewed_sha")
+        if not reviewed:
+            st["next"] = {"step": "review", "round": (st.get("next") or {}).get("round", 1)}
+            return False, "no clean review recorded for an exact commit; re-reviewing before any merge", True
+        checks = pr_checks(st["pr_url"])
+        v["checks"] = checks
+        if checks not in ("passed", "none"):
+            return False, f"PR checks {checks} on {st['pr_url']}", checks == "pending"
+        head = gh("pr", "view", st["pr_url"], "--json", "headRefOid", "--jq", ".headRefOid")
+        head_sha = head.stdout.strip() if head.returncode == 0 else ""
+        if head_sha != reviewed:
+            st["reviewed_sha"] = None
+            st["next"] = {"step": "review", "round": (st.get("next") or {}).get("round", 1)}
+            return False, (f"PR head {head_sha[:9] or 'unreadable'} is not the reviewed commit {reviewed[:9]}; "
+                           "re-reviewing before any merge"), True
+        p = gh("pr", "merge", st["pr_url"], "--merge", "--match-head-commit", reviewed)
+        if p.returncode != 0 and re.search(r"merge commits? (are|is) not allowed", p.stdout + p.stderr, re.I):
+            p = gh("pr", "merge", st["pr_url"], "--squash", "--match-head-commit", reviewed)
+        if p.returncode != 0:
+            return False, f"could not merge {st['pr_url']}: {(p.stderr or p.stdout).strip()[:300]}", False
+        st["merged"] = True
+    if not st.get("merge_commit"):
+        sha = gh("pr", "view", st["pr_url"], "--json", "mergeCommit", "--jq", ".mergeCommit.oid").stdout.strip()
+        if not sha:
+            return False, f"merged {st['pr_url']} but could not read its merge commit", True
+        st["merge_commit"] = sha
+        sync_root_checkout(repo_dir)
+    sha = st["merge_commit"]
+    if v.get("deploy") not in ("success", "none"):
+        v["deploy"] = verify_deploy(origin_slug(repo_dir), sha, repo_dir)
+        if v["deploy"] not in ("success", "none"):
+            return False, f"merged {sha[:9]} but the deploy is {v['deploy']}", v["deploy"] in ("timeout", "unverified")
+    if st["repo"] == followscan.TOOLING_REPO and v.get("install") not in ("installed", "skipped"):
+        v["install"] = install_ai_tools()
+        if v["install"] not in ("installed", "skipped"):
+            return False, f"merged {sha[:9]} and deployed, but this machine's ai-tools install failed: {v['install']}", True
+    return True, "", False
 
 
 def sync_root_checkout(repo_dir):

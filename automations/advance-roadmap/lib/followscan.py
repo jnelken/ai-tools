@@ -155,14 +155,32 @@ def run_rows(root, stamps):
     return {r["stamp"]: r for r in read_jsonl(Path(root) / "runs.jsonl") if r.get("stamp") in wanted}
 
 
-def tooling_scan(root, stamps, stages=()):
+def run_dir(root, stamp, run_dirs=None):
+    return Path((run_dirs or {}).get(stamp) or Path(root) / "runs" / stamp)
+
+
+def external_row(stamp, run):
+    """A runs.jsonl-shaped row for a run that never wrote one (a conductor session's), from its
+    own worker result: (row, the file it came from)."""
+    path = run / "worker-result.json"
+    result = read_json(path) or {}
+    return {"stamp": stamp, "outcome": result.get("outcome"), "detail": (result.get("summary") or "")[:200],
+            "worker": result.get("provider")}, path
+
+
+def tooling_scan(root, stamps, stages=(), run_dirs=None):
     """Findings for one finished batch/run: what in the automation itself got in the way.
 
     `stages` are the follow-up stage states this run's cleanup started (their blockers count as
-    friction too). Each recognition test names the moment and the file it was read from."""
+    friction too); `run_dirs` maps a stamp to a run dir outside root/runs (no runs.jsonl row).
+    Each recognition test names the moment and the file it was read from."""
     root = Path(root)
     stage, repo = "tooling-hardening", TOOLING_REPO
     rows = run_rows(root, stamps)
+    row_src = {s: root / "runs.jsonl" for s in rows}
+    for stamp in stamps:
+        if stamp not in rows and stamp in (run_dirs or {}):
+            rows[stamp], row_src[stamp] = external_row(stamp, run_dir(root, stamp, run_dirs))
     groups = {}   # kind/key → finding being built, so one cause across lanes is one finding
     quiet = []
 
@@ -173,8 +191,9 @@ def tooling_scan(root, stamps, stages=()):
         f["evidence"].append(ev)
 
     for stamp in stamps:
-        run = root / "runs" / stamp
+        run = run_dir(root, stamp, run_dirs)
         row = rows.get(stamp) or {}
+        src = row_src.get(stamp, root / "runs.jsonl")
         orch_path = run / "orchestrator-result.json"
         orch = read_json(orch_path) or {}
         planner_failed = bool(orch.get("planner_error") or orch.get("parse_error"))
@@ -184,7 +203,7 @@ def tooling_scan(root, stamps, stages=()):
             hit("misfiring-automation", "worker-after-failed-plan",
                 "a worker ran after the planner returned no usable plan",
                 "Stop before worker dispatch when ORCHESTRATOR_RESULT_JSON is missing or invalid.",
-                evidence(root / "runs.jsonl", f'{stamp}: action={row.get("action")} worker={row.get("worker")} '
+                evidence(src, f'{stamp}: action={row.get("action")} worker={row.get("worker")} '
                                               f'parse_error={orch.get("parse_error") or orch.get("planner_error")}'))
         # 2. Wrong knowledge recorded: quota exhaustion reported (and alerted) as an error.
         if row.get("outcome") in ERROR_OUTCOMES and banner:
@@ -197,7 +216,7 @@ def tooling_scan(root, stamps, stages=()):
             detail = row.get("detail") or row.get("outcome")
             hit("fragile-tooling", re.sub(r"\d+", "N", detail), f"runs ended {row['outcome']}: {detail[:100]}",
                 "Find the failure signature in the run log and make the step fail safe or retry it.",
-                evidence(root / "runs.jsonl", f"{stamp}: {row['outcome']} — {detail}"))
+                evidence(src, f"{stamp}: {row['outcome']} — {detail}"))
         # 4. A review the worker could not read.
         for r in read_jsonl(run / "reviews.jsonl"):
             if r.get("verdict") == "unparsed":
@@ -209,7 +228,7 @@ def tooling_scan(root, stamps, stages=()):
         if row.get("outcome") in SHIPPED and str(row.get("detail") or "").startswith("merged"):
             hit("misfiring-automation", "merged-unreviewed", "an item merged without a completed review",
                 "Find why the reviewer was unavailable and make the worker wait or defer instead.",
-                evidence(root / "runs.jsonl", f"{stamp}: {row['detail']}"))
+                evidence(src, f"{stamp}: {row['detail']}"))
         # 6. A builder touched the shared stash.
         for path in (run / "worker-output.log", root / "logs" / f"run-{stamp}.log"):
             m = STASH.search(read_text(path))
@@ -224,19 +243,19 @@ def tooling_scan(root, stamps, stages=()):
             quiet.append(non_finding(f"{stamp} paused for quota",
                                      "a quota pause that names its provider and reset is the gate working, "
                                      "not a tooling failure",
-                                     [evidence(root / "runs.jsonl", f'{stamp}: {row["outcome"]} {q.get("provider")} '
+                                     [evidence(src, f'{stamp}: {row["outcome"]} {q.get("provider")} '
                                                                     f'resets {q.get("reset_at")}')]))
         elif row.get("outcome") == "skipped-unchanged":
             quiet.append(non_finding(f"{stamp} skipped unchanged", "the unchanged-world gate saved a planner call",
-                                     [evidence(root / "runs.jsonl", f"{stamp}: {row.get('detail')}")]))
+                                     [evidence(src, f"{stamp}: {row.get('detail')}")]))
         elif row.get("action") in ("blocked_no_item", "nothing_qualified") and not planner_failed \
                 and row.get("outcome") not in ERROR_OUTCOMES:
             quiet.append(non_finding(f"{stamp} found no work", "a valid no-work plan with its bookkeeping",
-                                     [evidence(root / "runs.jsonl", f"{stamp}: {row.get('outcome')}")]))
+                                     [evidence(src, f"{stamp}: {row.get('outcome')}")]))
         if row.get("worker_result_source") == "stdout-fence":
             hit("fragile-tooling", "stdout-fence", "a worker skipped its result file",
                 "Make the worker write worker-result.json before its summary.",
-                evidence(root / "runs.jsonl", f"{stamp}: worker_result_source=stdout-fence"))
+                evidence(src, f"{stamp}: worker_result_source=stdout-fence"))
 
     # 7. Saved no-work verdicts whose text is a limit banner (cached as if triage ran).
     for path in sorted((root / "batch-verdicts").glob("*.json")):
@@ -267,12 +286,12 @@ def tooling_scan(root, stamps, stages=()):
     return findings, quiet
 
 
-def corpus_files(root, stamps):
+def corpus_files(root, stamps, run_dirs=None):
     """Every file the tooling corpus reads, for an analyst's evidence check."""
     root = Path(root)
     files = [root / "runs.jsonl"]
     for stamp in stamps:
-        run = root / "runs" / stamp
+        run = run_dir(root, stamp, run_dirs)
         files += [run / n for n in ("orchestrator-result.json", "worker-result.json", "worker-status.json",
                                     "reviews.jsonl", "worker-output.log")]
         files.append(root / "logs" / f"run-{stamp}.log")

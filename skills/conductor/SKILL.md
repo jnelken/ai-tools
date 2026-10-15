@@ -89,6 +89,7 @@ don't poll):
   --result-file "<dir>/worker-result.json" --status-file "<dir>/worker-status.json"
 ```
 
+Name `<dir>` for the run's stamp (`<scratch>/<stamp>/`); section 4's follow-ups find the run by it.
 `--providers cursor` pins the builder to Cursor. If Cursor is over its usage gate (95% of its
 pool), limited or missing, `worker.sh` exits `3` and says why in the status file's `limited` /
 `missing` lists; **ask the user** before failing over (`--providers "codex claude"`) —
@@ -125,8 +126,11 @@ The scheduled batch runs its follow-ups itself; a conductor session runs the sam
    holds its `worker-result.json` and `reviews.jsonl`:
    `python3 $F hook item-done --stamp <stamp> --run-dir <dir> --origin conductor-<session stamp>`.
 2. When you are done dispatching for the session (every builder you started has exited), queue one
-   tooling pass over the session's runs:
-   `python3 $F hook run-end --origin conductor-<session stamp> --stamp <stamp> [--stamp …]`.
+   tooling pass over every run of the session — shipped or not — by its run dir:
+   `python3 $F hook run-end --origin conductor-<session stamp> --run-dir <dir> [--run-dir …]`.
+   Conductor runs write no `runs.jsonl` row, so the tooling pass reads each dir directly and counts
+   a run finished once its `worker-result.json` exists. Each dir must be named for its run's stamp
+   (`<scratch>/<stamp>/`, as in section 2) — that name is how the pass matches it to its cleanup.
 3. Drain: `python3 $F drain --origin conductor-<session stamp> --wait-s 600` (run it in the
    background; it can take as long as a builder). It resumes prior follow-up tickets first, repairs
    through `worker.sh` + `review.sh` on its own branches, and merges only on passing checks and a

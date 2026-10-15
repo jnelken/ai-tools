@@ -7,7 +7,8 @@ next step. Every one has exactly one repo/* label (created through jnelken-linea
 fenced metadata block that later runs — on any machine — read back:
 
     ```advance-roadmap-followup
-    {"workflow": "advance-roadmap-followup", "key": "...", "stage": "...", "finding_ids": [...], ...}
+    {"workflow": "advance-roadmap-followup", "key": "...", "stage": "...", "finding_ids": [...],
+     "branch": "...", "pr_url": "...", "builder_provider": "...", ...}
     ```
 
 Older tickets written before the block existed are matched by finding text instead, so fresh
@@ -138,7 +139,9 @@ def description(stage, findings, quota=None, next_step="", validation=None):
     meta = {"workflow": WORKFLOW, "key": stage["key"], "stage": stage["stage"], "repo": stage["repo"],
             "origin": stage.get("origin"), "stamp": stage.get("stamp"), "item": stage.get("item"),
             "finding_ids": [f["id"] for f in findings], "branch": stage.get("branch"),
-            "pr_url": stage.get("pr_url")}
+            "pr_url": stage.get("pr_url"),
+            # Which provider built the branch: the reviewer on another machine must be a different one.
+            "builder_provider": stage.get("builder_provider")}
     q = quota or {}
     parts = [
         f"advance-roadmap's {stage['stage']} follow-up for "

@@ -28,7 +28,8 @@ follow-up tickets from earlier runs are fetched (all pages) and reconciled, and 
 resumed first.
 
   followup.py hook item-done --stamp S [--run-dir D] [--origin O]   queue S's cleanup (idempotent)
-  followup.py hook run-end --origin O [--stamp S ...]              queue O's tooling stage
+  followup.py hook run-end --origin O [--stamp S ...] [--run-dir D ...]   queue O's tooling stage
+                                                                   (--run-dir: a run outside $ROOT/runs)
   followup.py drain [--repo R] [--origin O] [--wait-s N]           run what is ready, prior work first
   followup.py scan --stage cleanup|tooling (--stamp S | --origin O --stamp S ...)   dry run, no repairs
   followup.py status [--origin O] [--json]
@@ -52,12 +53,13 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 sys.path.insert(0, str(HERE / "lib"))
+import followrepair  # noqa: E402
 import followscan  # noqa: E402
 import followticket  # noqa: E402
 import supervisor as shared  # noqa: E402
-from followrepair import (FOLLOWUP_ENV, MAX_ROUNDS, POLL_S, ROOT, STATE, feasibility, gate_one,  # noqa: E402
-                          land, log, now_iso, quota_record, read_json, repo_path, run_builder,
-                          run_review, safe_repo, stage_dir, write_json)
+from followrepair import (FOLLOWUP_ENV, MAX_ROUNDS, POLL_S, ROOT, STATE, builder_alive,  # noqa: E402
+                          feasibility, gate_one, land, log, now_iso, quota_record, read_json, repo_path,
+                          run_builder, run_review, safe_repo, stage_dir, write_json)
 
 SHIPPED = ("shipped", "shipped-deploy-failed")
 STAGES = {"cleanup": "project-cleanup", "tooling": "tooling-hardening"}
@@ -165,12 +167,22 @@ def hook_item_done(stamp, run_dir=None, origin=None):
     return 0
 
 
-def hook_run_end(origin, stamps):
+def hook_run_end(origin, stamps, run_dirs=()):
+    """Queue the tooling pass. `run_dirs` are runs outside $ROOT/runs (a conductor session's), each
+    named for its stamp; such a run counts as finished once its worker-result.json exists."""
     if recursion_suppressed():
         return 0
+    external = {}
+    for d in run_dirs:
+        path = Path(d).expanduser().resolve()
+        if not re.fullmatch(r"[A-Za-z0-9._-]+", path.name):
+            print(f"run-end: {d}: a run dir must be named for its stamp", file=sys.stderr)
+            return 2
+        external[path.name] = str(path)
+    children = list(dict.fromkeys([*stamps, *external]))
     st = new_stage(f"tooling-{origin}", STAGES["tooling"], followscan.TOOLING_REPO, origin,
-                   children=list(dict.fromkeys(stamps)))
-    print(f"queued tooling-{origin} ({len(stamps)} run(s))" if st else f"tooling-{origin} already queued")
+                   children=children, run_dirs=external)
+    print(f"queued tooling-{origin} ({len(children)} run(s))" if st else f"tooling-{origin} already queued")
     return 0
 
 
@@ -211,7 +223,9 @@ def ready(st):
         return quiescent(st["repo"])
     children = st.get("children") or []
     rows = shared.run_records(set(children))
-    running = [s for s in children if s not in rows]
+    external = st.get("run_dirs") or {}
+    running = [s for s in children if s not in rows
+               and not (s in external and (Path(external[s]) / "worker-result.json").exists())]
     stale = age_s(st) >= STALE_S
     if running and not stale:
         return False, f"{len(running)} run(s) of {st['origin']} have not recorded a result"
@@ -262,16 +276,36 @@ def recover_interrupted():
             c.close()
 
 
-def builder_alive(key):
-    for pid_file in stage_dir(key).glob("build-*/worker.pid"):
-        if (pid_file.parent / "worker.exit").exists():
-            continue
-        try:
-            os.kill(int(pid_file.read_text().strip()), 0)
-            return True
-        except (OSError, ValueError):
-            continue
-    return False
+# ── the local finding → ticket index ─────────────────────────────────────────
+
+class TicketIndex:
+    """followups/tickets.json under a blocking lock: which open ticket tracks each finding id.
+
+    The drain's Linear snapshot is read once, so a ticket filed mid-drain — by this drain or a
+    concurrent one — is only visible here. Hold it across the check-then-create."""
+
+    def __init__(self):
+        STATE.mkdir(parents=True, exist_ok=True)
+        self.fh = open(STATE / "tickets.lock", "a")
+        fcntl.lockf(self.fh, fcntl.LOCK_EX)
+        doc = read_json(STATE / "tickets.json")
+        self.entries = doc if isinstance(doc, dict) else {}
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        write_json(STATE / "tickets.json", self.entries)
+        self.fh.close()
+
+    def ticket(self, fid):
+        return (self.entries.get(fid) or {}).get("ticket")
+
+    def add(self, fid, ident, key):
+        self.entries[fid] = {"ticket": ident, "key": key, "at": time.time()}
+
+    def drop_tickets(self, idents):
+        self.entries = {k: e for k, e in self.entries.items() if e.get("ticket") not in idents}
 
 
 # ── prior tickets ────────────────────────────────────────────────────────────
@@ -283,11 +317,16 @@ def recover_tickets():
     which is recorded locally and never stops a repair."""
     if os.environ.get("ADVANCE_ROADMAP_FOLLOWUP_LINEAR", "1") != "1":
         return []
+    fetched_at = time.time()
     try:
         issues = followticket.fetch_open()
     except followticket.LinearError as e:
         report(None, "linear", f"could not read open follow-up tickets: {e}")
         return None
+    open_ids = {i.get("identifier") for i in issues}
+    with TicketIndex() as index:
+        index.entries = {k: e for k, e in index.entries.items()
+                         if e.get("ticket") in open_ids or (e.get("at") or 0) >= fetched_at}
     for issue, meta in followticket.followup_tickets(issues):
         ident = issue.get("identifier")
         key = meta.get("key")
@@ -301,6 +340,7 @@ def recover_tickets():
             if st is None:
                 continue
             st.update(status="deferred", branch=meta.get("branch"), pr_url=meta.get("pr_url"), scanned=True,
+                      builder_provider=meta.get("builder_provider"),
                       findings=[{"id": fid, "stage": st["stage"], "repo": st["repo"], "kind": "ticket",
                                  "title": issue.get("title"), "fix": f"see {ident}", "status": "deferred",
                                  "ticket": ident, "evidence": [{"source": ident, "quote": issue.get("title")}]}
@@ -310,6 +350,9 @@ def recover_tickets():
             save(st)
             continue
         changed = False
+        if not st.get("builder_provider") and meta.get("builder_provider"):
+            st["builder_provider"] = meta["builder_provider"]
+            changed = True
         for f in st.get("findings") or []:
             if f["id"] in (meta.get("finding_ids") or []) and f.get("ticket") != ident:
                 f["ticket"] = ident
@@ -361,8 +404,8 @@ def scan(st):
     else:
         children = st.get("children") or []
         cleanups = [s for s in all_stages() if s.get("stamp") in children]
-        findings, quiet = followscan.tooling_scan(ROOT, children, cleanups)
-        files = followscan.corpus_files(ROOT, children)
+        findings, quiet = followscan.tooling_scan(ROOT, children, cleanups, st.get("run_dirs"))
+        files = followscan.corpus_files(ROOT, children, st.get("run_dirs"))
     more, rejected = analyze(st, findings, files)
     st["findings"] = findings + more
     st["non_findings"] = quiet + rejected
@@ -463,8 +506,11 @@ def next_step_text(st, step):
             f"after the reset: it resumes at {step}{where}{pr}.")
 
 
-def defer(st, findings, quota, step):
-    """No provider under its gate: ticket the remaining findings (create or update) and wait."""
+def defer(st, findings, quota, step, issues=None):
+    """No provider under its gate: ticket the remaining findings (create or update) and wait.
+
+    A ticket this creates goes into the local index and the drain's `issues` snapshot, so a later
+    stage carrying the same finding — in this drain or a concurrent one — comments instead."""
     st.update(status="deferred", quota=quota, deferred_until=quota.get("reset_epoch"))
     next_step = next_step_text(st, step)
     for f in findings:
@@ -473,26 +519,38 @@ def defer(st, findings, quota, step):
         f"resets {quota.get('reset_at')}")
     if os.environ.get("ADVANCE_ROADMAP_FOLLOWUP_LINEAR", "1") != "1":
         return
-    ticketed = {}
-    for f in findings:
-        if f.get("ticket"):
-            ticketed.setdefault(f["ticket"], []).append(f)
-    note = f"{step}|{quota.get('provider')}|{quota.get('reset_at')}"
-    if note == st.get("last_deferral"):
-        ticketed = {}   # same stop, same reset: the ticket already says so
-    st["last_deferral"] = note
-    try:
-        for ident, fs in ticketed.items():
-            followticket.comment(ident, "advance-roadmap follow-up deferred again for quota.\n\n"
-                                 + followticket.description(st, fs, quota, next_step))
-        fresh = [f for f in findings if not f.get("ticket")]
-        if fresh:
-            ident = followticket.create(st, fresh, quota, next_step)
-            for f in fresh:
-                f["ticket"] = ident
-            log(f"{st['key']}: filed {ident} for {len(fresh)} deferred finding(s)")
-    except followticket.LinearError as e:
-        report(st, "linear", f"could not ticket the quota deferral: {e}", next_step)
+    with TicketIndex() as index:
+        attached = set()
+        for f in findings:
+            if not f.get("ticket") and index.ticket(f["id"]):
+                f["ticket"] = index.ticket(f["id"])
+                attached.add(f["ticket"])
+        ticketed = {}
+        for f in findings:
+            if f.get("ticket"):
+                ticketed.setdefault(f["ticket"], []).append(f)
+        note = f"{step}|{quota.get('provider')}|{quota.get('reset_at')}"
+        if note == st.get("last_deferral"):
+            # Same stop, same reset: the ticket already says so (unless it is new to this stage).
+            ticketed = {k: v for k, v in ticketed.items() if k in attached}
+        st["last_deferral"] = note
+        try:
+            for ident, fs in ticketed.items():
+                followticket.comment(ident, "advance-roadmap follow-up deferred again for quota.\n\n"
+                                     + followticket.description(st, fs, quota, next_step))
+            fresh = [f for f in findings if not f.get("ticket")]
+            if fresh:
+                ident = followticket.create(st, fresh, quota, next_step)
+                for f in fresh:
+                    f["ticket"] = ident
+                    index.add(f["id"], ident, st["key"])
+                if issues is not None:
+                    issues.append({"identifier": ident, "title": followticket.title_for(st, fresh),
+                                   "description": followticket.description(st, fresh, quota, next_step),
+                                   "labels": {"nodes": [{"name": st["repo"], "parent": {"name": "repo"}}]}})
+                log(f"{st['key']}: filed {ident} for {len(fresh)} deferred finding(s)")
+        except followticket.LinearError as e:
+            report(st, "linear", f"could not ticket the quota deferral: {e}", next_step)
 
 
 def block(st, kind, reason, retry=True):
@@ -521,14 +579,19 @@ def finish(st, findings):
     closing = (f"Fixed by advance-roadmap follow-up `{st['key']}`: PR {st.get('pr_url')}, merge "
                f"`{st.get('merge_commit')}`, deploy {st['validation'].get('deploy')}; "
                f"{followticket.render_validation(st.get('validation'))}.")
+    closed = set()
     for ident in sorted({f["ticket"] for f in findings if f.get("ticket")}):
         if os.environ.get("ADVANCE_ROADMAP_FOLLOWUP_LINEAR", "1") != "1":
             break
         try:
             followticket.close(ident, closing)
+            closed.add(ident)
             log(f"{st['key']}: closed {ident}")
         except followticket.LinearError as e:
             report(st, "linear", f"merged and deployed, but could not close {ident}: {e}")
+    if closed:
+        with TicketIndex() as index:
+            index.drop_tickets(closed)
 
 
 def process(st, issues):
@@ -548,19 +611,22 @@ def process(st, issues):
     if not repo_dir:
         block(st, "unsafe-repo", why, retry=False)
         return
-    lock = take_repo_lock(st["repo"])
-    if not lock.ok:
+    busy = ("its builder from an earlier drain is still running" if builder_alive(st["key"])
+            else "a worker or follow-up builder is still running in it" if st["repo"] in shared.inflight_repos(ROOT)
+            else None)
+    lock = None if busy else take_repo_lock(st["repo"])
+    if busy or not lock.ok:
         st["status"] = "pending"
         st["attempts"] -= 1   # not an attempt: someone else is in the repo
-        log(f"{st['key']}: {st['repo']} is busy; waiting")
+        log(f"{st['key']}: {st['repo']} is busy ({busy or 'its repo lock is held'}); waiting")
         return
     try:
-        repair(st, repo_dir, todo)
+        repair(st, repo_dir, todo, issues)
     finally:
         lock.close()
 
 
-def repair(st, repo_dir, todo):
+def repair(st, repo_dir, todo, issues=None):
     nxt = st.get("next") or {"step": "build", "round": 1}
     while True:
         st["next"] = nxt
@@ -571,24 +637,31 @@ def repair(st, repo_dir, todo):
             if kind == "unknown":
                 return block(st, "unknown-usage", detail)
             if kind == "quota":
-                return defer(st, todo, detail, f"builder round {rnd}")
+                return defer(st, todo, detail, f"builder round {rnd}", issues)
             kind, detail = run_builder(st, repo_dir, todo, rnd, detail, nxt.get("review_text"))
             if kind == "quota":
-                return defer(st, todo, detail or {}, f"builder round {rnd}")
+                return defer(st, todo, detail, f"builder round {rnd}", issues)
+            if kind == "unknown":
+                return block(st, "unknown-usage", detail)
             if kind != "ok":
                 return block(st, "builder", detail, retry="merged on its own" not in detail)
             nxt = {"step": "review", "round": rnd}
         elif step == "review":
-            kind, detail = feasibility(st, "review", st.get("builder_provider") or "cursor")
+            if st.get("builder_provider") not in followrepair.REVIEWERS:
+                return block(st, "unknown-builder",
+                             f"which provider built {st.get('branch') or 'the branch'} is not recorded, so no "
+                             "independent reviewer can be chosen; a human must name it (builder_provider in "
+                             "state.json) or close the PR", retry=False)
+            kind, detail = feasibility(st, "review", st["builder_provider"])
             if kind == "unknown":
                 return block(st, "unknown-usage", detail)
             if kind == "quota":
-                return defer(st, todo, detail, f"review round {rnd}")
+                return defer(st, todo, detail, f"review round {rnd}", issues)
             verdict, text = run_review(st, repo_dir, rnd)
             if verdict == "unavailable":
                 q = quota_record("reviewer")
                 if q and q.get("provider"):
-                    return defer(st, todo, q, f"review round {rnd}")
+                    return defer(st, todo, q, f"review round {rnd}", issues)
                 return block(st, "review-unavailable", "every reviewer was at capacity or missing")
             if verdict == "error":
                 return block(st, "review", f"review.sh failed: {text}")
@@ -601,9 +674,9 @@ def repair(st, repo_dir, todo):
                                            f"branch {st.get('branch')} and PR {st.get('pr_url')} are left for a human",
                              retry=False)
         else:
-            ok, reason = land(st, repo_dir, todo)
+            ok, reason, retry = land(st, repo_dir, todo)
             if not ok:
-                return block(st, "land", reason, retry="checks pending" in reason or "timeout" in reason)
+                return block(st, "land", reason, retry=retry)
             return finish(st, todo)
 
 
@@ -719,7 +792,8 @@ def main(argv=None):
     h = sub.add_parser("hook")
     h.add_argument("event", choices=["item-done", "run-end"])
     h.add_argument("--stamp", action="append", default=[])
-    h.add_argument("--run-dir")
+    h.add_argument("--run-dir", action="append", default=[], dest="run_dir_list",
+                   help="item-done: the run's dir (once); run-end: a finished run outside $ROOT/runs, named for its stamp")
     h.add_argument("--origin")
     d = sub.add_parser("drain")
     d.add_argument("--repo")
@@ -737,12 +811,12 @@ def main(argv=None):
     a = p.parse_args(argv)
     if a.cmd == "hook":
         if a.event == "item-done":
-            if len(a.stamp) != 1:
-                p.error("item-done takes exactly one --stamp")
-            return hook_item_done(a.stamp[0], a.run_dir, a.origin)
+            if len(a.stamp) != 1 or len(a.run_dir_list) > 1:
+                p.error("item-done takes exactly one --stamp and at most one --run-dir")
+            return hook_item_done(a.stamp[0], (a.run_dir_list or [None])[0], a.origin)
         if not a.origin or not re.fullmatch(r"[A-Za-z0-9._-]+", a.origin):
             p.error("run-end needs --origin (letters, digits, . _ -)")
-        return hook_run_end(a.origin, a.stamp)
+        return hook_run_end(a.origin, a.stamp, a.run_dir_list)
     if a.cmd == "drain":
         if recursion_suppressed():
             return 0

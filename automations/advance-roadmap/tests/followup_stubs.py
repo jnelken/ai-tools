@@ -8,6 +8,7 @@
   followup_stubs.py linear ...    linear: paginated issues from $ROOT/stub-linear.json
   followup_stubs.py jlin ...      jlin.py new: files DEV-900
   followup_stubs.py codex ...     codex exec -o FILE: the analyst answer in $ROOT/stub-analyst.txt
+  followup_stubs.py workspaces .. lib/workspaces.py launch: a worktree, the command run detached
 
 Every call is appended to $ROOT/stub-calls.jsonl. Nothing here reaches GitHub or Linear.
 """
@@ -83,6 +84,9 @@ def worker(args):
                   "quota": {"role": "worker", "provider": "cursor", "reset_epoch": time.time() + 3600,
                             "reset_at": "2026-10-14T12:00:00", "cause": "You've hit your usage limit"}}
         rc = 3
+    elif w.get("mode") == "missing":   # worker.sh with no CLI installed: exit 3, nothing gated
+        status = {"used": None, "exit": 3, "limited": [], "missing": ["cursor", "codex", "claude"], "quota": None}
+        rc = 3
     else:
         wt = os.environ["SUPERSET_WORKSPACE_PATH"]
         n = len(list(Path(wt).glob("fix-*.txt")))
@@ -90,6 +94,7 @@ def worker(args):
         git(wt, "add", "-A")
         git(wt, "commit", "-qm", f"follow-up fix {n}")
         git(wt, "push", "-q", "-u", "origin", orch["branch"])
+        (ROOT / "stub-pr-head.txt").write_text(git(wt, "rev-parse", "HEAD"))
         used = (opt(args, "--providers") or "cursor").split()[0]
         status = {"used": used, "session_id": f"{used}-sess-{n}"}
         result = {"outcome": w.get("outcome", "blocked-branch-left"), "branch": orch["branch"],
@@ -116,10 +121,20 @@ def review(args):
         sys.exit(3)
     verdicts = r["verdicts"]
     verdict = verdicts[min(rnd, len(verdicts)) - 1]
+    head = git(opt(args, "--repo"), "rev-parse", "--short", "HEAD")
     with open(opt(args, "--log"), "a") as f:
-        f.write(json.dumps({"round": rnd, "reviewer": "codex", "verdict": verdict, "head": "abc",
+        f.write(json.dumps({"round": rnd, "reviewer": "codex", "verdict": verdict, "head": head,
                             "session_id": f"codex-sess-{rnd}"}) + "\n")
     print(f"VERDICT: {verdict}\n- finding {rnd}" if verdict != "clean" else "VERDICT: clean")
+
+
+def pr_head(g):
+    if g.get("head"):
+        return g["head"]
+    try:
+        return (ROOT / "stub-pr-head.txt").read_text().strip()
+    except OSError:
+        return ""
 
 
 def gh(args):
@@ -131,16 +146,51 @@ def gh(args):
             sys.exit(1)
         sys.exit(0 if g["checks"] == "pass" else 1)
     if args[:2] == ["pr", "merge"]:
+        want = opt(args, "--match-head-commit")
+        if want and want != pr_head(g):
+            print("GraphQL: Head branch was modified. Review and try the merge again.", file=sys.stderr)
+            sys.exit(1)
         return
     if args[:2] == ["pr", "view"]:
-        print("f" * 40)
+        print(pr_head(g) if "headRefOid" in args else "f" * 40)
         return
+    deploy = g["deploy"]
+    if isinstance(deploy, list):   # one reading per status call, the last repeating
+        n = sum(1 for c in calls("gh") if c["args"][:1] == ["api"] and c["args"][1].endswith("/status"))
+        deploy = deploy[min(n, len(deploy)) - 1]
+    if args[0] == "api" and deploy == "error":
+        print("HTTP 502: Bad Gateway", file=sys.stderr)
+        sys.exit(1)
     if args[0] == "api" and args[1].endswith("/status"):
-        state = {"success": "success", "failure": "failure"}.get(g["deploy"])
+        state = {"success": "success", "failure": "failure"}.get(deploy)
         print(json.dumps({"statuses": [{"context": "Vercel", "state": state}] if state else []}))
         return
     if args[0] == "api":
         print(json.dumps({"check_runs": []}))
+
+
+def calls(tool):
+    try:
+        rows = [json.loads(l) for l in (ROOT / "stub-calls.jsonl").read_text().splitlines()]
+    except OSError:
+        return []
+    return [r for r in rows if r["tool"] == tool]
+
+
+def workspaces(args):
+    """lib/workspaces.py launch: a worktree for the branch, the command started detached in it."""
+    repo, branch, cmd = opt(args, "--repo"), opt(args, "--branch"), opt(args, "--command")
+    note("workspaces", branch=branch)
+    wt = Path(os.environ["ADVANCE_ROADMAP_FOLLOWUP_WORKTREES"]) / ("ws-" + branch.replace("/", "-"))
+    if not wt.exists():
+        has = subprocess.run(["git", "-C", repo, "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}"],
+                             capture_output=True).returncode == 0
+        add = [str(wt), branch] if has else ["-b", branch, str(wt), "origin/main"]
+        subprocess.run(["git", "-C", repo, "worktree", "add", "-q", *add], check=True, capture_output=True)
+    subprocess.Popen(["/bin/zsh", "-c", cmd], env={**os.environ, "SUPERSET_WORKSPACE_PATH": str(wt)},
+                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                     start_new_session=True)
+    Path(opt(args, "--out")).write_text(json.dumps({"path": str(wt)}))
 
 
 def linear(args):
@@ -172,4 +222,4 @@ def codex(args):
 
 if __name__ == "__main__":
     {"usage": usage, "worker": worker, "review": review, "gh": gh, "linear": linear, "jlin": jlin,
-     "codex": codex}[sys.argv[1]](sys.argv[2:])
+     "codex": codex, "workspaces": workspaces}[sys.argv[1]](sys.argv[2:])
