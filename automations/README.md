@@ -161,20 +161,24 @@ Codex, then Claude) whose findings are kept only when every quote is really in t
 (`lib/workspaces.py`; `ADVANCE_ROADMAP_SUPERSET=0` uses a plain worktree under
 `~/.cache/advance-roadmap-followups`), pushes and opens a PR, and stops. `review.sh` has a second
 provider review it, up to three rounds. The runner merges **only** when the PR's checks pass and
-the last review is clean, then verifies the deploy (and for ai-tools runs `~/.ai-tools/install.sh`).
+the last review is clean, then verifies the deploy (and for ai-tools runs `~/.ai-tools/install.sh`,
+which counts only once the deploy clone's HEAD contains the merge commit — `install.sh` exits 0
+when it skips a dirty clone or a failed fetch).
 It never merges past unresolved findings or an unavailable reviewer: the branch and PR stay for the
 next drain. Follow-up builders run with `ADVANCE_ROADMAP_FOLLOWUP=1`, and their run dirs carry a
 `followup-child` marker, so a follow-up never starts follow-ups.
 
 **Usage** is re-read before every builder and reviewer step, and a builder is only started when a
 reviewer `review.sh` would pick for it is also under its gate. When nobody is, the stage is
-deferred and its remaining findings go on one Linear ticket (`jlin.py new`, exactly one `repo/*`
+deferred (judged on the reviewers that branch could use — never the builder's own gate) and its
+remaining findings go on one Linear ticket (`jlin.py new`, exactly one `repo/*`
 label, state Backlog) with the evidence, branch/PR, validation so far, reset time and the exact
 next step, plus a fenced `advance-roadmap-followup` metadata block (`finding_ids`, stage key,
 origin, branch, PR). Unknown usage and every non-quota blocker go to `followups/report.jsonl`,
 never to a new ticket; a ticket the stage already has gets the verified progress as a comment.
 A ticket is closed only after checks pass, the review is clean, the PR merged and the deploy
-was verified.
+was verified; a close Linear refuses stays in the stage's `pending_close` and every later drain
+retries it.
 
 **Prior tickets first.** Every drain pages through all open DEV issues (`linear api`, following
 `endCursor`), rebuilds local state for any follow-up ticket this machine has not seen, and works
@@ -192,7 +196,8 @@ is saved in `batch.json` (`followups`, `followups_line`) and appended to the web
 ([conductor SKILL.md](../skills/conductor/SKILL.md)). Each hook is idempotent (one stage dir per
 stamp / origin), each stage is claimed with a kernel lock, a repair holds the repo's
 `repo-locks/<repo>.lock`, and a stage a killed drain left `running` resumes at its saved step
-(unless its builder is still alive).
+(unless its builder is still alive — a Superset builder's launcher registers itself in
+`inflight/<repo>/` before it starts, so lanes and drains stay out even if the drain dies).
 
 ```sh
 F=~/.claude/automations/advance-roadmap/followup.py
