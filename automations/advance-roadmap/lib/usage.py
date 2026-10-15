@@ -15,6 +15,8 @@ Usage:
                                                    # who is out for R when a lane stops on quota
   usage.py record-limit --provider P --text T [--scope S] [--out FILE] [--root DIR]
   usage.py parse-limit --provider P --text T [--scope S]  # the hit as JSON; writes no state
+  usage.py live-limit [--transcript-file F] [--exit N] [--final-file F] [--result-json F]
+                                                   # live CLI limit only (not an echoed banner)
   usage.py detect-limit --file PATH | --text T
   usage.py probe [--provider codex|cursor|all]   # live read, writes nothing
   usage.py show [--root DIR]
@@ -816,6 +818,103 @@ def limit_banner(text: str) -> str | None:
     return text[m.start():end if end >= 0 else len(text)].strip()
 
 
+def load_provider_result(path: str | Path | None) -> dict | None:
+    """Decode a Claude/Cursor --output-format json file, or None.
+
+    The CLI prints one JSON object (a line with a `result` key); stderr warnings may surround it.
+    A whole-file json.loads also works when the file is that object alone.
+    """
+    if not path:
+        return None
+    try:
+        text = Path(path).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    try:
+        obj = json.loads(text)
+        if isinstance(obj, dict):
+            return obj
+    except ValueError:
+        pass
+    for line in reversed(text.splitlines()):
+        if not line.startswith("{"):
+            continue
+        try:
+            obj = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(obj, dict) and "result" in obj:
+            return obj
+    return None
+
+
+def provider_is_error(result: dict | None) -> bool:
+    """True when a Claude/Cursor JSON result is a structured provider error (is_error / error subtype).
+
+    A zero-exit CLI can still fail this way; callers that classify capacity or failure must treat it
+    like a non-zero exit, not a successful final answer.
+    """
+    if not isinstance(result, dict):
+        return False
+    return bool(result.get("is_error") or result.get("subtype") in ("error", "error_during_execution"))
+
+
+def provider_reported_limit(result: dict | None) -> str | None:
+    """Limit text from a provider's own result/error record, or None.
+
+    Transcripts quote docs and prior logs that contain banner-shaped lines; those must not gate a
+    provider. A structured error or `limit_hit` outcome is authoritative.
+    """
+    if not isinstance(result, dict):
+        return None
+    if result.get("outcome") == "limit_hit":
+        text = " ".join(str(result.get("limit_text") or "").split()) or "provider reported limit_hit"
+        return text
+    # Claude/Cursor --output-format json: is_error / error subtype carry the CLI's own message.
+    if not provider_is_error(result):
+        return None
+    blob = "\n".join(str(result.get(k) or "") for k in ("result", "error", "error_message", "message"))
+    return limit_banner(blob) or (blob.strip().splitlines()[0].strip() if detect_limit(blob) and blob.strip() else None)
+
+
+def live_limit_banner(
+    transcript: str | None = None,
+    *,
+    exit_code: int | None = None,
+    final_answer: str | None = None,
+    provider_result: dict | None = None,
+) -> str | None:
+    """Banner text when this CLI call actually hit a limit; None when a banner is only echoed.
+
+    A limit banner in a transcript counts only when the call failed for that invocation — non-zero
+    exit, structured provider error (`is_error`), or no final answer — or when it appears in the
+    provider's own error/result record. A successful final answer means ignore banners quoted from
+    files, prompts, or prior logs. Zero-exit JSON with `is_error:true` is never a success even when
+    `.result` is a generic nonempty string (the live banner may only be on stderr).
+    """
+    reported = provider_reported_limit(provider_result)
+    if reported:
+        return reported
+    banner = limit_banner(transcript or "")
+    if not banner:
+        return None
+    succeeded = (
+        bool((final_answer or "").strip())
+        and (exit_code is None or exit_code == 0)
+        and not provider_is_error(provider_result)
+    )
+    if succeeded:
+        return None
+    # No final answer, non-zero exit, or structured provider error: the banner is a live CLI limit.
+    if exit_code is not None and exit_code != 0:
+        return banner
+    if provider_is_error(provider_result):
+        return banner
+    if not (final_answer or "").strip():
+        return banner
+    return None
+
+
 def cmd_refresh(args: argparse.Namespace) -> None:
     state = refresh(Path(args.root))
     orch = pick_orchestrator(state)
@@ -978,6 +1077,30 @@ def cmd_parse_limit(args: argparse.Namespace) -> None:
     print(json.dumps(limit_hit(args.provider, args.text, args.scope)))
 
 
+def cmd_live_limit(args: argparse.Namespace) -> None:
+    """Print the live limit banner (exit 0) or nothing (exit 1) — shared by shell callers."""
+    transcript = args.text or ""
+    if args.transcript_file:
+        transcript = Path(args.transcript_file).read_text(encoding="utf-8", errors="replace")
+    final = args.final or ""
+    if args.final_file:
+        try:
+            final = Path(args.final_file).read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            final = ""
+    result = load_provider_result(args.result_json) if args.result_json else None
+    banner = live_limit_banner(transcript, exit_code=args.exit, final_answer=final,
+                               provider_result=result)
+    if not banner:
+        sys.exit(1)
+    print(banner)
+
+
+def cmd_is_error(args: argparse.Namespace) -> None:
+    """Exit 0 when --result-json is a structured provider error; else 1. For shell capacity checks."""
+    sys.exit(0 if provider_is_error(load_provider_result(args.result_json)) else 1)
+
+
 def cmd_detect(args: argparse.Namespace) -> None:
     text = args.text
     if args.file:
@@ -1045,6 +1168,21 @@ def main() -> None:
     p.add_argument("--text", required=True)
     p.add_argument("--scope", default="unknown")
     p.set_defaults(func=cmd_parse_limit)
+
+    p = sub.add_parser("live-limit")
+    p.add_argument("--text", default="", help="transcript text (or use --transcript-file)")
+    p.add_argument("--transcript-file")
+    p.add_argument("--exit", type=int, dest="exit", default=None,
+                   help="CLI exit code; omit when unknown")
+    p.add_argument("--final", default="", help="final answer text")
+    p.add_argument("--final-file", help="path to the CLI's final-answer file (-o / .last)")
+    p.add_argument("--result-json", help="provider result JSON (worker result, Claude/Cursor object)")
+    p.set_defaults(func=cmd_live_limit)
+
+    p = sub.add_parser("is-error")
+    p.add_argument("--result-json", required=True,
+                   help="Claude/Cursor JSON; exit 0 when is_error/error subtype (failed invocation)")
+    p.set_defaults(func=cmd_is_error)
 
     p = sub.add_parser("detect-limit")
     p.add_argument("--text", default="")

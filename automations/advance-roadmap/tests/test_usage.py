@@ -461,6 +461,74 @@ class LimitBannerTests(unittest.TestCase):
         self.assertIsNone(usage.limit_banner("The doc says you've hit your session limit sometimes."))
         self.assertIsNone(usage.limit_banner(""))
 
+    def test_live_limit_ignores_echoed_banner_when_final_answer_succeeded(self):
+        banner = "You've hit your usage limit. Resets 5pm."
+        transcript = f"echoed from a prior log:\n{banner}\nthen the real answer"
+        self.assertIsNone(usage.live_limit_banner(transcript, exit_code=0, final_answer="VERDICT: clean\n"))
+        self.assertEqual(usage.live_limit_banner(transcript, exit_code=1, final_answer=""), banner)
+        self.assertEqual(usage.live_limit_banner(transcript, exit_code=0, final_answer=""), banner)
+        self.assertEqual(
+            usage.live_limit_banner("no banner", exit_code=0, final_answer="ok",
+                                    provider_result={"outcome": "limit_hit", "limit_text": banner}),
+            banner)
+        self.assertEqual(
+            usage.live_limit_banner("ok\n", exit_code=1, final_answer="",
+                                    provider_result={"is_error": True, "result": banner}),
+            banner)
+        # Zero exit + final answer that is the banner text still counts when is_error is set.
+        self.assertEqual(
+            usage.live_limit_banner("ok\n", exit_code=0, final_answer=banner,
+                                    provider_result={"is_error": True, "subtype": "success",
+                                                     "result": banner}),
+            banner)
+        self.assertIsNone(
+            usage.live_limit_banner("ok\n", exit_code=0, final_answer=banner,
+                                    provider_result=None))
+        # Zero exit + is_error:true + generic nonempty result must not suppress a stderr banner.
+        stderr_banner = f"noise\n{banner}\n"
+        generic = "An unexpected error occurred. Please try again."
+        self.assertEqual(
+            usage.live_limit_banner(
+                stderr_banner, exit_code=0, final_answer=generic,
+                provider_result={"type": "result", "subtype": "success", "is_error": True,
+                                 "result": generic}),
+            banner)
+        self.assertIsNone(
+            usage.live_limit_banner(
+                stderr_banner, exit_code=0, final_answer=generic,
+                provider_result={"type": "result", "is_error": False, "result": generic}))
+
+    def test_load_provider_result_finds_json_amid_noise(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "out.json"
+            path.write_text(
+                'warn: ignore\n'
+                '{"type":"result","is_error":true,"result":"You\'ve hit your usage limit. Resets 5pm."}\n')
+            obj = usage.load_provider_result(path)
+            self.assertTrue(obj["is_error"])
+            self.assertEqual(
+                usage.live_limit_banner(
+                    "noise", exit_code=0, final_answer="You've hit your usage limit. Resets 5pm.",
+                    provider_result=obj),
+                "You've hit your usage limit. Resets 5pm.")
+
+    def test_provider_is_error_and_is_error_cli(self):
+        self.assertTrue(usage.provider_is_error({"is_error": True}))
+        self.assertTrue(usage.provider_is_error({"subtype": "error_during_execution"}))
+        self.assertFalse(usage.provider_is_error({"is_error": False, "result": "ok"}))
+        self.assertFalse(usage.provider_is_error(None))
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "err.json"
+            path.write_text('{"type":"result","is_error":true,"result":"Selected model is at capacity."}\n')
+            ok = Path(tmp) / "ok.json"
+            ok.write_text('{"type":"result","is_error":false,"result":"VERDICT: clean"}\n')
+            self.assertEqual(
+                subprocess.run([sys.executable, str(SCRIPT), "is-error",
+                                "--result-json", str(path)], capture_output=True).returncode, 0)
+            self.assertEqual(
+                subprocess.run([sys.executable, str(SCRIPT), "is-error",
+                                "--result-json", str(ok)], capture_output=True).returncode, 1)
+
 
 class ProbeTests(unittest.TestCase):
     def setUp(self):

@@ -340,9 +340,13 @@ run_worker_in_workspace() {
   name="roadmap $repo $(jq -r '.orchestrator.linear_id // empty' "$req") ${slug}"
   # A worker an earlier run timed out on may still be going in this branch's workspace;
   # never start a second one beside it.
-  local inflight="$ROOT/inflight/${repo}--${slug//\//-}.pid"
-  mkdir -p "$ROOT/inflight"
-  if [ -s "$inflight" ] && kill -0 "$(cat "$inflight")" 2>/dev/null; then
+  # inflight/<repo>/<slug>.pid: the directory names the repo, so a repo or slug with "--" reads right.
+  # Legacy flat inflight/<repo>--<slug>.pid is still honored so an older run's worker is seen.
+  local inflight="$ROOT/inflight/$repo/${slug//\//-}.pid"
+  local inflight_legacy="$ROOT/inflight/${repo}--${slug//\//-}.pid"
+  mkdir -p "$ROOT/inflight/$repo"
+  if { [ -s "$inflight" ] && kill -0 "$(cat "$inflight")" 2>/dev/null; } || \
+     { [ -s "$inflight_legacy" ] && kill -0 "$(cat "$inflight_legacy")" 2>/dev/null; }; then
     superset_skip="a worker from an earlier run is still running on $branch"; return 1
   fi
   # The terminal runs the user's shell, not launchd's env: carry over what this run set.
@@ -442,7 +446,7 @@ run_orchestrator_codex() {
   local out="$1" prompt="$2"
   # -o writes only the final message, so the fence can't be confused with the
   # prompt or ORCHESTRATOR.md that Codex echoes into stdout.
-  rm -f "$out.last"
+  rm -f "$out.last" "$out.json" "$out.session"
   # CODE_DIR is a multi-repo parent, not a git checkout — skip the repo check.
   "$CODEX" exec \
     -o "$out.last" \
@@ -460,7 +464,7 @@ run_orchestrator_codex() {
 
 run_orchestrator_claude() {
   local out="$1" prompt="$2"
-  rm -f "$out.last"
+  rm -f "$out.last" "$out.json" "$out.session"
   "$CLAUDE" -p "$prompt" \
     --model "$ORCH_CLAUDE_MODEL" \
     --effort high \
@@ -645,7 +649,9 @@ Previous no-work verdict and what changed since (carry unchanged verdicts forwar
       tried="$tried $ORCH"
       orch_rc=0
       planner_hit=""   # only the planner that answers last decides quota vs invalid output
-      rm -f "$orch_out.last"   # a failed-over planner's final message must not be read as the next one's
+      # Per-attempt artifacts: a prior Claude/Cursor .json must not be passed to the next
+      # planner's live-limit (Codex writes no .json; stale is_error would gate the wrong provider).
+      rm -f "$orch_out.last" "$orch_out.json" "$orch_out.session"
       run_orchestrator "$ORCH" "$orch_out" "$ORCH_PROMPT" || orch_rc=$?
       cat "$orch_out" 2>/dev/null
       echo ""
@@ -655,11 +661,22 @@ Previous no-work verdict and what changed since (carry unchanged verdicts forwar
       if [ -s "$orch_out.last" ] && extract_json_fence ORCHESTRATOR_RESULT_JSON "$orch_out.last" "$result"; then
         had_json=1; break
       fi
-      # Limit failover only when the orchestrator failed to produce a result JSON.
-      # Successful triage dumps skill text that mentions "session limit" historically
-      # and must not burn a second orchestrator turn.
+      # Live-limit rule: a banner counts only when this planner produced no final answer
+      # (successful triage dumps skill text that mentions "session limit" historically).
+      # Claude JSON with is_error:true is a live limit even on exit 0 (result lands in .last).
+      live_json=()
+      [ -f "$orch_out.json" ] && live_json=(--result-json "$orch_out.json")
+      if ! text="$(python3 "$USAGE_PY" live-limit --transcript-file "$orch_out" --exit "$orch_rc" \
+          --final-file "$orch_out.last" "${live_json[@]}" 2>/dev/null)" || [ -z "$text" ]; then
+        planner_hit=""; break
+      fi
       planner_hit="$RUN_DIR/orchestrator-limit-$ORCH.json"
-      record_limit_from_log "$ORCH" "$orch_out" "$planner_hit" || { planner_hit=""; break; }
+      python3 "$USAGE_PY" parse-limit --provider "$ORCH" --text "$text" --scope orchestrator \
+        > "$planner_hit" 2>/dev/null \
+        || python3 -c 'import json, sys; print(json.dumps({"provider": sys.argv[1], "exact_cli_text": sys.argv[2]}))' \
+             "$ORCH" "$text" > "$planner_hit"
+      python3 "$USAGE_PY" --root "$ROOT" record-limit --provider "$ORCH" --text "$text" --scope orchestrator \
+        || true
       # The planner that just hit its limit is gated now; try the next one still under its gate.
       alt=""
       for p in ${=$(python3 "$USAGE_PY" --root "$ROOT" pick-orchestrators 2>/dev/null | tr -d '\r')}; do

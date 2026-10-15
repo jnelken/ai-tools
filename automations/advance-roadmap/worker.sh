@@ -74,9 +74,15 @@ print(json.dumps(usage.saved_quota_record(Path(sys.argv[2]), "worker", usage.rea
                                           sys.argv[4] or None)))
 PY
   fi
-  python3 - "$STATUS_FILE" "$1" "$2" "${3:-}" "$LIMITED_LOG" "$MISSING" "$quota" <<'PY2'
+  python3 - "$STATUS_FILE" "$1" "$2" "${3:-}" "$LIMITED_LOG" "$MISSING" "$quota" "${tmpdir:-}/${1:-none}.log.session" <<'PY2'
 import json, sys
-path, used, rc, fatal, limited_log, missing, quota_path = sys.argv[1:8]
+path, used, rc, fatal, limited_log, missing, quota_path, session_path = sys.argv[1:9]
+session = None
+if used:
+    try:
+        session = open(session_path).read().strip() or None
+    except OSError:
+        pass
 quota = None
 try:
     quota = json.load(open(quota_path)) if quota_path else None
@@ -95,7 +101,9 @@ except OSError:
     pass
 json.dump({"used": used or None, "exit": int(rc) if rc.lstrip("-").isdigit() else None,
            "fatal": fatal or None, "limited": limited, "missing": missing.split(),
-           "quota": quota if isinstance(quota, dict) else None},
+           "quota": quota if isinstance(quota, dict) else None,
+           # The CLI session the used provider ran (Cursor/Claude JSON session_id, Codex header).
+           "session_id": session},
           open(path, "w"), indent=1)
 PY2
 }
@@ -216,7 +224,7 @@ run_cursor() {
     "$prompt" >"$out.json" 2>&1
   local rc=$?
   python3 "$TOKENS_PY" cursor-json "$out.json" "$out" --final "$out.last" --role worker \
-    --model "$CURSOR_WORKER_MODEL" --log "$USAGE_LOG" 2>&1
+    --model "$CURSOR_WORKER_MODEL" --log "$USAGE_LOG" --session-out "$out.session" 2>&1
   [ -s "$out" ] || cp "$out.json" "$out" 2>/dev/null   # tokens.py missing or broken: keep the raw output
   return $rc
 }
@@ -238,7 +246,8 @@ run_codex() {
     --dangerously-bypass-approvals-and-sandbox \
     "$prompt" >"$out" 2>&1 </dev/null
   local rc=$?
-  python3 "$TOKENS_PY" codex "$out" --role worker --model "$CODEX_WORKER_MODEL" --log "$USAGE_LOG" 2>&1
+  python3 "$TOKENS_PY" codex "$out" --role worker --model "$CODEX_WORKER_MODEL" --log "$USAGE_LOG" \
+    --session-out "$out.session" 2>&1
   return $rc
 }
 
@@ -256,7 +265,7 @@ run_claude() {
     --output-format json >"$out.json" 2>&1
   local rc=$?
   python3 "$TOKENS_PY" claude-json "$out.json" "$out" --final "$out.last" --role worker \
-    --model "$CLAUDE_WORKER_MODEL" --log "$USAGE_LOG" 2>&1
+    --model "$CLAUDE_WORKER_MODEL" --log "$USAGE_LOG" --session-out "$out.session" 2>&1
   [ -s "$out" ] || cp "$out.json" "$out" 2>/dev/null   # tokens.py missing or broken: keep the raw output
   return $rc
 }
@@ -298,7 +307,8 @@ for provider in "${providers[@]}"; do
   fi
   echo "=== worker try provider=$provider mode=$WORKER_MODE stamp=$STAMP ($(date)) ==="
   rc=0
-  rm -f "$out.last"
+  # Per-provider out paths already isolate attempts; still clear so a retry never sees stale JSON.
+  rm -f "$out.last" "$out.json" "$out.session"
   [ -n "$RESULT_FILE" ] && rm -f "$RESULT_FILE"   # a failed-over attempt's result must not count
   rm -f "$REVIEW_LOG"                              # nor its review rounds
   if [ -n "${SUPERSET_TERMINAL_ID:-}" ]; then
@@ -315,9 +325,14 @@ for provider in "${providers[@]}"; do
   cat "$out"
   echo "=== worker provider=$provider exit=$rc ==="
 
-  if text="$(rg -m1 -i \
-      '^(you.?ve hit your (session |usage )?limit|hit your session limit|rate limit exceeded|quota exceeded|out of (usage|credits|quota)\b)' \
-      "$out" || true)" && [ -n "$text" ]; then
+  # Live-limit rule (usage.py live-limit): a banner in the transcript counts only when this
+  # call failed — non-zero exit or no final answer — never when a successful answer merely
+  # quoted docs or prior logs. Claude/Cursor JSON with is_error:true is a live limit even on
+  # exit 0 (the result text is also written to .last). Result-only limit_hit is below.
+  live_json=()
+  [ -f "$out.json" ] && live_json=(--result-json "$out.json")
+  if text="$(python3 "$USAGE_PY" live-limit --transcript-file "$out" --exit "$rc" \
+      --final-file "$out.last" "${live_json[@]}" 2>/dev/null)" && [ -n "$text" ]; then
     echo "(limit for $provider — recording and failing over)"
     record_limit "$provider" "$text"
     last_hit="$provider"

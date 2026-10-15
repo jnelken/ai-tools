@@ -64,7 +64,7 @@ rf="$(print -r -- "$prompt" | sed -n 's/^(raw JSON, no fence) to: //p')"
 res='{"outcome":"shipped","provider":"cursor","repo":"demo","item":"DEV-1 thing","merge_commit":"abc1234","summary":"ok","slack_summary":"Did the thing. DEV-1 Done."}'
 case "$FAKE_WORKER" in
   file)  print -r -- "$res" > "$rf"; print "=== advance-roadmap exit=2 finished (decoy) ==="
-         print -r -- '{"type":"result","result":"done","usage":{"inputTokens":100,"outputTokens":50,"cacheReadTokens":900,"cacheWriteTokens":10}}' ;;
+         print -r -- '{"type":"result","result":"done","session_id":"cursor-session-1","usage":{"inputTokens":100,"outputTokens":50,"cacheReadTokens":900,"cacheWriteTokens":10}}' ;;
   # No result file: the fence is only in the CLI's JSON final answer.
   fence) python3 -c 'import json, sys; print(json.dumps({"type": "result", "result": "```WORKER_RESULT_JSON\n" + sys.argv[1] + "\n```"}))' "$res" ;;
   # An echoed WORKER.md example on the transcript, and a final answer without a fence.
@@ -125,6 +125,7 @@ check() { [ "$2" = "$3" ] || { echo "FAIL [$1]: expected '$3', got '$2'"; tail -
 
 run good file;    check "agent-written result → shipped"       "$(last outcome)" shipped
                   check "result source is the agent's file"     "$(last worker_result_source)" agent
+                  check "worker session id recorded"            "$(last worker_session)" cursor-session-1
                   check "merge commit carried through"          "$(last merge_commit)" abc1234
                   check "slack summary carried through"         "$(last slack_summary)" "Did the thing. DEV-1 Done."
                   check "unreviewed ship is flagged"            "$(last detail)" "merged without a logged review"
@@ -185,6 +186,14 @@ grep -q "which another lane holds" "$ROOT/logs/latest.log" && echo "ok   refusal
 check "lane recorded"                          "$(last lane)" 2
 check "a refused dispatch runs no worker"      "$(last worker)" none
 check "and records no work"                    "$(last outcome)" blocked-no-item
+# DEV-167: the repo's kernel lock, not the busy list, is what keeps a second lane off a repo.
+mkdir -p "$ROOT/repo-locks"; : >> "$ROOT/repo-locks/demo.lock"
+python3 -c 'import fcntl,sys,time; f=open(sys.argv[1],"a"); fcntl.lockf(f,fcntl.LOCK_EX); time.sleep(8)' "$ROOT/repo-locks/demo.lock" &
+holder=$!; sleep 1
+ADVANCE_ROADMAP_LANE=3 ADVANCE_ROADMAP_BUSY_REPOS="" run good file
+check "a held repo lock refuses the dispatch"  "$(last action)" blocked_no_item
+check "and runs no worker"                     "$(last worker)" none
+kill $holder 2>/dev/null; wait $holder 2>/dev/null || true
 # Superset mode: the worker runs in the item's workspace terminal, not in-process.
 ADVANCE_ROADMAP_LANE=1 ADVANCE_ROADMAP_TARGET_REPO=other run good file
 check "wrong target repo is not dispatched"    "$(last action)" blocked_no_item

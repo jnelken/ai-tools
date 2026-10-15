@@ -1,7 +1,7 @@
 #!/bin/zsh
 # review.sh with fake providers: reviewer is never the worker's provider, limits
-# fail over, the last VERDICT line wins over the one echoed in the prompt, and
-# every round leaves one line in the review log.
+# fail over, the verdict comes only from the reviewer's final answer (never the
+# echoed prompt), and every round leaves one line in the review log.
 set -eu
 
 HERE="$(cd "$(dirname "$0")/.." && pwd)"
@@ -16,7 +16,7 @@ cp "$HERE/review.sh" "$ROOT/"
 cp "$HERE/lib/models.sh" "$HERE/lib/tokens.py" "$ROOT/lib/"
 # Fake usage.py: `gate` refuses the providers in FAKE_GATED; anything else records its last arg.
 cat > "$ROOT/lib/usage.py" <<'PY'
-import json, os, sys
+import json, os, re, sys
 args = sys.argv[1:]
 if "gate" in args:
     provider = args[args.index("--provider") + 1]
@@ -28,6 +28,71 @@ if "parse-limit" in args:
     print(json.dumps({"provider": args[args.index("--provider") + 1], "exact_cli_text": args[args.index("--text") + 1],
                       "reset_epoch": 1760396400, "reset_at": "2025-10-13T19:00:00-04:00"}))
     sys.exit(0)
+def _load_result(path):
+    raw = open(path).read()
+    try:
+        result = json.loads(raw)
+        if isinstance(result, dict):
+            return result
+    except ValueError:
+        pass
+    for line in reversed(raw.splitlines()):
+        if not line.startswith("{"):
+            continue
+        try:
+            obj = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(obj, dict) and "result" in obj:
+            return obj
+    return None
+
+if "is-error" in args:
+    result = _load_result(args[args.index("--result-json") + 1]) if "--result-json" in args else None
+    err = isinstance(result, dict) and (
+        result.get("is_error") or result.get("subtype") in ("error", "error_during_execution"))
+    sys.exit(0 if err else 1)
+if "live-limit" in args:
+    # Mirror usage.live_limit_banner: provider JSON is_error, else banner + (nonzero/no final).
+    transcript = open(args[args.index("--transcript-file") + 1]).read() if "--transcript-file" in args else ""
+    final = ""
+    if "--final-file" in args:
+        try:
+            final = open(args[args.index("--final-file") + 1]).read()
+        except OSError:
+            pass
+    exit_code = int(args[args.index("--exit") + 1]) if "--exit" in args else None
+    result = _load_result(args[args.index("--result-json") + 1]) if "--result-json" in args else None
+    if isinstance(result, dict):
+        if result.get("outcome") == "limit_hit":
+            print(" ".join(str(result.get("limit_text") or "").split()) or "provider reported limit_hit")
+            sys.exit(0)
+        err = result.get("is_error") or result.get("subtype") in ("error", "error_during_execution")
+        if err:
+            blob = "\n".join(str(result.get(k) or "") for k in ("result", "error", "error_message", "message"))
+            m = re.search(
+                r"^(?:you.?ve hit your (?:session |usage )?limit|hit your session limit|rate limit exceeded"
+                r"|quota exceeded|out of (?:usage|credits|quota)\b)", blob, re.I | re.M)
+            if m:
+                end = blob.find("\n", m.start())
+                print(blob[m.start():end if end >= 0 else len(blob)].strip())
+                sys.exit(0)
+            if re.search(r"usage.?limit|hit your session limit|quota.?exceeded", blob, re.I) and blob.strip():
+                print(blob.strip().splitlines()[0].strip())
+                sys.exit(0)
+            # Capacity/overload in is_error JSON is not a quota limit — leave it for capacity fallback.
+            sys.exit(1)
+    m = re.search(
+        r"^(?:you.?ve hit your (?:session |usage )?limit|hit your session limit|rate limit exceeded"
+        r"|quota exceeded|out of (?:usage|credits|quota)\b)", transcript, re.I | re.M)
+    if not m:
+        sys.exit(1)
+    end = transcript.find("\n", m.start())
+    banner = transcript[m.start():end if end >= 0 else len(transcript)].strip()
+    if final.strip() and (exit_code is None or exit_code == 0):
+        sys.exit(1)
+    print(banner)
+    sys.exit(0)
 open(args[1] + "/limits.txt", "a").write(args[-1] + "\n")
 PY
 
@@ -37,18 +102,36 @@ git -C "$REPO" checkout -q -b roadmap/x
 print 'x = 1' > "$REPO/x.py"
 git -C "$REPO" add x.py && git -C "$REPO" -c user.name=t -c user.email=t@t commit -q -m feat
 
-# Each fake says which provider it is; FAKE_<P> picks clean | findings | limit.
+# Each fake says which provider it is; FAKE_<P> picks clean | findings | limit | json-limit.
 for p in codex agent claude; do
   cat > "$BIN/$p" <<SH
 #!/bin/zsh
 name=$p; mode="\${FAKE_${p:u}:-clean}"
 last=""; while [ \$# -gt 0 ]; do [ "\$1" = "-o" ] && { last="\$2"; shift; }; shift; done
+[ "\$name" = codex ] && print "session id: 11111111-2222-3333-4444-555555555555"
 print -r -- "echoed prompt: VERDICT: clean      (no findings)"
 [ "\$mode" = limit ] && { print "You've hit your usage limit. Resets 5pm."; exit 1; }
+[ "\$mode" = capacity ] && { print "ERROR: Selected model is at capacity. Please try a different model."; exit 1; }
+[ "\$mode" = http503 ] && { print "stream error: unexpected status 503 Service Unavailable"; exit 1; }
+# Zero-exit JSON with is_error:true — only detectable via --result-json (not transcript alone).
+[ "\$mode" = json-limit ] && {
+  python3 -c 'import json; print(json.dumps({"type":"result","subtype":"success","is_error":True,"result":"You'\''ve hit your usage limit. Resets 5pm.","session_id":"json-limit-session"}))'
+  exit 0
+}
+# Zero-exit overload in JSON: must fail over as capacity, not end as unparsed.
+[ "\$mode" = json-capacity ] && {
+  python3 -c 'import json; print(json.dumps({"type":"result","subtype":"success","is_error":True,"result":"Selected model is at capacity. Please try a different model.","session_id":"json-capacity-session"}))'
+  exit 0
+}
 body="reviewer=\$name
 x.py:1 bug: something
 VERDICT: \$mode"
-if [ -n "\$last" ]; then print -r -- "\$body" > "\$last"; else print -r -- "\$body"; fi
+# echo: the transcript carries a verdict line, the final answer none.
+[ "\$mode" = echo ] && { print "VERDICT: clean"; body="reviewer=\$name
+I ran out of time before deciding."; }
+if [ -n "\$last" ]; then print -r -- "\$body" > "\$last"
+else python3 -c 'import json, sys; print(json.dumps({"type": "result", "result": sys.argv[1], "session_id": sys.argv[2] + "-session"}))' "\$body" "\$name"
+fi
 SH
   chmod +x "$BIN/$p"
 done
@@ -64,7 +147,8 @@ check() { [ "$2" = "$3" ] || { echo "FAIL [$1]: expected '$3', got '$2'"; exit 1
 
 out="$(review cursor 1 FAKE_CODEX=findings)"
 check "cursor's work → codex reviews"        "$(field reviewer)" codex
-check "last VERDICT wins over echoed prompt" "$(field verdict)" findings
+check "reviewer session id logged"           "$(field session_id)" 11111111-2222-3333-4444-555555555555
+check "verdict from the final answer only"   "$(field verdict)" findings
 case "$out" in *"x.py:1 bug"*) echo "ok   findings printed" ;; *) echo "FAIL: no findings in output"; exit 1 ;; esac
 
 review codex 2 FAKE_AGENT=clean >/dev/null
@@ -95,4 +179,79 @@ check "gated reviewer logged"                "$(field gated)" "['codex']"
 rc=0; review claude 1 FAKE_GATED="codex cursor" >/dev/null || rc=$?
 check "every reviewer gated → exit 3"        "$rc" 3
 check "gated round logged as unavailable"    "$(field verdict)" unavailable
+
+: > "$ROOT/limits.txt"
+out="$(review cursor 1 FAKE_CODEX=capacity FAKE_CLAUDE=clean)"
+check "codex at capacity → claude reviews"   "$(field reviewer)" claude
+check "capacity is not unparsed"             "$(field verdict)" clean
+check "capacity reviewer logged"             "$(field capacity)" "['codex']"
+check "skipped reviewer's session not kept"  "$(field session_id)" claude-session
+[ -s "$ROOT/limits.txt" ] && { echo "FAIL: capacity recorded as a quota limit"; exit 1; } || echo "ok   capacity is not a quota hit"
+case "$out" in *"at capacity"*) echo "ok   capacity skip printed" ;; *) echo "FAIL: no capacity note"; exit 1 ;; esac
+
+rc=0; review claude 1 FAKE_CODEX=capacity FAKE_AGENT=http503 >/dev/null || rc=$?
+check "every reviewer at capacity → exit 3"  "$rc" 3
+check "capacity round logged as unavailable" "$(field verdict)" unavailable
+check "both capacity reviewers logged"       "$(field capacity)" "['codex', 'cursor']"
+
+out="$(review cursor 1 FAKE_CODEX=echo)"
+check "a transcript-only verdict is unparsed" "$(field verdict)" unparsed
+
+# Successful final answer + banner on its own line in the transcript is not a live limit.
+# (A prefix like "echoed prior log:" would dodge the anchored detector and not exercise suppression.)
+: > "$ROOT/limits.txt"
+cat > "$BIN/codex" <<'SH'
+#!/bin/zsh
+last=""; while [ $# -gt 0 ]; do [ "$1" = "-o" ] && { last="$2"; shift; }; shift; done
+print "echoed prior log:"
+print "You've hit your usage limit. Resets 5pm."
+print -r -- "reviewer=codex
+VERDICT: clean" > "$last"
+print "session id: 11111111-2222-3333-4444-555555555555"
+SH
+chmod +x "$BIN/codex"
+review cursor 1 >/dev/null
+check "echoed banner + clean final is clean" "$(field verdict)" clean
+check "echoed banner does not fail over"     "$(field reviewer)" codex
+[ -s "$ROOT/limits.txt" ] && { echo "FAIL: echoed banner recorded as a limit"; exit 1; } \
+  || echo "ok   echoed banner is not a live limit"
+case "$out" in *"VERDICT: unparsed"*) echo "ok   unparsed printed" ;; *) echo "FAIL: no unparsed note"; exit 1 ;; esac
+
+# Zero-exit JSON is_error:true must fail over (needs --result-json); Claude is the next reviewer.
+: > "$ROOT/limits.txt"
+# Recreate the default codex stub first (overwritten above), then run with agent json-limit.
+for p in codex; do
+  cat > "$BIN/$p" <<SH
+#!/bin/zsh
+name=$p; mode="\${FAKE_${p:u}:-clean}"
+last=""; while [ \$# -gt 0 ]; do [ "\$1" = "-o" ] && { last="\$2"; shift; }; shift; done
+print "session id: 11111111-2222-3333-4444-555555555555"
+print -r -- "echoed prompt: VERDICT: clean      (no findings)"
+body="reviewer=\$name
+x.py:1 bug: something
+VERDICT: \$mode"
+if [ -n "\$last" ]; then print -r -- "\$body" > "\$last"; fi
+SH
+  chmod +x "$BIN/$p"
+done
+review codex 1 FAKE_AGENT=json-limit FAKE_CLAUDE=clean >/dev/null
+check "json is_error limit fails over"       "$(field reviewer)" claude
+check "json is_error verdict is clean"       "$(field verdict)" clean
+[ -s "$ROOT/limits.txt" ] || { echo "FAIL: is_error JSON was not recorded as a limit"; exit 1; }
+echo "ok   json is_error is a live limit"
+
+# Zero-exit JSON overload must use capacity fallback (not unparsed), without a quota hit.
+: > "$ROOT/limits.txt"
+out="$(review codex 1 FAKE_AGENT=json-capacity FAKE_CLAUDE=clean)"
+check "json is_error capacity fails over"    "$(field reviewer)" claude
+check "json is_error capacity is clean"      "$(field verdict)" clean
+check "json capacity reviewer logged"        "$(field capacity)" "['cursor']"
+[ -s "$ROOT/limits.txt" ] && { echo "FAIL: json capacity recorded as a quota limit"; exit 1; } \
+  || echo "ok   json capacity is not a quota hit"
+case "$out" in *"at capacity"*) echo "ok   json capacity skip printed" ;; *) echo "FAIL: no json capacity note"; exit 1 ;; esac
+
+out="$(review codex 1 FAKE_AGENT=findings)"
+check "cursor's JSON final answer is parsed" "$(field verdict)" findings
+check "cursor reviewer session id logged"    "$(field session_id)" agent-session
+case "$out" in *"echoed prompt"*) echo "FAIL: transcript printed instead of the final answer"; exit 1 ;; *) echo "ok   only the final answer printed" ;; esac
 echo "all passed"
