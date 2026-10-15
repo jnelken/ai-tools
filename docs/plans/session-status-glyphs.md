@@ -43,3 +43,12 @@ The last line of every final message is `<glyph> <label of 8 words or fewer>`, e
 - Live check: in a fresh session, ask a trivial question. The reply should end in 💬. Then ask it to reply without a glyph, and confirm the hook forces one retry that adds the line, with no loop.
 - Check that plan mode and AskUserQuestion turns are never blocked.
 - Run `jq . ~/.claude/settings.json` to confirm the settings file is valid JSON after the edit.
+
+## Addendum: session-only schedule warning (2026-10-15)
+
+`CronCreate` and `ScheduleWakeup` jobs live only in the session: closing it silently cancels them. The same Stop hook now scans the transcript for them and, while any is still pending, emits a non-blocking `systemMessage` (`⏰ Session-only schedule — lost if this session closes: …`) naming each job and when it fires.
+
+- Pending means: a one-shot whose fire time hasn't passed (2 min grace), a recurring job younger than its 7-day auto-expiry, or the latest `ScheduleWakeup` whose delay hasn't elapsed and wasn't stopped. A `CronDelete` removes a job; sidechain (subagent) schedules are ignored.
+- It never blocks. A missing glyph still blocks exactly as before, and the warning is shown on the pass after the retry.
+- The transcript is prefiltered with `grep` so jq never slurps the whole file.
+- Not covered: background `Agent`/`Bash` tasks and `Monitor` watches also die with the session but are not scanned here.
