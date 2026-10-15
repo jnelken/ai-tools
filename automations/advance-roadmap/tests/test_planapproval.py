@@ -197,6 +197,21 @@ class Approve(unittest.TestCase):
         self.assertIn("claude: over its usage gate", out["error"])
         self.assertIn("codex: no", out["error"])
 
+    def test_empty_ruling_then_gated_fallback_keeps_error_and_quota(self):
+        req = request(plan("1", 1, ["a"]), plan("2", 2, ["b"]))
+        quota = {"provider": "claude", "reset_at": "2026-10-15T17:00:00Z"}
+        for empty in ({}, [], "approve"):
+            with self.subTest(fence=empty):
+                runners = {"codex": lambda prompt, code: (self.fence(empty), "")}
+                with mock.patch.object(pa, "usage_cli", side_effect=self.gates({"claude"})), \
+                        mock.patch.object(pa, "quota_record", return_value=quota) as record:
+                    out = pa.approve("/root", req, "DOC.md", "/code", runners=runners,
+                                     providers=["codex", "claude"])
+                self.assertEqual(out["decisions"][1]["verdict"], "defer")
+                self.assertIn("claude: over its usage gate", out["error"])
+                self.assertEqual(out["quota"], quota)
+                record.assert_called_once_with("/root", [], None)
+
     def test_fallback_whose_gate_reopens_during_the_first_attempt_is_tried(self):
         # Claude is over its gate when the approval starts and resets while Codex runs: the
         # default order still lists it, and its gate is read only when its turn comes.

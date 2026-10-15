@@ -254,8 +254,9 @@ def _approve(root, request, doc, code_dir, runners, providers, tmp):
             model, error = None, f"{name}: {exc}"
             continue
         model = extract_fence(answer)
-        if model:
+        if isinstance(model, dict) and model:
             break
+        model = None
         banner = limit_banner(answer) or limit_banner(log)
         if banner:
             # Saved before the shared usage file is touched: the quota record keeps the banner and
