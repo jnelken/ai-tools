@@ -27,6 +27,7 @@ Personal AI coding tools — Claude Code and Cursor skills, slash commands, hook
 | [`peer-review`](skills/peer-review) | Review with Claude for Codex-authored changes, Codex otherwise |
 | [`post-pr`](skills/post-pr) | Take a finished PR the rest of the way: review until clean, watch CI, post to `#pr-review`, badge + undraft |
 | [`pr-review-gaps`](skills/pr-review-gaps) | Find sswt PRs never posted to `#pr-review`, with a hold-list for deliberately parked ones |
+| [`prod-query`](skills/prod-query) | Read-only production customer-tenant data questions via the api repo's audited `query:prod-readonly` script — CLI contract, RUM id → tenant mapping, safe query cookbook, PII rules |
 | [`rebase-after-squash`](skills/rebase-after-squash) | Resolve rebase-after-squash-merge conflicts cleanly |
 | [`rum-review`](skills/rum-review) | Query Datadog RUM data, synthesize findings into categorized issues |
 | [`scoutmail`](skills/scoutmail) | Monitor all Spark email accounts and surface only new messages that genuinely require attention |
@@ -57,6 +58,7 @@ Each skill is a directory with a `SKILL.md` (required) plus optional `scripts/`,
 | [`implementer`](agents/implementer.md) | Implement one scoped task with Codex-first routing, Claude fallback, checks, and local checkpoints |
 | [`researcher`](agents/researcher.md) | Investigate code, prior decisions, documentation, branches, and PRs read-only with source evidence |
 | [`ops-investigator`](agents/ops-investigator.md) | Investigate Datadog, Koyeb, and GitHub Actions read-only with reproducible evidence and observability gaps |
+| [`prod-reader`](agents/prod-reader.md) | Answer read-only production tenant-data questions through the audited api query script — aggregate/anonymized results, exact SQL in the report, never raw PII |
 
 ### Hooks (`hooks/`)
 
