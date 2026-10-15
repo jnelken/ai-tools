@@ -186,7 +186,31 @@ followup_chain_end() {
     >> "$LOGDIR/followup-$CHAIN_ORIGIN.log" 2>&1 < /dev/null &!
   echo "=== follow-ups: queued for $CHAIN_ORIGIN ($CHAIN_STAMPS); draining in the background ===" >> "$LOG"
 }
-
+planner_quota_record() {
+  # planner_quota_record OUT [--primary P] [--hit P=FILE]... — every planner who is out and until
+  # when. When quota-record (which refreshes first) fails, the gates as last saved still name them.
+  local out="$1"; shift
+  python3 "$USAGE_PY" --root "$ROOT" quota-record --role orchestrator "$@" > "$out" 2>/dev/null && return 0
+  python3 - "$USAGE_PY" "$ROOT" "$@" > "$out" 2>/dev/null <<'PY' && return 0
+import json, sys
+from pathlib import Path
+sys.path.insert(0, str(Path(sys.argv[1]).parent))
+import usage
+args, hits, primary = sys.argv[3:], [], None
+for flag, value in zip(args[::2], args[1::2]):
+    if flag == "--hit":
+        hits.append(value)
+    elif flag == "--primary":
+        primary = value
+print(json.dumps(usage.saved_quota_record(Path(sys.argv[2]), "orchestrator",
+                                          usage.read_attempts(None, hits), primary)))
+PY
+  rm -f "$out"; return 1
+}
+save_quota_gates() {
+  # So a batch's quota summary counts this repo's skip too.
+  planner_quota_record "$RUN_DIR/quota-gates.json" || true
+}
 on_exit() {
   local rc=$?
   [ -n "${LOCK:-}" ] && [ "${HOLDS_LOCK:-0}" -eq 1 ] && rm -rf "$LOCK"
@@ -287,9 +311,7 @@ orch_pick_rc=$?
 if [ "$orch_pick_rc" -ne 0 ] || [ -z "$ORCH" ] || [ "$ORCH" = "none" ]; then
   echo "=== advance-roadmap $STAMP: skipping — no orchestrator available ===" >> "$LOG"
   ORCH=""
-  # Who is out and until when, so a batch's quota summary counts this repo too.
-  python3 "$USAGE_PY" --root "$ROOT" quota-record --role orchestrator > "$RUN_DIR/quota-gates.json" 2>/dev/null \
-    || rm -f "$RUN_DIR/quota-gates.json"
+  save_quota_gates
   record skipped-quota "no orchestrator available"
   ln -sf "$LOG" "$LOGDIR/latest.log"
   regen_dashboard
@@ -412,8 +434,8 @@ import json, sys
 label, infile, outfile = sys.argv[1], sys.argv[2], sys.argv[3]
 text = open(infile, encoding="utf-8", errors="replace").read()
 start = f"```{label}"
-# Codex echoes the prompt and the ORCHESTRATOR.md it reads into stdout, and both
-# contain this label — so take the last fence whose body actually parses.
+# Callers pass a final answer only, never a transcript. That answer may still quote a
+# malformed fence before its own, so take the last fence whose body actually parses.
 end = len(text)
 while (i := text.rfind(start, 0, end)) >= 0:
     end = i
@@ -443,10 +465,16 @@ record_limit_from_log() {
     '^(you.?ve hit your (session |usage )?limit|hit your session limit|rate limit exceeded|quota exceeded|out of (usage|credits|quota)\b)' \
     "$logfile" || true)"
   [ -n "$text" ] || return 1
-  local -a out_arg=()
-  [ -n "$hit_out" ] && out_arg=(--out "$hit_out")
+  # Saved before the shared usage file is touched, so the run record keeps the banner and its
+  # reset even when that update fails.
+  if [ -n "$hit_out" ]; then
+    python3 "$USAGE_PY" parse-limit --provider "$provider" --text "$text" --scope orchestrator \
+      > "$hit_out" 2>/dev/null \
+      || python3 -c 'import json, sys; print(json.dumps({"provider": sys.argv[1], "exact_cli_text": sys.argv[2]}))' \
+           "$provider" "$text" > "$hit_out"
+  fi
   python3 "$USAGE_PY" --root "$ROOT" record-limit --provider "$provider" --text "$text" --scope orchestrator \
-    "${out_arg[@]}" || true
+    || true
   return 0
 }
 
@@ -472,6 +500,7 @@ run_orchestrator_codex() {
 
 run_orchestrator_claude() {
   local out="$1" prompt="$2"
+  rm -f "$out.last"
   "$CLAUDE" -p "$prompt" \
     --model "$ORCH_CLAUDE_MODEL" \
     --effort high \
@@ -481,9 +510,10 @@ run_orchestrator_claude() {
     --add-dir "$CODE_DIR" \
     --output-format json >"$out.json" 2>&1
   local rc=$?
-  # json carries the per-model token counts; tokens.py turns it back into plain text at $out.
-  python3 "$TOKENS_PY" claude-json "$out.json" "$out" --role orchestrator --model "$ORCH_CLAUDE_MODEL" \
-    --log "$USAGE_LOG" >> "$LOG" 2>&1
+  # json carries the per-model token counts; tokens.py turns it back into plain text at $out,
+  # and writes the json's final answer alone to $out.last, as Codex's -o does.
+  python3 "$TOKENS_PY" claude-json "$out.json" "$out" --final "$out.last" --role orchestrator \
+    --model "$ORCH_CLAUDE_MODEL" --log "$USAGE_LOG" >> "$LOG" 2>&1
   [ -s "$out" ] || cp "$out.json" "$out" 2>/dev/null   # tokens.py missing or broken: keep the raw output
   return $rc
 }
@@ -639,8 +669,7 @@ Previous no-work verdict and what changed since (carry unchanged verdicts forwar
       if [ -z "$alt" ]; then
         echo "=== advance-roadmap $STAMP: skipping — planner $ORCH went over its gate before launch, no other is under its gate ==="
         ORCH=""
-        python3 "$USAGE_PY" --root "$ROOT" quota-record --role orchestrator > "$RUN_DIR/quota-gates.json" 2>/dev/null \
-          || rm -f "$RUN_DIR/quota-gates.json"
+        save_quota_gates
         record skipped-quota "no orchestrator available at launch"
         ln -sf "$LOG" "$LOGDIR/latest.log"
         regen_dashboard
@@ -662,9 +691,9 @@ Previous no-work verdict and what changed since (carry unchanged verdicts forwar
       cat "$orch_out" 2>/dev/null
       echo ""
       echo "=== orchestrator provider=$ORCH exit=$orch_rc ==="
+      # The plan comes only from the planner's final answer. The transcript echoes the prompt and
+      # ORCHESTRATOR.md, whose example fences are valid plans; no final answer means no plan.
       if [ -s "$orch_out.last" ] && extract_json_fence ORCHESTRATOR_RESULT_JSON "$orch_out.last" "$result"; then
-        had_json=1; break
-      elif extract_json_fence ORCHESTRATOR_RESULT_JSON "$orch_out" "$result"; then
         had_json=1; break
       fi
       # Limit failover only when the orchestrator failed to produce a result JSON.
@@ -705,12 +734,15 @@ sys.exit(0 if ok else 1)' "$result")" || had_json=0
           [ -f "$RUN_DIR/orchestrator-limit-$p.json" ] && hits+=(--hit "$p=$RUN_DIR/orchestrator-limit-$p.json")
         done
         planner_quota="$RUN_DIR/planner-quota.json"
-        python3 "$USAGE_PY" --root "$ROOT" quota-record --role orchestrator --primary "$ORCH" "${hits[@]}" \
-          > "$planner_quota" 2>/dev/null || { rm -f "$planner_quota"; planner_quota=""; }
+        planner_quota_record "$planner_quota" --primary "$ORCH" "${hits[@]}" || planner_quota=""
       fi
       python3 - "$orch_out" "$ORCH_RESULT" "$ORCH" "$tried" "$planner_hit" "$orch_rc" "$invalid" "$planner_quota" <<'PY'
-import json, sys
+import json, os, sys
 out, dest, provider, tried, hit_path, rc, invalid, quota_path = sys.argv[1:9]
+try:
+    answered = os.path.getsize(out + ".last") > 0
+except OSError:
+    answered = False
 hit, quota = {}, {}
 try:
     hit = json.load(open(hit_path)) if hit_path else {}
@@ -724,14 +756,26 @@ r = {"action": None, "outcome_token": None, "repo": None, "item": None, "branch"
      "linear_id": None, "directive_ticket": None, "worker_brief": None,
      "archives": [], "blockers": [], "considered": []}
 if hit_path:
+    limits = quota.get("providers") or []
+    if not limits:
+        # No quota record at all: the limits this lane saved itself still name every planner it tried.
+        for name in tried.split():
+            try:
+                h = json.load(open(os.path.join(os.path.dirname(hit_path), f"orchestrator-limit-{name}.json")))
+            except (OSError, ValueError):
+                continue
+            if isinstance(h, dict):
+                limits.append({"provider": name, "state": "limited", "cause": h.get("exact_cli_text"),
+                               "reset_epoch": h.get("reset_epoch"), "reset_at": h.get("reset_at")})
     r["planner_error"] = {"kind": "quota", "provider": provider, "tried": tried.split(),
                           "limit_text": hit.get("exact_cli_text"), "reset_epoch": hit.get("reset_epoch"),
-                          "reset_at": hit.get("reset_at"), "limits": quota.get("providers") or []}
+                          "reset_at": hit.get("reset_at"), "limits": limits}
     r["summary"] = (f"Planner {provider} hit its usage limit"
                     + (f" (resets {hit['reset_at']})" if hit.get("reset_at") else "")
                     + "; no other planner was under its gate, so nothing was dispatched.")
 else:
-    cause = invalid or ("the planner CLI was not found" if rc == "127" else "missing ORCHESTRATOR_RESULT_JSON")
+    cause = invalid or ("the planner CLI was not found" if rc == "127"
+                        else "missing ORCHESTRATOR_RESULT_JSON" if answered else "no final answer")
     try:
         tail = open(out, encoding="utf-8", errors="replace").read()[-2000:]
     except OSError:

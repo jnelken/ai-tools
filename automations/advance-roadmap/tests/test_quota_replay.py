@@ -46,23 +46,45 @@ with open(os.environ["FAKE_CALLS"], "a") as f:
     f.write(json.dumps({{"bin": name, "role": role}}) + "\n")
 mode = os.environ.get(f"FAKE_{{name.upper()}}_{{role.upper()}}") or os.environ.get("FAKE_" + name.upper(), "plan")
 fence = "```ORCHESTRATOR_RESULT_JSON\n" + os.environ.get("FAKE_PLAN", "{{}}") + "\n```"
+# What Codex echoes while it reads ORCHESTRATOR.md / WORKER.md: their examples, which are valid JSON.
+label = "WORKER_RESULT_JSON" if role == "worker" else "ORCHESTRATOR_RESULT_JSON"
+echo = "```" + label + "\n" + json.dumps({{**json.loads({no_work!r}), "outcome": "shipped",
+                                          "summary": "ECHOED EXAMPLE"}}) + "\n```"
+final = fence if role == "orchestrator" else "```WORKER_RESULT_JSON\n" + json.dumps(
+    {{"outcome": "failed", "provider": "codex", "repo": "demo", "summary": "FINAL ANSWER"}}) + "\n```"
 if name == "agent":
     path = next(l.split(": ", 1)[1] for l in prompt.splitlines() if l.startswith("(raw JSON, no fence) to: "))
     json.dump({{"outcome": "bookkeeping", "provider": "cursor", "repo": "demo", "summary": "bookkeeping done"}},
               open(path, "w"))
     print(json.dumps({{"type": "result", "result": "done", "usage": {{"inputTokens": 1, "outputTokens": 1}}}}))
 elif name == "codex":
+    out = args[args.index("-o") + 1] if "-o" in args else None
+    if mode.startswith("echo-"):
+        print("user\n" + prompt + "\n" + echo)
+        if mode == "echo-limit":
+            print("You've hit your usage limit · resets in 2h 30m")
+            sys.exit(1)
+        if mode == "echo-final" and out:
+            open(out, "w").write(final)
+        print("codex done")
+        sys.exit(0)
     if mode == "limit":
         print("You've hit your usage limit · resets in 2h 30m")
         sys.exit(1)
-    out = args[args.index("-o") + 1] if "-o" in args else None
     if out:
         open(out, "w").write(fence if mode == "plan" else "no fence here")
     print("codex done")
 elif name == "claude":
+    if mode == "raw":  # a fence printed outside the CLI's JSON is not its final answer
+        print(fence)
+        sys.exit(1)
     if mode == "limit":
         print(json.dumps(json.load(open(os.environ["FAKE_LIMIT_FIXTURE"]))))  # one line, as the CLI prints it
         sys.exit(1)
+    if mode == "result-limit":  # the limit only in the worker's result file, no banner on stdout
+        path = next(l.split(": ", 1)[1] for l in prompt.splitlines() if l.startswith("(raw JSON, no fence) to: "))
+        json.dump({{"outcome": "limit_hit", "provider": "claude", "repo": "demo",
+                    "limit_text": os.environ["FAKE_RESULT_LIMIT"]}}, open(path, "w"))
     result = fence if mode == "plan" else "I looked around and decided nothing."
     print(json.dumps({{"type": "result", "subtype": "success", "is_error": False, "result": result, "modelUsage": {{}}}}))
 '''
@@ -90,7 +112,7 @@ class QuotaReplayTest(unittest.TestCase):
                         "git@github.com:jnelken/demo.git"], check=True)
         for name in ("claude", "codex", "agent"):
             p = self.bin / name
-            p.write_text(FAKE.format(python=sys.executable))
+            p.write_text(FAKE.format(python=sys.executable, no_work=json.dumps(NO_WORK)))
             p.chmod(0o755)
         # deploysnap.py's gh: fails like an offline machine, so nothing reaches GitHub. It runs after
         # the planner is picked and before it launches, so it can also stand in for another lane
@@ -333,6 +355,128 @@ class QuotaReplayTest(unittest.TestCase):
                 self.assertEqual({q["provider"]: (q["repos"], q["reset_epoch"]) for q in summary},
                                  {n: (["demo"], p["reset_epoch"]) for n, p in by.items()})
 
+    # ── a failing usage.py helper never loses an observed limit ──────────────
+
+    FAILING_USAGE = '''import sys
+from pathlib import Path
+if __name__ == "__main__" and {{"record-limit", "quota-record"}} & set(sys.argv[1:]):
+    with open(Path(__file__).with_name("failed-helpers.log"), "a") as f:
+        f.write(next(a for a in sys.argv[1:] if a in ("record-limit", "quota-record")) + "\\n")
+    sys.stderr.write("usage.py: simulated helper failure\\n")
+    sys.exit(1)
+__file__ = {real!r}
+exec(compile(open(__file__).read(), __file__, "exec"))
+'''
+
+    def fail_usage_helpers(self):
+        """record-limit and quota-record exit 1; every other usage.py call (and an import) is real."""
+        stub = self.root / "lib" / "usage.py"
+        stub.unlink()
+        stub.write_text(self.FAILING_USAGE.format(real=str(HERE / "lib" / "usage.py")))
+        return self.root / "lib" / "failed-helpers.log"
+
+    def worker_plan(self):
+        return json.dumps({"action": "dispatch_worker", "outcome_token": None, "repo": "demo", "item": "DEV-1 thing",
+                           "branch": "roadmap/thing", "worker_mode": "standard", "work_kind": "feature",
+                           "archives": [], "blockers": [], "considered": [], "summary": "do the thing"})
+
+    def reviewer_row(self):
+        (self.root / "review.sh").symlink_to(HERE / "review.sh")
+        repo = self.dir / "reviewed"
+        git = ["git", "-c", "user.name=t", "-c", "user.email=t@t", "-C", str(repo)]
+        # Fixture commits must not depend on the user's signing setup or hooks.
+        hermetic = {**os.environ, "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"}
+        subprocess.run(["git", "init", "-q", "-b", "main", str(repo)], env=hermetic, check=True)
+        subprocess.run([*git, "commit", "-q", "--allow-empty", "-m", "base"], env=hermetic, check=True)
+        subprocess.run([*git, "checkout", "-q", "-b", "roadmap/x"], env=hermetic, check=True)
+        (repo / "x.py").write_text("x = 1\n")
+        subprocess.run([*git, "add", "x.py"], env=hermetic, check=True)
+        subprocess.run([*git, "commit", "-q", "-m", "feat"], env=hermetic, check=True)
+        env = self.env(FAKE_CODEX="limit")
+        run = self.root / "runs" / self.stamp
+        run.mkdir(parents=True)
+        # Codex (Cursor's reviewer) answers only its banner; Claude reviews instead.
+        subprocess.run(["/bin/zsh", str(self.root / "review.sh"), "--repo", str(repo), "--worker", "cursor",
+                        "--round", "1", "--log", str(run / "reviews.jsonl"), "--base", "main"],
+                       env=env, capture_output=True, check=False)
+        (run / "worker-result.json").write_text(json.dumps({"outcome": "failed", "provider": "cursor"}))
+        runrecord.main(["--root", str(self.root), "append", "--stamp", self.stamp, "--status", "ran",
+                        "--worker-result", str(run / "worker-result.json")])
+        rec = self.record()
+        self.assertEqual([h["provider"] for h in rec["review_limits"]], ["codex"], rec)
+        return rec["review_limits"][0]
+
+    def test_reviewer_fixture_ignores_the_users_commit_signing(self):
+        hostile = self.dir / "hostile.gitconfig"
+        hostile.write_text("[commit]\n\tgpgsign = true\n[tag]\n\tgpgsign = true\n"
+                           "[gpg]\n\tprogram = false\n[gpg \"ssh\"]\n\tprogram = false\n")
+        with mock.patch.dict(os.environ, {"GIT_CONFIG_GLOBAL": str(hostile)}):
+            self.assertEqual(self.reviewer_row()["provider"], "codex")
+
+    def batch_skip_row(self):
+        self.env()
+        run = self.root / "runs" / self.stamp
+        run.mkdir(parents=True)
+        batch = daily_batch.Batch.__new__(daily_batch.Batch)
+        batch.state = {"queue": [{"stamp": self.stamp, "status": "ready"}]}
+        with mock.patch.object(daily_batch, "ROOT", self.root), \
+                mock.patch.object(daily_batch.shared, "LIB", self.root / "lib"):
+            batch.defer_ready("no worker quota available", batch.worker_quota())
+        runrecord.main(["--root", str(self.root), "append", "--stamp", self.stamp, "--status", "skipped-quota",
+                        "--detail", "daily batch deferred", "--quota-gates", str(run / "quota-gates.json")])
+        return self.record()["quota"]
+
+    def test_failing_usage_helpers_never_lose_an_observed_limit(self):
+        # Each path observes a limit (banner, result-only limit_hit, or a gate) and then calls a
+        # usage.py helper that fails. The run record must still carry the provider, cause and reset.
+        over_codex = {"weekly": {"used_pct": 85, "reset_epoch": FUTURE}}
+        over_cursor = {"included": {"auto_pct": 99, "reset_epoch": LATER}}
+        over_claude = {"five_hour": {"used_pct": 90, "reset_epoch": LATER}}
+        def at_1150(reset):
+            return datetime.fromtimestamp(reset, NY).strftime("%H:%M") == "11:50"
+
+        def lane(**fake):
+            def row():
+                self.run_lane(**fake)
+                return self.record()["quota"]
+            return row
+
+        cases = [
+            ("planner banner", dict(codex=over_codex), lane(FAKE_CLAUDE="limit"),
+             "claude", BANNER, at_1150, {"record-limit", "quota-record"}),
+            ("planner skipped over its gate", dict(codex=over_codex, claude=over_claude), lane(),
+             "codex", "weekly 85%", lambda r: r == FUTURE, {"quota-record"}),
+            ("worker banner", dict(codex=over_codex, cursor=over_cursor),
+             lane(FAKE_CLAUDE="plan", FAKE_CLAUDE_WORKER="limit", FAKE_PLAN=self.worker_plan()),
+             "claude", BANNER, at_1150, {"record-limit", "quota-record"}),
+            ("worker result-only limit_hit", dict(codex=over_codex, cursor=over_cursor),
+             lane(FAKE_CLAUDE="plan", FAKE_CLAUDE_WORKER="result-limit", FAKE_PLAN=self.worker_plan(),
+                  FAKE_RESULT_LIMIT=BANNER),
+             "claude", BANNER, at_1150, {"record-limit", "quota-record"}),
+            ("reviewer banner", {}, self.reviewer_row,
+             "codex", "You've hit your usage limit · resets in 2h 30m",
+             lambda r: time.time() + 2 * 3600 < r <= time.time() + 3 * 3600, {"record-limit"}),
+            ("approver banner", dict(codex=over_codex), lambda: self.approver_row()["quota"],
+             "claude", BANNER, at_1150, {"record-limit", "quota-record"}),
+            # Every worker out with none stopped on: the one that frees up first, the others' reasons too.
+            ("daily batch skipped-quota", dict(codex=over_codex, cursor=over_cursor, claude=over_claude),
+             self.batch_skip_row, "codex", "cursor: auto pool 99%", lambda r: r == FUTURE, {"quota-record"}),
+        ]
+        for name, gated, row, provider, cause, reset_ok, failed in cases:
+            with self.subTest(path=name):
+                self.tearDown()
+                self.setUp()
+                failures = self.fail_usage_helpers()
+                self.usage_state(**gated)
+                quota = row()
+                self.assertIsNotNone(quota, name)
+                self.assertEqual(quota["provider"], provider, quota)
+                self.assertIn(cause, quota["cause"], quota)
+                self.assertTrue(quota["reset_epoch"] and reset_ok(quota["reset_epoch"]), quota)
+                self.assertTrue(quota["reset_at"], quota)
+                self.assertTrue(failed <= set(failures.read_text().split()),
+                                f"{name}: expected {failed} to fail, log: {failures.read_text()}")
+
     # ── malformed output is an error, still with no worker ───────────────────
 
     def test_malformed_planner_output_is_an_error_without_a_worker(self):
@@ -346,6 +490,62 @@ class QuotaReplayTest(unittest.TestCase):
                 self.assertEqual(rec["outcome"], "error", rec)
                 self.assertTrue(rec["detail"].startswith("orchestrator: "), rec["detail"])
                 self.assertIsNone(rec["quota"])
+
+    def test_raw_claude_fence_outside_its_json_answer_is_not_a_plan(self):
+        self.usage_state(codex={"weekly": {"used_pct": 85, "reset_epoch": FUTURE}})
+        run = self.run_lane(FAKE_CLAUDE="raw")
+        self.assert_nothing_dispatched(run)
+        rec = self.record()
+        self.assertEqual(rec["outcome"], "error", rec)
+        self.assertIn("no final answer", rec["detail"])
+
+    # ── a plan is read only from the planner's final answer ──────────────────
+
+    def test_codex_echoing_orchestrator_examples_then_hitting_quota_dispatches_nothing(self):
+        # The transcript holds a valid blocked_no_item example from ORCHESTRATOR.md, then the banner.
+        self.usage_state(claude={"five_hour": {"used_pct": 90, "reset_epoch": FUTURE}})
+        run = self.run_lane(FAKE_CODEX="echo-limit")
+        self.assert_nothing_dispatched(run)
+        self.assertEqual(self.calls(), [{"bin": "codex", "role": "orchestrator"}])
+        self.assertIn("ECHOED EXAMPLE", (run / "orchestrator-stdout.txt").read_text())
+        rec = self.record()
+        self.assertEqual((rec["outcome"], rec["quota"]["provider"]), ("quota-paused", "codex"), rec)
+        self.assertNotIn("ECHOED EXAMPLE", json.dumps(rec))
+
+    def test_codex_echoing_orchestrator_examples_with_no_final_answer_is_an_error(self):
+        self.usage_state(claude={"five_hour": {"used_pct": 90, "reset_epoch": FUTURE}})
+        run = self.run_lane(FAKE_CODEX="echo-silent")
+        self.assert_nothing_dispatched(run)
+        rec = self.record()
+        self.assertEqual(rec["outcome"], "error", rec)
+        self.assertIn("no final answer", rec["detail"])
+        self.assertIsNone(rec["quota"])
+
+    def test_codex_echoing_orchestrator_examples_plans_from_its_final_answer(self):
+        self.usage_state(claude={"five_hour": {"used_pct": 90, "reset_epoch": FUTURE}})
+        self.run_lane(FAKE_CODEX="echo-final")
+        self.assertTrue(self.reached_barrier)
+        self.assertEqual(self.record()["outcome"], "blocked-no-item")
+        self.assertEqual(json.loads(self.verdict.read_text())["summary"], NO_WORK["summary"])
+
+    def test_codex_worker_result_comes_only_from_its_final_answer(self):
+        # Cursor is over its gate, so Codex works. Its transcript echoes WORKER.md's shipped example.
+        over_cursor = {"included": {"auto_pct": 99, "reset_epoch": LATER}}
+        for mode, source, summary in (("echo-silent", None, None), ("echo-final", "stdout-fence", "FINAL ANSWER")):
+            with self.subTest(mode=mode):
+                self.tearDown()
+                self.setUp()
+                self.usage_state(cursor=over_cursor)
+                run = self.run_lane(FAKE_CODEX_ORCHESTRATOR="plan", FAKE_CODEX_WORKER=mode,
+                                    FAKE_PLAN=self.worker_plan())
+                self.assertEqual([c["bin"] for c in self.calls()], ["codex", "codex"])
+                rec = self.record()
+                self.assertNotEqual(rec["outcome"], "shipped", rec)
+                self.assertEqual(rec["worker_result_source"], source, rec)
+                if summary:
+                    self.assertEqual(json.loads((run / "worker-result.json").read_text())["summary"], summary)
+                else:
+                    self.assertFalse((run / "worker-result.json").exists())
 
     # ── a real no-work plan keeps its bookkeeping ────────────────────────────
 

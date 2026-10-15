@@ -66,7 +66,11 @@ res='{"outcome":"shipped","provider":"cursor","repo":"demo","item":"DEV-1 thing"
 case "$FAKE_WORKER" in
   file)  print -r -- "$res" > "$rf"; print "=== advance-roadmap exit=2 finished (decoy) ==="
          print -r -- '{"type":"result","result":"done","session_id":"cursor-session-1","usage":{"inputTokens":100,"outputTokens":50,"cacheReadTokens":900,"cacheWriteTokens":10}}' ;;
-  fence) print -r -- '```WORKER_RESULT_JSON'; print -r -- "$res"; print -r -- '```' ;;
+  # No result file: the fence is only in the CLI's JSON final answer.
+  fence) python3 -c 'import json, sys; print(json.dumps({"type": "result", "result": "```WORKER_RESULT_JSON\n" + sys.argv[1] + "\n```"}))' "$res" ;;
+  # An echoed WORKER.md example on the transcript, and a final answer without a fence.
+  echo)  print -r -- '```WORKER_RESULT_JSON'; print -r -- "$res"; print -r -- '```'
+         print -r -- '{"type":"result","result":"I stopped before writing a result."}' ;;
   fail)  print "boom"; exit 1 ;;
   reviewed) print -r -- "$prompt" | grep -q -- '--worker cursor --round <N> --log .*/reviews.jsonl' || exit 9
          print -r -- '{"round":1,"worker":"cursor","reviewer":"codex","verdict":"findings"}' >> "${rf:h}/reviews.jsonl"
@@ -317,4 +321,8 @@ check "a skipped first link records its skip"     "$(last outcome)" skipped-lock
 [ ! -f "$ROOT/followup-calls.log" ] && echo "ok   a skipped first link queues no follow-ups" \
   || { echo "FAIL: a skipped tick ran follow-up hooks"; cat "$ROOT/followup-calls.log"; exit 1; }
 rm -f "$ROOT/followup.py"
+# A valid WORKER.md example echoed on the transcript is never recovered as the worker's result.
+run good echo
+check "echoed example fence is not a result" "$(last worker_result_source)" None
+check "echoed example does not ship"         "$(last outcome)" incomplete
 echo "all passed"

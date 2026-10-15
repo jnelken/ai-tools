@@ -11,9 +11,10 @@ is usage.py's job (quota percentages) — this only records what a run consumed.
   tokens.py codex        IN --role R --model M --log FILE  # codex exec stdout (merged stderr)
 
 The *-json forms also write the model's final message to OUT_TEXT, so callers keep
-their plain-text pipeline (limit-banner grep, fence extraction). If IN isn't the
-expected JSON (a crash, a banner) it is copied to OUT_TEXT verbatim and nothing is
-logged. Every command exits 0: accounting must never fail a run.
+their plain-text pipeline (limit-banner grep). With --final FILE they write that message,
+and nothing else, to FILE as well — the only text a result fence may be read from. If IN
+isn't the expected JSON (a crash, a banner) it is copied to OUT_TEXT verbatim, FILE is not
+written and nothing is logged. Every command exits 0: accounting must never fail a run.
 
 Each also takes --session-out FILE: the CLI session id (Claude/Cursor JSON `session_id`, Codex's
 "session id:" header) is written there, so a conductor can link the session; records carry it too.
@@ -88,9 +89,12 @@ def load_result(path):
     return None, ""
 
 
-def write_text(path, noise, result):
+def write_text(path, noise, result, final=None):
     with open(path, "w", encoding="utf-8") as f:
         f.write((noise + "\n" if noise else "") + str(result or "") + "\n")
+    if final:
+        with open(final, "w", encoding="utf-8") as f:
+            f.write(str(result or ""))
 
 
 def write_session(path, session_id):
@@ -152,7 +156,7 @@ def cmd_claude_json(a):
     data, noise = load_result(a.input)
     if not data:
         return passthrough(a.input, a.out_text)
-    write_text(a.out_text, noise, data.get("result"))
+    write_text(a.out_text, noise, data.get("result"), a.final)
     sid = data.get("session_id")
     write_session(getattr(a, "session_out", ""), sid)
     # modelUsage has one entry per model the session touched, subagents included.
@@ -173,7 +177,7 @@ def cmd_cursor_json(a):
     data, noise = load_result(a.input)
     if not data:
         return passthrough(a.input, a.out_text)
-    write_text(a.out_text, noise, data.get("result"))
+    write_text(a.out_text, noise, data.get("result"), a.final)
     sid = data.get("session_id")
     write_session(getattr(a, "session_out", ""), sid)
     u = data.get("usage") or {}
@@ -237,6 +241,7 @@ def main():
         p.add_argument("input")
         if name != "codex":
             p.add_argument("out_text")
+            p.add_argument("--final", default="", help="also write only the final message here")
         p.add_argument("--role", required=True, choices=["orchestrator", "worker", "reviewer", "analyst"])
         p.add_argument("--log", required=True)
         p.add_argument("--model", default="")

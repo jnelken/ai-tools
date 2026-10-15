@@ -6,7 +6,7 @@
 #
 # --result-file: where the agent writes its WORKER_RESULT_JSON (the record run.sh
 #   keeps). If the agent doesn't, we fall back to the last valid fence in that
-#   provider's own stdout — never the combined run log.
+#   provider's final answer — never its transcript, which echoes WORKER.md's examples.
 # --status-file: what this script observed (provider used, exit, fatal reason).
 set -u
 
@@ -63,7 +63,16 @@ write_status() {
     quota="$tmpdir/quota.json"
     [ -n "${4:-}" ] && primary=(--primary "$4")
     python3 "$USAGE_PY" --root "$ROOT" quota-record --role worker --attempts "$LIMITED_LOG" \
-      "${primary[@]}" > "$quota" 2>/dev/null || quota=""
+      "${primary[@]}" > "$quota" 2>/dev/null \
+      || python3 - "$USAGE_PY" "$ROOT" "$LIMITED_LOG" "${4:-}" > "$quota" 2>/dev/null <<'PY' || quota=""
+import json, sys
+from pathlib import Path
+sys.path.insert(0, str(Path(sys.argv[1]).parent))
+import usage
+# quota-record refreshes first; the gates as last saved still name every worker provider.
+print(json.dumps(usage.saved_quota_record(Path(sys.argv[2]), "worker", usage.read_attempts(sys.argv[3], []),
+                                          sys.argv[4] or None)))
+PY
   fi
   python3 - "$STATUS_FILE" "$1" "$2" "${3:-}" "$LIMITED_LOG" "$MISSING" "$quota" "${tmpdir:-}/${1:-none}.log.session" <<'PY2'
 import json, sys
@@ -214,8 +223,8 @@ run_cursor() {
     --output-format json \
     "$prompt" >"$out.json" 2>&1
   local rc=$?
-  python3 "$TOKENS_PY" cursor-json "$out.json" "$out" --role worker --model "$CURSOR_WORKER_MODEL" \
-    --log "$USAGE_LOG" --session-out "$out.session" 2>&1
+  python3 "$TOKENS_PY" cursor-json "$out.json" "$out" --final "$out.last" --role worker \
+    --model "$CURSOR_WORKER_MODEL" --log "$USAGE_LOG" --session-out "$out.session" 2>&1
   [ -s "$out" ] || cp "$out.json" "$out" 2>/dev/null   # tokens.py missing or broken: keep the raw output
   return $rc
 }
@@ -227,6 +236,7 @@ run_codex() {
   command -v "$CODEX" >/dev/null 2>&1 || return 127
   # WORKDIR may be the multi-repo parent, not a git checkout — skip the repo check.
   "$CODEX" exec \
+    -o "$out.last" \
     -m "$CODEX_WORKER_MODEL" \
     -c model_reasoning_effort=high \
     -C "$WORKDIR" \
@@ -254,8 +264,8 @@ run_claude() {
     --add-dir "$ROOT" \
     --output-format json >"$out.json" 2>&1
   local rc=$?
-  python3 "$TOKENS_PY" claude-json "$out.json" "$out" --role worker --model "$CLAUDE_WORKER_MODEL" \
-    --log "$USAGE_LOG" --session-out "$out.session" 2>&1
+  python3 "$TOKENS_PY" claude-json "$out.json" "$out" --final "$out.last" --role worker \
+    --model "$CLAUDE_WORKER_MODEL" --log "$USAGE_LOG" --session-out "$out.session" 2>&1
   [ -s "$out" ] || cp "$out.json" "$out" 2>/dev/null   # tokens.py missing or broken: keep the raw output
   return $rc
 }
@@ -265,9 +275,10 @@ trap 'rm -rf "$tmpdir"' EXIT INT TERM
 LIMITED_LOG="$tmpdir/limited.jsonl"
 
 record_limit() {
-  # record_limit PROVIDER TEXT — gate the provider for later lanes and note its reset in the status.
-  python3 "$USAGE_PY" --root "$ROOT" record-limit --provider "$1" --text "$2" --scope worker \
-    --out "$tmpdir/hit-$1.json" || true
+  # record_limit PROVIDER TEXT — note the limit and its reset in the status, then gate the provider
+  # for later lanes. The note comes first, so a failed shared-state update can't lose the reset.
+  python3 "$USAGE_PY" parse-limit --provider "$1" --text "$2" --scope worker > "$tmpdir/hit-$1.json" 2>/dev/null \
+    || rm -f "$tmpdir/hit-$1.json"
   python3 -c 'import json, sys
 hit = {}
 try:
@@ -277,6 +288,7 @@ except (OSError, ValueError):
 print(json.dumps({"provider": sys.argv[1], "state": "limited", "cause": sys.argv[3],
                   "reset_epoch": hit.get("reset_epoch"), "reset_at": hit.get("reset_at")}))' \
     "$1" "$tmpdir/hit-$1.json" "$2" >> "$LIMITED_LOG"
+  python3 "$USAGE_PY" --root "$ROOT" record-limit --provider "$1" --text "$2" --scope worker || true
 }
 
 final_rc=1
@@ -295,6 +307,7 @@ for provider in "${providers[@]}"; do
   fi
   echo "=== worker try provider=$provider mode=$WORKER_MODE stamp=$STAMP ($(date)) ==="
   rc=0
+  rm -f "$out.last"
   [ -n "$RESULT_FILE" ] && rm -f "$RESULT_FILE"   # a failed-over attempt's result must not count
   rm -f "$REVIEW_LOG"                              # nor its review rounds
   if [ -n "${SUPERSET_TERMINAL_ID:-}" ]; then
@@ -337,9 +350,9 @@ if [ -z "$used" ]; then
   exit 3
 fi
 
-# The agent's file is the record. Fall back to this provider's own stdout only.
+# The agent's file is the record. Fall back to this provider's own final answer only.
 if [ -n "$RESULT_FILE" ]; then
-  python3 - "$RESULT_FILE" "$tmpdir/$used.log" <<'PY2'
+  python3 - "$RESULT_FILE" "$tmpdir/$used.log.last" <<'PY2'
 import json, sys
 path, out = sys.argv[1], sys.argv[2]
 try:
@@ -347,7 +360,10 @@ try:
         sys.exit(0)
 except (OSError, ValueError):
     pass
-text = open(out, encoding="utf-8", errors="replace").read()
+try:
+    text = open(out, encoding="utf-8", errors="replace").read()
+except OSError:
+    text = ""
 label, end = "```WORKER_RESULT_JSON", len(text)
 while (i := text.rfind(label, 0, end)) >= 0:
     end = i
@@ -362,7 +378,7 @@ while (i := text.rfind(label, 0, end)) >= 0:
     if isinstance(obj, dict):
         obj["_source"] = "stdout-fence"
         json.dump(obj, open(path, "w"), indent=1)
-        print("(worker result file missing — recovered from stdout fence)")
+        print("(worker result file missing — recovered from its final answer's fence)")
         sys.exit(0)
 print("(worker wrote no result file and no valid fence)")
 PY2

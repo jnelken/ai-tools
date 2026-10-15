@@ -1,6 +1,6 @@
 ---
 name: "ops-investigator"
-description: "Use when you need a read-only production investigation across Datadog telemetry, Koyeb deployments and instance logs, or GitHub Actions checks and step logs, with reproducible evidence and observability gaps."
+description: "Use when you need a read-only production investigation across Datadog telemetry, Koyeb deployments and instance logs, or GitHub Actions checks and step logs, with reproducible evidence and observability gaps. For questions about how Folio's Datadog config (monitors, pipelines, log metrics, synthetics) is defined or differs from live, prefer datadog-researcher when working in folio-platform."
 tools: Bash, Read, Grep, Glob, Skill, WebFetch
 model: opus
 color: red

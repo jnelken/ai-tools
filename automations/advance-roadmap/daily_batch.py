@@ -28,6 +28,9 @@ from pathlib import Path
 
 import supervisor as shared
 
+sys.path.insert(0, str(shared.HERE / "lib"))
+import usage  # noqa: E402
+
 ROOT = shared.ROOT
 POLL_S = float(os.environ.get("ADVANCE_ROADMAP_BATCH_POLL_S", "1"))
 PLAN_TIMEOUT_S = float(os.environ.get("ADVANCE_ROADMAP_PLAN_TIMEOUT_S", "1800"))
@@ -387,7 +390,11 @@ class Batch:
                 return out.stdout
         except (OSError, ValueError, subprocess.TimeoutExpired):
             pass
-        return None
+        # quota-record refreshes first; the gates the wave just read are still saved.
+        try:
+            return json.dumps(usage.saved_quota_record(ROOT, "worker"))
+        except (OSError, ValueError, TypeError, KeyError):
+            return None
 
     def run(self):
         self.write()

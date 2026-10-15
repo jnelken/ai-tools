@@ -24,12 +24,13 @@ if "gate" in args:
                           "reason": "5h 71% >= 70%", "reset_epoch": 1760400000, "reset_at": "x"}))
         sys.exit(3)
     print(json.dumps({"provider": provider, "available": True, "state": "ok"}))
+if "parse-limit" in args:
+    print(json.dumps({"provider": args[args.index("--provider") + 1], "exact_cli_text": args[args.index("--text") + 1],
+                      "reset_epoch": 1760403600, "reset_at": "2025-10-13T21:00:00-04:00"}))
 if "record-limit" in args:
     provider, text = args[args.index("--provider") + 1], args[args.index("--text") + 1]
     with open(os.environ["LIMITS"], "a") as f:
         f.write(f"{provider}|{text}\n")
-    with open(args[args.index("--out") + 1], "w") as f:
-        json.dump({"reset_epoch": 1760403600, "reset_at": "2025-10-13T21:00:00-04:00"}, f)
 PY
 
 cat > "$TMP_ROOT/bin/fake-provider" <<'SH'

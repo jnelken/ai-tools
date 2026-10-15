@@ -27,7 +27,7 @@ This skill owns the *only* place the badge and the undraft happen. Never add `�
 /post-pr                      # the PR for the current branch
 /post-pr 1271                 # a PR by number, in the current repo
 /post-pr <worktree-path>      # a PR whose branch lives in another worktree
-/post-pr 41 1271 1433         # several, run to completion one at a time
+/post-pr 41 1271 1433         # several: one per worktree, run in parallel
 ```
 
 Runs automatically when a task's work is complete — see [When it fires on its own](#when-it-fires-on-its-own).
@@ -52,7 +52,11 @@ For each target, establish: worktree path, repo (`owner/name`), PR number, branc
 gh pr view --json number,url,title,isDraft,headRefName -q '.'
 ```
 
-If several targets were given, finish one completely before starting the next. Their reviews are independent, but interleaving makes the report unreadable and the dedup state hard to reason about.
+Stamp the run's start for the metrics ledger, from the target's worktree: `~/.ai-tools/bin/review-metrics mark started`. Also stamp `review_done` when step 2 passes its gate and `ci_done` when step 3 does, and finish every run (announced, merged, or stopped at a gate) with the ledger line in step 7. Ledger writes are best-effort: ignore a nonzero exit.
+
+If several targets were given, run them **in parallel**. Targets in different worktrees (and especially different repos) are independent: dispatch each into its own sswt with its own agent (`superset workspaces create --local --project <id> --branch <branch> --agent claude --prompt "/post-pr <n>"`, or one Agent call per target in a single message) rather than finishing one before starting the next. Each run owns its worktree, so reviews, CI watches and merges don't interact. Append to `pr-review-posted.jsonl` with a single `>>` line write so concurrent runs can't clobber each other, and have each run report its own block (step 7) rather than interleaving output.
+
+Serialize only for a real dependency: two targets sharing a worktree or branch, a sub-PR whose trunk another target is still merging into, or the user stating a hard ordering requirement. A soft ordering hint ("API first so the endpoint exists") is not a hard requirement: run in parallel and flag the risk in the report (e.g. "UI PR announced before the API PR merged").
 
 ### 2. Review until clean
 
@@ -62,9 +66,11 @@ If several targets were given, finish one completely before starting the next. T
 
 Automatic review is disabled at all PR stages in these repos, so start the loop directly rather than waiting for a bot. `/peer-review` runs Codex against the branch, applies mechanical findings, commits, pushes, and comments the round count on the PR; `/loop` re-runs it until the review is quiet. That skill owns its own convergence ceiling — don't second-guess it here.
 
+**Rate limits are not a gate.** A Codex throttle (`rate_limited`: 429, tokens-per-minute) is waited out and retried inside `/peer-review`, then falls back to the GitHub review on the other credential pool (see below) if it persists; the run continues rather than stopping at step 2. Parallel `/post-pr` runs share one Codex quota, so when dispatching several targets at once, stagger the launches by ~60s or lower the lens count (`lenses=1`) instead of serializing them. Report any throttled retries in the step 7 block (`Review: clean after 3 rounds, 2 throttled retries`). Stop only if the fallback itself can't run (no PR, `local` mode) and say so.
+
 **Gate:** if the loop exits with unresolved P1/P2 findings, or hits its ceiling without converging, **stop**. Report what's outstanding and do not proceed to step 3. Those need a human decision before the PR goes near reviewers.
 
-Never post `@codex review` to trigger a round yourself — that's [[cycle-review-pr]]'s job, and only when asked.
+The GitHub fallback is whichever trigger bills the *other* credential pool from local Codex: `/codex-action-review` (API key) when local runs on a ChatGPT login, `@codex review` (ChatGPT plan) when local runs on an API key. `/peer-review` owns the pick; either may be posted without asking.
 
 ### 2.5. Resolve merge conflicts with the base
 
@@ -231,6 +237,8 @@ gh pr ready <PR_NUMBER> --repo <OWNER/REPO>
 Only if it is currently a draft. Together with the badge this gives reviewers two independent signals that the PR has been shared and wants eyes.
 
 ### 7. Report
+
+Record the run in the metrics ledger before reporting (and before step 3.7's reap, which kills the terminal): `~/.ai-tools/bin/review-metrics run --outcome posted|merged|stopped|skipped [--gate review|ci|conflicts|merge]`. Use `stopped` with the gate that fired when the run halted early, `skipped` when the dedup check skipped the Slack post. It reads the phase stamps and round count from the worktree, so run it from there. `~/.ai-tools/bin/review-metrics summary` aggregates rounds, durations and gate stops.
 
 Per target, one block:
 

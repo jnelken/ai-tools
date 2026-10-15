@@ -165,6 +165,8 @@ not evidence of a clean round.
 
 Pass the same `$EFFORT` to every reviewer agent this round.
 
+Stamp the round's start for the metrics ledger, keeping the first stamp if a throttled retry re-dispatches the same round: `[ -f "$GIT_DIR/peer-review-round-start" ] || date +%s > "$GIT_DIR/peer-review-round-start"`.
+
 **First round on a branch: build a focus prompt before dispatching the reviewer.** A bare `codex review` reports its top-confidence findings, not an exhaustive sweep — each new diff re-rolls its attention, so on a cross-cutting change it peels one layer per round and a review that should converge in 1–2 rounds takes 5+. Before the first round:
 
 1. **Enumerate the change's interaction matrix from the diff.** Which axes does it cut across? Typical axes: data types / value formats (enum, array, date, percent…), component or editor variants that share the behavior, permission/visibility states (unauthorized, masked, loading, read-only), and host contexts (inside buttons, tables, dashboards). A change that mirrors display state or adds a new affordance to existing values usually spans several.
@@ -183,7 +185,7 @@ The reviewer agents own detach-and-poll until completion, so the orchestrator ne
 
 **Fallback — agent type unavailable.** Agent definitions load at session start, so a session older than `~/.claude/agents/codex-reviewer.md` (or one without the Agent tool) gets an unknown-type error. That is not a reviewer `failed`: read the selected agent file (`~/.claude/agents/codex-reviewer.md` or `claude-reviewer.md`) and run its procedure yourself — same command, same detach-and-poll in bounded foreground calls under 100s, same output block — then continue as if the agent had returned it.
 
-**Parallel lenses (`lenses=N`, or promoted automatically).** A single focus prompt spanning a dozen axes dilutes Codex's attention: one run peels one layer per round, and a review that should converge in 1–2 rounds takes 5+. When `lenses=N` was passed, **or** the matrix from the focus-prompt step spans 3+ axes and no `lenses=` was given, dispatch N *concurrent* Agent calls with `subagent_type: "codex-reviewer"` in **one message** (default N=3 when promoted; clamp 2–4), one per lens slice, then triage the **union** in step 3. This still counts as one round — one lock, one triage, one apply pass, one commit, one increment of the rounds file, one TSV row (record the lens count in the reviewer-effort column, e.g. `high ×3`). It trades tokens for wall-clock rounds.
+**Parallel lenses (`lenses=N`, or promoted automatically).** A single focus prompt spanning a dozen axes dilutes Codex's attention: one run peels one layer per round, and a review that should converge in 1–2 rounds takes 5+. When `lenses=N` was passed, **or** the matrix from the focus-prompt step spans 3+ axes, no `lenses=` was given and the diff isn't large (see below), dispatch N *concurrent* Agent calls with `subagent_type: "codex-reviewer"` in **one message** (default N=3 when promoted; clamp 2–4), one per lens slice, then triage the **union** in step 3. This still counts as one round — one lock, one triage, one apply pass, one commit, one increment of the rounds file, one TSV row (record the lens count in the reviewer-effort column, e.g. `high ×3`). It trades tokens for wall-clock rounds.
 
 Slice the focus prompt into lenses that a single reviewer would each hold in mind at once. The four that recur on UI/data changes, in order of value:
 
@@ -194,13 +196,22 @@ Slice the focus prompt into lenses that a single reviewer would each hold in min
 
 Fewer lenses than that: merge 4 into 3, then 2 into 1. Persist the slices to `$GIT_DIR/peer-review-lenses` (one lens prompt per line) alongside the focus file so every `/loop` round reuses the same partition. Give each agent the same worktree, scope, effort and full focus contents including all do-not-re-report lines, plus its own lens text and label `lens<N>`. Codex logs live at `$GIT_DIR/peer-review-<label>.log`; use each agent's returned `log:` path. Every lens prompt still states the diff scope ("the changes on this branch relative to the merge-base with origin/<base>") and ends with "Also report anything else you find" so nothing falls between the slices. Wait for all agents to return, then dedupe the union by `file:line + summary` before triage — two lenses will occasionally report the same finding.
 
-When *not* to fan out: a diff confined to one file or one concern, a round that is only verifying the previous round's fixes (drop to 1 lens — the prior round's report tells you which slice to keep), or a `low`-effort mop-up round.
+When *not* to fan out: a diff confined to one file or one concern, a round that is only verifying the previous round's fixes (drop to 1 lens — the prior round's report tells you which slice to keep), a `low`-effort mop-up round, or a large diff (roughly 80+ files or 5k+ changed lines). Every lens re-sends the whole diff (110–160k tokens per request on a 142-file trunk), and the 1M tokens-per-minute quota is shared with every other Codex run, so 2+ concurrent lenses on a large diff throttle at once. Fold the slices into one focus prompt instead, or run them one after another. An explicit `lenses=N` still wins.
 
 For either path, `failed` from **any** agent makes the whole round failed: release the lock (`rm -f "$LOCK"`), surface the agent's error text verbatim to the user, and stop. Common causes: not logged in (`codex login`), config error, network. Don't try to work around those. If some lenses succeed and one fails, do not triage a partial union or record a completed round.
 
 `usage_limited` from any agent also prevents local triage or a completed-round record: release the lock. With the Codex reviewer, use the fallback below; with the Claude reviewer there is no GitHub equivalent, so report the limit and stop. In `local` mode, report the limit and stop without GitHub calls.
 
-**Exception — Codex usage limit / out of credits** (a `codex-reviewer` agent returns `usage_limited`; Codex path only): fall back to the GitHub review action. Comment `/codex-action-review` on the PR (`gh pr comment <PR> --body "/codex-action-review"`), then continue the workflow with [[babysit-pr]] until the review lands and its findings are addressed. **Never use `@codex review` for this fallback**: it bills the same Codex account as the local CLI, so it hits the same limit (it replies "You have reached your Codex usage limits"). `/codex-action-review` is handled by `.github/workflows/codex-review.yml`, which runs on separate credentials. If the PR doesn't exist yet, stop and report instead.
+**`rate_limited` is transient: wait and retry, never stop on the first one.** A per-minute throttle (TPM/RPM, HTTP 429) clears on its own, and it is not a failed round and not a usage limit. Release the lock, then retry the *same* round (nothing is recorded, the rounds file is untouched) up to 3 times. Wait `retry_after` seconds when given, else 60s, 120s, 240s in bounded foreground sleeps under 100s each, or `ScheduleWakeup` when the loop is dynamic. Retry with a **single lens** even if the round was fanned out: N concurrent Codex runs multiply tokens per minute and are the usual trigger, and the quota is shared with every other Codex run on this account (parallel `/post-pr` sessions, other reviews), so a 429 often means "others are running". If the round was fanned out and only some lenses throttled, keep the lenses that returned `ok` and re-run only the throttled ones; a union is only triaged once every lens has returned `ok`. After 3 throttled attempts, treat it as `usage_limited` and use the fallback below (Codex path), or report and stop (Claude reviewer, `local` mode). Say in the round comment or report how many throttled retries it took.
+
+**Exception — Codex usage limit / out of credits** (a `codex-reviewer` agent returns `usage_limited`; Codex path only): fall back to a GitHub-triggered review on the **other credential pool** from local Codex, so it doesn't hit the same limit:
+
+| Local Codex auth | Fallback trigger | Bills |
+|---|---|---|
+| ChatGPT login (`jq -r .auth_mode ~/.codex/auth.json` → `chatgpt`, no `OPENAI_API_KEY`/`CODEX_API_KEY` in env) | `/codex-action-review` (`.github/workflows/codex-review.yml`) | the repo's `OPENAI_API_KEY` secret |
+| API key (`auth_mode` → `apikey`, or a key in env) | `@codex review` | the ChatGPT/Codex plan |
+
+Post it on the PR (`gh pr comment <PR> --body "<trigger>"`) without asking, then continue the workflow with [[babysit-pr]] until the review lands and its findings are addressed. Same-pool triggers fail the same way (e.g. `@codex review` on a ChatGPT-login machine replies "You have reached your Codex usage limits"). Say in the report that you switched and why. If the PR doesn't exist yet, stop and report instead.
 
 Only when **all** agents return `ok` (regardless of finding count), record the round and both sides' model metadata. Read `REVIEWER_MODEL` and `REVIEWER_EFFORT` from their `reviewer:` lines, retaining the `codex`/`claude` identity with the model. For identical values across N lenses, record the model once and effort as `<effort> ×N`; if values differ, list each lens label with its model/effort in the corresponding columns of the same single row. Missing values are `unknown`.
 ```bash
@@ -273,6 +284,14 @@ echo "<number of P1 rows in this round's triage>" > "$GIT_DIR/peer-review-last-p
 ```
 
 Write it on every completed round, including a round that found nothing (`0`). Skipping it leaves the previous round's number in place and picks the next effort off stale evidence.
+
+**Append the round to the metrics ledger** (`~/.claude/state/review-metrics.jsonl`) from the same triage table. The helper reads the round number, start stamp, reviewer model/effort and lens count from `$GIT_DIR`, so you only pass the counts: P1/P2/P3 rows Codex reported, how many you applied vs dismissed, and how many throttled retries this round took (step 2's `rate_limited` handling):
+
+```bash
+~/.ai-tools/bin/review-metrics round --p1 <n> --p2 <n> --p3 <n> --applied <n> --dismissed <n> --throttled <n>
+```
+
+Run it on every completed round, including a clean one (all zeros). It is append-only and cheap; a failure to write must never fail the round, so ignore a nonzero exit. `~/.ai-tools/bin/review-metrics summary` reads it back (rounds/PR, round duration, findings by round number).
 
 ### 4. Apply the fixes
 
