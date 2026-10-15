@@ -223,6 +223,5 @@ def comment(identifier, body):
     with_file(body, lambda path: linear("issue", "comment", "add", identifier, "--body-file", path))
 
 
-def close(identifier, body):
-    comment(identifier, body)
+def mark_done(identifier):
     linear("issue", "update", identifier, "--state", "Done")

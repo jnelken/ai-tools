@@ -113,21 +113,42 @@ def feasibility(st, step, builder=None):
         return "unknown", "usage.py could not read provider usage"
     free_reviewers = {g["provider"] for g in gr if g.get("available")}
     if step == "build":
-        chain = [g["provider"] for g in gw if g.get("available")
-                 and free_reviewers.intersection(REVIEWERS.get(g["provider"], ()))]
+        free_builders = [g["provider"] for g in gw if g.get("available")]
+        chain = [p for p in free_builders if free_reviewers.intersection(REVIEWERS.get(p, ()))]
         if chain:
             return "ok", chain
-        role = "worker" if not any(g.get("available") for g in gw) else "reviewer"
+        if not free_builders:
+            if any(g.get("state") in OUT for g in gw + gr):
+                q = quota_record("worker")
+                if q and q.get("provider"):
+                    return "quota", q
+            return "unknown", "no worker is available and none reports a usage gate"
+        eligible = {r for p in free_builders for r in REVIEWERS.get(p, ())}
     else:
-        if free_reviewers.intersection(REVIEWERS.get(builder, ())):
+        eligible = set(REVIEWERS.get(builder, ()))
+        if free_reviewers.intersection(eligible):
             return "ok", [builder]
-        role = "reviewer"
-    relevant = gw + gr if role == "worker" else gr
-    if any(g.get("state") in OUT for g in relevant):
-        q = quota_record(role)
-        if q and q.get("provider"):
-            return "quota", q
-    return "unknown", f"no {role} is available and none reports a usage gate"
+    q = reviewer_quota(eligible)
+    if q:
+        return "quota", q
+    return "unknown", "no reviewer is available and none reports a usage gate"
+
+
+def reviewer_quota(eligible):
+    """usage.py's reviewer quota record narrowed to the reviewers review.sh would actually try,
+    or None when none of them is over its gate or limited. An excluded reviewer (the builder
+    itself) being out says nothing about when this review can run."""
+    q = quota_record("reviewer")
+    rows = [p for p in (q or {}).get("providers") or []
+            if isinstance(p, dict) and p.get("provider") in eligible]
+    out = [p for p in rows if p.get("state") in OUT]
+    if not out:
+        return None
+    resets = [p for p in out if p.get("reset_epoch")]
+    first = min(resets, key=lambda p: p["reset_epoch"]) if resets else out[0]
+    return {**q, "provider": first["provider"], "reset_epoch": first.get("reset_epoch"),
+            "reset_at": first.get("reset_at"), "providers": rows,
+            "cause": "; ".join(f"{p['provider']}: {p.get('cause') or p.get('reason') or p['state']}" for p in out)}
 
 
 # ── repos and workspaces ─────────────────────────────────────────────────────
@@ -335,9 +356,17 @@ def run_in_superset(st, repo_dir, branch, bdir, cmd):
         if (k.startswith("ADVANCE_ROADMAP_") or k in ("PERSONAL_CODE_DIR", FOLLOWUP_ENV)) \
                 and not re.search(r"WEBHOOK|SECRET|TOKEN|KEY", k):
             lines.append(f"export {k}={shell_quote(v)}")
-    lines += [f"print -r -- $$ > {shell_quote(str(bdir / 'worker.pid'))}",
+    # The launcher registers itself in the shared in-flight registry (supervisor.inflight_repos)
+    # before the builder starts and unregisters before recording its exit, so every lane, thread
+    # and drain stays out of the repo even if the drain that launched it dies first.
+    registry = shell_quote(str(inflight_file(st)))
+    lines += [f"mkdir -p {shell_quote(str(inflight_file(st).parent))}",
+              f"print -r -- $$ > {registry}",
+              f"print -r -- $$ > {shell_quote(str(bdir / 'worker.pid'))}",
               " ".join(shell_quote(c) for c in cmd) + f" 2>&1 | tee {shell_quote(str(bdir / 'worker-output.log'))}",
-              f"print -r -- ${{pipestatus[1]}} > {shell_quote(str(bdir / 'worker.exit'))}"]
+              "rc=${pipestatus[1]}",
+              f"rm -f {registry}",
+              f"print -r -- $rc > {shell_quote(str(bdir / 'worker.exit'))}"]
     launcher.write_text("\n".join(lines) + "\n")
     launcher.chmod(0o700)
     p = subprocess.run([sys.executable, str(ROOT / "lib" / "workspaces.py"), "launch", "--repo", str(repo_dir),
@@ -347,25 +376,18 @@ def run_in_superset(st, repo_dir, branch, bdir, cmd):
     if p.returncode != 0:
         return None, f"could not create the Superset workspace for {branch}: {(p.stderr or p.stdout).strip()[-300:]}"
     waited, pid = 0.0, None
-    registry = inflight_file(st)
     while not (bdir / "worker.exit").exists():
         time.sleep(WORKER_POLL_S)
         waited += WORKER_POLL_S
         if pid is None and (bdir / "worker.pid").exists():
             pid = int((bdir / "worker.pid").read_text().strip() or 0) or None
-            if pid:
-                # The shared in-flight registry (supervisor.inflight_repos): every lane, thread and
-                # follow-up drain sees a builder that outlives this wait and stays out of the repo.
-                registry.parent.mkdir(parents=True, exist_ok=True)
-                registry.write_text(f"{pid}\n")
         if pid is None and waited >= 180:
             return None, "the workspace terminal never started the builder"
         if pid and not pid_alive(pid) and not (bdir / "worker.exit").exists():
-            registry.unlink(missing_ok=True)
+            inflight_file(st).unlink(missing_ok=True)   # its terminal died before it could unregister
             return None, "the builder's terminal exited without an exit code"
         if waited >= WORKER_TIMEOUT_S:
             return None, f"the builder was still running after {WORKER_TIMEOUT_S / 60:.0f}m"
-    registry.unlink(missing_ok=True)
     try:
         return int((bdir / "worker.exit").read_text().strip()), None
     except ValueError:
@@ -552,7 +574,7 @@ def land(st, repo_dir, findings):
         if v["deploy"] not in ("success", "none"):
             return False, f"merged {sha[:9]} but the deploy is {v['deploy']}", v["deploy"] in ("timeout", "unverified")
     if st["repo"] == followscan.TOOLING_REPO and v.get("install") not in ("installed", "skipped"):
-        v["install"] = install_ai_tools()
+        v["install"] = install_ai_tools(sha)
         if v["install"] not in ("installed", "skipped"):
             return False, f"merged {sha[:9]} and deployed, but this machine's ai-tools install failed: {v['install']}", True
     return True, "", False
@@ -568,13 +590,25 @@ def sync_root_checkout(repo_dir):
         git("-C", str(repo_dir), "fetch", "--quiet", "origin")
 
 
-def install_ai_tools():
+def install_ai_tools(merge_commit):
     """ai-tools repairs reach this machine through the deploy clone's own install (clone-lock),
-    never by editing it: run its install.sh once the PR is merged."""
+    never by editing it: run its install.sh once the PR is merged.
+
+    install.sh exits 0 even when it skips the update (a dirty deploy clone, a failed fetch), so
+    success is the deploy clone's HEAD containing the merge commit — a read-only git query."""
     if os.environ.get("ADVANCE_ROADMAP_FOLLOWUP_INSTALL", "1") != "1":
         return "skipped"
     script = AI_TOOLS_HOME / "install.sh"
     if not script.exists():
         return "no deploy clone"
     p = subprocess.run([str(script)], capture_output=True, text=True, timeout=600, stdin=subprocess.DEVNULL)
-    return "installed" if p.returncode == 0 else f"install.sh exit {p.returncode}"
+    if p.returncode != 0:
+        return f"install.sh exit {p.returncode}"
+    clone = str(AI_TOOLS_HOME)
+    head = git("-C", clone, "rev-parse", "--short", "HEAD")
+    if head.returncode != 0:
+        return f"could not read the deploy clone's HEAD: {(head.stderr or head.stdout).strip()[:200]}"
+    fetched = git("-C", clone, "cat-file", "-e", f"{merge_commit}^{{commit}}").returncode == 0
+    if fetched and git("-C", clone, "merge-base", "--is-ancestor", merge_commit, "HEAD").returncode == 0:
+        return "installed"
+    return f"install.sh exited 0 but the deploy clone (HEAD {head.stdout.strip()}) does not contain {merge_commit[:9]}"

@@ -4,8 +4,8 @@
   followup_stubs.py usage ...     lib/usage.py: gates/gate/quota-record from $ROOT/stub-usage.json
   followup_stubs.py worker ...    worker.sh: builds on the follow-up branch per $ROOT/stub-worker.json
   followup_stubs.py review ...    review.sh: verdicts per round from $ROOT/stub-review.json
-  followup_stubs.py gh ...        gh: PR checks / merge / deploy status from $ROOT/stub-gh.json
-  followup_stubs.py linear ...    linear: paginated issues from $ROOT/stub-linear.json
+  followup_stubs.py gh ...        gh: PR checks / merge / merge commit / deploy status from $ROOT/stub-gh.json
+  followup_stubs.py linear ...    linear: paginated issues (and failing commands) from $ROOT/stub-linear.json
   followup_stubs.py jlin ...      jlin.py new: files DEV-900
   followup_stubs.py codex ...     codex exec -o FILE: the analyst answer in $ROOT/stub-analyst.txt
   followup_stubs.py workspaces .. lib/workspaces.py launch: a worktree, the command run detached
@@ -152,7 +152,9 @@ def gh(args):
             sys.exit(1)
         return
     if args[:2] == ["pr", "view"]:
-        print(pr_head(g) if "headRefOid" in args else "f" * 40)
+        # "merge_commit": "head" stands the PR head in for the merge commit (a real, fetchable sha).
+        merge = pr_head(g) if g.get("merge_commit") == "head" else "f" * 40
+        print(pr_head(g) if "headRefOid" in args else merge)
         return
     deploy = g["deploy"]
     if isinstance(deploy, list):   # one reading per status call, the last repeating
@@ -205,7 +207,12 @@ def linear(args):
             "hasNextPage": i + 1 < len(pages), "endCursor": str(i + 1)}}}}))
         return
     body = Path(opt(args, "--body-file")).read_text() if "--body-file" in args else None
-    note("linear", cmd=" ".join(args[:3]), issue=args[3] if len(args) > 3 else None, body=body, args=args)
+    failed = any(" ".join(args).startswith(prefix) for prefix in lin.get("fail") or [])
+    note("linear", cmd=" ".join(args[:3]), issue=args[3] if len(args) > 3 else None, body=body, args=args,
+         failed=failed)
+    if failed:   # "fail": ["issue update"] → that command exits 1, like a transient API error
+        print("Error: request failed (503)", file=sys.stderr)
+        sys.exit(1)
 
 
 def jlin(args):

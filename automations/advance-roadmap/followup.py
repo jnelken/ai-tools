@@ -58,7 +58,7 @@ import followscan  # noqa: E402
 import followticket  # noqa: E402
 import supervisor as shared  # noqa: E402
 from followrepair import (FOLLOWUP_ENV, MAX_ROUNDS, POLL_S, ROOT, STATE, builder_alive,  # noqa: E402
-                          feasibility, gate_one, land, log, now_iso, quota_record, read_json, repo_path,
+                          feasibility, gate_one, land, log, now_iso, read_json, repo_path,
                           run_builder, run_review, safe_repo, stage_dir, write_json)
 
 SHIPPED = ("shipped", "shipped-deploy-failed")
@@ -576,22 +576,58 @@ def finish(st, findings):
     for f in findings:
         f["status"] = "fixed"
     st.update(status="done", quota=None, deferred_until=None, next=None)
-    closing = (f"Fixed by advance-roadmap follow-up `{st['key']}`: PR {st.get('pr_url')}, merge "
-               f"`{st.get('merge_commit')}`, deploy {st['validation'].get('deploy')}; "
-               f"{followticket.render_validation(st.get('validation'))}.")
+    st["close_note"] = (f"Fixed by advance-roadmap follow-up `{st['key']}`: PR {st.get('pr_url')}, merge "
+                        f"`{st.get('merge_commit')}`, deploy {st['validation'].get('deploy')}; "
+                        f"{followticket.render_validation(st.get('validation'))}.")
+    st["pending_close"] = [{"ticket": ident, "commented": False}
+                           for ident in sorted({f["ticket"] for f in findings if f.get("ticket")})]
+    close_tickets(st)
+
+
+def close_tickets(st):
+    """The repair's last step, persisted in `pending_close` so a Linear failure is retried by every
+    later drain (retry_closes) even though the stage itself is done. The closing comment and the
+    move to Done are tracked apart, so a retry never posts the comment twice."""
     closed = set()
-    for ident in sorted({f["ticket"] for f in findings if f.get("ticket")}):
-        if os.environ.get("ADVANCE_ROADMAP_FOLLOWUP_LINEAR", "1") != "1":
-            break
+    if os.environ.get("ADVANCE_ROADMAP_FOLLOWUP_LINEAR", "1") != "1":
+        return closed
+    for entry in st.get("pending_close") or []:
+        ident = entry["ticket"]
         try:
-            followticket.close(ident, closing)
+            if not entry.get("commented"):
+                followticket.comment(ident, st.get("close_note") or f"Fixed by advance-roadmap follow-up `{st['key']}`.")
+                entry["commented"] = True
+            followticket.mark_done(ident)
             closed.add(ident)
             log(f"{st['key']}: closed {ident}")
         except followticket.LinearError as e:
-            report(st, "linear", f"merged and deployed, but could not close {ident}: {e}")
+            report(st, "linear", f"merged and deployed, but could not close {ident}: {e}",
+                   "the next drain retries closing it")
+    st["pending_close"] = [e for e in st.get("pending_close") or [] if e["ticket"] not in closed]
     if closed:
         with TicketIndex() as index:
             index.drop_tickets(closed)
+    return closed
+
+
+def retry_closes():
+    """Close tickets an earlier drain merged and deployed but could not close in Linear; returns
+    the identifiers it closed."""
+    closed = set()
+    for st in all_stages():
+        if not st.get("pending_close"):
+            continue
+        c = claim_stage(st["key"])
+        if not c:
+            continue
+        try:
+            st = load(st["key"]) or st
+            if st.get("pending_close"):
+                closed |= close_tickets(st)
+                save(st)
+        finally:
+            c.close()
+    return closed
 
 
 def process(st, issues):
@@ -659,8 +695,8 @@ def repair(st, repo_dir, todo, issues=None):
                 return defer(st, todo, detail, f"review round {rnd}", issues)
             verdict, text = run_review(st, repo_dir, rnd)
             if verdict == "unavailable":
-                q = quota_record("reviewer")
-                if q and q.get("provider"):
+                q = followrepair.reviewer_quota(followrepair.REVIEWERS[st["builder_provider"]])
+                if q:
                     return defer(st, todo, q, f"review round {rnd}", issues)
                 return block(st, "review-unavailable", "every reviewer was at capacity or missing")
             if verdict == "error":
@@ -691,6 +727,9 @@ def drain(repo=None, origin=None, stage=None, wait_s=0.0, recover=True):
     STATE.mkdir(parents=True, exist_ok=True)
     recover_interrupted()
     issues = recover_tickets() if recover else []
+    closed = retry_closes()
+    if issues and closed:
+        issues[:] = [i for i in issues if i.get("identifier") not in closed]
     deadline = time.time() + wait_s
     while True:
         waiting, progressed = [], False

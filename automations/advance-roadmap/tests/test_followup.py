@@ -18,6 +18,10 @@ FOLLOWUP = ADV / "followup.py"
 STUBS = HERE / "followup_stubs.py"
 FIXTURES = HERE / "fixtures" / "oct13"
 MARKER_LINE = "# TODO(advance-roadmap review): reject an empty listing before saving"
+sys.path.insert(0, str(ADV))
+sys.path.insert(0, str(ADV / "lib"))
+import followscan  # noqa: E402
+import supervisor  # noqa: E402
 
 
 class FollowupTest(unittest.TestCase):
@@ -341,6 +345,30 @@ class FollowupTest(unittest.TestCase):
         self.assertEqual(len(self.calls("workspaces")), 2)
         self.assertFalse(registry.exists())
 
+    def test_a_builder_whose_drain_dies_before_seeing_its_pid_is_still_registered(self):
+        self.shipped_item("20261014-050000")
+        self.run_followup("hook", "item-done", "--stamp", "20261014-050000")
+        self.py_wrapper(Path(self.tmp.name), "workspaces").rename(self.root / "lib" / "workspaces.py")
+        self.set("stub-worker.json", {"mode": "ok", "sleep": 3})
+        key = "cleanup-20261014-050000"
+        # The drain sleeps a full minute before its first look at worker.pid, so it dies first.
+        drain = subprocess.Popen([sys.executable, str(FOLLOWUP), "drain"], stdout=subprocess.DEVNULL,
+                                 stderr=subprocess.DEVNULL, env={**self.env, "ADVANCE_ROADMAP_SUPERSET": "1",
+                                                                 "ADVANCE_ROADMAP_WORKER_POLL_S": "60"})
+        deadline = time.time() + 30
+        while not list((self.root / "followups" / key).glob("build-*/worker.pid")) and time.time() < deadline:
+            time.sleep(0.1)
+        drain.kill()
+        drain.wait()
+        registry = self.root / "inflight" / "demo" / f"followup-{key}.pid"
+        self.assertTrue(registry.exists())
+        pid = int(registry.read_text().strip())
+        os.kill(pid, 0)   # a live builder the drain never recorded
+        self.assertIn("demo", supervisor.inflight_repos(self.root))
+        while not list((self.root / "followups" / key).glob("build-*/worker.exit")) and time.time() < deadline:
+            time.sleep(0.1)
+        self.assertFalse(registry.exists())   # the launcher unregisters before recording its exit
+
     def test_a_pr_head_that_moved_after_the_review_is_re_reviewed_never_merged(self):
         self.shipped_item("20261014-050000")
         self.run_followup("hook", "item-done", "--stamp", "20261014-050000")
@@ -373,27 +401,51 @@ class FollowupTest(unittest.TestCase):
         self.assertEqual((st["status"], st["validation"]["deploy"]), ("done", "none"))
         self.assertEqual(len([c for c in self.calls("gh") if c["args"][:2] == ["pr", "merge"]]), 1)
 
-    def test_an_ai_tools_repair_is_not_done_until_this_machine_installs_it(self):
+    def ai_tools_deploy_clone(self):
+        """An ai-tools item ready to drain, a deploy clone of its remote, and the env pointing at it.
+        The stub reports the PR head as the merge commit, so the clone can really fetch it."""
         self.make_repo("ai-tools")
         self.shipped_item("20261014-050000", repo="ai-tools")
         self.run_followup("hook", "item-done", "--stamp", "20261014-050000")
+        self.set("stub-gh.json", {"checks": "pass", "deploy": "success", "merge_commit": "head"})
         home = Path(self.tmp.name) / "ai-home"
-        home.mkdir()
-        script, ran = home / "install.sh", home / "ran"
-        script.write_text(f"#!/bin/sh\necho run >> {ran}\nexit 1\n")
+        subprocess.run(["git", "clone", "-q", str(Path(self.tmp.name) / "remotes" / "ai-tools.git"), str(home)],
+                       check=True, env=self.env)
+        return home, {"AI_TOOLS_HOME": str(home), "ADVANCE_ROADMAP_FOLLOWUP_INSTALL": "1"}
+
+    def install_script(self, home, body):
+        script = home / "install.sh"
+        script.write_text(f"#!/bin/sh\necho run >> {Path(self.tmp.name) / 'install-ran'}\n{body}\n")
         script.chmod(0o755)
-        env = {"AI_TOOLS_HOME": str(home), "ADVANCE_ROADMAP_FOLLOWUP_INSTALL": "1"}
+
+    def test_an_ai_tools_repair_is_not_done_until_this_machine_installs_it(self):
+        home, env = self.ai_tools_deploy_clone()
+        self.install_script(home, "exit 1")
         self.run_followup("drain", env=env)
         st = self.state("cleanup-20261014-050000")
         self.assertEqual(st["status"], "pending")
         self.assertEqual((st["validation"]["deploy"], st["validation"]["install"]), ("success", "install.sh exit 1"))
         self.assertIn("install failed", self.report()[-1]["reason"])
-        script.write_text(f"#!/bin/sh\necho run >> {ran}\nexit 0\n")
+        branch = "roadmap/followup-cleanup-20261014-050000"
+        self.install_script(home, f"git -C {home} fetch -q origin {branch} && "
+                                  f"git -C {home} merge -q --ff-only FETCH_HEAD")
         self.run_followup("drain", env=env)
         st = self.state("cleanup-20261014-050000")
         self.assertEqual((st["status"], st["validation"]["install"]), ("done", "installed"))
         self.assertEqual(len([c for c in self.calls("gh") if c["args"][:2] == ["pr", "merge"]]), 1)
-        self.assertEqual(ran.read_text().count("run"), 2)
+        self.assertEqual((Path(self.tmp.name) / "install-ran").read_text().count("run"), 2)
+
+    def test_an_install_that_exits_0_without_updating_the_deploy_clone_is_not_installed(self):
+        home, env = self.ai_tools_deploy_clone()
+        self.install_script(home, "echo 'deploy clone is dirty; skipping update' >&2\nexit 0")
+        before = self.git(home, "rev-parse", "HEAD")
+        self.run_followup("drain", env=env)
+        st = self.state("cleanup-20261014-050000")
+        self.assertEqual(st["status"], "pending")
+        self.assertIn("does not contain", st["validation"]["install"])
+        self.assertIn("install failed", self.report()[-1]["reason"])
+        self.assertEqual(self.git(home, "rev-parse", "HEAD"), before)   # the check itself is read-only
+        self.assertEqual(st["findings"][0]["status"], "open")
 
     def test_repairs_in_one_repo_are_serialized(self):
         for stamp in ("20261014-050000", "20261014-060000"):
@@ -461,6 +513,29 @@ class FollowupTest(unittest.TestCase):
         [w] = self.calls("worker")
         self.assertEqual(w["providers"], "codex claude")
         self.assertEqual(st["status"], "done")
+
+    def test_an_unavailable_review_is_not_quota_when_only_the_builder_is_out(self):
+        self.shipped_item("20261014-050000")
+        self.run_followup("hook", "item-done", "--stamp", "20261014-050000")
+        # cursor builds; codex and claude pass their gates but are missing or at capacity in review.sh.
+        self.set("stub-usage.json", {"reviewer": {"cursor": "over"}, "reset_at": "2026-10-14T13:00:00",
+                                     "reset_epoch": time.time() + 600})
+        self.set("stub-review.json", {"verdicts": ["clean"], "unavailable": True})
+        self.run_followup("drain")
+        st = self.state("cleanup-20261014-050000")
+        self.assertEqual(st["builder_provider"], "cursor")
+        self.assertEqual((st["status"], st["next"]["step"]), ("pending", "review"))
+        self.assertEqual(self.calls("jlin"), [])
+        self.assertIsNone(st.get("quota"))
+        self.assertEqual(self.report()[-1]["kind"], "review-unavailable")
+        # An eligible reviewer that is really out is still quota, and names that reviewer.
+        self.set("stub-usage.json", {"reviewer": {"cursor": "over", "claude": "limited"},
+                                     "reset_at": "2026-10-14T13:00:00", "reset_epoch": time.time() + 600})
+        self.run_followup("drain")
+        st = self.state("cleanup-20261014-050000")
+        self.assertEqual((st["status"], st["quota"]["provider"]), ("deferred", "claude"))
+        self.assertEqual(len(self.calls("jlin")), 1)
+        self.assertNotIn("cursor", st["quota"]["cause"])
 
     def test_worker_exit_3_with_every_cli_missing_is_a_local_blocker_not_quota(self):
         self.shipped_item("20261014-050000")
@@ -553,6 +628,33 @@ class FollowupTest(unittest.TestCase):
         order = [c["tool"] for c in self.calls() if c["tool"] in ("review", "worker")]
         self.assertEqual(order[0], "review")   # the prior PR is reviewed before any new build
 
+    def test_a_ticket_close_that_fails_is_retried_by_later_drains(self):
+        self.shipped_item("20261014-050000")
+        self.run_followup("hook", "item-done", "--stamp", "20261014-050000")
+        self.set("stub-usage.json", {"fail": True})
+        self.run_followup("drain")   # scans, then stops on unknown usage
+        key = "cleanup-20261014-050000"
+        fid = self.state(key)["findings"][0]["id"]
+        ticket = self.meta_ticket("DEV-501", {"key": key, "stage": "project-cleanup", "finding_ids": [fid]})
+        self.set("stub-usage.json", {})
+        self.set("stub-linear.json", {"pages": [[ticket]], "fail": ["issue update DEV-501"]})
+        self.run_followup("drain")
+        st = self.state(key)
+        self.assertEqual(st["status"], "done", self.report())
+        self.assertEqual(st["pending_close"], [{"ticket": "DEV-501", "commented": True}])
+        self.assertIn("could not close DEV-501", self.report()[-1]["reason"])
+        self.set("stub-linear.json", {"pages": [[ticket]]})
+        self.run_followup("drain")
+        st = self.state(key)
+        self.assertEqual(st["pending_close"], [])
+        updates = [c for c in self.calls("linear") if c["cmd"] == "issue update DEV-501"]
+        self.assertEqual([c["failed"] for c in updates], [True, False])
+        self.assertIn("Done", updates[-1]["args"])
+        closing = [c for c in self.calls("linear") if c["cmd"].startswith("issue comment")
+                   and c["issue"] == "DEV-501" and "Fixed by" in (c["body"] or "")]
+        self.assertEqual(len(closing), 1)   # the retry only moves it to Done
+        self.assertEqual(len(self.calls("worker")), 1)   # the finished repair never ran again
+
     def test_a_finding_already_ticketed_gets_evidence_not_a_duplicate(self):
         self.shipped_item("20261014-050000")
         self.run_followup("hook", "item-done", "--stamp", "20261014-050000")
@@ -617,6 +719,27 @@ class FollowupTest(unittest.TestCase):
         self.assertEqual(doc["analyst"], "codex: answered")
         self.assertEqual(self.calls("worker"), [])
         self.assertFalse((self.root / "followups" / "tooling-batch-2026-10-13").exists())
+
+    def test_only_an_executed_git_stash_is_a_finding_never_an_echoed_rule(self):
+        run = self.root / "runs" / "s1"
+        run.mkdir(parents=True)
+        log = run / "worker-output.log"
+        echoed = ("- Never use `git stash`. Never run git after a `cd` that may have failed.\n"
+                  "exec\n/bin/zsh -lc \"rg -n 'git stash' SAFETY.md && git stash list\" in /r\n"
+                  " succeeded in 3ms:\nSAFETY.md:12:- Never use `git stash`.\n"
+                  "exec\n/bin/zsh -lc 'echo \"git stash would lose WIP\"' in /r\n")
+        log.write_text(echoed)
+
+        def stash_findings():
+            findings, _ = followscan.tooling_scan(self.root, ["s1"])
+            return [f for f in findings if f["id"] == followscan.finding_id(
+                "tooling-hardening", "ai-tools", "misfiring-automation", "git-stash")]
+        self.assertEqual(stash_findings(), [])
+        ran = '/bin/zsh -lc "cd /r && git -C /r stash push -m wip" in /r'
+        log.write_text(echoed + f"exec\n{ran}\n succeeded in 9ms:\nSaved working directory\n")
+        [f] = stash_findings()
+        self.assertEqual(f["evidence"][0]["quote"], ran)
+        self.assertTrue(followscan.evidence_holds(f["evidence"][0], [log]))
 
     def test_status_summarizes_fixed_deferred_and_blocked(self):
         for stamp in ("20261014-050000", "20261014-060000", "20261014-070000"):

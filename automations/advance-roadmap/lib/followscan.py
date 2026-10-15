@@ -19,6 +19,7 @@ calls a model, Linear or GitHub.
 import hashlib
 import json
 import re
+import shlex
 import subprocess
 from pathlib import Path
 
@@ -28,7 +29,11 @@ MARKER = re.compile(r"\b(FIXME|TODO)\(advance-roadmap review\):\s*(.+)")
 LIMIT_BANNER = re.compile(
     r"^(?:you.?ve hit your (?:session |usage )?limit|hit your session limit|rate limit exceeded"
     r"|quota exceeded|out of (?:usage|credits|quota)\b)", re.I | re.M)
-STASH = re.compile(r"^.*\bgit\s+(?:-C\s+\S+\s+)?stash\b(?!\s+list).*$", re.M)
+# Codex's log of a command it executed: an `exec` header, then `<shell> -lc <command> in <cwd>`
+# (older CLIs put the command on the header line). Cursor and Claude run with --output-format json
+# and log no commands, so anything else that mentions `git stash` is prose, not an execution.
+EXEC_HEADER = re.compile(r"^(?:\[[^\]]*\]\s*)?exec(?:\s+(\S.*))?$")
+GIT_OPTS_WITH_VALUE = ("-C", "-c", "--git-dir", "--work-tree", "--namespace", "--exec-path")
 QUOTA_OUTCOMES = ("quota-paused", "skipped-quota")
 ERROR_OUTCOMES = ("error", "failed", "incomplete")
 TOOLING_REPO = "ai-tools"
@@ -168,6 +173,64 @@ def external_row(stamp, run):
             "worker": result.get("provider")}, path
 
 
+def executed_commands(text):
+    """The command lines a provider CLI logged as executed (Codex `exec` blocks), verbatim."""
+    lines = text.splitlines()
+    for i, line in enumerate(lines):
+        m = EXEC_HEADER.match(line.strip())
+        if not m:
+            continue
+        cmd = m.group(1) or next((nxt for nxt in lines[i + 1:i + 3] if nxt.strip()), "")
+        if cmd.strip():
+            yield cmd.strip()
+
+
+def shell_words(script):
+    """Shell words with each separator (&&, ;, |, parentheses, redirections) its own word, or None
+    when the script does not tokenize (unbalanced quotes)."""
+    lex = shlex.shlex(script, posix=True, punctuation_chars=True)
+    lex.whitespace_split = True
+    try:
+        return list(lex)
+    except ValueError:
+        return None
+
+
+SHELL_PREFIXES = ("command", "exec", "env", "nohup", "time", "sudo", "if", "then", "else", "elif",
+                  "do", "while", "until", "!", "{")
+
+
+def runs_git_stash(command, depth=0):
+    """True when the command line runs `git [options] stash` (anything but `stash list`) as a
+    command — not when `git stash` is only an argument (a grep pattern, an echo, a quoted rule)."""
+    words = shell_words(command) if depth <= 3 else None
+    segment = []
+    for w in (words or []) + [";"]:
+        if w and set(w) <= set("();<>|&"):
+            if segment_runs_git_stash(segment, depth):
+                return True
+            segment = []
+        else:
+            segment.append(w)
+    return False
+
+
+def segment_runs_git_stash(words, depth):
+    while words and (words[0] in SHELL_PREFIXES or re.fullmatch(r"[A-Za-z_]\w*=.*", words[0])):
+        words = words[1:]
+    if not words:
+        return False
+    name = words[0].rsplit("/", 1)[-1]
+    if name in ("sh", "bash", "zsh") and len(words) > 2 and words[1] in ("-c", "-lc"):
+        return runs_git_stash(words[2], depth + 1)
+    if name != "git":
+        return False
+    i = 1
+    while i < len(words) and words[i].startswith("-"):
+        i += 2 if words[i] in GIT_OPTS_WITH_VALUE else 1
+    return i < len(words) and words[i] == "stash" and words[i + 1:i + 2] != ["list"]
+
+
 def tooling_scan(root, stamps, stages=(), run_dirs=None):
     """Findings for one finished batch/run: what in the automation itself got in the way.
 
@@ -229,13 +292,13 @@ def tooling_scan(root, stamps, stages=(), run_dirs=None):
             hit("misfiring-automation", "merged-unreviewed", "an item merged without a completed review",
                 "Find why the reviewer was unavailable and make the worker wait or defer instead.",
                 evidence(src, f"{stamp}: {row['detail']}"))
-        # 6. A builder touched the shared stash.
+        # 6. A builder touched the shared stash (an executed command, never echoed docs or prose).
         for path in (run / "worker-output.log", root / "logs" / f"run-{stamp}.log"):
-            m = STASH.search(read_text(path))
-            if m:
+            line = next((c for c in executed_commands(read_text(path)) if runs_git_stash(c)), None)
+            if line:
                 hit("misfiring-automation", "git-stash", "a builder ran git stash (shared across worktrees)",
                     "Keep the never-stash rule in SAFETY.md and the builder prompt; commit on the branch instead.",
-                    evidence(path, m.group(0)))
+                    evidence(path, line))
                 break
         # Deliberate non-findings: the parts that look like friction but are the design.
         if row.get("outcome") in QUOTA_OUTCOMES and (row.get("quota") or {}).get("provider"):
