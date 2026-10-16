@@ -177,7 +177,7 @@ class FollowupTest(unittest.TestCase):
         again = self.run_followup("hook", "item-done", "--stamp", "20261014-050000", "--origin", "batch-x").stdout
         self.assertIn("already queued", again)
         st = self.state("cleanup-20261014-050000")
-        self.assertEqual(st["status"], "pending")
+        self.assertEqual(st["status"], "queued")
         self.assertEqual(st.get("mode"), "report-only")
         self.assertEqual(len(list((self.root / "followups").glob("*/state.json"))), 1)
 
@@ -201,7 +201,9 @@ class FollowupTest(unittest.TestCase):
             fcntl.lockf(held, fcntl.LOCK_EX)
             out = self.run_followup("drain").stdout
         self.assertIn("demo.t2.lock is held", out)
-        self.assertEqual(self.state("cleanup-20261014-050000")["status"], "pending")
+        waiting = self.state("cleanup-20261014-050000")
+        self.assertEqual(waiting["status"], "waiting")
+        self.assertIn("demo.t2.lock is held", waiting.get("waiting_reason", ""))
         pid = self.root / "inflight" / "demo" / "roadmap-x.pid"
         pid.parent.mkdir(parents=True)
         pid.write_text(str(os.getpid()))
@@ -221,14 +223,14 @@ class FollowupTest(unittest.TestCase):
         self.run_followup("hook", "run-end", "--origin", "batch-2026-10-14", "--stamp", "s1", "--stamp", "s2")
         row = {"stamp": "s1", "outcome": "skipped-unchanged", "detail": "unchanged"}
         (self.root / "runs.jsonl").write_text(json.dumps(row) + "\n")
-        self.assertIn("1 run(s) of batch-2026-10-14 have not recorded", self.run_followup("drain").stdout)
-        self.assertEqual(self.state("tooling-batch-2026-10-14")["status"], "pending")
+        self.assertIn("have not finished", self.run_followup("drain").stdout)
+        self.assertEqual(self.state("tooling-batch-2026-10-14")["status"], "waiting")
         self.shipped_item("s2")
         self.run_followup("hook", "item-done", "--stamp", "s2")
         with open(self.root / "runs.jsonl", "a") as f:
             f.write(json.dumps({**row, "stamp": "s2", "outcome": "shipped", "detail": "PR #4"}) + "\n")
         self.run_followup("drain", "--stage", "tooling")
-        self.assertEqual(self.state("tooling-batch-2026-10-14")["status"], "pending")
+        self.assertEqual(self.state("tooling-batch-2026-10-14")["status"], "waiting")
         self.run_followup("drain")
         self.assertEqual(self.state("cleanup-s2")["status"], "done")
         tooling = self.state("tooling-batch-2026-10-14")
@@ -252,7 +254,7 @@ class FollowupTest(unittest.TestCase):
         pid.write_text(str(os.getpid()))
         out = self.run_followup("drain", "--stage", "tooling").stdout
         self.assertIn("cleanup-s1 has not finished", out)
-        self.assertEqual(self.state("tooling-batch-old")["status"], "pending")
+        self.assertEqual(self.state("tooling-batch-old")["status"], "waiting")
         self.assertFalse(self.state("tooling-batch-old").get("scanned"))
         pid.unlink()
         self.run_followup("drain", "--stage", "tooling", env={"ADVANCE_ROADMAP_FOLLOWUP_ANALYST": "0"})
@@ -262,7 +264,7 @@ class FollowupTest(unittest.TestCase):
         run = Path(self.tmp.name) / "scratch" / "20261014-090000"
         run.mkdir(parents=True)
         self.run_followup("hook", "run-end", "--origin", "conductor-x", "--run-dir", str(run))
-        self.assertIn("1 run(s) of conductor-x have not recorded", self.run_followup("drain", "--stage", "tooling").stdout)
+        self.assertIn("have not finished", self.run_followup("drain", "--stage", "tooling").stdout)
         result = run.resolve() / "worker-result.json"
         result.write_text(json.dumps({"outcome": "failed", "repo": "demo", "summary": "tests failed"}))
         self.run_followup("drain", "--stage", "tooling")
@@ -445,7 +447,7 @@ class FollowupTest(unittest.TestCase):
                                "ADVANCE_ROADMAP_CODEX_BIN": missing})
         st = self.state("tooling-batch-fail-analyst")
         self.assertFalse(st.get("scanned"))
-        self.assertEqual(st["status"], "pending")
+        self.assertEqual(st["status"], "retryable")
         self.assertTrue(any(b["kind"] == "analyst" for b in st["blockers"]), st["blockers"])
         self.assertTrue(any(r["kind"] == "analyst" for r in self.report()), self.report())
 
@@ -462,6 +464,17 @@ class FollowupTest(unittest.TestCase):
         doc = json.loads(p.stdout)
         self.assertEqual(doc["analyst"], "claude: answered")
         self.assertIn(self.ANALYST_FINDING["title"], [f["title"] for f in doc["findings"]])
+        orphan = self.root / "stub-codex-orphan.pid"
+        self.assertTrue(orphan.exists(), "hang stub must spawn a SIGTERM-ignoring child")
+        pid = int(orphan.read_text())
+        for _ in range(40):
+            try:
+                os.kill(pid, 0)
+            except OSError:
+                break
+            time.sleep(0.05)
+        else:
+            self.fail(f"orphan pid {pid} still alive after analyst timeout reap")
 
     def test_analyst_non_zero_without_limit_fails_over_to_claude(self):
         (self.root / "stub-codex-crash").write_text("")
@@ -541,7 +554,7 @@ class FollowupTest(unittest.TestCase):
             self.run_followup("hook", "item-done", "--stamp", stamp, "--origin", "batch-2026-10-14")
         self.run_followup("drain", "--stage", "cleanup")
         st = self.state("cleanup-20261014-060000")
-        st.update(status="pending", blockers=[{"kind": "interrupted", "reason": "waiting on a sibling"}])
+        st.update(status="retryable", blockers=[{"kind": "interrupted", "reason": "waiting on a sibling"}])
         (self.root / "followups" / st["key"] / "state.json").write_text(json.dumps(st))
         st = self.state("cleanup-20261014-070000")
         st.update(status="blocked", blockers=[{"kind": "crash", "reason": "scan blew up"}])
@@ -551,6 +564,50 @@ class FollowupTest(unittest.TestCase):
         self.assertIn("2 blocked", line)
         rows = json.loads(self.run_followup("status", "--origin", "batch-2026-10-14", "--json").stdout)
         self.assertEqual(len(rows), 3)
+
+    def test_consolidation_state_machine_covers_review_findings(self):
+        """Table-driven coverage of the four independent-review findings (resume #3)."""
+        cases = [
+            ("missing-repo", "shipped result without repo → blocked; sibling still drains"),
+            ("status-complete", "terminal worker-status finishes a conductor child into corpus"),
+            ("waiting-status", "waiting stages appear in status, never 'Follow-ups: none.'"),
+            ("ready-guards", "quiescent/ready never TypeError on a bad repo value"),
+        ]
+        import followup as fu
+        self.assertEqual(fu.quiescent(None), (False, "no repo"), cases[3])
+        self.assertEqual(fu.quiescent(["x"]), (False, "no repo"), cases[3])
+        # 1) missing repo at queue + sibling isolation
+        run = self.root / "runs" / "no-repo"
+        run.mkdir(parents=True)
+        (run / "worker-result.json").write_text(json.dumps({
+            "outcome": "shipped", "repo": None, "item": "x", "merge_commit": "abc",
+            "summary": "shipped without repo"}))
+        self.run_followup("hook", "item-done", "--stamp", "no-repo", "--origin", "batch-c")
+        st = self.state("cleanup-no-repo")
+        self.assertEqual(st["status"], "blocked", cases[0])
+        self.assertTrue(any(b["kind"] == "missing-repo" for b in st["blockers"]), cases[0])
+        self.shipped_item("ok-repo")
+        self.run_followup("hook", "item-done", "--stamp", "ok-repo", "--origin", "batch-c")
+        self.run_followup("drain", "--stage", "cleanup", "--origin", "batch-c")
+        self.assertEqual(self.state("cleanup-ok-repo")["status"], "done", cases[0])
+        self.assertEqual(self.state("cleanup-no-repo")["status"], "blocked", cases[0])
+        # 2–3) worker-status completion + waiting visible in status
+        ext = Path(self.tmp.name) / "scratch" / "cond-status"
+        ext.mkdir(parents=True)
+        self.run_followup("hook", "run-end", "--origin", "conductor-status", "--run-dir", str(ext))
+        out = self.run_followup("drain", "--stage", "tooling", "--origin", "conductor-status").stdout
+        self.assertIn("have not finished", out)
+        line = self.run_followup("status", "--origin", "conductor-status").stdout.strip()
+        self.assertNotEqual(line, "Follow-ups: none.", cases[2])
+        self.assertIn("waiting", line, cases[2])
+        status_path = ext.resolve() / "worker-status.json"
+        status_path.write_text(json.dumps({
+            "used": "cursor", "exit": 1, "fatal": "quota exhausted", "limited": [],
+            "missing": [], "quota": {"provider": "cursor"}}))
+        self.run_followup("drain", "--stage", "tooling", "--origin", "conductor-status")
+        tooling = self.state("tooling-conductor-status")
+        self.assertEqual(tooling["status"], "done", cases[1])
+        self.assertTrue(any(p.endswith("worker-status.json") for p in tooling["corpus"]), cases[1])
 
 
 if __name__ == "__main__":

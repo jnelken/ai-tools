@@ -46,6 +46,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 sys.path.insert(0, str(HERE / "lib"))
 import followscan  # noqa: E402
+import procrun  # noqa: E402
 import supervisor as shared  # noqa: E402
 import usage as usagelib  # noqa: E402
 
@@ -54,6 +55,11 @@ STATE = ROOT / "followups"
 FOLLOWUP_ENV = "ADVANCE_ROADMAP_FOLLOWUP"
 SHIPPED = ("shipped", "shipped-deploy-failed")
 STAGES = {"cleanup": "project-cleanup", "tooling": "tooling-hardening"}
+# Stage state machine: queued → waiting(reason) → ready → running → done | blocked | retryable.
+QUEUED, WAITING, READY, RUNNING, DONE, BLOCKED, RETRYABLE = (
+    "queued", "waiting", "ready", "running", "done", "blocked", "retryable")
+ELIGIBLE = {QUEUED, WAITING, READY, RETRYABLE}
+COMPLETE_MARKER = "complete"  # explicit run-dir marker when no worker-result/status
 MAX_ATTEMPTS = int(os.environ.get("ADVANCE_ROADMAP_FOLLOWUP_MAX_ATTEMPTS", "3"))
 STALE_S = float(os.environ.get("ADVANCE_ROADMAP_FOLLOWUP_STALE_H", "12")) * 3600
 POLL_S = float(os.environ.get("ADVANCE_ROADMAP_FOLLOWUP_POLL_S", "15"))
@@ -136,7 +142,7 @@ def new_stage(key, stage, repo, origin, **extra):
     except FileExistsError:
         return None
     # Findings carry stable finding_id via followscan.finding; ticket fields arrive in slice 3.
-    st = {"key": key, "stage": stage, "repo": repo, "origin": origin, "status": "pending",
+    st = {"key": key, "stage": stage, "repo": repo, "origin": origin, "status": QUEUED,
           "created_at": now_iso(), "attempts": 0, "findings": [], "non_findings": [], "blockers": [],
           "usage_snapshots": [], "sessions": [], "mode": "report-only", **extra}
     save(st)
@@ -200,6 +206,18 @@ def hook_item_done(stamp, run_dir=None, origin=None):
         print(f"{stamp}: outcome {result.get('outcome')!r} did not ship — recoverable work, not a cleanup")
         return 0
     repo = result.get("repo") or (read_json(run_dir / "orchestrator-result.json") or {}).get("repo")
+    # Schema allows repo=null; never queue a cleanup that would TypeError in readiness.
+    if not repo or not isinstance(repo, str):
+        st = new_stage(f"cleanup-{stamp}", STAGES["cleanup"], None, origin, stamp=stamp,
+                       item=result.get("item"), run_dir=str(run_dir),
+                       merge_commit_item=result.get("merge_commit"), status=BLOCKED)
+        if st:
+            report(st, "missing-repo", "shipped result has no repo", next_step="")
+            save(st)
+            print(f"blocked cleanup-{stamp} (missing repo)")
+        else:
+            print(f"cleanup-{stamp} already queued")
+        return 0
     st = new_stage(f"cleanup-{stamp}", STAGES["cleanup"], repo, origin, stamp=stamp,
                    item=result.get("item"), run_dir=str(run_dir), merge_commit_item=result.get("merge_commit"))
     print(f"queued cleanup-{stamp} ({repo})" if st else f"cleanup-{stamp} already queued")
@@ -241,6 +259,8 @@ def quiescent(repo):
 
     Never call this while holding the repo's lock yourself: probing it opens and closes the same
     file, and closing any descriptor drops every fcntl lock this process holds on it."""
+    if not repo or not isinstance(repo, str):
+        return False, "no repo"
     if repo in shared.inflight_repos(ROOT):
         return False, "a worker an earlier run timed out on is still running in it"
     for path in repo_lock_files(repo):
@@ -254,10 +274,7 @@ def quiescent(repo):
 
 
 def cleanup_still_active(other):
-    """True when a pending/running cleanup is still being worked and must not be age-bypassed.
-
-    Age only skips confirmed-abandoned cleanups (no inflight worker, no drain holding the stage
-    claim). Slice 3 adds a live-builder check here; report-only has no builders."""
+    """True when a queued/waiting/running cleanup is still being worked (no age-bypass)."""
     repo = other.get("repo")
     if repo and repo in shared.inflight_repos(ROOT):
         return True
@@ -268,25 +285,41 @@ def cleanup_still_active(other):
     return False
 
 
+def child_complete(stamp, external=None):
+    """True when a child run finished: runs.jsonl row, worker-result, terminal worker-status,
+    or an explicit `complete` marker. Returns (done, how)."""
+    external = external or {}
+    if stamp in shared.run_records({stamp}):
+        return True, "runs.jsonl"
+    run = Path(external[stamp]) if stamp in external else (ROOT / "runs" / stamp)
+    if (run / "worker-result.json").exists():
+        return True, "worker-result"
+    status = read_json(run / "worker-status.json")
+    if isinstance(status, dict) and "exit" in status:
+        return True, "worker-status"
+    if (run / COMPLETE_MARKER).exists():
+        return True, "marker"
+    return False, ""
+
+
 def ready(st):
     if st["stage"] == STAGES["cleanup"]:
-        return quiescent(st["repo"])
+        return quiescent(st.get("repo"))
     children = st.get("children") or []
-    rows = shared.run_records(set(children))
     external = st.get("run_dirs") or {}
-    running = [s for s in children if s not in rows
-               and not (s in external and (Path(external[s]) / "worker-result.json").exists())]
+    unfinished = [s for s in children if not child_complete(s, external)[0]]
     stale = age_s(st) >= STALE_S
-    if running and not stale:
-        return False, f"{len(running)} run(s) of {st['origin']} have not recorded a result"
-    if running:
-        st["unrecorded_children"] = running   # a crashed run never records; analyze what did
+    if unfinished and not stale:
+        names = ", ".join(unfinished[:5]) + ("…" if len(unfinished) > 5 else "")
+        return False, f"{len(unfinished)} run(s) of {st['origin']} have not finished ({names})"
+    if unfinished:
+        st["unrecorded_children"] = unfinished
+    active = {QUEUED, WAITING, READY, RUNNING, RETRYABLE}
     for other in all_stages():
         if other["stage"] != STAGES["cleanup"] or other.get("stamp") not in children:
             continue
-        if other.get("status") not in ("pending", "running"):
+        if other.get("status") not in active:
             continue
-        # Never skip a cleanup whose drain is still alive, even past the age gate.
         if cleanup_still_active(other) or not stale:
             return False, f"{other['key']} has not finished"
     return True, ""
@@ -301,27 +334,42 @@ def age_s(st):
 
 def eligible(st, now=None):
     now = time.time() if now is None else now
-    if st.get("status") == "pending":
+    status = st.get("status")
+    if status in ELIGIBLE or status == "pending":  # pending = legacy alias for queued/retryable
         return True
-    if st.get("status") == "deferred":
+    if status == "deferred":
         until = st.get("deferred_until")
         return not until or until <= now
     return False
 
 
-def recover_interrupted():
-    """A stage left `running` whose claim nobody holds was killed mid-step: it resumes next.
+def set_waiting(st, reason):
+    st["status"] = WAITING
+    st["waiting_reason"] = reason
+    # Keep the latest readiness reason visible to status/summary (and as a durable blocker).
+    blockers = st.setdefault("blockers", [])
+    if not blockers or blockers[-1].get("kind") != "waiting" or blockers[-1].get("reason") != reason:
+        blockers.append({"at": now_iso(), "kind": "waiting", "reason": reason})
+    save(st)
 
-    Slice 3 will also refuse to resume beside a still-alive builder; report-only has none."""
+
+def set_ready(st):
+    st["status"] = READY
+    st.pop("waiting_reason", None)
+    save(st)
+
+
+def recover_interrupted():
+    """A stage left `running` whose claim nobody holds was killed mid-step: it resumes next."""
     for st in all_stages():
-        if st.get("status") != "running":
+        if st.get("status") != RUNNING:
             continue
         c = claim_stage(st["key"])
         if not c:
             continue
         try:
             st = load(st["key"]) or st
-            st["status"] = "pending"
+            st["status"] = QUEUED
             st.setdefault("blockers", []).append({"at": now_iso(), "kind": "interrupted",
                                                   "reason": "the previous drain stopped mid-stage; resuming"})
             save(st)
@@ -452,25 +500,30 @@ def run_analyst(st, provider, prompt):
         f.unlink(missing_ok=True)
     tokens = [sys.executable, str(HERE / "lib" / "tokens.py")]
     provider_result = None
+    # procrun.run: start_new_session + reap the whole tree on timeout before failover.
     if provider == "codex":
-        p = subprocess.run([CODEX, "exec", "-o", str(final), "-s", "read-only", "-C", str(ROOT),
-                            "--skip-git-repo-check", prompt], capture_output=True, text=True,
-                           timeout=ANALYST_TIMEOUT_S, stdin=subprocess.DEVNULL)
-        raw.write_text(p.stdout + p.stderr)
-        subprocess.run([*tokens, "codex", str(raw), "--role", "analyst",
-                        "--log", str(d / "model-usage.jsonl"), "--session-out", str(session)],
-                       capture_output=True, stdin=subprocess.DEVNULL, timeout=60)
+        p = procrun.run([CODEX, "exec", "-o", str(final), "-s", "read-only", "-C", str(ROOT),
+                         "--skip-git-repo-check", prompt], timeout=ANALYST_TIMEOUT_S)
+        raw.write_text((p.stdout or "") + (p.stderr or ""))
+        try:
+            procrun.run([*tokens, "codex", str(raw), "--role", "analyst",
+                         "--log", str(d / "model-usage.jsonl"), "--session-out", str(session)],
+                        timeout=60)
+        except (OSError, subprocess.TimeoutExpired):
+            pass
         transcript = raw.read_text(errors="replace")
     else:
-        p = subprocess.run([CLAUDE, "-p", prompt, "--permission-mode", "plan",
-                            "--disallowedTools", "Edit,Write,NotebookEdit", "--output-format", "json"],
-                           capture_output=True, text=True, timeout=ANALYST_TIMEOUT_S,
-                           stdin=subprocess.DEVNULL, cwd=str(ROOT))
+        p = procrun.run([CLAUDE, "-p", prompt, "--permission-mode", "plan",
+                         "--disallowedTools", "Edit,Write,NotebookEdit", "--output-format", "json"],
+                        timeout=ANALYST_TIMEOUT_S, cwd=str(ROOT))
         raw_json = d / "analyst-claude.json"
-        raw_json.write_text(p.stdout + p.stderr)
-        subprocess.run([*tokens, "claude-json", str(raw_json), str(raw), "--final", str(final), "--role", "analyst",
-                        "--log", str(d / "model-usage.jsonl"), "--session-out", str(session)],
-                       capture_output=True, stdin=subprocess.DEVNULL, timeout=60)
+        raw_json.write_text((p.stdout or "") + (p.stderr or ""))
+        try:
+            procrun.run([*tokens, "claude-json", str(raw_json), str(raw), "--final", str(final),
+                         "--role", "analyst", "--log", str(d / "model-usage.jsonl"),
+                         "--session-out", str(session)], timeout=60)
+        except (OSError, subprocess.TimeoutExpired):
+            pass
         transcript = followscan.read_text(raw) or raw_json.read_text(errors="replace")
         try:
             for line in raw_json.read_text(errors="replace").splitlines():
@@ -529,22 +582,23 @@ End with one fence:
 def process(st):
     """Run ANALYZE then REPORT. No repair, no builders, no Linear."""
     st["attempts"] = st.get("attempts", 0) + 1
-    st["status"] = "running"
+    st["status"] = RUNNING
+    st.pop("waiting_reason", None)
     st["next"] = {"step": "analyze"}
     save(st)
     if not st.get("scanned"):
         scan(st)
         save(st)
     if not st.get("scanned"):
-        # Analyst hard-failed: leave retryable (or blocked after MAX_ATTEMPTS). report() already ran.
-        st["status"] = "pending" if st.get("attempts", 0) < MAX_ATTEMPTS else "blocked"
+        # Analyst hard-failed: retryable (or blocked after MAX_ATTEMPTS). report() already ran.
+        st["status"] = RETRYABLE if st.get("attempts", 0) < MAX_ATTEMPTS else BLOCKED
         st["next"] = {"step": "analyze"}
         save(st)
         return
     st["next"] = {"step": "report"}
     fs = st.get("findings") or []
     quiet = st.get("non_findings") or []
-    st.update(status="done", next=None, reported_at=now_iso(),
+    st.update(status=DONE, next=None, reported_at=now_iso(),
               open_findings=sum(1 for f in fs if f.get("status") == "open"))
     log(f"{st['key']}: reported {len(fs)} finding(s), {len(quiet)} non-finding(s) (report-only)")
     save(st)
@@ -567,16 +621,26 @@ def drain(repo=None, origin=None, stage=None, wait_s=0.0):
                 continue
             if not eligible(st):
                 continue
-            ok, why = ready(st)
+            try:
+                ok, why = ready(st)
+            except Exception as e:  # malformed stage must not abort the drain
+                report(st, "readiness", f"{type(e).__name__}: {e}")
+                st["status"] = BLOCKED
+                save(st)
+                progressed = True
+                continue
             if not ok:
+                set_waiting(st, why)
                 waiting.append(f"{st['key']}: {why}")
                 continue
+            if st.get("status") != READY:
+                set_ready(st)
             c = claim_stage(st["key"])
             if not c:
                 continue   # another drain is running it
             try:
                 st = load(st["key"]) or st
-                if not eligible(st):
+                if not eligible(st) and st.get("status") != READY:
                     continue
                 if origin:
                     st["drained_by"] = origin
@@ -584,7 +648,7 @@ def drain(repo=None, origin=None, stage=None, wait_s=0.0):
                     process(st)
                 except Exception as e:  # one broken stage must never stop the rest
                     report(st, "crash", f"{type(e).__name__}: {e}")
-                    st["status"] = "pending" if st.get("attempts", 0) < MAX_ATTEMPTS else "blocked"
+                    st["status"] = RETRYABLE if st.get("attempts", 0) < MAX_ATTEMPTS else BLOCKED
                     save(st)
                 progressed = True
             finally:
@@ -603,27 +667,36 @@ def summary(origin=None):
         if origin and origin not in (st.get("origin"), st.get("drained_by")):
             continue
         fs = st.get("findings") or []
-        rows.append({"key": st["key"], "stage": st["stage"], "repo": st.get("repo"), "status": st.get("status"),
+        status = st.get("status")
+        reason = st.get("waiting_reason")
+        if not reason and st.get("blockers"):
+            reason = st["blockers"][-1].get("reason")
+        rows.append({"key": st["key"], "stage": st["stage"], "repo": st.get("repo"), "status": status,
                      "item": st.get("item"), "findings": len(fs),
                      "open_findings": sum(f.get("status") == "open" for f in fs),
                      "non_findings": len(st.get("non_findings") or []),
                      "mode": st.get("mode") or "report-only",
-                     "blocker": (st.get("blockers") or [{}])[-1].get("reason")
-                     if st.get("status") in ("blocked", "pending") and st.get("blockers") else None})
+                     "waiting_reason": st.get("waiting_reason"),
+                     "blocker": reason if status in (BLOCKED, WAITING, RETRYABLE, "pending") else None})
     return rows
 
 
 def summary_line(rows):
-    """One sentence for the batch/run summary: reported findings (report-only; no repairs yet)."""
-    done = [r for r in rows if r["status"] == "done"]
-    blocked = [r for r in rows if r["status"] == "blocked" or (r["status"] == "pending" and r.get("blocker"))]
+    """One sentence for the batch/run summary. Never 'none' while stages are waiting."""
+    done = [r for r in rows if r["status"] == DONE]
+    blocked = [r for r in rows if r["status"] == BLOCKED]
+    waiting = [r for r in rows if r["status"] == WAITING]
+    retryable = [r for r in rows if r["status"] in (RETRYABLE, "pending") and r.get("blocker")]
     parts = []
     if done:
         n_find = sum(r["findings"] for r in done)
         n_open = sum(r.get("open_findings") or 0 for r in done)
         parts.append(f"{len(done)} follow-up(s) reported ({n_find} finding(s), {n_open} open)")
-    if blocked:
-        parts.append(f"{len(blocked)} blocked (see followups/report.jsonl)")
+    if waiting:
+        sample = waiting[0].get("waiting_reason") or waiting[0].get("blocker") or "not ready"
+        parts.append(f"{len(waiting)} waiting ({sample})")
+    if blocked or retryable:
+        parts.append(f"{len(blocked) + len(retryable)} blocked (see followups/report.jsonl)")
     return ("Follow-ups: " + "; ".join(parts) + ".") if parts else ""
 
 

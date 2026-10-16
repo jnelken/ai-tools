@@ -74,6 +74,17 @@ def usage(args):
 def codex(args):
     note("codex", args=args[:2])
     if (ROOT / "stub-codex-hang").exists():
+        # Spawn a SIGTERM-ignoring child in this process group so timeout reaping must SIGKILL it.
+        import signal
+        import subprocess
+        orphan = ROOT / "stub-codex-orphan.pid"
+        subprocess.Popen([sys.executable, "-c",
+                          "import os,signal,time\n"
+                          "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+                          f"open({str(orphan)!r},'w').write(str(os.getpid()))\n"
+                          "time.sleep(120)\n"])
+        while not orphan.exists():
+            time.sleep(0.05)
         time.sleep(120)
     if (ROOT / "stub-codex-crash").exists():
         print("codex crashed", file=sys.stderr)

@@ -228,12 +228,32 @@ def run_dir(root, stamp, run_dirs=None):
 
 
 def external_row(stamp, run):
-    """A runs.jsonl-shaped row for a run that never wrote one (a conductor session's), from its
-    own worker result: (row, the file it came from)."""
+    """A runs.jsonl-shaped row for a run outside root/runs (conductor): result, else terminal
+    worker-status, else an explicit `complete` marker. (row, source path)."""
+    run = Path(run)
     path = run / "worker-result.json"
-    result = read_json(path) or {}
-    return {"stamp": stamp, "outcome": result.get("outcome"), "detail": (result.get("summary") or "")[:200],
-            "worker": result.get("provider")}, path
+    result = read_json(path)
+    if isinstance(result, dict) and result.get("outcome") is not None:
+        return {"stamp": stamp, "outcome": result.get("outcome"),
+                "detail": (result.get("summary") or "")[:200], "worker": result.get("provider")}, path
+    status_path = run / "worker-status.json"
+    status = read_json(status_path)
+    if isinstance(status, dict) and "exit" in status:
+        if status.get("quota") or status.get("limited"):
+            outcome = "limit_hit"
+        elif status.get("fatal") or (status.get("exit") not in (0, None)):
+            outcome = "failed"
+        else:
+            outcome = "incomplete"
+        detail = status.get("fatal") or (
+            f"quota exhausted" if status.get("quota") else f"exit {status.get('exit')}")
+        return {"stamp": stamp, "outcome": outcome, "detail": str(detail)[:200],
+                "worker": status.get("used")}, status_path
+    marker = run / "complete"
+    if marker.exists():
+        return {"stamp": stamp, "outcome": "incomplete", "detail": "completion marker",
+                "worker": None}, marker
+    return {"stamp": stamp, "outcome": None, "detail": "", "worker": None}, path
 
 
 def executed_commands(text):

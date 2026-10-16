@@ -17,7 +17,6 @@ import fcntl
 import json
 import os
 import re
-import signal
 import shutil
 import subprocess
 import sys
@@ -29,7 +28,14 @@ from pathlib import Path
 import supervisor as shared
 
 sys.path.insert(0, str(shared.HERE / "lib"))
+import procrun  # noqa: E402
 import usage  # noqa: E402
+
+# Shared process-group helpers (lib/procrun.py) — used by tests and followup timeout paths.
+_group_pids = procrun.group_pids
+_group_alive = procrun.group_alive
+_signal_group = procrun.signal_group
+_reap_group = procrun.reap_group
 
 ROOT = shared.ROOT
 POLL_S = float(os.environ.get("ADVANCE_ROADMAP_BATCH_POLL_S", "1"))
@@ -60,95 +66,19 @@ def followup_env():
                          "ADVANCE_ROADMAP_STAMP", "ADVANCE_ROADMAP_TARGET_REPO"}}
 
 
-def _group_pids(pgid):
-    """PIDs still in the process group (empty when the group is gone)."""
-    try:
-        out = subprocess.run(
-            ["ps", "-g", str(pgid), "-o", "pid="],
-            capture_output=True, text=True, timeout=2)
-    except (OSError, subprocess.TimeoutExpired):
-        return []
-    return [int(line) for line in out.stdout.splitlines() if line.strip().isdigit()]
-
-
-def _group_alive(pgid):
-    """True when any member of the process group still exists."""
-    if _group_pids(pgid):
-        return True
-    try:
-        os.killpg(pgid, 0)
-        return True
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        # macOS can return EPERM for a group after its session leader exits; trust ps above first.
-        return False
-
-
-def _signal_group(pgid, sig):
-    try:
-        os.killpg(pgid, sig)
-    except (ProcessLookupError, PermissionError):
-        pass
-    if sig == signal.SIGKILL:
-        for pid in _group_pids(pgid):
-            try:
-                os.kill(pid, signal.SIGKILL)
-            except (ProcessLookupError, PermissionError):
-                pass
-
-
-def _reap_group(proc, grace=5.0):
-    """SIGTERM (then SIGKILL) the process group until no members remain.
-
-    Drain runs start_new_session so an analyst child shares this group; releasing the stage claim
-    only after the group is reaped stops recovery from launching a duplicate analyst. After the
-    grace period, SIGKILL whenever any member survives — even if the leader has already exited.
-    """
-    pgid = proc.pid
-    _signal_group(pgid, signal.SIGTERM)
-    try:
-        proc.wait(timeout=grace)
-    except subprocess.TimeoutExpired:
-        pass
-    # Leader exit alone is not enough: descendants that ignore SIGTERM must still be killed.
-    if _group_alive(pgid):
-        _signal_group(pgid, signal.SIGKILL)
-    if proc.poll() is None:
-        try:
-            proc.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            pass
-    # Confirm the group is empty before the caller releases any stage claim.
-    deadline = time.time() + 2.0
-    while _group_alive(pgid) and time.time() < deadline:
-        _signal_group(pgid, signal.SIGKILL)
-        time.sleep(0.05)
-
-
 def followup(*args, timeout=300, log=None):
     """followup.py in its own process group. None when it could not run (never fails the batch)."""
     try:
-        kwargs = {"stdin": subprocess.DEVNULL, "env": followup_env(), "start_new_session": True, "text": True}
+        kwargs = {"timeout": timeout, "env": followup_env(), "grace": 5.0}
         if log:
             kwargs.update(stdout=log, stderr=subprocess.STDOUT)
-        else:
-            kwargs.update(stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        proc = subprocess.Popen([sys.executable, str(ROOT / "followup.py"), *args], **kwargs)
+        return procrun.run([sys.executable, str(ROOT / "followup.py"), *args], **kwargs)
     except OSError as error:
         shared.log(f"followup.py {args[0]}: {error}")
         return None
-    try:
-        stdout, stderr = proc.communicate(timeout=timeout)
     except subprocess.TimeoutExpired as error:
-        _reap_group(proc)
-        try:
-            proc.communicate(timeout=1)  # drain/close pipes after the group is gone
-        except (OSError, subprocess.TimeoutExpired):
-            pass
         shared.log(f"followup.py {args[0]}: {error}")
         return None
-    return subprocess.CompletedProcess(proc.args, proc.returncode, stdout, stderr)
 
 
 def save(path, value):
