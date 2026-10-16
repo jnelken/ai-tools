@@ -178,23 +178,99 @@ def all_stages():
     return sorted(out, key=lambda s: s.get("created_at") or "")
 
 
+def _usable_stage(st):
+    return isinstance(st, dict) and st.get("key") and st.get("stage") and st.get("status")
+
+
+def _orphan_placeholder(st):
+    """Drain-written blocked stub for a dir that had no usable state — hooks may replace it."""
+    return _usable_stage(st) and any(
+        b.get("kind") == "orphan-stage" for b in (st.get("blockers") or []))
+
+
 def new_stage(key, stage, repo, origin, **extra):
-    """Create the stage's directory exclusively: a second hook for the same key is a no-op."""
+    """Create or recover a stage under its claim; a healthy existing stage is a no-op.
+
+    Directory creation alone is not enough: a crash after mkdir and before state.json left an
+    undiscoverable orphan. Init (and recover) always write state.json atomically under the claim.
+    """
     require_id(key, "stage key")
     if origin is not None:
         require_id(origin, "origin")
     if repo is not None:
         require_id(repo, "repo")
-    try:
-        stage_dir(key).mkdir(parents=True)
-    except FileExistsError:
+    d = stage_dir(key)
+    preexisted = d.is_dir()
+    c = claim_stage(key)
+    if not c:
         return None
-    # Findings carry stable finding_id via followscan.finding; ticket fields arrive in slice 3.
-    st = {"key": key, "stage": stage, "repo": repo, "origin": origin, "status": QUEUED,
-          "created_at": now_iso(), "attempts": 0, "findings": [], "non_findings": [], "blockers": [],
-          "usage_snapshots": [], "sessions": [], "mode": "report-only", **extra}
-    save(st)
-    return st
+    try:
+        existing = load(key)
+        if _usable_stage(existing) and not _orphan_placeholder(existing):
+            return None
+        # Findings carry stable finding_id via followscan.finding; ticket fields arrive in slice 3.
+        st = {"key": key, "stage": stage, "repo": repo, "origin": origin, "status": QUEUED,
+              "created_at": now_iso(), "attempts": 0, "findings": [], "non_findings": [], "blockers": [],
+              "usage_snapshots": [], "sessions": [], "mode": "report-only", **extra}
+        if preexisted or _orphan_placeholder(existing) or (existing is not None and not _usable_stage(existing)):
+            st.setdefault("blockers", []).append({
+                "at": now_iso(), "kind": "recovered",
+                "reason": "stage dir existed without usable state.json; re-initialized from hook input"})
+        save(st)  # write_json: temp + rename under the claim
+        return st
+    finally:
+        c.close()
+
+
+def recover_orphan_dirs():
+    """Dirs under followups/ with no/corrupt state.json become blocked stages drains can see."""
+    if not STATE.is_dir():
+        return
+    root = STATE.resolve()
+    for d in sorted(p for p in STATE.iterdir() if p.is_dir()):
+        try:
+            d.resolve().relative_to(root)
+            require_id(d.name, "stage key")
+        except ValueError:
+            continue
+        c = claim_stage(d.name)
+        if not c:
+            continue
+        try:
+            existing = load(d.name)
+            if _usable_stage(existing):
+                continue
+            key = d.name
+            if key.startswith("cleanup-"):
+                stage = STAGES["cleanup"]
+            elif key.startswith("tooling-"):
+                stage = STAGES["tooling"]
+            else:
+                stage = "unknown"
+            st = {"key": key, "stage": stage, "repo": None, "origin": None, "status": BLOCKED,
+                  "created_at": now_iso(), "attempts": 0, "findings": [], "non_findings": [],
+                  "blockers": [{"at": now_iso(), "kind": "orphan-stage",
+                                "reason": "stage directory existed without usable state.json"}],
+                  "usage_snapshots": [], "sessions": [], "mode": "report-only"}
+            if key.startswith("cleanup-"):
+                stamp = key[len("cleanup-"):]
+                try:
+                    require_id(stamp, "stamp")
+                    st["stamp"] = stamp
+                except ValueError:
+                    pass
+            elif key.startswith("tooling-"):
+                origin = key[len("tooling-"):]
+                try:
+                    require_id(origin, "origin")
+                    st["origin"] = origin
+                    st["repo"] = followscan.TOOLING_REPO
+                except ValueError:
+                    pass
+            save(st)
+            log(f"{key}: marked orphan stage blocked (no usable state.json)")
+        finally:
+            c.close()
 
 
 class Claim:
@@ -530,6 +606,7 @@ def order(st):
 def drain(repo=None, origin=None, stage=None, wait_s=0.0):
     """Drain ready stages. Every status transition is claim → reload → eligibility → act → save."""
     STATE.mkdir(parents=True, exist_ok=True)
+    recover_orphan_dirs()
     recover_interrupted()
     deadline = time.time() + wait_s
     while True:

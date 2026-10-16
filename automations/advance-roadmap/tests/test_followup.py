@@ -599,6 +599,67 @@ class FollowupTest(unittest.TestCase):
         self.assertEqual(self.state(key)["status"], "done")
         self.assertFalse(any(b.get("kind") == "interrupted" for b in self.state(key).get("blockers") or []))
 
+    def test_added_markers_rejects_option_like_merge_commit(self):
+        """An unchecked merge_commit such as --output=/path must never become a git option."""
+        repo = self.code / "demo"
+        out_dir = Path(self.tmp.name) / "evil-out"
+        out_dir.mkdir()
+        target = out_dir / "pwned"
+        hostile = f"--output={target}"
+        with self.assertRaises(ValueError):
+            followscan.require_sha(hostile, "merge_commit")
+        self.assertEqual(followscan.added_markers(repo, hostile), [])
+        self.assertFalse(target.exists())
+        # Short / uppercase / empty / path-shaped values are also rejected.
+        for bad in ("abc123", "ABCDEFabcdef", "", "deadbeef/../x", "-c", "HEAD"):
+            self.assertEqual(followscan.added_markers(repo, bad), [])
+            with self.assertRaises(ValueError):
+                followscan.require_sha(bad, "merge_commit")
+        # A real merge SHA still finds markers.
+        sha = self.shipped_item("20261015-shaok")
+        markers = followscan.added_markers(repo, sha)
+        self.assertTrue(markers)
+        self.assertTrue(any(MARKER_LINE in line for _, line in markers))
+
+    def test_new_stage_recovers_dir_without_state_under_claim(self):
+        """A crash after mkdir and before state.json must not leave an undiscoverable orphan."""
+        import followup as fu
+        fu.ROOT = self.root
+        fu.STATE = self.root / "followups"
+        stamp = "20261015-orphan"
+        self.shipped_item(stamp)
+        key = f"cleanup-{stamp}"
+        orphan = self.root / "followups" / key
+        orphan.mkdir(parents=True)
+        (orphan / "claim.lock").write_text("")  # dir exists, no state.json
+        # Hook recovers: re-inits from input under the claim and writes state.json.
+        out = self.run_followup("hook", "item-done", "--stamp", stamp, "--origin", "batch-orphan").stdout
+        self.assertIn("queued", out)
+        st = self.state(key)
+        self.assertEqual(st["status"], "queued")
+        self.assertEqual(st["repo"], "demo")
+        self.assertTrue(any(b["kind"] == "recovered" for b in st["blockers"]))
+        # Second hook is still a no-op once state is healthy.
+        again = self.run_followup("hook", "item-done", "--stamp", stamp, "--origin", "batch-orphan").stdout
+        self.assertIn("already queued", again)
+        # Drain-side: a dir with no state (no second hook) becomes a blocked, discoverable stage.
+        ghost_key = "cleanup-20261015-ghost"
+        ghost = self.root / "followups" / ghost_key
+        ghost.mkdir(parents=True)
+        fu.recover_orphan_dirs()
+        ghost_st = self.state(ghost_key)
+        self.assertEqual(ghost_st["status"], "blocked")
+        self.assertTrue(any(b["kind"] == "orphan-stage" for b in ghost_st["blockers"]))
+        # A later hook with full input replaces the orphan placeholder.
+        self.shipped_item("20261015-ghost")
+        out = self.run_followup("hook", "item-done", "--stamp", "20261015-ghost",
+                                "--origin", "batch-orphan").stdout
+        self.assertIn("queued", out)
+        recovered = self.state(ghost_key)
+        self.assertEqual(recovered["status"], "queued")
+        self.assertEqual(recovered["repo"], "demo")
+        self.assertTrue(any(b["kind"] == "recovered" for b in recovered["blockers"]))
+
     def test_planner_error_evidence_uses_source_span_not_reserialized_json(self):
         """Escaped strings and pretty-printed planner_error dicts must quote the file as stored."""
         stamp = "20261015-planerr"

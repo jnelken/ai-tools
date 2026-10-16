@@ -24,6 +24,8 @@ import subprocess
 from pathlib import Path
 
 SHIPPED = ("shipped", "shipped-deploy-failed")
+# Artifact SHAs passed into git argv — reject anything that could be parsed as an option.
+SHA_RE = re.compile(r"^[0-9a-f]{7,40}$")
 MARKER = re.compile(r"\b(FIXME|TODO)\(advance-roadmap review\):\s*(.+)")
 # Same banner shape run.sh, worker.sh, review.sh and usage.py match: a CLI's own words at a line start.
 LIMIT_BANNER = re.compile(
@@ -222,11 +224,23 @@ def read_text(path, limit=2_000_000):
 
 # ── project cleanup ──────────────────────────────────────────────────────────
 
+def require_sha(value, name="commit"):
+    """Validate a git object name from run artifacts before it enters a subprocess argv."""
+    if not isinstance(value, str) or not SHA_RE.fullmatch(value):
+        raise ValueError(f"invalid {name}: {value!r} (expected 7–40 lowercase hex chars)")
+    return value
+
+
 def added_markers(repo_dir, merge_commit):
     """[(file, line)] for review markers the merge added (first parent → merge)."""
     if not repo_dir or not merge_commit:
         return []
-    p = subprocess.run(["git", "-C", str(repo_dir), "diff", "-U0", f"{merge_commit}^1", merge_commit],
+    try:
+        sha = require_sha(merge_commit, "merge_commit")
+    except ValueError:
+        return []
+    # Validated hex-only revisions cannot be mistaken for git options (--output=, -c, …).
+    p = subprocess.run(["git", "-C", str(repo_dir), "diff", "-U0", f"{sha}^1", sha],
                        capture_output=True, text=True)
     if p.returncode != 0:
         return []
