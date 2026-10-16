@@ -123,7 +123,7 @@ class Batch:
         self.limit = lanes
         self.threads = threads
         self.procs = {}
-        self.cleanups = {}   # repo → its follow-up cleanup drain
+        self.cleanups = {}  # repo → {proc, deadline} via procrun.start/reap
         self.origin = f"batch-{directory.name}"
         self.state = {"date": directory.name, "phase": "preparing", "lanes_max": self.limit,
                       "threads_max": self.threads,
@@ -217,7 +217,50 @@ class Batch:
                 item.update(status="finished", outcome="planning-timeout")
 
     def live_cleanups(self):
-        return sum(p.poll() is None for p in self.cleanups.values())
+        return sum(e["proc"].poll() is None for e in self.cleanups.values())
+
+    def _followup_blocker(self, repo, kind, reason):
+        """Append followups/report.jsonl; never raise into the batch handler."""
+        try:
+            path = ROOT / "followups" / "report.jsonl"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with open(path, "a", encoding="utf-8") as f:
+                f.write(json.dumps({"at": datetime.now().isoformat(timespec="seconds"), "key": None,
+                                    "stage": "project-cleanup", "repo": repo, "kind": kind,
+                                    "reason": reason, "next_step": ""}) + "\n")
+        except OSError as error:
+            shared.log(f"follow-up blocker write failed: {error}")
+
+    def _reap_cleanup(self, repo, proc, reason="cleanup drain exceeded its deadline"):
+        """Reap a cleanup group and mark running project-cleanup stages retryable."""
+        _reap_group(proc)
+        shared.log(f"follow-up cleanup for {repo} ran out of time; it resumes next drain")
+        self._followup_blocker(repo, "timeout", reason)
+        root = ROOT / "followups"
+        if not root.is_dir():
+            return
+        at = datetime.now().isoformat(timespec="seconds")
+        for path in root.glob("*/state.json"):
+            try:
+                st = json.loads(path.read_text())
+            except (OSError, ValueError):
+                continue
+            if not (isinstance(st, dict) and st.get("repo") == repo
+                    and st.get("stage") == "project-cleanup" and st.get("status") == "running"):
+                continue
+            st.update(status="retryable", updated_at=at)
+            st.setdefault("blockers", []).append({"at": at, "kind": "timeout", "reason": reason})
+            try:
+                path.write_text(json.dumps(st, indent=1) + "\n")
+            except OSError as error:
+                shared.log(f"follow-up retryable mark failed for {repo}: {error}")
+
+    def reap_expired_cleanups(self):
+        """Lane-loop deadline check so a hung cleanup cannot hold a lane forever."""
+        now = time.time()
+        for repo, entry in list(self.cleanups.items()):
+            if entry["proc"].poll() is None and now >= entry["deadline"]:
+                self._reap_cleanup(repo, entry["proc"])
 
     def start_cleanups(self, slots):
         """One cleanup drain per repo whose shipped items are queued and whose threads have all
@@ -226,16 +269,27 @@ class Batch:
         for repo in sorted({i["repo"] for i in self.state["queue"] if i.get("followup") == "queued"}):
             if started >= slots:
                 break
-            if repo in self.cleanups and self.cleanups[repo].poll() is None:
+            live = self.cleanups.get(repo)
+            if live and live["proc"].poll() is None:
                 continue
             if any(i["repo"] == repo and i["status"] in ACTIVE for i in self.state["queue"]):
                 continue
-            with open(ROOT / "logs" / f"followup-{self.origin}.log", "a") as out:
-                self.cleanups[repo] = subprocess.Popen(
-                    [sys.executable, str(ROOT / "followup.py"), "drain", "--repo", repo, "--stage", "cleanup",
-                     "--origin", self.origin, "--wait-s", FOLLOWUP_WAIT_S],
-                    env=followup_env(), stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT,
-                    start_new_session=True)
+            try:  # log-open / launch errors stay local — never fail the batch
+                (ROOT / "logs").mkdir(parents=True, exist_ok=True)
+                with open(ROOT / "logs" / f"followup-{self.origin}.log", "a") as out:
+                    proc = procrun.start(
+                        [sys.executable, str(ROOT / "followup.py"), "drain", "--repo", repo,
+                         "--stage", "cleanup", "--origin", self.origin, "--wait-s", FOLLOWUP_WAIT_S],
+                        env=followup_env(), stdin=subprocess.DEVNULL, stdout=out,
+                        stderr=subprocess.STDOUT)
+            except (OSError, ValueError) as error:
+                shared.log(f"follow-up cleanup for {repo} failed to start: {error}")
+                self._followup_blocker(repo, "cleanup-launch", str(error))
+                for item in self.state["queue"]:
+                    if item["repo"] == repo and item.get("followup") == "queued":
+                        item["followup"] = "launch-failed"
+                continue
+            self.cleanups[repo] = {"proc": proc, "deadline": time.time() + FOLLOWUP_TIMEOUT_S}
             for item in self.state["queue"]:
                 if item["repo"] == repo and item.get("followup") == "queued":
                     item["followup"] = "draining"
@@ -252,19 +306,22 @@ class Batch:
         self.write()
         deadline = time.time() + FOLLOWUP_TIMEOUT_S
         self.start_cleanups(len(self.state["queue"]) + 1)
-        for repo, proc in self.cleanups.items():
+        for repo, entry in self.cleanups.items():
             try:
-                proc.wait(timeout=max(1.0, deadline - time.time()))
+                entry["proc"].wait(timeout=max(1.0, min(entry["deadline"], deadline) - time.time()))
             except subprocess.TimeoutExpired:
-                _reap_group(proc)   # claim stays held until the group is gone; stage resumes next drain
-                shared.log(f"follow-up cleanup for {repo} ran out of time; it resumes next drain")
+                self._reap_cleanup(repo, entry["proc"])
         stamps = [s for i in self.state["queue"] if i["stamp"] in self.procs for s in ("--stamp", i["stamp"])]
         followup("hook", "run-end", "--origin", self.origin, *stamps)
-        with open(ROOT / "logs" / f"followup-{self.origin}.log", "a") as out:
-            # Own process group: timeout reaps followup.py (and any children) before the
-            # stage claim can be considered released.
+        try:
+            with open(ROOT / "logs" / f"followup-{self.origin}.log", "a") as out:
+                followup("drain", "--origin", self.origin, "--wait-s", FOLLOWUP_WAIT_S,
+                         timeout=max(60.0, deadline - time.time()), log=out)
+        except OSError as error:
+            shared.log(f"follow-up final drain log open failed: {error}")
+            self._followup_blocker(None, "cleanup-launch", str(error))
             followup("drain", "--origin", self.origin, "--wait-s", FOLLOWUP_WAIT_S,
-                     timeout=max(60.0, deadline - time.time()), log=out)
+                     timeout=max(60.0, deadline - time.time()))
         status = followup("status", "--origin", self.origin, "--json", timeout=60)
         try:
             self.state["followups"] = json.loads(status.stdout) if status and status.returncode == 0 else []
@@ -420,6 +477,8 @@ class Batch:
         self.write()
         while any(i["status"] in {"ready", "running", "canceling"} for i in self.state["queue"]):
             self.poll()
+            if followups_on():
+                self.reap_expired_cleanups()
             slots = self.limit - self.live_cleanups() - sum(i["status"] in {"running", "canceling"}
                                                             for i in self.state["queue"])
             if followups_on():

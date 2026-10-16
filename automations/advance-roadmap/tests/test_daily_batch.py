@@ -497,6 +497,44 @@ class DailyBatchTest(unittest.TestCase):
         self.assertFalse([c for c in calls if '--repo' in c['args']])
         self.assertTrue([c for c in calls if c['args'][:2] == ['hook', 'run-end']])
 
+    def test_hung_cleanup_deadline_frees_lane_for_one_lane_batch(self):
+        """Hung cleanup is reaped mid-loop so a one-lane batch still reaches finish_followups."""
+        (self.root / 'followup.py').write_text(
+            "import json,os,pathlib,sys,time\n"
+            "r,a=os.environ['ADVANCE_ROADMAP_ROOT'],sys.argv[1:]\n"
+            "open(r+'/followup-calls.jsonl','a').write(json.dumps({'args':a})+'\\n')\n"
+            "if a[0]=='drain' and '--repo' in a:\n"
+            " repo=a[a.index('--repo')+1]; d=pathlib.Path(r)/'followups'/f'cleanup-{repo}'\n"
+            " d.mkdir(parents=True); (d/'state.json').write_text(json.dumps(\n"
+            "  {'key':f'cleanup-{repo}','stage':'project-cleanup','repo':repo,"
+            "'status':'running','blockers':[]}))\n"
+            " time.sleep(120)\n"
+            "if a[0]=='status' and '--json' in a: print('[]')\n"
+            "elif a[0]=='status': print('Follow-ups: none.')\n")
+        self.env['ADVANCE_ROADMAP_FOLLOWUP_TIMEOUT_S'] = '0.4'
+        for name in 'ab':
+            self.repo(name)
+        self.run_batch(lanes=1)
+        state = self.state()
+        self.assertEqual(state['phase'], 'done')
+        self.assertEqual(sorted((i['repo'], i['outcome']) for i in state['queue']),
+                         [('a', 'shipped'), ('b', 'shipped')])
+        st = json.loads((self.root / 'followups/cleanup-a/state.json').read_text())
+        self.assertEqual((st['status'], st['blockers'][-1]['kind']), ('retryable', 'timeout'))
+
+    def test_cleanup_launch_error_preserves_batch_outcome(self):
+        """Log-open/launch errors stay local; batch still finishes shipped."""
+        self.fake_followup()
+        self.repo('a')
+        (self.root / 'logs').mkdir(exist_ok=True)
+        (self.root / 'logs' / f'followup-batch-{datetime.now().date().isoformat()}.log').mkdir()
+        self.run_batch()
+        state = self.state()
+        self.assertEqual((state['phase'], [i['outcome'] for i in state['queue']],
+                          state['queue'][0].get('followup')),
+                         ('done', ['shipped'], 'launch-failed'))
+        self.assertIn('cleanup-launch', (self.root / 'followups/report.jsonl').read_text())
+
     def test_reap_group_sigkills_survivors_after_leader_exits(self):
         """Leader exit alone must not release the claim while a descendant ignores SIGTERM."""
         import time

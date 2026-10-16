@@ -64,15 +64,18 @@ def reap_group(proc, grace=5.0):
         time.sleep(0.05)
 
 
-def run(argv, *, timeout=None, cwd=None, env=None, text=True, stdin=subprocess.DEVNULL,
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE, grace=5.0):
-    """Popen with start_new_session; on timeout reap the whole group before raising.
-
-    Returns CompletedProcess. Raises TimeoutExpired only after the group is confirmed empty.
-    """
-    proc = subprocess.Popen(
+def start(argv, *, cwd=None, env=None, text=True, stdin=subprocess.DEVNULL,
+          stdout=subprocess.PIPE, stderr=subprocess.PIPE):
+    """Non-blocking start_new_session Popen (same group model as run)."""
+    return subprocess.Popen(
         argv, stdin=stdin, stdout=stdout, stderr=stderr, cwd=cwd, env=env,
         text=text, start_new_session=True)
+
+
+def run(argv, *, timeout=None, cwd=None, env=None, text=True, stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, grace=5.0):
+    """start() + communicate; on timeout reap the group before raising TimeoutExpired."""
+    proc = start(argv, cwd=cwd, env=env, text=text, stdin=stdin, stdout=stdout, stderr=stderr)
     try:
         out, err = proc.communicate(timeout=timeout)
     except subprocess.TimeoutExpired as error:
