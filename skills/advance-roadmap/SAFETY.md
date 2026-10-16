@@ -46,7 +46,8 @@ commit, merge, or push (see WORKER.md).
   fetch failed and `error` says why). The **worker** is unsandboxed and calls the CLI directly:
   - read an issue: `linear issue view DEV-N` · raw GraphQL: `linear api '<query>'`
   - comments: `linear issue comment list DEV-N` · `linear issue comment add DEV-N --body-file <f>`
-  - close out: `linear issue update DEV-N --state Done`
+  - close out: `linear issue update DEV-N --state Done` (Step 7, or Step 2e for a `Needs Input`
+    ticket that already landed)
   - flag: `linear issue update DEV-N --state "Needs Input"` (Step 2b, decision or
     attended-acceptance blocker only — skipped by triage until Jake or `/unblock-roadmap` clears
     it) or `linear issue update DEV-N --state Paused` (Step 2b, dirty tree or a red deploy after

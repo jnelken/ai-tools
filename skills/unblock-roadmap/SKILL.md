@@ -313,8 +313,15 @@ For each direct child of `$(~/.ai-tools/bin/personal-code-dir)` (non-zero exit: 
    **A `Needs Input` ticket with no `advance-roadmap:blocker` comment is Jake's own doing, not
    this skill's** — he moved it there by hand (the old `needs-rescope` use case: scope is
    stale and he'll rewrite it himself) and there's no bot-authored question to relay. Skip it
-   silently, like `human-only`: no question, not reported as a candidate. It's his to clear
-   when the rewrite is done, the same way he'd have removed the old label.
+   while it's fresh. **Once it hasn't been updated in 14 days, it's a candidate** with one
+   question — is it still parked for a rewrite? Nothing else ever revisits these: DEV-106 sat
+   there for weeks after its work had shipped.
+7. **Before relaying any `Needs Input` question, check whether it's already moot.** Look for the
+   same evidence `/advance-roadmap`'s Step 2e uses: a commit on the default branch naming the
+   `DEV-N` id, the paths the ticket names, checked acceptance boxes, or a human comment newer than
+   the blocker that already answers it. If you find any, say so when you show the ticket in
+   Step 2 and lead with the close option. You're asking, not deciding, so partial evidence is
+   worth showing too — label it partial.
 
 A repo can be dirty-tree blocked, decisions-needed blocked, `Needs Input`-ticket blocked, any
 combination, or none. Dirty-tree and decisions-needed together is common:
@@ -379,6 +386,8 @@ show Jake enough to decide:
 - **`Needs Input`-ticket blocker:** the ticket id and its newest `<!-- advance-roadmap:blocker -->`
   comment verbatim (Blocker type, Details, Needed from you) — always a decision or
   attended-acceptance question, never a dirty tree, so it never overlaps with the bullet above.
+  For a hand-parked ticket (no bot comment, 14+ days stale), the title, its last update date and
+  the scope section instead. Either way, add any already-done evidence from Step 1.
 
 Also name the ticket the directive will land on, so Jake can object before it's written.
 
@@ -413,6 +422,8 @@ several — they're independent). For the options:
   Step 2b format asks "does X or Y?"), offer those as the options.
 - Otherwise offer your single best-guess candidate answer as one option.
 - Always include `Skip — leave this open for next sweep` as one of the options.
+- For any `Needs Input` ticket, also offer `Close it — already done` (first, when Step 1 found
+  evidence) and, for a hand-parked one, `Close it — no longer wanted` and `Keep it parked`.
 - The user can always pick **Other** to type a full free-text answer regardless of what
   options you listed — don't strain to make the presets perfect, they only need to cover
   the common case and leave an obvious escape hatch for everything else.
@@ -449,6 +460,14 @@ Concretely, per repo:
    gets no ticket either** — if every answer for a repo was "Leave it" / "Skip", nothing at
    all is created for it. **A `Needs Input` ticket whose only answer was "Skip" stays `Needs Input`** —
    don't reset its state without an actual answer to record.
+
+Closing and parking answers write no directive:
+
+- **Close it — already done** or **no longer wanted:** add a comment saying why, citing any
+  evidence from Step 1, then set the ticket to `Done` (already done) or `Canceled` (not wanted).
+- **Keep it parked:** add a one-line comment, `Still parked for a scope rewrite (unblock-roadmap,
+  <date>)`. Commenting bumps the ticket's update time, which resets its 14-day clock, so the next
+  sweep won't ask again for another two weeks.
 
 If a repo's only answers were "Leave it" / "Skip", write no directive and change no state.
 

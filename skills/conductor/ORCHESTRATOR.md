@@ -54,6 +54,7 @@ Schema: `~/.claude/automations/advance-roadmap/schemas/orchestrator-result.json`
   "conflict_notes": [],
   "archives": [],
   "blockers": [],
+  "closeouts": [],
   "considered": ["typey.site DEV-56 skipped: needs PostHog key"],
   "summary": "Picked DEV-35 in mailcruxh."
 }
@@ -90,6 +91,9 @@ ticket is the scope. `run.sh` doesn't chain after one (see SKILL.md).
   "blockers": [
     {"repo": "typey.site", "linear_id": "DEV-54", "detail": "Attended visual QA required: ..."}
   ],
+  "closeouts": [
+    {"repo": "ai-tools", "linear_id": "DEV-106", "evidence": "fa00c98 ships it; automations/README.md has the Phone access section; all 3 acceptance boxes checked"}
+  ],
   "considered": ["..."],
   "summary": "Five-line summary for the log."
 }
@@ -98,8 +102,8 @@ ticket is the scope. `run.sh` doesn't chain after one (see SKILL.md).
 `action` / `outcome_token`: `blocked_no_item` / `blocked-no-item`, or
 `nothing_qualified` / `nothing-qualified`.
 
-`run.sh` still invokes a bookkeeping worker so Step 2b comments, archives, and Step 8
-ledger writes happen with write tools — put everything they need in this JSON.
+`run.sh` still invokes a bookkeeping worker so Step 2b comments, archives, Step 2e close-outs and
+Step 8 ledger writes happen with write tools — put everything they need in this JSON.
 
 ---
 
@@ -562,7 +566,8 @@ an issue exists somewhere; read both, then pick one item by the prefer/skip rule
   label, so check labels for both independently.
 - **Scope going stale or changing is a `Needs Input` case, not a label.** Jake moves the ticket to
   `Needs Input` himself when its scope needs a rewrite before this skill should touch it — the same
-  silent-skip bullet above covers it; there's nothing further to check.
+  silent-skip bullet above covers it for *implementation*. The one thing you still do with a
+  `Needs Input` ticket is Step 2e's check for whether it already landed.
 - **An unconsumed `## Directive` marker gates a repo's tree, not the item.** The ticket's
   description carries a `## Directive` section from [[unblock-roadmap]] — Jake's recorded answer to
   what blocked this repo. It is the only dirty-tree exception (Step 1a), it is a *pending* marker
@@ -672,3 +677,34 @@ re-derive picks repos up again as their cooldowns lapse.
 
 One pass per run, and `run.sh` doesn't chain after a code-health ship — so a quiet queue produces at
 most one refactor per tick, never a 40-minute refactor spree.
+
+## Step 2e — Close out `Needs Input` tickets that already landed
+
+`Needs Input` is skipped for implementation, so without this step nothing ever looks at one again:
+work that landed some other way (by hand, under a different ticket, in a commit that never named the
+ID) leaves the ticket parked forever. DEV-106 sat there after `fa00c98` shipped it. So on every run,
+for each `Needs Input` ticket in the snapshot whose repo is a valid candidate (personal, cloned —
+the tree may be dirty, you only read it), look for evidence that its work is done. Under a carried
+verdict, check only tickets whose `issue:` or `repo:` entry is in `changed`; a landing commit moves
+the repo's HEAD, so it shows up there. On a full triage, check them all.
+
+Name a ticket in `closeouts` only on **concrete evidence that covers what the ticket asks for**:
+
+- A commit on the default branch that names the `DEV-N` id (`git -C <repo> log origin/<default>
+  --grep DEV-N`), **and** the files, commands or symbols the ticket's scope names exist; or
+- every acceptance checkbox in the description is checked, **and** the artifacts those boxes
+  describe exist (grep for them; run a read-only status command if one is named and your sandbox
+  allows it).
+- **A ticket waiting on attended acceptance needs Jake's word, not just code.** When the newest
+  `<!-- advance-roadmap:blocker -->` comment asks him to verify something by hand, the shipping
+  commit is exactly what's *expected* to exist. Close it only when the acceptance boxes are checked
+  or a later human comment confirms it.
+
+Partial evidence — some boxes checked, some named files missing, a commit that names the ID but
+covers only part of the scope — is not a close-out. Leave the ticket where it is; partly-built work
+is a decision for Jake, and `/unblock-roadmap` is where he gets asked. Write `evidence` as the
+commit(s), the paths you confirmed, and the checkbox count, so the worker's comment can cite them
+and Jake can audit the call in one read.
+
+Close-outs are bookkeeping, like archives: they don't spend this run's one item, they go in the
+JSON whether or not you dispatch, and they belong to a repo's first thread only.

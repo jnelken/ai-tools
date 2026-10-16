@@ -730,7 +730,7 @@ except (OSError, ValueError):
     pass
 r = {"action": None, "outcome_token": None, "repo": None, "item": None, "branch": None,
      "linear_id": None, "directive_ticket": None, "worker_brief": None,
-     "archives": [], "blockers": [], "considered": []}
+     "archives": [], "blockers": [], "closeouts": [], "considered": []}
 if hit_path:
     limits = quota.get("providers") or []
     if not limits:
@@ -793,7 +793,7 @@ r = json.load(open(path))
 repo = r.get("repo")
 if thread > 1:
     # Bookkeeping belongs to a repo's first thread, and a code-health pass never runs beside a feature.
-    r["blockers"], r["archives"] = [], []
+    r["blockers"], r["archives"], r["closeouts"] = [], [], []
     if r.get("action") == "resume_worker" or r.get("work_kind") == "code_health":
         r.update(action="blocked_no_item", outcome_token="blocked-no-item", repo=None, item=None,
                  branch=None, linear_id=None, directive_ticket=None, worker_brief=None,
@@ -802,11 +802,12 @@ if thread > 1:
 if target:
     # A target-scoped planner cannot authorize bookkeeping in another repo either.
     r["blockers"] = [b for b in r.get("blockers", []) if b.get("repo") == target]
+    r["closeouts"] = [c for c in r.get("closeouts", []) if c.get("repo") == target]
     r["archives"] = [a for a in r.get("archives", [])
                      if a.startswith(target + "/") and ".." not in a.split("/")]
     if r.get("action") not in ("dispatch_worker", "resume_worker") and repo not in (None, target):
         r.update(repo=None, item=None, branch=None, linear_id=None, directive_ticket=None,
-                 worker_brief=None, archives=[], blockers=[], considered=[],
+                 worker_brief=None, archives=[], blockers=[], closeouts=[], considered=[],
                  summary=f"Planner returned bookkeeping outside assigned repo {target}; ignored")
 if r.get("action") in ("dispatch_worker", "resume_worker"):
     why = None
@@ -820,7 +821,7 @@ if r.get("action") in ("dispatch_worker", "resume_worker"):
         # Every actionable field goes too: no worker may touch another lane's repo.
         r.update(action="blocked_no_item", outcome_token="blocked-no-item", repo=None, item=None,
                  branch=None, linear_id=None, directive_ticket=None, worker_brief=None,
-                 archives=[], blockers=[],
+                 archives=[], blockers=[], closeouts=[],
                  summary=(r.get("summary") or "") + f"\n({why} — not dispatched)")
         json.dump(r, open(path, "w"), indent=2)
         open(os.path.join(os.path.dirname(os.environ["ORCH_RESULT"]), "dispatch-rejected"), "w").write(why)

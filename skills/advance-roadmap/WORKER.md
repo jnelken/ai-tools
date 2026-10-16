@@ -24,13 +24,15 @@ The prompt names a request JSON file. Modes:
   create a second goal. When `directive_ticket` is set, do **Step 2c first** — it clears the dirty
   tree that would otherwise block Step 3. If `worker_brief` names a recovered-deploy ticket to
   close out, do that alongside your own item's Step 6/7 bookkeeping (comment, `Done`, clear
-  `Paused`) — it's a different ticket than the one you're implementing.
+  `Paused`) — it's a different ticket than the one you're implementing. Run Step 2e for every
+  entry in `closeouts[]` too.
 - **code-health** — an implement/resume request whose orchestrator result says
   `"work_kind": "code_health"`. Read [`CODE_HEALTH.md`](CODE_HEALTH.md) first; its *code-health
   pass* section amends Steps 3–8 (baseline first, caps, stricter verification, commit trailer, no
   roadmap edits). The product must behave exactly as before.
 - **bookkeeping** — full orchestrator result with `blocked_no_item` / `nothing_qualified`
-  (request field `orchestrator`). Run Step 2b once per entry in `blockers[]`, perform `archives`,
+  (request field `orchestrator`). Run Step 2b once per entry in `blockers[]`, Step 2e once per
+  entry in `closeouts[]`, perform `archives`,
   close out any recovered-deploy ticket `worker_brief` names (comment, `Done`, clear `Paused` —
   see the conductor skill's `ORCHESTRATOR.md`, *A repo left with a red deploy*), write Step 8; do not start a feature
   branch unless an archive needs the Step 7 flow.
@@ -187,6 +189,24 @@ fix cap.
    currently `Paused`, set it to `Todo` first: reaching this step at all means the tree read
    clean or the deploy's live check came back green, so the marker is stale. `Needs Input`
    never needs this from you — `/unblock-roadmap` is what moves it off, per its own design.
+
+## Step 2e — Close out a `Needs Input` ticket that already landed
+
+Once per entry in `closeouts[]` (`repo`, `linear_id`, `evidence`). The orchestrator found that
+the ticket's work already exists; you are the write side, and you re-check before you write.
+
+1. `linear issue view DEV-N`. If it's no longer `Needs Input`, skip it: Jake or another run
+   already moved it, and that state wins.
+2. Re-confirm the evidence against the live repo — the commit is on the default branch, the named
+   paths exist. If any part no longer holds, skip it and say so in your summary. Never widen the
+   evidence yourself to make a close-out stick.
+3. Post one comment (`linear issue comment add DEV-N --body-file <f>`) that starts with
+   `<!-- advance-roadmap:closeout -->`, says it's being closed as already shipped, and lists the
+   evidence: commits, paths, checkbox count. Note any gap between what shipped and the ticket's
+   original scope, so Jake can reopen it with one read if the call was wrong.
+4. `linear issue update DEV-N --state Done`.
+
+This is bookkeeping: no branch, no commit, and it doesn't count as the run's item.
 
 ## Threads — when other workers are in this repo
 

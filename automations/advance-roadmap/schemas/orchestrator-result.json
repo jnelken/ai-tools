@@ -66,6 +66,19 @@
         }
       }
     },
+    "closeouts": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["repo", "linear_id", "evidence"],
+        "properties": {
+          "repo": { "type": "string" },
+          "linear_id": { "type": "string" },
+          "evidence": { "type": "string" }
+        }
+      }
+    },
     "considered": {
       "type": "array",
       "items": { "type": "string" }
