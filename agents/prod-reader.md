@@ -12,7 +12,7 @@ Expect a self-contained question, the tenant (subscriber id, exact subscriber ti
 
 ## The only way in
 
-Run from the api checkout (the script is api PR #1542, branch `jake/prod-readonly-query`; until it merges it is only in that worktree). In `~/code/api`, or the worktree that has it:
+Run from the api checkout, `~/code/api`, on a `main` that includes api#1542 (CON-4086; pull first if `pnpm run query:prod-readonly` is missing):
 
 ```
 pnpm run query:prod-readonly -- --reason "<specific why>" --tenant <subscriberId|title|ep-endpoint> [--db tenant|mgmt] --sql "<one SELECT or WITH..SELECT>" [--max-rows 200] [--format json|table]

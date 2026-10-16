@@ -7,7 +7,7 @@ description: Answer read-only questions about production customer-tenant data (c
 
 Read-only production data questions, asked through one audited door: `pnpm run query:prod-readonly` in the **api** repo. The script (not this doc) is the source of truth for flags and enforcement; this skill documents the contract and how to use it safely. For the hands-off version, delegate to the `prod-reader` agent, which carries these rules.
 
-> **Availability:** the script is api PR #1542 (branch `jake/prod-readonly-query`, CON-4086). Run it from the **api checkout** once that PR is merged (`~/code/api`); until then it exists only in that branch's worktree. If `pnpm run query:prod-readonly` is missing, stop and say so. Do not fall back to `psql`/`prisma`. The full guardrail doc is `docs/reference/prod-readonly-query.md` in that repo.
+> **Availability:** the script is on api `main` (api#1542, CON-4086, merged 2026-10-16). Run it from the **api checkout** (`~/code/api`) after pulling `main`. If `pnpm run query:prod-readonly` is missing, stop and say so (the checkout is probably behind). Do not fall back to `psql`/`prisma`. The full guardrail doc is `docs/reference/prod-readonly-query.md` in that repo.
 
 ## Which tool for which question
 
