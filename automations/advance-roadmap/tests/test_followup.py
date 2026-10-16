@@ -272,32 +272,45 @@ class FollowupTest(unittest.TestCase):
         [f] = [f for f in findings if f["kind"] == "fragile-tooling"]
         self.assertIn("missing ORCHESTRATOR_RESULT_JSON", f["evidence"][0]["quote"])
 
+    def _write_stage(self, key, blockers):
+        """Persist a follow-up stage so blocker evidence can cite its absolute state.json."""
+        st = {"key": key, "blockers": blockers, "stage": "project-cleanup", "status": "blocked"}
+        path = self.root / "followups" / key / "state.json"
+        path.parent.mkdir(parents=True)
+        path.write_text(json.dumps(st, indent=1) + "\n")
+        return st
+
     def test_tooling_scan_skips_expected_safety_blockers(self):
         stages = [
-            {"key": "cleanup-noroadmap", "blockers": [
-                {"kind": "unsafe-repo", "reason": "demo has opted out (.noroadmap)"}]},
-            {"key": "cleanup-dirty", "blockers": [
-                {"kind": "unsafe-repo", "reason": "dirty tree (3 files)"}]},
-            {"key": "cleanup-land", "blockers": [
-                {"kind": "land", "reason": "PR checks failed on https://example/pull/1"}]},
+            self._write_stage("cleanup-noroadmap", [
+                {"kind": "unsafe-repo", "reason": "demo has opted out (.noroadmap)"}]),
+            self._write_stage("cleanup-dirty", [
+                {"kind": "unsafe-repo", "reason": "dirty tree (3 files)"}]),
+            self._write_stage("cleanup-land", [
+                {"kind": "land", "reason": "PR checks failed on https://example/pull/1"}]),
         ]
         findings, quiet = followscan.tooling_scan(self.root, [], stages=stages)
         titles = [f["title"] for f in findings if f["kind"] == "fragile-tooling"]
         self.assertEqual(titles, ["a follow-up stage was blocked: PR checks failed on https://example/pull/1"])
+        land = next(f for f in findings if f["kind"] == "fragile-tooling")
+        state = (self.root / "followups" / "cleanup-land" / "state.json").resolve()
+        self.assertEqual(Path(land["evidence"][0]["source"]), state)
+        self.assertTrue(followscan.evidence_holds(land["evidence"][0], [state]))
         self.assertTrue(any("noroadmap" in n["title"] or "unsafe-repo" in n["title"] for n in quiet), quiet)
         self.assertTrue(any("cleanup-dirty" in n["title"] for n in quiet), quiet)
 
     def test_tooling_scan_classifies_hard_analyst_failures_as_tooling_defects(self):
         """Historical/slice-3 analyst blockers stay tooling findings, not expected safety stops."""
         stages = [
-            {"key": "tooling-batch-fail-analyst", "blockers": [
+            self._write_stage("tooling-batch-fail-analyst", [
                 {"kind": "analyst",
-                 "reason": "failed: codex: [Errno 2] No such file; claude: exit 1"}]},
+                 "reason": "failed: codex: [Errno 2] No such file; claude: exit 1"}]),
         ]
         findings, quiet = followscan.tooling_scan(self.root, [], stages=stages)
         [f] = [x for x in findings if x["kind"] == "fragile-tooling"]
         self.assertIn("failed: codex", f["title"])
         self.assertTrue(f["evidence"])
+        self.assertTrue(Path(f["evidence"][0]["source"]).is_absolute())
         self.assertFalse([n for n in quiet if "analyst" in n["title"]], quiet)
 
     def test_an_interrupted_stage_resumes_where_it_stopped(self):
@@ -389,9 +402,10 @@ class FollowupTest(unittest.TestCase):
         (self.root / "batch-verdicts" / "other.json").write_text(json.dumps({
             "stamp": "20261012-999999", "summary": "You've hit your session limit · resets never\n"}))
         corpus = followscan.corpus_files(self.root, [stamp], excerpt_dir=self.root / "corpus-x")
-        self.assertEqual([p for p in corpus if p.name == "runs.jsonl"], [self.root / "corpus-x" / "runs.jsonl"])
-        self.assertNotIn(self.root / "batch-verdicts" / "other.json", corpus)
-        self.assertIn(self.root / "batch-verdicts" / "apt-sqft.json", corpus)
+        self.assertEqual([p for p in corpus if p.name == "runs.jsonl"],
+                         [(self.root / "corpus-x" / "runs.jsonl").resolve()])
+        self.assertNotIn((self.root / "batch-verdicts" / "other.json").resolve(), corpus)
+        self.assertIn((self.root / "batch-verdicts" / "apt-sqft.json").resolve(), corpus)
         borrowed = {"source": str(self.root / "runs.jsonl"),
                     "quote": "unrelated historical quote for another stage"}
         self.assertFalse(followscan.evidence_holds(borrowed, [self.root / "runs.jsonl"], [stamp]))
@@ -422,7 +436,7 @@ class FollowupTest(unittest.TestCase):
         self.assertIn(stamp, ev["quote"])
         self.assertNotIn("unrelated historical quote", ev["quote"])
         missing = followscan.row_evidence(self.root / "runs.jsonl", "no-such-stamp")
-        self.assertEqual(missing["quote"], "no-such-stamp")
+        self.assertIsNone(missing)  # missing stamp is missing evidence — never a synthetic quote
         corpus = followscan.corpus_files(self.root, [stamp], excerpt_dir=self.root / "corpus-big")
         excerpt = next(p for p in corpus if p.name == "runs.jsonl")
         self.assertIn(stamp, excerpt.read_text())
@@ -701,6 +715,57 @@ class FollowupTest(unittest.TestCase):
         self.assertTrue(followscan.evidence_holds(ev, [orch_path]), ev)
         self.assertIn('"parse_error"', ev["quote"])
         self.assertIn(ev["quote"], " ".join(raw.split()))
+
+    def test_internal_run_artifact_only_is_not_complete_and_reports_missing_record(self):
+        """Round 7: worker-result without runs.jsonl must not count as complete for internal runs."""
+        import followup as fu
+        import supervisor as shared
+        fu.ROOT = shared.ROOT = self.root
+        fu.STATE = self.root / "followups"
+        stamp = "20261015-norecord"
+        run = self.root / "runs" / stamp
+        run.mkdir(parents=True)
+        (run / "worker-result.json").write_text(json.dumps({
+            "outcome": "failed", "repo": "demo", "summary": "tests failed"}) + "\n")
+        self.assertEqual(fu.child_complete(stamp, {}), (False, ""))
+        # Conductor/external still completes from artifacts alone.
+        ext = {stamp: str(run.resolve())}
+        self.assertEqual(fu.child_complete(stamp, ext), (True, "worker-result"))
+        findings, _ = followscan.tooling_scan(self.root, [stamp])
+        missing = [f for f in findings if f["id"] == followscan.finding_id(
+            "tooling-hardening", "ai-tools", "fragile-tooling", "missing-run-record")]
+        self.assertTrue(missing, findings)
+        ev = missing[0]["evidence"][0]
+        self.assertTrue(Path(ev["source"]).is_absolute())
+        self.assertTrue(followscan.evidence_holds(ev, [run / "worker-result.json"]))
+        # With a ledger row, the finding goes away and completion is via runs.jsonl.
+        (self.root / "runs.jsonl").write_text(json.dumps({
+            "stamp": stamp, "outcome": "failed", "detail": "npm test failed", "worker": "cursor"}) + "\n")
+        self.assertEqual(fu.child_complete(stamp, {}), (True, "runs.jsonl"))
+        findings, quiet = followscan.tooling_scan(self.root, [stamp])
+        self.assertFalse([f for f in findings if f["id"] == followscan.finding_id(
+            "tooling-hardening", "ai-tools", "fragile-tooling", "missing-run-record")])
+        self.assertTrue(any(n["title"] == f"{stamp} ended failed" for n in quiet), quiet)
+
+    def test_blocker_evidence_cites_absolute_state_and_raw_escaped_reason(self):
+        """Round 7: blocker quotes must be raw JSON spans (escapes intact), from absolute paths."""
+        reason = 'land failed: path "C:\\temp\\x" and quote "done"'
+        st = self._write_stage("cleanup-escaped", [{"kind": "land", "reason": reason}])
+        state = (self.root / "followups" / "cleanup-escaped" / "state.json").resolve()
+        raw = state.read_text()
+        self.assertIn('\\"', raw)  # escaped quotes as stored
+        findings, _ = followscan.tooling_scan(self.root, [], stages=[st])
+        [f] = [x for x in findings if x["kind"] == "fragile-tooling"]
+        ev = f["evidence"][0]
+        self.assertEqual(Path(ev["source"]), state)
+        self.assertTrue(followscan.evidence_holds(ev, [state]))
+        self.assertIn(ev["quote"], " ".join(raw.split()))
+        # Decoded reason alone must not be the quote (backslashes / quotes would not hold).
+        self.assertNotEqual(ev["quote"], reason)
+        self.assertNotEqual(ev["quote"], " ".join(reason.split()))
+        corpus = followscan.corpus_files(self.root, [], stages=[st])
+        self.assertIn(state, corpus)
+        self.assertTrue(followscan.evidence_holds(ev, corpus))
 
 
 if __name__ == "__main__":

@@ -65,8 +65,32 @@ def finding_id(stage, repo, kind, key):
     return hashlib.sha1(raw.encode()).hexdigest()[:12]
 
 
-def evidence(source, quote):
-    return {"source": str(source), "quote": " ".join(str(quote).split())[:400]}
+def _span_in_file(path, raw_span):
+    """True when raw_span is an exact substring of the file (streamed for *.jsonl)."""
+    path = Path(path)
+    raw = str(raw_span)
+    if not raw:
+        return False
+    if path.name.endswith(".jsonl") or path.name == "runs.jsonl":
+        return any(raw in line or raw == line for line in iter_jsonl_lines(path)) \
+            or raw in read_text(path)
+    return raw in read_text(path)
+
+
+def evidence(path, raw_span):
+    """The only evidence constructor: absolute corpus file path + raw span read from it.
+
+    Validates at construction that `path` is a real file and `raw_span` appears in it
+    verbatim (not a decoded/re-serialized reconstruction). Every finding and non-finding
+    goes through this — helpers below only extract a span, then call here.
+    """
+    path = Path(path).resolve()
+    raw = str(raw_span)
+    if not path.is_file():
+        raise ValueError(f"evidence source is not a file: {path}")
+    if not _span_in_file(path, raw):
+        raise ValueError(f"evidence span not found in {path}")
+    return {"source": str(path), "quote": " ".join(raw.split())[:400]}
 
 
 def source_key_span(text, key):
@@ -120,19 +144,27 @@ def source_key_span(text, key):
 
 def source_key_evidence(path, key):
     """Evidence quoting a JSON object's key exactly as stored on disk — never re-serialized."""
-    path = Path(path)
+    path = Path(path).resolve()
+    if not path.is_file():
+        return None
     span = source_key_span(read_text(path), key)
-    return evidence(path, span if span is not None else key)
+    if span is None:
+        return None
+    return evidence(path, span)
 
 
 def jsonl_last_evidence(path):
     """Evidence quoting the last non-empty JSONL line verbatim (never json.dumps of a parse)."""
-    path = Path(path)
+    path = Path(path).resolve()
+    if not path.is_file():
+        return None
     last = None
     for line in iter_jsonl_lines(path):
         if line.strip():
             last = line
-    return evidence(path, last if last is not None else path.name)
+    if last is None:
+        return None
+    return evidence(path, last)
 
 
 def iter_jsonl_lines(path):
@@ -162,22 +194,43 @@ def row_evidence(src, stamp, needle=None):
     For runs.jsonl (and other stamp-keyed JSONL), stream the whole file and cite only that
     stamp's row. A missing stamp is missing evidence — never fall back to another row.
     """
-    src = Path(src)
+    src = Path(src).resolve()
+    if not src.is_file():
+        return None
     if src.name.endswith(".jsonl") or src.name == "runs.jsonl":
         line = jsonl_stamp_line(src, stamp)
-        if line:
-            return evidence(src, line)
-        return evidence(src, stamp)
+        return evidence(src, line) if line else None
     text = read_text(src)
     if needle and " ".join(str(needle).split()) in " ".join(text.split()):
         for raw in text.splitlines():
             if str(needle) in raw:
                 return evidence(src, raw)
-        return evidence(src, needle)
+        # Needle matches collapsed text but not a single line — find its JSON encoding.
+        encoded = json.dumps(str(needle))
+        if encoded in text:
+            return evidence(src, encoded)
+        return None
     for raw in text.splitlines():
         if raw.strip():
             return evidence(src, raw)
-    return evidence(src, stamp)
+    return None
+
+
+def stage_state_path(root, stage):
+    """Absolute path to a follow-up stage's persisted state.json, or None."""
+    key = stage.get("key") if isinstance(stage, dict) else None
+    if not key or not isinstance(key, str) or "/" in key or key in (".", ".."):
+        return None
+    return (Path(root).resolve() / "followups" / key / "state.json")
+
+
+def blocker_reason_span(text, reason):
+    """Raw `"reason": <json>` span for this reason as stored (preserves escapes)."""
+    encoded = json.dumps(reason)
+    m = re.search(r'"reason"\s*:\s*' + re.escape(encoded), text)
+    if m:
+        return m.group(0)
+    return encoded if encoded in text else None
 
 
 def finding(stage, repo, kind, title, key, ev, fix):
@@ -186,7 +239,7 @@ def finding(stage, repo, kind, title, key, ev, fix):
 
 
 def non_finding(title, why, ev=()):
-    return {"title": title, "why": why, "evidence": list(ev)}
+    return {"title": title, "why": why, "evidence": [e for e in ev if e]}
 
 
 def read_json(path):
@@ -256,45 +309,54 @@ def added_markers(repo_dir, merge_commit):
 def cleanup_scan(run_dir, repo_dir=None):
     """Findings for one item's project-cleanup stage. An item that didn't ship is not a trigger."""
     run_dir = Path(run_dir)
-    result_path = run_dir / "worker-result.json"
+    result_path = (run_dir / "worker-result.json").resolve()
     result = read_json(result_path) or {}
     repo = result.get("repo")
     stage = "project-cleanup"
     if result.get("outcome") not in SHIPPED:
+        ev = source_key_evidence(result_path, "outcome")
         return [], [non_finding("item did not ship",
                                 f"outcome {result.get('outcome')!r} is recoverable work for the next run, "
                                 "not a completed-ticket cleanup trigger",
-                                [source_key_evidence(result_path, "outcome")])]
+                                [ev] if ev else [])]
     findings, quiet = [], []
     markers = added_markers(repo_dir, result.get("merge_commit"))
-    for path, line in markers:
-        m = MARKER.search(line)
-        findings.append(finding(
-            stage, repo, "unresolved-review", f"{m.group(1)} left by the review: {m.group(2)[:120]}",
-            f"{path}|{m.group(2)}", [evidence(f"git:{result.get('merge_commit')}:{path}", line)],
-            "Fix what the marker describes if it is a real bug, test it, and delete the marker."))
+    # Persist marker lines into the run corpus so evidence cites a real file, not a git: pseudo-path.
+    if markers:
+        excerpt = (run_dir / "review-markers.excerpt").resolve()
+        excerpt.write_text("\n".join(line for _, line in markers) + "\n")
+        for path, line in markers:
+            m = MARKER.search(line)
+            findings.append(finding(
+                stage, repo, "unresolved-review", f"{m.group(1)} left by the review: {m.group(2)[:120]}",
+                f"{path}|{m.group(2)}", [evidence(excerpt, line)],
+                "Fix what the marker describes if it is a real bug, test it, and delete the marker."))
     unresolved = (result.get("review") or {}).get("unresolved") or 0
     if unresolved and not markers:
-        findings.append(finding(
-            stage, repo, "unresolved-review", f"{unresolved} review finding(s) merged unresolved with no marker",
-            f"unmarked|{result.get('merge_commit')}",
-            [source_key_evidence(result_path, "review")],
-            "Re-review the merged diff, fix the real findings, and test them."))
-    reviews_path = run_dir / "reviews.jsonl"
+        ev = source_key_evidence(result_path, "review")
+        if ev:
+            findings.append(finding(
+                stage, repo, "unresolved-review", f"{unresolved} review finding(s) merged unresolved with no marker",
+                f"unmarked|{result.get('merge_commit')}", [ev],
+                "Re-review the merged diff, fix the real findings, and test them."))
+    reviews_path = (run_dir / "reviews.jsonl").resolve()
     reviews = read_jsonl(reviews_path)
     if reviews and reviews[-1].get("verdict") == "clean" and not unresolved:
-        quiet.append(non_finding("review closed clean", "the last review round was clean",
-                                 [jsonl_last_evidence(reviews_path)]))
+        ev = jsonl_last_evidence(reviews_path)
+        if ev:
+            quiet.append(non_finding("review closed clean", "the last review round was clean", [ev]))
     deploy = result.get("deploy") or {}
     if deploy.get("status") in ("failed", "timeout"):
-        findings.append(finding(
-            stage, repo, "red-deploy", f"production deploy {deploy['status']} after the merge",
-            f"deploy|{result.get('merge_commit')}",
-            [source_key_evidence(result_path, "deploy")],
-            "Read the deployment's build log, fix the build forward, and confirm the new deploy is green."))
+        ev = source_key_evidence(result_path, "deploy")
+        if ev:
+            findings.append(finding(
+                stage, repo, "red-deploy", f"production deploy {deploy['status']} after the merge",
+                f"deploy|{result.get('merge_commit')}", [ev],
+                "Read the deployment's build log, fix the build forward, and confirm the new deploy is green."))
     elif deploy.get("status") in ("success", "none"):
-        quiet.append(non_finding(f"deploy {deploy['status']}", "nothing to repair in production",
-                                 [source_key_evidence(result_path, "deploy")]))
+        ev = source_key_evidence(result_path, "deploy")
+        if ev:
+            quiet.append(non_finding(f"deploy {deploy['status']}", "nothing to repair in production", [ev]))
     return findings, quiet
 
 
@@ -421,7 +483,29 @@ def orchestration_failure_evidence(row, orch, run, src):
     return None
 
 
-def blocker_repair_evidence(blocker, stage):
+def stage_blocker_evidence(root, stage, blocker):
+    """Evidence citing the absolute persisted state file's raw reason/kind span. None if absent."""
+    path = stage_state_path(root, stage)
+    if path is None or not path.is_file():
+        return None
+    text = read_text(path)
+    reason = blocker.get("reason")
+    if reason is not None and str(reason) != "":
+        span = blocker_reason_span(text, str(reason))
+        if span:
+            return evidence(path, span)
+    kind = blocker.get("kind")
+    if kind:
+        encoded = json.dumps(kind)
+        m = re.search(r'"kind"\s*:\s*' + re.escape(encoded), text)
+        if m:
+            return evidence(path, m.group(0))
+        if encoded in text:
+            return evidence(path, encoded)
+    return None
+
+
+def blocker_repair_evidence(blocker, stage, root):
     """Evidence a follow-up blocker is an orchestration/repair defect. None = expected safety stop."""
     kind = blocker.get("kind") or ""
     reason = str(blocker.get("reason") or "")
@@ -430,9 +514,35 @@ def blocker_repair_evidence(blocker, stage):
     # safe_repo / eligibility gates are deliberate SAFETY.md stops, not defects to repair.
     if kind in ("unsafe-repo", "interrupted"):
         return None
-    src = f"followups/{stage.get('key')}/state.json"
     if kind in REPAIR_BLOCKER_KINDS or ORCH_FAILURE.search(reason):
-        return evidence(src, reason or kind)
+        return stage_blocker_evidence(root, stage, blocker)
+    return None
+
+
+def missing_run_record_evidence(run):
+    """Evidence an internal run left artifacts but no runs.jsonl row."""
+    run = Path(run)
+    for name, key in (("worker-result.json", "outcome"), ("worker-status.json", "exit"),
+                      ("orchestrator-result.json", "action")):
+        path = (run / name).resolve()
+        if path.is_file():
+            ev = source_key_evidence(path, key)
+            if ev:
+                return ev
+            # File exists but key missing — cite any non-empty line.
+            for raw in read_text(path).splitlines():
+                if raw.strip():
+                    return evidence(path, raw)
+    marker = (run / "complete").resolve()
+    if marker.is_file():
+        text = read_text(marker) or "complete"
+        # Ensure the marker file has citeable content.
+        if not text.strip():
+            marker.write_text("complete\n")
+            text = "complete\n"
+        span = text.splitlines()[0] if text.splitlines() else text
+        if span and _span_in_file(marker, span):
+            return evidence(marker, span)
     return None
 
 
@@ -442,14 +552,16 @@ def tooling_scan(root, stamps, stages=(), run_dirs=None):
     `stages` are the follow-up stage states this run's cleanup started (their blockers count as
     friction too); `run_dirs` maps a stamp to a run dir outside root/runs (no runs.jsonl row).
     Each recognition test cites a verbatim line from the file that supplied it."""
-    root = Path(root)
+    root = Path(root).resolve()
     stage, repo = "tooling-hardening", TOOLING_REPO
     wanted = set(stamps)
+    external = run_dirs or {}
     rows = run_rows(root, stamps)
-    row_src = {s: root / "runs.jsonl" for s in rows}
+    row_src = {s: (root / "runs.jsonl").resolve() for s in rows}
     for stamp in stamps:
-        if stamp not in rows and stamp in (run_dirs or {}):
-            rows[stamp], row_src[stamp] = external_row(stamp, run_dir(root, stamp, run_dirs))
+        if stamp not in rows and stamp in external:
+            rows[stamp], row_src[stamp] = external_row(stamp, run_dir(root, stamp, external))
+            row_src[stamp] = Path(row_src[stamp]).resolve()
     groups = {}   # kind/key → finding being built, so one cause across lanes is one finding
     quiet = []
 
@@ -461,14 +573,26 @@ def tooling_scan(root, stamps, stages=(), run_dirs=None):
             if ev:
                 f["evidence"].append(ev)
 
+    def evs(*xs):
+        return [x for x in xs if x]
+
     for stamp in stamps:
-        run = run_dir(root, stamp, run_dirs)
+        run = run_dir(root, stamp, external)
+        # Internal run with completing artifacts but no runs.jsonl row: report, don't skip the rest.
+        if stamp not in rows and stamp not in external:
+            ev = missing_run_record_evidence(run)
+            if ev:
+                hit("fragile-tooling", "missing-run-record",
+                    f"internal run {stamp} has artifacts but no runs.jsonl row",
+                    "Ensure every internal run writes a runs.jsonl row before follow-up tooling scans it.",
+                    ev)
         row = rows.get(stamp) or {}
-        src = row_src.get(stamp, root / "runs.jsonl")
-        orch_path = run / "orchestrator-result.json"
+        src = row_src.get(stamp, (root / "runs.jsonl").resolve())
+        orch_path = (run / "orchestrator-result.json").resolve()
         orch = read_json(orch_path) or {}
         planner_failed = bool(orch.get("planner_error") or orch.get("parse_error"))
-        banner = LIMIT_BANNER.search(orch.get("summary") or "")
+        orch_raw = read_text(orch_path)
+        banner = LIMIT_BANNER.search(orch_raw) or LIMIT_BANNER.search(orch.get("summary") or "")
         # 1. Misfiring automation: a worker spent tokens on a run that had no plan.
         if planner_failed and row.get("worker") not in (None, "none"):
             err_key = "parse_error" if orch.get("parse_error") else "planner_error"
@@ -479,10 +603,16 @@ def tooling_scan(root, stamps, stages=(), run_dirs=None):
                 row_evidence(src, stamp), orch_ev)
         # 2. Wrong knowledge recorded: quota exhaustion reported (and alerted) as an error.
         if row.get("outcome") in ERROR_OUTCOMES and banner:
+            banner_ev = None
+            if orch_path.is_file() and banner.group(0) in orch_raw:
+                banner_ev = evidence(orch_path, banner.group(0))
+            elif orch_path.is_file():
+                # Decoded summary matched; cite the raw summary key span instead.
+                banner_ev = source_key_evidence(orch_path, "summary")
             hit("misleading-surface", "quota-recorded-as-error",
                 "a planner's usage limit was recorded as an error",
                 "Record a limit banner as quota-paused with its provider and reset, not error.",
-                evidence(orch_path, banner.group(0)), row_evidence(src, stamp))
+                banner_ev, row_evidence(src, stamp))
         # 3. Fragile tooling: only when evidence shows the automation itself failed.
         elif row.get("outcome") in ERROR_OUTCOMES:
             detail = row.get("detail") or row.get("outcome")
@@ -496,28 +626,32 @@ def tooling_scan(root, stamps, stages=(), run_dirs=None):
                 quiet.append(non_finding(
                     f"{stamp} ended {row['outcome']}",
                     "a project or item failure with correct automation behavior is not a tooling defect",
-                    [row_evidence(src, stamp, detail)]))
+                    evs(row_evidence(src, stamp, detail))))
         # 4. A review the worker could not read.
-        reviews_path = run / "reviews.jsonl"
-        for line in read_text(reviews_path).splitlines():
-            try:
-                r = json.loads(line)
-            except ValueError:
-                continue
-            if isinstance(r, dict) and r.get("verdict") == "unparsed":
-                hit("misfiring-automation", "review-unparsed",
-                    "a review round ended with no VERDICT line (read as findings)",
-                    "Classify the reviewer's failure (limit, capacity, crash) and fall back instead.",
-                    evidence(reviews_path, line))
+        reviews_path = (run / "reviews.jsonl").resolve()
+        if reviews_path.is_file():
+            for line in iter_jsonl_lines(reviews_path):
+                try:
+                    r = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(r, dict) and r.get("verdict") == "unparsed":
+                    hit("misfiring-automation", "review-unparsed",
+                        "a review round ended with no VERDICT line (read as findings)",
+                        "Classify the reviewer's failure (limit, capacity, crash) and fall back instead.",
+                        evidence(reviews_path, line))
         # 5. Ships the record flags as unreviewed.
         if row.get("outcome") in SHIPPED and str(row.get("detail") or "").startswith("merged"):
             hit("misfiring-automation", "merged-unreviewed", "an item merged without a completed review",
                 "Find why the reviewer was unavailable and make the worker wait or defer instead.",
                 row_evidence(src, stamp, row.get("detail")))
         # 6. A builder touched the shared stash (an executed command, never echoed docs or prose).
-        for path in (run / "worker-output.log", root / "logs" / f"run-{stamp}.log"):
-            line = next((c for c in executed_commands(read_text(path)) if runs_git_stash(c)), None)
-            if line:
+        for path in ((run / "worker-output.log").resolve(), (root / "logs" / f"run-{stamp}.log").resolve()):
+            if not path.is_file():
+                continue
+            text = read_text(path)
+            line = next((c for c in executed_commands(text) if runs_git_stash(c)), None)
+            if line and line in text:
                 hit("misfiring-automation", "git-stash", "a builder ran git stash (shared across worktrees)",
                     "Keep the never-stash rule in SAFETY.md and the builder prompt; commit on the branch instead.",
                     evidence(path, line))
@@ -527,14 +661,14 @@ def tooling_scan(root, stamps, stages=(), run_dirs=None):
             quiet.append(non_finding(f"{stamp} paused for quota",
                                      "a quota pause that names its provider and reset is the gate working, "
                                      "not a tooling failure",
-                                     [row_evidence(src, stamp)]))
+                                     evs(row_evidence(src, stamp))))
         elif row.get("outcome") == "skipped-unchanged":
             quiet.append(non_finding(f"{stamp} skipped unchanged", "the unchanged-world gate saved a planner call",
-                                     [row_evidence(src, stamp, row.get("detail"))]))
+                                     evs(row_evidence(src, stamp, row.get("detail")))))
         elif row.get("action") in ("blocked_no_item", "nothing_qualified") and not planner_failed \
                 and row.get("outcome") not in ERROR_OUTCOMES:
             quiet.append(non_finding(f"{stamp} found no work", "a valid no-work plan with its bookkeeping",
-                                     [row_evidence(src, stamp)]))
+                                     evs(row_evidence(src, stamp))))
         if row.get("worker_result_source") == "stdout-fence":
             hit("fragile-tooling", "stdout-fence", "a worker skipped its result file",
                 "Make the worker write worker-result.json before its summary.",
@@ -542,28 +676,32 @@ def tooling_scan(root, stamps, stages=(), run_dirs=None):
 
     # 7. Saved no-work verdicts whose text is a limit banner (cached as if triage ran).
     for path in sorted((root / "batch-verdicts").glob("*.json")):
+        path = path.resolve()
         v = read_json(path) or {}
         if v.get("stamp") in wanted:
-            m = LIMIT_BANNER.search(v.get("summary") or "")
-            if m:
+            raw = read_text(path)
+            m = LIMIT_BANNER.search(raw) or LIMIT_BANNER.search(v.get("summary") or "")
+            if m and path.is_file():
+                span = m.group(0) if m.group(0) in raw else None
+                ev = evidence(path, span) if span else source_key_evidence(path, "summary")
                 hit("wrong-knowledge", "contaminated-verdict", "a no-work verdict was saved from a limit banner",
                     "Refuse to save (and invalidate) verdicts whose source run had a planner error.",
-                    evidence(path, m.group(0)))
+                    ev)
 
     # 8. Follow-up stages this run started: only blockers that evidence an orchestration defect.
     for st in stages:
         for b in st.get("blockers") or []:
-            ev = blocker_repair_evidence(b, st)
+            ev = blocker_repair_evidence(b, st, root)
             if ev:
                 hit("fragile-tooling", f"followup-{b.get('kind')}",
                     f"a follow-up stage was blocked: {(b.get('reason') or '')[:100]}",
                     "Fix the step that blocked the follow-up so it can finish unattended.", ev)
             elif b.get("kind") != "quota":
-                reason = b.get("reason") or b.get("kind")
+                quiet_ev = stage_blocker_evidence(root, st, b)
                 quiet.append(non_finding(
                     f"{st.get('key')} blocked ({b.get('kind')})",
                     "an expected safety stop or deliberate gate is not a tooling defect",
-                    [evidence(f"followups/{st.get('key')}/state.json", reason)] if reason else []))
+                    [quiet_ev] if quiet_ev else []))
 
     findings = list(groups.values())
     # One stdout-fence fallback is the recovery path working; only a repeat is friction.
@@ -575,13 +713,13 @@ def tooling_scan(root, stamps, stages=(), run_dirs=None):
     return findings, quiet
 
 
-def corpus_files(root, stamps, run_dirs=None, excerpt_dir=None):
-    """Files the tooling corpus may cite: only this stage's child stamps.
+def corpus_files(root, stamps, run_dirs=None, excerpt_dir=None, stages=None):
+    """Files the tooling corpus may cite: only this stage's child stamps (+ their cleanup states).
 
     runs.jsonl rows and batch-verdicts for other stamps are excluded. When the on-disk
     runs.jsonl still holds history, a stamp-scoped excerpt is written under excerpt_dir.
     """
-    root = Path(root)
+    root = Path(root).resolve()
     wanted = set(stamps)
     files = []
     runs_path = root / "runs.jsonl"
@@ -600,27 +738,36 @@ def corpus_files(root, stamps, run_dirs=None, excerpt_dir=None):
             if other and excerpt_dir is not None:
                 excerpt_dir = Path(excerpt_dir)
                 excerpt_dir.mkdir(parents=True, exist_ok=True)
-                excerpt = excerpt_dir / "runs.jsonl"
+                excerpt = (excerpt_dir / "runs.jsonl").resolve()
                 excerpt.write_text("\n".join(lines) + "\n")
                 files.append(excerpt)
             else:
-                files.append(runs_path)
+                files.append(runs_path.resolve())
     for stamp in stamps:
         run = run_dir(root, stamp, run_dirs)
         files += [run / n for n in ("orchestrator-result.json", "worker-result.json", "worker-status.json",
-                                    "reviews.jsonl", "worker-output.log")]
+                                    "reviews.jsonl", "worker-output.log", "review-markers.excerpt",
+                                    "complete")]
         files.append(root / "logs" / f"run-{stamp}.log")
     for path in sorted((root / "batch-verdicts").glob("*.json")):
         v = read_json(path) or {}
         if v.get("stamp") in wanted:
+            files.append(path.resolve())
+    for st in stages or []:
+        path = stage_state_path(root, st)
+        if path is not None and path.is_file():
             files.append(path)
-    return [f for f in files if f.exists()]
+    return [f.resolve() for f in files if Path(f).exists()]
 
 
 def evidence_holds(ev, files, stamps=None):
     """True when the quoted text is in the cited corpus file (and belongs to these stamps)."""
-    allowed = {str(Path(f)): f for f in files}
-    path = allowed.get(str(Path(ev.get("source") or "")))
+    allowed = {str(Path(f).resolve()): Path(f).resolve() for f in files}
+    try:
+        source = Path(ev.get("source") or "").resolve()
+    except OSError:
+        return False
+    path = allowed.get(str(source))
     quote = " ".join(str(ev.get("quote") or "").split())
     if not path or len(quote) < 8:
         return False

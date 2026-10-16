@@ -362,7 +362,8 @@ def hook_item_done(stamp, run_dir=None, origin=None):
 
 def hook_run_end(origin, stamps, run_dirs=()):
     """Queue the tooling pass. `run_dirs` are runs outside $ROOT/runs (a conductor session's), each
-    named for its stamp; such a run counts as finished once its worker-result.json exists."""
+    named for its stamp; those external runs may complete from artifacts alone. Internal stamps
+    still need a runs.jsonl row (see child_complete)."""
     if recursion_suppressed():
         return 0
     try:
@@ -439,8 +440,12 @@ def cleanup_still_active(other):
 
 
 def child_complete(stamp, external=None):
-    """True when a child run finished: runs.jsonl row, worker-result, terminal worker-status,
-    or an explicit `complete` marker. Returns (done, how)."""
+    """True when a child run finished. Returns (done, how).
+
+    Internal runs (under $ROOT/runs) need a runs.jsonl row — artifact-only completion is for
+    conductor/external run dirs only. An interrupted internal run with a worker-result but no
+    ledger row must not look complete (tooling_scan reports `missing-run-record` instead).
+    """
     external = external or {}
     try:
         require_id(stamp, "stamp")
@@ -448,6 +453,8 @@ def child_complete(stamp, external=None):
         return False, ""
     if stamp in shared.run_records({stamp}):
         return True, "runs.jsonl"
+    if stamp not in external:
+        return False, ""
     try:
         run = run_dir_for(stamp, external)
     except ValueError:
@@ -554,7 +561,8 @@ def scan(st, work_dir=None):
             run_dir = run_dir_for(st["stamp"])
         repo_dir = repo_path(st["repo"])
         findings, quiet = followscan.cleanup_scan(run_dir, repo_dir if repo_dir and repo_dir.is_dir() else None)
-        files = [p for p in (run_dir / n for n in ("worker-result.json", "reviews.jsonl", "worker-output.log"))
+        files = [p for p in (run_dir / n for n in (
+            "worker-result.json", "reviews.jsonl", "worker-output.log", "review-markers.excerpt"))
                  if p.exists()]
     else:
         children = st.get("children") or []
@@ -564,7 +572,8 @@ def scan(st, work_dir=None):
         work = Path(work_dir) if work_dir else stage_dir(st["key"])
         corpus_dir = work / "corpus"
         findings, quiet = followscan.tooling_scan(ROOT, children, cleanups, st.get("run_dirs"))
-        files = followscan.corpus_files(ROOT, children, st.get("run_dirs"), excerpt_dir=corpus_dir)
+        files = followscan.corpus_files(
+            ROOT, children, st.get("run_dirs"), excerpt_dir=corpus_dir, stages=cleanups)
     st["findings"] = findings
     st["non_findings"] = quiet
     st["corpus"] = [str(p) for p in files]
