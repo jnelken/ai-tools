@@ -67,6 +67,72 @@ def evidence(source, quote):
     return {"source": str(source), "quote": " ".join(str(quote).split())[:400]}
 
 
+def source_key_span(text, key):
+    """Raw `"key": <value>` span as stored in text (pretty or compact JSON). None if absent."""
+    m = re.search(r'"' + re.escape(key) + r'"\s*:', text)
+    if not m:
+        return None
+    start, i = m.start(), m.end()
+    while i < len(text) and text[i] in " \t\r\n":
+        i += 1
+    if i >= len(text):
+        return text[start:].rstrip()
+    ch = text[i]
+    if ch in "{[":
+        open_ch, close_ch, depth, j = ch, "}" if ch == "{" else "]", 1, i + 1
+        in_str, esc = None, False
+        while j < len(text) and depth:
+            c = text[j]
+            if in_str:
+                if esc:
+                    esc = False
+                elif c == "\\":
+                    esc = True
+                elif c == in_str:
+                    in_str = None
+            elif c in "\"'":
+                in_str = c
+            elif c == open_ch:
+                depth += 1
+            elif c == close_ch:
+                depth -= 1
+            j += 1
+        return text[start:j]
+    if ch == '"':
+        j, esc = i + 1, False
+        while j < len(text):
+            c = text[j]
+            if esc:
+                esc = False
+            elif c == "\\":
+                esc = True
+            elif c == '"':
+                return text[start:j + 1]
+            j += 1
+        return text[start:]
+    j = i
+    while j < len(text) and text[j] not in ",}\n\r":
+        j += 1
+    return text[start:j].rstrip()
+
+
+def source_key_evidence(path, key):
+    """Evidence quoting a JSON object's key exactly as stored on disk — never re-serialized."""
+    path = Path(path)
+    span = source_key_span(read_text(path), key)
+    return evidence(path, span if span is not None else key)
+
+
+def jsonl_last_evidence(path):
+    """Evidence quoting the last non-empty JSONL line verbatim (never json.dumps of a parse)."""
+    path = Path(path)
+    last = None
+    for line in iter_jsonl_lines(path):
+        if line.strip():
+            last = line
+    return evidence(path, last if last is not None else path.name)
+
+
 def iter_jsonl_lines(path):
     """Yield raw lines from a JSONL file with no size cap (streamed end-to-end)."""
     try:
@@ -197,22 +263,23 @@ def cleanup_scan(run_dir, repo_dir=None):
         findings.append(finding(
             stage, repo, "unresolved-review", f"{unresolved} review finding(s) merged unresolved with no marker",
             f"unmarked|{result.get('merge_commit')}",
-            [evidence(result_path, f'"review": {json.dumps(result.get("review"))}')],
+            [source_key_evidence(result_path, "review")],
             "Re-review the merged diff, fix the real findings, and test them."))
-    reviews = read_jsonl(run_dir / "reviews.jsonl")
+    reviews_path = run_dir / "reviews.jsonl"
+    reviews = read_jsonl(reviews_path)
     if reviews and reviews[-1].get("verdict") == "clean" and not unresolved:
         quiet.append(non_finding("review closed clean", "the last review round was clean",
-                                 [evidence(run_dir / "reviews.jsonl", json.dumps(reviews[-1]))]))
+                                 [jsonl_last_evidence(reviews_path)]))
     deploy = result.get("deploy") or {}
     if deploy.get("status") in ("failed", "timeout"):
         findings.append(finding(
             stage, repo, "red-deploy", f"production deploy {deploy['status']} after the merge",
             f"deploy|{result.get('merge_commit')}",
-            [evidence(result_path, f'"deploy": {json.dumps(deploy)}')],
+            [source_key_evidence(result_path, "deploy")],
             "Read the deployment's build log, fix the build forward, and confirm the new deploy is green."))
     elif deploy.get("status") in ("success", "none"):
         quiet.append(non_finding(f"deploy {deploy['status']}", "nothing to repair in production",
-                                 [evidence(result_path, f'"deploy": {json.dumps(deploy)}')]))
+                                 [source_key_evidence(result_path, "deploy")]))
     return findings, quiet
 
 

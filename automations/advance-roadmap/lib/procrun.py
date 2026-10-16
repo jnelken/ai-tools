@@ -1,8 +1,7 @@
 """Process-group runner: start_new_session, timeout, reap the whole tree before returning.
 
-Every child this slice launches (analyst model calls, drains, hooks) goes through `run` so a
-timeout or failover never leaves descendants alive while a claim is released or the next
-provider starts. daily_batch and followup share these helpers.
+daily_batch launches follow-up drains/hooks through `run` so a timeout never leaves descendants
+alive after the parent returns. Slice 3's model analyst will share the same helpers.
 """
 import os
 import signal

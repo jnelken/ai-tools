@@ -31,7 +31,7 @@ sys.path.insert(0, str(shared.HERE / "lib"))
 import procrun  # noqa: E402
 import usage  # noqa: E402
 
-# Shared process-group helpers (lib/procrun.py) — used by tests and followup timeout paths.
+# Shared process-group helpers (lib/procrun.py) — used by tests and drain timeout paths.
 _group_pids = procrun.group_pids
 _group_alive = procrun.group_alive
 _signal_group = procrun.signal_group
@@ -264,8 +264,8 @@ class Batch:
         stamps = [s for i in self.state["queue"] if i["stamp"] in self.procs for s in ("--stamp", i["stamp"])]
         followup("hook", "run-end", "--origin", self.origin, *stamps)
         with open(ROOT / "logs" / f"followup-{self.origin}.log", "a") as out:
-            # Own process group: timeout reaps followup.py and any analyst it started before
-            # the stage claim can be considered released.
+            # Own process group: timeout reaps followup.py (and any children) before the
+            # stage claim can be considered released.
             followup("drain", "--origin", self.origin, "--wait-s", FOLLOWUP_WAIT_S,
                      timeout=max(60.0, deadline - time.time()), log=out)
         status = followup("status", "--origin", self.origin, "--json", timeout=60)

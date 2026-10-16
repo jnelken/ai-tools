@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""advance-roadmap's follow-up runner — report-only (DEV-232 Phase B slice 2).
+"""advance-roadmap's follow-up runner — deterministic report-only (DEV-232 Phase B slice 2).
 
 After work ships, scan what its logs prove went wrong and record findings. This slice does
-**not** repair, launch builders, open PRs, merge, install, or read/write Linear. Slice 3 adds
-that lifecycle on top of the same stage state (stable `finding_id`s, no ticket fields yet).
+**not** call a model, repair, launch builders, open PRs, merge, install, or read/write Linear.
+Slice 3 adds the model analyst and the repair lifecycle on top of the same stage state (stable
+`finding_id`s, no ticket fields yet).
 
 Two stages, each a durable record under $ROOT/followups/<key>/ (runtime state, never ~/.ai-tools):
 
@@ -16,10 +17,9 @@ Two stages, each a durable record under $ROOT/followups/<key>/ (runtime state, n
                      cleanup stage it started has finished. Corpus: those runs' orchestration,
                      routing, review and reporting records. Findings are ai-tools' own.
 
-Findings come from lib/followscan.py's recognition tests (each cites a file and a quote) plus an
-optional read-only analyst call whose findings are kept only when their quotes are really in the
-corpus. Drain runs ANALYZE then REPORT only: findings land in stage state and the run/batch
-summary.
+Findings come only from lib/followscan.py's recognition tests (each cites a file and a verbatim
+quote from that file). Drain runs ANALYZE then REPORT only: findings land in stage state and the
+run/batch summary. Every state transition happens under the stage claim.
 
   followup.py hook item-done --stamp S [--run-dir D] [--origin O]   queue S's cleanup (idempotent)
   followup.py hook run-end --origin O [--stamp S ...] [--run-dir D ...]   queue O's tooling stage
@@ -36,7 +36,6 @@ import os
 import re
 import shutil
 import signal
-import subprocess
 import sys
 import time
 from datetime import datetime
@@ -46,9 +45,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 sys.path.insert(0, str(HERE / "lib"))
 import followscan  # noqa: E402
-import procrun  # noqa: E402
 import supervisor as shared  # noqa: E402
-import usage as usagelib  # noqa: E402
 
 ROOT = shared.ROOT
 STATE = ROOT / "followups"
@@ -63,9 +60,6 @@ COMPLETE_MARKER = "complete"  # explicit run-dir marker when no worker-result/st
 MAX_ATTEMPTS = int(os.environ.get("ADVANCE_ROADMAP_FOLLOWUP_MAX_ATTEMPTS", "3"))
 STALE_S = float(os.environ.get("ADVANCE_ROADMAP_FOLLOWUP_STALE_H", "12")) * 3600
 POLL_S = float(os.environ.get("ADVANCE_ROADMAP_FOLLOWUP_POLL_S", "15"))
-CODEX = os.environ.get("ADVANCE_ROADMAP_CODEX_BIN", "/opt/homebrew/bin/codex")
-CLAUDE = os.environ.get("ADVANCE_ROADMAP_CLAUDE_BIN", "/Users/jake/.local/bin/claude")
-ANALYST_TIMEOUT_S = float(os.environ.get("ADVANCE_ROADMAP_FOLLOWUP_ANALYST_TIMEOUT_S", "1800"))
 
 
 # ── shared helpers (slice 3 will share these with the repair module) ─────────
@@ -96,22 +90,6 @@ def stage_dir(key):
 def repo_path(repo):
     code = shared.code_dir()
     return Path(code) / repo if code and repo else None
-
-
-def usage(*args, timeout=180):
-    p = subprocess.run([sys.executable, str(ROOT / "lib" / "usage.py"), "--root", str(ROOT), *args],
-                       capture_output=True, text=True, timeout=timeout, stdin=subprocess.DEVNULL)
-    return p.returncode, p.stdout
-
-
-def gate_one(role, provider):
-    try:
-        rc, out = usage("gate", "--role", role, "--provider", provider)
-        if rc not in (0, 3):
-            return None
-        return {**json.loads(out), "available": rc == 0}
-    except (OSError, ValueError, subprocess.TimeoutExpired):
-        return None
 
 
 # ── durable stage state ──────────────────────────────────────────────────────
@@ -344,9 +322,9 @@ def eligible(st, now=None):
 
 
 def set_waiting(st, reason):
+    """Mark waiting. Caller must hold the stage claim — no save outside a claim."""
     st["status"] = WAITING
     st["waiting_reason"] = reason
-    # Keep the latest readiness reason visible to status/summary (and as a durable blocker).
     blockers = st.setdefault("blockers", [])
     if not blockers or blockers[-1].get("kind") != "waiting" or blockers[-1].get("reason") != reason:
         blockers.append({"at": now_iso(), "kind": "waiting", "reason": reason})
@@ -354,6 +332,7 @@ def set_waiting(st, reason):
 
 
 def set_ready(st):
+    """Mark ready. Caller must hold the stage claim — no save outside a claim."""
     st["status"] = READY
     st.pop("waiting_reason", None)
     save(st)
@@ -378,209 +357,35 @@ def recover_interrupted():
             c.close()
 
 
-# ── ANALYZE ──────────────────────────────────────────────────────────────────
+# ── ANALYZE (deterministic recognition tests only — no model) ────────────────
 
 def scan(st):
-    st.pop("analyst_error", None)
     if st["stage"] == STAGES["cleanup"]:
         run_dir = Path(st.get("run_dir") or ROOT / "runs" / st["stamp"])
         repo_dir = repo_path(st["repo"])
         findings, quiet = followscan.cleanup_scan(run_dir, repo_dir if repo_dir and repo_dir.is_dir() else None)
         files = [p for p in (run_dir / n for n in ("worker-result.json", "reviews.jsonl", "worker-output.log"))
                  if p.exists()]
-        child_stamps = [st["stamp"]] if st.get("stamp") else []
     else:
         children = st.get("children") or []
-        child_stamps = children
         cleanups = [s for s in all_stages() if s.get("stamp") in children]
         corpus_dir = stage_dir(st["key"]) / "corpus"
         findings, quiet = followscan.tooling_scan(ROOT, children, cleanups, st.get("run_dirs"))
         files = followscan.corpus_files(ROOT, children, st.get("run_dirs"), excerpt_dir=corpus_dir)
-    more, rejected = analyze(st, findings, files, child_stamps)
-    st["findings"] = findings + more
-    st["non_findings"] = quiet + rejected
+    st["findings"] = findings
+    st["non_findings"] = quiet
     st["corpus"] = [str(p) for p in files]
-    if st.get("analyst_error"):
-        report(st, "analyst", st.get("analyst") or "analyst failed", next_step="analyze")
-        return st
     st["scanned"] = True
     return st
-
-
-ANALYST_FENCE = "FOLLOWUP_FINDINGS_JSON"
-
-
-def analyze(st, findings, files, stamps=None):
-    """Optional read-only model pass over the corpus. Only findings whose every quote is really in
-    a corpus file for this stage's stamps are kept; the rest are recorded as rejected non-findings.
-    Off with ADVANCE_ROADMAP_FOLLOWUP_ANALYST=0; skipped when no analyst is under its usage gate.
-
-    Missing binary, timeout, or non-zero exit without a live-limit banner fails over to the next
-    eligible provider. When every attempt hard-fails, sets analyst_error so the stage stays
-    retryable (not scanned/done).
-    """
-    if os.environ.get("ADVANCE_ROADMAP_FOLLOWUP_ANALYST", "1") != "1" or not files:
-        return [], []
-    prompt = analyst_prompt(st, findings, files)
-    limited, hard_failures = [], []
-    provider = answer = transcript = None
-    exit_code, provider_result = 0, None
-    for provider in ("codex", "claude"):
-        gate = gate_one("analyst", provider)
-        st["usage_snapshots"].append({"at": now_iso(), "role": "analyst", "provider": provider, "gate": gate})
-        if gate is not None and not gate.get("available"):
-            continue
-        try:
-            transcript, answer, exit_code, provider_result = run_analyst(st, provider, prompt)
-        except (OSError, subprocess.TimeoutExpired) as e:
-            hard_failures.append(f"{provider}: {e}")
-            continue
-        # Echoed banners in a successful final answer are not a live limit (shared live-limit rule).
-        banner = usagelib.live_limit_banner(
-            transcript, exit_code=exit_code, final_answer=answer, provider_result=provider_result)
-        if banner:
-            record_analyst_limit(st, provider, banner)
-            limited.append(provider)
-            continue
-        if exit_code != 0:
-            hard_failures.append(f"{provider}: exit {exit_code}")
-            continue
-        break
-    else:
-        if hard_failures:
-            detail = "; ".join(hard_failures)
-            if limited:
-                detail += f"; {' and '.join(limited)} hit {'their limits' if len(limited) > 1 else 'its limit'}"
-            st["analyst"] = f"failed: {detail}"
-            st["analyst_error"] = True
-            return [], []
-        st["analyst"] = (f"skipped: {' and '.join(limited)} hit {'their limits' if len(limited) > 1 else 'its limit'}"
-                         if limited else "skipped: no analyst under its usage gate")
-        return [], []
-    # The findings come only from the final answer: the transcript echoes the prompt's example fence.
-    m = re.findall(r"```" + ANALYST_FENCE + r"\s*\n(.*?)\n```", answer or "", re.S)
-    try:
-        doc = json.loads(m[-1]) if m else {}
-    except ValueError:
-        doc = {}
-    st["analyst"] = f"{provider}: {'answered' if m else 'no findings block'}"
-    known = {f["id"] for f in findings}
-    kept, rejected = [], []
-    stage_stamps = list(stamps or st.get("children") or ([st.get("stamp")] if st.get("stamp") else []))
-    for raw in doc.get("findings") or []:
-        if not isinstance(raw, dict) or not raw.get("title"):
-            continue
-        ev = [e for e in raw.get("evidence") or [] if isinstance(e, dict)]
-        if not ev or not all(followscan.evidence_holds(e, files, stage_stamps) for e in ev):
-            rejected.append(followscan.non_finding(raw["title"], "rejected: its evidence is not in the corpus", ev))
-            continue
-        f = followscan.finding(st["stage"], st["repo"], str(raw.get("kind") or "analyst"), raw["title"],
-                               raw.get("key") or raw["title"],
-                               [followscan.evidence(e["source"], e["quote"]) for e in ev],
-                               raw.get("fix") or "")
-        if f["id"] not in known:
-            kept.append(f)
-            known.add(f["id"])
-    for raw in doc.get("non_findings") or []:
-        if isinstance(raw, dict) and raw.get("title"):
-            rejected.append(followscan.non_finding(raw["title"], raw.get("why") or "", []))
-    return kept, rejected
-
-
-def run_analyst(st, provider, prompt):
-    """(transcript, final answer, exit code, provider_result) of one read-only analyst call.
-
-    Findings come only from the final answer (Codex's -o file, Claude's JSON result). Live limits
-    use usage.live_limit_banner — exit status and provider error records, never a quoted banner
-    alone.
-    """
-    d = stage_dir(st["key"])
-    final, raw, session = d / f"analyst-{provider}.last", d / f"analyst-{provider}.log", d / f"analyst-{provider}.session"
-    for f in (final, session):
-        f.unlink(missing_ok=True)
-    tokens = [sys.executable, str(HERE / "lib" / "tokens.py")]
-    provider_result = None
-    # procrun.run: start_new_session + reap the whole tree on timeout before failover.
-    if provider == "codex":
-        p = procrun.run([CODEX, "exec", "-o", str(final), "-s", "read-only", "-C", str(ROOT),
-                         "--skip-git-repo-check", prompt], timeout=ANALYST_TIMEOUT_S)
-        raw.write_text((p.stdout or "") + (p.stderr or ""))
-        try:
-            procrun.run([*tokens, "codex", str(raw), "--role", "analyst",
-                         "--log", str(d / "model-usage.jsonl"), "--session-out", str(session)],
-                        timeout=60)
-        except (OSError, subprocess.TimeoutExpired):
-            pass
-        transcript = raw.read_text(errors="replace")
-    else:
-        p = procrun.run([CLAUDE, "-p", prompt, "--permission-mode", "plan",
-                         "--disallowedTools", "Edit,Write,NotebookEdit", "--output-format", "json"],
-                        timeout=ANALYST_TIMEOUT_S, cwd=str(ROOT))
-        raw_json = d / "analyst-claude.json"
-        raw_json.write_text((p.stdout or "") + (p.stderr or ""))
-        try:
-            procrun.run([*tokens, "claude-json", str(raw_json), str(raw), "--final", str(final),
-                         "--role", "analyst", "--log", str(d / "model-usage.jsonl"),
-                         "--session-out", str(session)], timeout=60)
-        except (OSError, subprocess.TimeoutExpired):
-            pass
-        transcript = followscan.read_text(raw) or raw_json.read_text(errors="replace")
-        try:
-            for line in raw_json.read_text(errors="replace").splitlines():
-                if line.startswith("{"):
-                    obj = json.loads(line)
-                    if isinstance(obj, dict) and "result" in obj:
-                        provider_result = obj
-                        break
-        except (OSError, ValueError):
-            provider_result = None
-    sid = followscan.read_text(session).strip()
-    if sid:
-        st.setdefault("sessions", []).append({"role": "analyst", "provider": provider, "session_id": sid})
-    return transcript, followscan.read_text(final), p.returncode, provider_result
-
-
-def record_analyst_limit(st, provider, text):
-    """Keep the hit (and its reset) in the stage first, then gate the provider for everyone else:
-    a failed shared-state update must not lose it."""
-    try:
-        rc, out = usage("parse-limit", "--provider", provider, "--text", text, "--scope", "analyst")
-        hit = json.loads(out) if rc == 0 else None
-    except (OSError, ValueError, subprocess.TimeoutExpired):
-        hit = None
-    if not isinstance(hit, dict):
-        hit = {"provider": provider, "exact_cli_text": text}
-    st.setdefault("limits", []).append({"role": "analyst", "at": now_iso(), **hit})
-    write_json(stage_dir(st["key"]) / f"analyst-limit-{provider}.json", hit)
-    try:
-        usage("record-limit", "--provider", provider, "--text", text, "--scope", "analyst")
-    except (OSError, subprocess.TimeoutExpired):
-        pass
-
-
-def analyst_prompt(st, findings, files):
-    return f"""You are the read-only analyst for advance-roadmap's {st['stage']} follow-up ({st['key']}).
-Read only these files: {', '.join(str(f) for f in files)}
-These findings are already recorded (do not repeat them): {json.dumps([f['title'] for f in findings])}
-
-Apply session-hardening's recognition tests (wrong knowledge, misfiring automation, repeated manual
-work, fragile tooling, misleading surfaces, newly dead mechanisms). Report a finding ONLY with
-evidence: for each, the exact file path from the list above and a verbatim quote of at least one
-line from it. Skip speculative improvements and unrelated backlog. List deliberate non-findings —
-things that look like friction but are working as designed.
-{'Only project-specific bugs in ' + st['repo'] + ' count here.' if st['stage'] == STAGES['cleanup'] else 'Only orchestration, routing, skills, hooks and reporting count here.'}
-
-End with one fence:
-```{ANALYST_FENCE}
-{{"findings": [{{"title": "...", "kind": "...", "fix": "...", "evidence": [{{"source": "<path>", "quote": "<verbatim>"}}]}}],
- "non_findings": [{{"title": "...", "why": "..."}}]}}
-```"""
 
 
 # ── process / drain (ANALYZE + REPORT only) ──────────────────────────────────
 
 def process(st):
-    """Run ANALYZE then REPORT. No repair, no builders, no Linear."""
+    """Run ANALYZE then REPORT. No model, no repair, no builders, no Linear.
+
+    Caller must hold the stage claim for the whole call — every save is claim-scoped.
+    """
     st["attempts"] = st.get("attempts", 0) + 1
     st["status"] = RUNNING
     st.pop("waiting_reason", None)
@@ -589,12 +394,6 @@ def process(st):
     if not st.get("scanned"):
         scan(st)
         save(st)
-    if not st.get("scanned"):
-        # Analyst hard-failed: retryable (or blocked after MAX_ATTEMPTS). report() already ran.
-        st["status"] = RETRYABLE if st.get("attempts", 0) < MAX_ATTEMPTS else BLOCKED
-        st["next"] = {"step": "analyze"}
-        save(st)
-        return
     st["next"] = {"step": "report"}
     fs = st.get("findings") or []
     quiet = st.get("non_findings") or []
@@ -611,6 +410,7 @@ def order(st):
 
 
 def drain(repo=None, origin=None, stage=None, wait_s=0.0):
+    """Drain ready stages. Every status transition is claim → reload → eligibility → act → save."""
     STATE.mkdir(parents=True, exist_ok=True)
     recover_interrupted()
     deadline = time.time() + wait_s
@@ -621,27 +421,27 @@ def drain(repo=None, origin=None, stage=None, wait_s=0.0):
                 continue
             if not eligible(st):
                 continue
-            try:
-                ok, why = ready(st)
-            except Exception as e:  # malformed stage must not abort the drain
-                report(st, "readiness", f"{type(e).__name__}: {e}")
-                st["status"] = BLOCKED
-                save(st)
-                progressed = True
-                continue
-            if not ok:
-                set_waiting(st, why)
-                waiting.append(f"{st['key']}: {why}")
-                continue
-            if st.get("status") != READY:
-                set_ready(st)
             c = claim_stage(st["key"])
             if not c:
-                continue   # another drain is running it
+                continue   # another drain holds this stage
             try:
                 st = load(st["key"]) or st
-                if not eligible(st) and st.get("status") != READY:
+                if not eligible(st):
                     continue
+                try:
+                    ok, why = ready(st)
+                except Exception as e:  # malformed stage must not abort the drain
+                    report(st, "readiness", f"{type(e).__name__}: {e}")
+                    st["status"] = BLOCKED
+                    save(st)
+                    progressed = True
+                    continue
+                if not ok:
+                    set_waiting(st, why)
+                    waiting.append(f"{st['key']}: {why}")
+                    continue
+                if st.get("status") != READY:
+                    set_ready(st)
                 if origin:
                     st["drained_by"] = origin
                 try:
@@ -705,18 +505,18 @@ def summary_line(rows):
 def cmd_scan(a):
     """Dry run: the findings and non-findings a stage would report. No durable state."""
     if a.stage == "cleanup":
-        st = {"key": f"scan-{a.stamp[0]}", "stage": STAGES["cleanup"], "stamp": a.stamp[0], "usage_snapshots": [],
+        st = {"key": f"scan-{a.stamp[0]}", "stage": STAGES["cleanup"], "stamp": a.stamp[0],
               "repo": (read_json(ROOT / "runs" / a.stamp[0] / "worker-result.json") or {}).get("repo")}
     else:
         st = {"key": f"scan-{a.origin}", "stage": STAGES["tooling"], "children": a.stamp, "origin": a.origin,
-              "repo": followscan.TOOLING_REPO, "usage_snapshots": []}
+              "repo": followscan.TOOLING_REPO}
     stage_dir(st["key"]).mkdir(parents=True, exist_ok=True)
     try:
         scan(st)
     finally:
         shutil.rmtree(stage_dir(st["key"]), ignore_errors=True)
     print(json.dumps({"findings": st["findings"], "non_findings": st["non_findings"],
-                      "analyst": st.get("analyst")}, indent=1))
+                      "mode": "report-only"}, indent=1))
     return 0
 
 

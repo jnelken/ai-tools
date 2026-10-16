@@ -149,10 +149,10 @@ record() {
     --worker-status "$WORKER_STATUS" --worker-result "$WORKER_RESULT" \
     --usage-log "$USAGE_LOG" >> "$LOG" 2>&1 || true
 }
-# ── Follow-ups (report-only until Phase B slice 3) ────────────────────────────
+# ── Follow-ups (deterministic report-only until Phase B slice 3) ───────────────
 # A lone run (not a batch lane) queues its own follow-ups (followup.py): a project cleanup when
 # a link shipped, and once the chain stops, one tooling-hardening pass over every link. The batch
-# does this itself for its lanes. Slice 2 analyzes and reports findings only — no repair/PR/Linear.
+# does this itself for its lanes. Slice 2 runs recognition tests only (no model) — no repair/PR/Linear.
 FOLLOWUP_PY="$ROOT/followup.py"
 CHAIN_STAMPS="${ADVANCE_ROADMAP_CHAIN_STAMPS:+$ADVANCE_ROADMAP_CHAIN_STAMPS }$STAMP"
 CHAIN_ORIGIN="${ADVANCE_ROADMAP_CHAIN_ORIGIN:-run-$STAMP}"

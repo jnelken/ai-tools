@@ -1,7 +1,7 @@
-"""followup.py report-only (DEV-232 Phase B slice 2), offline.
+"""followup.py deterministic report-only (DEV-232 Phase B slice 2), offline.
 
-Temp ADVANCE_ROADMAP_ROOT + tests/followup_stubs.py for usage.py and the analyst.
-No Linear, GitHub, worker, or review — those arrive in slice 3.
+Temp ADVANCE_ROADMAP_ROOT + tests/followup_stubs.py for usage.py.
+No model analyst, Linear, GitHub, worker, or review — those arrive in slice 3.
 """
 import fcntl
 import json
@@ -9,6 +9,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -22,15 +23,6 @@ MARKER_LINE = "# TODO(advance-roadmap review): reject an empty listing before sa
 sys.path.insert(0, str(ADV))
 sys.path.insert(0, str(ADV / "lib"))
 import followscan  # noqa: E402
-import supervisor  # noqa: E402
-
-
-def pid_alive(pid):
-    try:
-        os.kill(pid, 0)
-        return True
-    except OSError:
-        return False
 
 
 class FollowupTest(unittest.TestCase):
@@ -44,7 +36,7 @@ class FollowupTest(unittest.TestCase):
         self.env = {**{k: v for k, v in os.environ.items()
                        if not k.startswith(("ADVANCE_ROADMAP_", "GIT_", "SUPERSET_"))},
                     "ADVANCE_ROADMAP_ROOT": str(self.root), "PERSONAL_CODE_DIR": str(self.code),
-                    "ADVANCE_ROADMAP_SUPERSET": "0", "ADVANCE_ROADMAP_FOLLOWUP_ANALYST": "0",
+                    "ADVANCE_ROADMAP_SUPERSET": "0",
                     "ADVANCE_ROADMAP_FOLLOWUP_INSTALL": "0", "ADVANCE_ROADMAP_FOLLOWUP_POLL_S": "0.2",
                     "ADVANCE_ROADMAP_FOLLOWUP_WORKTREES": str(t / "worktrees"),
                     "ADVANCE_ROADMAP_FOLLOWUP_DEPLOY_NONE_S": "0", "ADVANCE_ROADMAP_FOLLOWUP_DEPLOY_TIMEOUT_S": "2",
@@ -119,7 +111,7 @@ class FollowupTest(unittest.TestCase):
         (run / "worker-result.json").write_text(json.dumps({
             "outcome": outcome, "repo": repo, "item": f"Feature {stamp}", "merge_commit": sha,
             "review": {"reviewer": "codex", "rounds": 2, "unresolved": 1 if marker else 0},
-            "deploy": {"status": "success"}}))
+            "deploy": {"status": "success"}}, indent=1) + "\n")
         return sha
 
     def set(self, name, value):
@@ -147,19 +139,6 @@ class FollowupTest(unittest.TestCase):
             return [json.loads(l) for l in (self.root / "followups" / "report.jsonl").read_text().splitlines()]
         except OSError:
             return []
-
-    def legacy_ticket(self, ident, title, description="", repo="demo"):
-        return {"id": ident, "identifier": ident, "title": title, "description": description, "url": "",
-                "state": {"name": "Backlog", "type": "backlog"},
-                "labels": {"nodes": [{"name": repo, "parent": {"name": "repo"}}]}}
-
-    def meta_ticket(self, ident, meta, repo="demo"):
-        body = "Follow-up.\n\n```advance-roadmap-followup\n" + json.dumps(
-            {"workflow": "advance-roadmap-followup", "repo": repo, **meta}) + "\n```\n"
-        return self.legacy_ticket(ident, "Follow-up (project-cleanup): something", body, repo)
-
-    # ── triggers ──
-
 
     # ── triggers ──
 
@@ -257,7 +236,7 @@ class FollowupTest(unittest.TestCase):
         self.assertEqual(self.state("tooling-batch-old")["status"], "waiting")
         self.assertFalse(self.state("tooling-batch-old").get("scanned"))
         pid.unlink()
-        self.run_followup("drain", "--stage", "tooling", env={"ADVANCE_ROADMAP_FOLLOWUP_ANALYST": "0"})
+        self.run_followup("drain", "--stage", "tooling")
         self.assertTrue(self.state("tooling-batch-old")["scanned"])
 
     def test_a_conductor_run_dir_counts_once_its_result_exists_and_feeds_the_corpus(self):
@@ -309,7 +288,7 @@ class FollowupTest(unittest.TestCase):
         self.assertTrue(any("cleanup-dirty" in n["title"] for n in quiet), quiet)
 
     def test_tooling_scan_classifies_hard_analyst_failures_as_tooling_defects(self):
-        """Missing binaries / crashes are tooling findings, not expected safety non-findings."""
+        """Historical/slice-3 analyst blockers stay tooling findings, not expected safety stops."""
         stages = [
             {"key": "tooling-batch-fail-analyst", "blockers": [
                 {"kind": "analyst",
@@ -334,7 +313,7 @@ class FollowupTest(unittest.TestCase):
         self.assertTrue(any(b["kind"] == "interrupted" for b in st["blockers"]))
         self.assertEqual(self.calls("worker"), [])
 
-    def test_tooling_dry_run_on_the_oct13_evidence_keeps_only_quoted_analyst_findings(self):
+    def test_tooling_dry_run_on_the_oct13_evidence_is_deterministic(self):
         stamp = "20261013-103004"
         run = self.root / "runs" / stamp
         run.mkdir(parents=True)
@@ -342,36 +321,60 @@ class FollowupTest(unittest.TestCase):
         (self.root / "runs.jsonl").write_text(json.dumps(json.loads((FIXTURES / "runs-row.json").read_text())) + "\n")
         (self.root / "batch-verdicts").mkdir()
         (self.root / "batch-verdicts" / "apt-sqft.json").write_text((FIXTURES / "batch-verdict-apt-sqft.json").read_text())
-        good = {"title": "Bookkeeping summary blames the orchestrator limit", "kind": "misleading-surface",
-                "fix": "Name the quota in the alert", "evidence": [{"source": str(self.root / "runs.jsonl"),
-                                                                    "quote": "the orchestrator hit its session limit before triage"}]}
-        bad = {"title": "Invented friction", "evidence": [{"source": str(run / "orchestrator-result.json"),
-                                                          "quote": "this text is nowhere in the corpus"}]}
-        (self.root / "stub-analyst.txt").write_text(
-            "thinking...\n```FOLLOWUP_FINDINGS_JSON\n" + json.dumps({"findings": [good, bad], "non_findings": [
-                {"title": "planner retried", "why": "by design"}]}) + "\n```\n")
-        p = self.run_followup("scan", "--stage", "tooling", "--origin", "batch-2026-10-13", "--stamp", stamp,
-                              env={"ADVANCE_ROADMAP_FOLLOWUP_ANALYST": "1"})
+        p = self.run_followup("scan", "--stage", "tooling", "--origin", "batch-2026-10-13", "--stamp", stamp)
         doc = json.loads(p.stdout)
         kinds = {f["kind"] for f in doc["findings"]}
         self.assertIn("misfiring-automation", kinds)
         self.assertIn("misleading-surface", kinds)
         self.assertIn("wrong-knowledge", kinds)
-        titles = [f["title"] for f in doc["findings"]]
-        self.assertIn(good["title"], titles)
-        self.assertNotIn(bad["title"], titles)
-        self.assertTrue(any(n["title"] == bad["title"] and "rejected" in n["why"] for n in doc["non_findings"]))
+        self.assertEqual(doc.get("mode"), "report-only")
         self.assertTrue(all(f["repo"] == "ai-tools" and f["evidence"] for f in doc["findings"]))
-        # Deterministic findings preserve verbatim source lines (Oct 13 fixture reproduces this).
         corpus = followscan.corpus_files(self.root, [stamp])
         for f in doc["findings"]:
-            if f["title"] == good["title"]:
-                continue
             for ev in f["evidence"]:
                 self.assertTrue(followscan.evidence_holds(ev, corpus, [stamp]), (f["title"], ev))
-        self.assertEqual(doc["analyst"], "codex: answered")
         self.assertEqual(self.calls("worker"), [])
         self.assertFalse((self.root / "followups" / "tooling-batch-2026-10-13").exists())
+
+    def test_pretty_printed_worker_result_and_reviews_evidence_holds(self):
+        """Deploy and unresolved-review quotes come from the file as stored, never json.dumps."""
+        run = self.root / "runs" / "pretty"
+        run.mkdir(parents=True)
+        result = {
+            "outcome": "shipped", "repo": "demo", "item": "x", "merge_commit": "abc123",
+            "review": {"reviewer": "codex", "rounds": 2, "unresolved": 1},
+            "deploy": {"status": "failed", "url": "https://example.test/d", "attempts": 2},
+        }
+        result_path = run / "worker-result.json"
+        result_path.write_text(json.dumps(result, indent=1) + "\n")
+        reviews_path = run / "reviews.jsonl"
+        # Pretty-printed JSONL object (multi-line) still must cite a verbatim source span.
+        reviews_path.write_text(json.dumps({"round": 1, "verdict": "findings", "reviewer": "codex"}, indent=1) + "\n"
+                                + json.dumps({"round": 2, "verdict": "clean", "reviewer": "codex"}) + "\n")
+        findings, quiet = followscan.cleanup_scan(run, None)
+        kinds = {f["kind"] for f in findings}
+        self.assertIn("red-deploy", kinds)
+        self.assertIn("unresolved-review", kinds)
+        for f in findings:
+            for ev in f["evidence"]:
+                self.assertTrue(followscan.evidence_holds(ev, [Path(ev["source"])]), (f["title"], ev))
+                raw = Path(ev["source"]).read_text()
+                # Quote (whitespace-collapsed) must be a substring of the collapsed source.
+                self.assertIn(ev["quote"], " ".join(raw.split()))
+                # Must not be a compact json.dumps reconstruction (space after { differs).
+                if f["kind"] == "red-deploy":
+                    self.assertNotEqual(ev["quote"], '"deploy": ' + json.dumps(result["deploy"]))
+        # Clean last review round with unresolved=0 uses the last JSONL line verbatim.
+        result["review"]["unresolved"] = 0
+        result["deploy"]["status"] = "success"
+        result_path.write_text(json.dumps(result, indent=1) + "\n")
+        findings, quiet = followscan.cleanup_scan(run, None)
+        [n] = [x for x in quiet if x["title"] == "review closed clean"]
+        last_line = reviews_path.read_text().splitlines()[-1]
+        self.assertEqual(n["evidence"][0]["quote"], " ".join(last_line.split())[:400])
+        self.assertTrue(followscan.evidence_holds(n["evidence"][0], [reviews_path]))
+        [d] = [x for x in quiet if x["title"] == "deploy success"]
+        self.assertTrue(followscan.evidence_holds(d["evidence"][0], [result_path]))
 
     def test_corpus_and_evidence_are_scoped_to_stage_child_stamps(self):
         stamp = "20261013-103004"
@@ -427,105 +430,37 @@ class FollowupTest(unittest.TestCase):
         own = {"source": str(self.root / "runs.jsonl"), "quote": "recent row after the size cap"}
         self.assertTrue(followscan.evidence_holds(own, [self.root / "runs.jsonl"], [stamp]))
 
-    def test_analyst_missing_binary_fails_over_then_hard_fail_stays_retryable(self):
-        stamp = "20261013-103004"
-        (self.root / "runs" / stamp).mkdir(parents=True)
-        (self.root / "runs.jsonl").write_text(json.dumps(json.loads((FIXTURES / "runs-row.json").read_text())) + "\n")
-        (self.root / "stub-claude-analyst.txt").write_text(self.analyst_fence())
-        missing = str(self.root / "no-such-codex")
-        p = self.run_followup("scan", "--stage", "tooling", "--origin", "batch-2026-10-13", "--stamp", stamp,
-                              env={"ADVANCE_ROADMAP_FOLLOWUP_ANALYST": "1",
-                                   "ADVANCE_ROADMAP_CODEX_BIN": missing})
-        doc = json.loads(p.stdout)
-        self.assertEqual(doc["analyst"], "claude: answered")
-        self.assertIn(self.ANALYST_FINDING["title"], [f["title"] for f in doc["findings"]])
-        # Both providers hard-fail → durable drain leaves the stage unscanned/retryable.
-        (self.root / "stub-claude-crash").write_text("")
-        self.run_followup("hook", "run-end", "--origin", "batch-fail-analyst", "--stamp", stamp)
-        self.run_followup("drain", "--stage", "tooling", "--origin", "batch-fail-analyst",
-                          env={"ADVANCE_ROADMAP_FOLLOWUP_ANALYST": "1",
-                               "ADVANCE_ROADMAP_CODEX_BIN": missing})
-        st = self.state("tooling-batch-fail-analyst")
-        self.assertFalse(st.get("scanned"))
-        self.assertEqual(st["status"], "retryable")
-        self.assertTrue(any(b["kind"] == "analyst" for b in st["blockers"]), st["blockers"])
-        self.assertTrue(any(r["kind"] == "analyst" for r in self.report()), self.report())
+    def test_concurrent_drains_preserve_findings_and_scan_once(self):
+        """Two drains on one stage: claim serializes; findings from the first scan survive."""
+        self.shipped_item("20261014-race")
+        self.run_followup("hook", "item-done", "--stamp", "20261014-race", "--origin", "batch-race")
+        key = "cleanup-20261014-race"
+        barrier = threading.Barrier(2)
+        results = []
 
-    def test_analyst_timeout_fails_over_to_claude(self):
-        (self.root / "stub-codex-hang").write_text("")
-        (self.root / "stub-claude-analyst.txt").write_text(self.analyst_fence())
-        stamp = "20261013-103004"
-        (self.root / "runs" / stamp).mkdir(parents=True)
-        (self.root / "runs.jsonl").write_text(json.dumps(json.loads((FIXTURES / "runs-row.json").read_text())) + "\n")
-        p = self.run_followup("scan", "--stage", "tooling", "--origin", "batch-2026-10-13", "--stamp", stamp,
-                              env={"ADVANCE_ROADMAP_FOLLOWUP_ANALYST": "1",
-                                   "ADVANCE_ROADMAP_FOLLOWUP_ANALYST_TIMEOUT_S": "0.3"},
-                              check=True)
-        doc = json.loads(p.stdout)
-        self.assertEqual(doc["analyst"], "claude: answered")
-        self.assertIn(self.ANALYST_FINDING["title"], [f["title"] for f in doc["findings"]])
-        orphan = self.root / "stub-codex-orphan.pid"
-        self.assertTrue(orphan.exists(), "hang stub must spawn a SIGTERM-ignoring child")
-        pid = int(orphan.read_text())
-        for _ in range(40):
-            try:
-                os.kill(pid, 0)
-            except OSError:
-                break
-            time.sleep(0.05)
-        else:
-            self.fail(f"orphan pid {pid} still alive after analyst timeout reap")
+        def drain_once():
+            barrier.wait(timeout=10)
+            p = subprocess.run([sys.executable, str(FOLLOWUP), "drain", "--stage", "cleanup",
+                                "--origin", "batch-race"],
+                               capture_output=True, text=True, timeout=180, env=self.env)
+            results.append(p)
 
-    def test_analyst_non_zero_without_limit_fails_over_to_claude(self):
-        (self.root / "stub-codex-crash").write_text("")
-        doc, titles = self.analyst_scan("stub-claude-analyst.txt", answer=True)
-        self.assertEqual(doc["analyst"], "claude: answered")
-        self.assertIn(self.ANALYST_FINDING["title"], titles)
-        self.assertTrue(any(c["tool"] == "codex" for c in self.calls()))
-        self.assertTrue(any(c["tool"] == "claude" for c in self.calls()))
-
-    ANALYST_FINDING = {"title": "Bookkeeping summary blames the orchestrator limit", "kind": "misleading-surface",
-                       "quote": "the orchestrator hit its session limit before triage"}
-
-    def analyst_scan(self, answer_file, answer):
-        stamp = "20261013-103004"
-        (self.root / "runs" / stamp).mkdir(parents=True)
-        (self.root / "runs.jsonl").write_text(json.dumps(json.loads((FIXTURES / "runs-row.json").read_text())) + "\n")
-        (self.root / answer_file).write_text(self.analyst_fence() if answer else "I found nothing worth reporting.\n")
-        p = self.run_followup("scan", "--stage", "tooling", "--origin", "batch-2026-10-13", "--stamp", stamp,
-                              env={"ADVANCE_ROADMAP_FOLLOWUP_ANALYST": "1"})
-        doc = json.loads(p.stdout)
-        return doc, [f["title"] for f in doc["findings"]]
-
-    def analyst_fence(self):
-        f = self.ANALYST_FINDING
-        good = {"title": f["title"], "kind": f["kind"],
-                "evidence": [{"source": str(self.root / "runs.jsonl"), "quote": f["quote"]}]}
-        return "```FOLLOWUP_FINDINGS_JSON\n" + json.dumps({"findings": [good]}) + "\n```\n"
-
-    def test_analyst_findings_come_only_from_its_final_answer(self):
-        (self.root / "stub-codex-transcript.txt").write_text(self.analyst_fence())
-        doc, titles = self.analyst_scan("stub-analyst.txt", answer=False)
-        self.assertEqual(doc["analyst"], "codex: no findings block")
-        self.assertNotIn(self.ANALYST_FINDING["title"], titles)
-
-    def test_a_limited_analyst_saves_its_limit_first_then_fails_over(self):
-        (self.root / "stub-codex-limit").write_text("")
-        self.set("stub-usage.json", {"record_limit_fails": True})
-        doc, titles = self.analyst_scan("stub-claude-analyst.txt", answer=True)
-        self.assertEqual(doc["analyst"], "claude: answered")
-        self.assertIn(self.ANALYST_FINDING["title"], titles)
-        cmds = [c.get("cmd") or c["tool"] for c in self.calls() if c["tool"] in ("usage", "usage-record-limit")]
-        self.assertLess(cmds.index("parse-limit"), cmds.index("usage-record-limit"))
-        self.assertEqual([(c["provider"], c["scope"]) for c in self.calls("usage-record-limit")], [("codex", "analyst")])
-
-    def test_analyst_ignores_an_echoed_limit_banner_when_its_final_answer_succeeded(self):
-        (self.root / "stub-codex-transcript.txt").write_text(
-            "reading runs.jsonl\nYou've hit your usage limit. Upgrade to Pro or try again at 7:00 PM.\n")
-        doc, titles = self.analyst_scan("stub-analyst.txt", answer=True)
-        self.assertEqual(doc["analyst"], "codex: answered")
-        self.assertIn(self.ANALYST_FINDING["title"], titles)
-        self.assertEqual(self.calls("usage-record-limit"), [])
+        threads = [threading.Thread(target=drain_once) for _ in range(2)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=60)
+        self.assertTrue(all(not t.is_alive() for t in threads))
+        self.assertEqual({p.returncode for p in results}, {0}, [p.stdout + p.stderr for p in results])
+        st = self.state(key)
+        self.assertEqual(st["status"], "done")
+        self.assertTrue(st["scanned"])
+        self.assertTrue(st["findings"])
+        # Exactly one successful analyze: attempts may be 1 (loser skipped after claim) or 2 if
+        # the second saw eligible before the first saved done — but findings must match a fresh scan.
+        fresh, _ = followscan.cleanup_scan(self.root / "runs" / "20261014-race", self.code / "demo")
+        self.assertEqual([f["id"] for f in st["findings"]], [f["id"] for f in fresh])
+        self.assertEqual(st.get("attempts", 0), 1, st)
 
     def test_only_an_executed_git_stash_is_a_finding_never_an_echoed_rule(self):
         run = self.root / "runs" / "s1"

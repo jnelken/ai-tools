@@ -81,7 +81,7 @@ def _pct_env(name: str, default: float) -> float:
 
 
 # One gate per provider, applied to every role that calls a model (planner, worker, reviewer,
-# plan approver, follow-up analyst): stop routing to a provider well before its hard limit, not at it.
+# plan approver): stop routing to a provider well before its hard limit, not at it.
 MAX_FIVE_HOUR_PCT = _pct_env("ADVANCE_ROADMAP_MAX_FIVE_HOUR_PCT", 70)
 MAX_SEVEN_DAY_PCT = _pct_env("ADVANCE_ROADMAP_MAX_WEEKLY_PCT", 80)
 # Cursor quotas are monthly and worker.sh fails over within the tick, so gate
@@ -98,8 +98,6 @@ ROLE_PROVIDERS = {
     "approver": ("codex", "claude"),
     "worker": ("cursor", "codex", "claude"),
     "reviewer": ("codex", "cursor", "claude"),
-    # followup.py's read-only corpus analysis: a planner-like call, never Cursor.
-    "analyst": ("codex", "claude"),
 }
 # Cursor draws on a different pool per role: Auto, or the API pool for a named model.
 CURSOR_MODEL_ENV = {"worker": "ADVANCE_ROADMAP_CURSOR_WORKER_MODEL",

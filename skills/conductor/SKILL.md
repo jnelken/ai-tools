@@ -116,11 +116,12 @@ with no logged review is flagged). Then tell the user plainly:
 On `failed`, `limit_hit` or an incomplete result, report what the log shows and ask how to proceed;
 never retry silently in a loop. Don't clean up the builder's branch.
 
-## 4. Follow-ups (end of the session — report-only)
+## 4. Follow-ups (end of the session — deterministic report-only)
 
 The scheduled batch runs its follow-ups itself; a conductor session runs the same three commands
-(`F=~/.claude/automations/advance-roadmap/followup.py`). Slice 2 is **report-only**: drain
-analyzes and records findings; it does not repair, open PRs, or write Linear.
+(`F=~/.claude/automations/advance-roadmap/followup.py`). Slice 2 is **deterministic report-only**:
+drain runs recognition tests and records findings (no model calls); it does not repair, open PRs,
+or write Linear.
 
 1. After each item that ended `shipped` / `shipped-deploy-failed` — not for blocked, failed or
    incomplete items, which are the next run's work — queue its cleanup, pointing at the dir that
@@ -136,8 +137,8 @@ analyzes and records findings; it does not repair, open PRs, or write Linear.
    Report `python3 $F status --origin conductor-<session stamp>` to the user: reported findings and
    any blocked stages (`followups/report.jsonl`).
 
-Each hook is idempotent, so re-running one is harmless. Ask before step 3 if the user wants to keep
-the session's provider quota for something else (the optional analyst call).
+Each hook is idempotent, so re-running one is harmless. Drain is free of model calls in slice 2, so
+there is no quota trade-off for step 3.
 
 ## What this skill does not do
 
