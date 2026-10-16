@@ -72,6 +72,8 @@ Automatic review is disabled at all PR stages in these repos, so start the loop 
 
 The GitHub fallback is whichever trigger bills the *other* credential pool from local Codex: `/codex-action-review` (API key) when local runs on a ChatGPT login, `@codex review` (ChatGPT plan) when local runs on an API key. `/peer-review` owns the pick; either may be posted without asking.
 
+**Watching the GitHub fallback.** The fallback is a `codex-review.yml` run, and a run that *fails* (runner or install error — not "requests changes") posts no review at all, so a watch keyed on "a review appears" never fires. Treat a failed run as a failed gate: find it with `gh run list --workflow codex-review.yml --branch <branch>` (the `issue_comment` event), read `gh run view <id> --log-failed`, and if the cause is infra — npm registry `error (23)` retries, `Missing optional dependency @openai/codex-linux-x64` — re-post the trigger comment **once**; a second failure is reported, not retried again. Re-arm the Monitor on every expiry until the run concludes, the same way `superset-workspaces.md` watches a dispatched agent — an expired watch is indistinguishable from a review still running. Evidence: api#1544 sat ~18h (2026-10-15→16) after run 38803271874 failed on npm flakiness and the watch quietly expired; woodrow#1724's first run failed the same way and passed on retry.
+
 ### 2.5. Resolve merge conflicts with the base
 
 ```bash
