@@ -37,6 +37,7 @@ import re
 import shutil
 import signal
 import sys
+import tempfile
 import time
 from datetime import datetime
 from pathlib import Path
@@ -60,6 +61,9 @@ COMPLETE_MARKER = "complete"  # explicit run-dir marker when no worker-result/st
 MAX_ATTEMPTS = int(os.environ.get("ADVANCE_ROADMAP_FOLLOWUP_MAX_ATTEMPTS", "3"))
 STALE_S = float(os.environ.get("ADVANCE_ROADMAP_FOLLOWUP_STALE_H", "12")) * 3600
 POLL_S = float(os.environ.get("ADVANCE_ROADMAP_FOLLOWUP_POLL_S", "15"))
+# Externally supplied path segments (stamp, origin, repo, key): no '/', '..', NUL, or empties.
+# Production stamps look like YYYYMMDD-HHMMSS; fixtures may use any SAFE_ID.
+SAFE_ID = re.compile(r"[A-Za-z0-9._-]+")
 
 
 # ── shared helpers (slice 3 will share these with the repair module) ─────────
@@ -70,6 +74,26 @@ def now_iso():
 
 def log(msg):
     print(f"{datetime.now():%H:%M:%S} followup: {msg}", flush=True)
+
+
+def require_id(value, name="id"):
+    """Reject path-traversal identifiers. Every externally supplied path segment goes through here."""
+    if not isinstance(value, str) or not value or not SAFE_ID.fullmatch(value) or value in (".", "..") or ".." in value:
+        raise ValueError(f"invalid {name}: {value!r} (letters, digits, . _ - only; no path separators)")
+    return value
+
+
+def under(root, *parts, name="path"):
+    """Join parts under root after validating each; resolve and refuse escape."""
+    root = Path(root).resolve()
+    for p in parts:
+        require_id(p, name)
+    path = root.joinpath(*parts).resolve()
+    try:
+        path.relative_to(root)
+    except ValueError as e:
+        raise ValueError(f"{name} escapes {root}: {parts!r}") from e
+    return path
 
 
 def read_json(path):
@@ -84,12 +108,26 @@ def write_json(path, value):
 
 
 def stage_dir(key):
-    return STATE / key
+    """Durable stage dir under $ROOT/followups only — never deletes or writes outside it."""
+    return under(STATE, require_id(key, "stage key"), name="stage key")
 
 
 def repo_path(repo):
     code = shared.code_dir()
-    return Path(code) / repo if code and repo else None
+    if not code or not repo:
+        return None
+    try:
+        return under(code, require_id(repo, "repo"), name="repo")
+    except ValueError:
+        return None
+
+
+def run_dir_for(stamp, external=None):
+    """Resolved run dir for a stamp: external map entry, or $ROOT/runs/<stamp>."""
+    external = external or {}
+    if stamp in external:
+        return Path(external[stamp])
+    return under(ROOT / "runs", require_id(stamp, "stamp"), name="stamp")
 
 
 # ── durable stage state ──────────────────────────────────────────────────────
@@ -104,17 +142,49 @@ def save(st):
     write_json(stage_dir(st["key"]) / "state.json", st)
 
 
+def cas_status(st, expected, new_status=None, **fields):
+    """Compare-and-set under the caller's claim. expected is one status or a set of them.
+
+    Returns False (and writes nothing) when the reloaded status is not what the transition expects —
+    e.g. a concurrent drain finished between snapshot and claim.
+    """
+    allowed = expected if isinstance(expected, (set, frozenset)) else {expected}
+    if st.get("status") not in allowed:
+        return False
+    if new_status is not None:
+        st["status"] = new_status
+    st.update(fields)
+    save(st)
+    return True
+
+
 def all_stages():
     out = []
+    if not STATE.is_dir():
+        return out
+    root = STATE.resolve()
     for f in sorted(STATE.glob("*/state.json")):
+        try:
+            f.resolve().relative_to(root)
+        except ValueError:
+            continue
         st = read_json(f)
         if isinstance(st, dict) and st.get("key"):
+            try:
+                require_id(st["key"], "stage key")
+            except ValueError:
+                continue
             out.append(st)
     return sorted(out, key=lambda s: s.get("created_at") or "")
 
 
 def new_stage(key, stage, repo, origin, **extra):
     """Create the stage's directory exclusively: a second hook for the same key is a no-op."""
+    require_id(key, "stage key")
+    if origin is not None:
+        require_id(origin, "origin")
+    if repo is not None:
+        require_id(repo, "repo")
     try:
         stage_dir(key).mkdir(parents=True)
     except FileExistsError:
@@ -175,7 +245,14 @@ def recursion_suppressed():
 def hook_item_done(stamp, run_dir=None, origin=None):
     if recursion_suppressed():
         return 0
-    run_dir = Path(run_dir) if run_dir else ROOT / "runs" / stamp
+    try:
+        require_id(stamp, "stamp")
+        if origin is not None:
+            require_id(origin, "origin")
+    except ValueError as e:
+        print(f"item-done: {e}", file=sys.stderr)
+        return 2
+    run_dir = Path(run_dir).expanduser().resolve() if run_dir else run_dir_for(stamp)
     if (run_dir / "followup-child").exists():
         print(f"{stamp} is a follow-up's own run: no follow-ups (recursion suppressed)")
         return 0
@@ -196,6 +273,11 @@ def hook_item_done(stamp, run_dir=None, origin=None):
         else:
             print(f"cleanup-{stamp} already queued")
         return 0
+    try:
+        require_id(repo, "repo")
+    except ValueError as e:
+        print(f"item-done: {e}", file=sys.stderr)
+        return 2
     st = new_stage(f"cleanup-{stamp}", STAGES["cleanup"], repo, origin, stamp=stamp,
                    item=result.get("item"), run_dir=str(run_dir), merge_commit_item=result.get("merge_commit"))
     print(f"queued cleanup-{stamp} ({repo})" if st else f"cleanup-{stamp} already queued")
@@ -207,10 +289,19 @@ def hook_run_end(origin, stamps, run_dirs=()):
     named for its stamp; such a run counts as finished once its worker-result.json exists."""
     if recursion_suppressed():
         return 0
+    try:
+        require_id(origin, "origin")
+        for s in stamps:
+            require_id(s, "stamp")
+    except ValueError as e:
+        print(f"run-end: {e}", file=sys.stderr)
+        return 2
     external = {}
     for d in run_dirs:
         path = Path(d).expanduser().resolve()
-        if not re.fullmatch(r"[A-Za-z0-9._-]+", path.name):
+        try:
+            require_id(path.name, "stamp")
+        except ValueError:
             print(f"run-end: {d}: a run dir must be named for its stamp", file=sys.stderr)
             return 2
         external[path.name] = str(path)
@@ -224,6 +315,10 @@ def hook_run_end(origin, stamps, run_dirs=()):
 # ── readiness / locks ────────────────────────────────────────────────────────
 
 def repo_lock_files(repo):
+    try:
+        require_id(repo, "repo")
+    except ValueError:
+        return []
     base = ROOT / "repo-locks"
     return [base / f"{repo}.lock", *sorted(base.glob(f"{glob_escape(repo)}.t*.lock"))]
 
@@ -238,6 +333,10 @@ def quiescent(repo):
     Never call this while holding the repo's lock yourself: probing it opens and closes the same
     file, and closing any descriptor drops every fcntl lock this process holds on it."""
     if not repo or not isinstance(repo, str):
+        return False, "no repo"
+    try:
+        require_id(repo, "repo")
+    except ValueError:
         return False, "no repo"
     if repo in shared.inflight_repos(ROOT):
         return False, "a worker an earlier run timed out on is still running in it"
@@ -267,9 +366,16 @@ def child_complete(stamp, external=None):
     """True when a child run finished: runs.jsonl row, worker-result, terminal worker-status,
     or an explicit `complete` marker. Returns (done, how)."""
     external = external or {}
+    try:
+        require_id(stamp, "stamp")
+    except ValueError:
+        return False, ""
     if stamp in shared.run_records({stamp}):
         return True, "runs.jsonl"
-    run = Path(external[stamp]) if stamp in external else (ROOT / "runs" / stamp)
+    try:
+        run = run_dir_for(stamp, external)
+    except ValueError:
+        return False, ""
     if (run / "worker-result.json").exists():
         return True, "worker-result"
     status = read_json(run / "worker-status.json")
@@ -323,19 +429,21 @@ def eligible(st, now=None):
 
 def set_waiting(st, reason):
     """Mark waiting. Caller must hold the stage claim — no save outside a claim."""
-    st["status"] = WAITING
+    if st.get("status") not in ELIGIBLE | {"pending"}:
+        return False
     st["waiting_reason"] = reason
     blockers = st.setdefault("blockers", [])
     if not blockers or blockers[-1].get("kind") != "waiting" or blockers[-1].get("reason") != reason:
         blockers.append({"at": now_iso(), "kind": "waiting", "reason": reason})
-    save(st)
+    return cas_status(st, ELIGIBLE | {"pending", WAITING}, WAITING)
 
 
 def set_ready(st):
     """Mark ready. Caller must hold the stage claim — no save outside a claim."""
-    st["status"] = READY
+    if st.get("status") == READY:
+        return True
     st.pop("waiting_reason", None)
-    save(st)
+    return cas_status(st, ELIGIBLE | {"pending"}, READY)
 
 
 def recover_interrupted():
@@ -348,28 +456,37 @@ def recover_interrupted():
             continue
         try:
             st = load(st["key"]) or st
-            st["status"] = QUEUED
+            # CAS: a concurrent drain may have finished between the snapshot and this claim.
+            if st.get("status") != RUNNING:
+                continue
             st.setdefault("blockers", []).append({"at": now_iso(), "kind": "interrupted",
                                                   "reason": "the previous drain stopped mid-stage; resuming"})
-            save(st)
-            log(f"{st['key']}: recovered an interrupted stage")
+            if cas_status(st, RUNNING, QUEUED):
+                log(f"{st['key']}: recovered an interrupted stage")
         finally:
             c.close()
 
 
 # ── ANALYZE (deterministic recognition tests only — no model) ────────────────
 
-def scan(st):
+def scan(st, work_dir=None):
+    """Recognize findings. `work_dir` is scratch for dry-run scan (tempfile); durable drains use stage_dir."""
     if st["stage"] == STAGES["cleanup"]:
-        run_dir = Path(st.get("run_dir") or ROOT / "runs" / st["stamp"])
+        if st.get("run_dir"):
+            run_dir = Path(st["run_dir"])
+        else:
+            run_dir = run_dir_for(st["stamp"])
         repo_dir = repo_path(st["repo"])
         findings, quiet = followscan.cleanup_scan(run_dir, repo_dir if repo_dir and repo_dir.is_dir() else None)
         files = [p for p in (run_dir / n for n in ("worker-result.json", "reviews.jsonl", "worker-output.log"))
                  if p.exists()]
     else:
         children = st.get("children") or []
+        for child in children:
+            require_id(child, "stamp")
         cleanups = [s for s in all_stages() if s.get("stamp") in children]
-        corpus_dir = stage_dir(st["key"]) / "corpus"
+        work = Path(work_dir) if work_dir else stage_dir(st["key"])
+        corpus_dir = work / "corpus"
         findings, quiet = followscan.tooling_scan(ROOT, children, cleanups, st.get("run_dirs"))
         files = followscan.corpus_files(ROOT, children, st.get("run_dirs"), excerpt_dir=corpus_dir)
     st["findings"] = findings
@@ -386,21 +503,22 @@ def process(st):
 
     Caller must hold the stage claim for the whole call — every save is claim-scoped.
     """
-    st["attempts"] = st.get("attempts", 0) + 1
-    st["status"] = RUNNING
     st.pop("waiting_reason", None)
-    st["next"] = {"step": "analyze"}
-    save(st)
+    if not cas_status(st, READY, RUNNING, attempts=st.get("attempts", 0) + 1,
+                      next={"step": "analyze"}):
+        return
     if not st.get("scanned"):
         scan(st)
+        if st.get("status") != RUNNING:
+            return
         save(st)
-    st["next"] = {"step": "report"}
+    if st.get("status") != RUNNING:
+        return
     fs = st.get("findings") or []
     quiet = st.get("non_findings") or []
-    st.update(status=DONE, next=None, reported_at=now_iso(),
-              open_findings=sum(1 for f in fs if f.get("status") == "open"))
-    log(f"{st['key']}: reported {len(fs)} finding(s), {len(quiet)} non-finding(s) (report-only)")
-    save(st)
+    if cas_status(st, RUNNING, DONE, next=None, reported_at=now_iso(),
+                  open_findings=sum(1 for f in fs if f.get("status") == "open")):
+        log(f"{st['key']}: reported {len(fs)} finding(s), {len(quiet)} non-finding(s) (report-only)")
 
 
 def order(st):
@@ -432,24 +550,24 @@ def drain(repo=None, origin=None, stage=None, wait_s=0.0):
                     ok, why = ready(st)
                 except Exception as e:  # malformed stage must not abort the drain
                     report(st, "readiness", f"{type(e).__name__}: {e}")
-                    st["status"] = BLOCKED
-                    save(st)
+                    cas_status(st, ELIGIBLE | {"pending"}, BLOCKED)
                     progressed = True
                     continue
                 if not ok:
                     set_waiting(st, why)
                     waiting.append(f"{st['key']}: {why}")
                     continue
-                if st.get("status") != READY:
-                    set_ready(st)
+                if st.get("status") != READY and not set_ready(st):
+                    continue
                 if origin:
                     st["drained_by"] = origin
                 try:
                     process(st)
                 except Exception as e:  # one broken stage must never stop the rest
                     report(st, "crash", f"{type(e).__name__}: {e}")
-                    st["status"] = RETRYABLE if st.get("attempts", 0) < MAX_ATTEMPTS else BLOCKED
-                    save(st)
+                    # CAS: only demote if we still own the running transition.
+                    dest = RETRYABLE if st.get("attempts", 0) < MAX_ATTEMPTS else BLOCKED
+                    cas_status(st, RUNNING, dest)
                 progressed = True
             finally:
                 c.close()
@@ -503,18 +621,27 @@ def summary_line(rows):
 # ── CLI ──────────────────────────────────────────────────────────────────────
 
 def cmd_scan(a):
-    """Dry run: the findings and non-findings a stage would report. No durable state."""
-    if a.stage == "cleanup":
-        st = {"key": f"scan-{a.stamp[0]}", "stage": STAGES["cleanup"], "stamp": a.stamp[0],
-              "repo": (read_json(ROOT / "runs" / a.stamp[0] / "worker-result.json") or {}).get("repo")}
-    else:
-        st = {"key": f"scan-{a.origin}", "stage": STAGES["tooling"], "children": a.stamp, "origin": a.origin,
-              "repo": followscan.TOOLING_REPO}
-    stage_dir(st["key"]).mkdir(parents=True, exist_ok=True)
+    """Dry run: the findings and non-findings a stage would report. No durable state.
+
+    Scratch lives in a uniquely allocated tempfile — never under $ROOT/followups — so a hostile
+    origin/stamp cannot make rmtree delete anything durable.
+    """
+    require_id(a.origin, "origin")
+    for s in a.stamp:
+        require_id(s, "stamp")
+    scratch = Path(tempfile.mkdtemp(prefix="followup-scan-"))
     try:
-        scan(st)
+        if a.stage == "cleanup":
+            stamp = a.stamp[0]
+            result = read_json(run_dir_for(stamp) / "worker-result.json") or {}
+            st = {"key": f"scan-{stamp}", "stage": STAGES["cleanup"], "stamp": stamp,
+                  "repo": result.get("repo")}
+        else:
+            st = {"key": f"scan-{a.origin}", "stage": STAGES["tooling"], "children": list(a.stamp),
+                  "origin": a.origin, "repo": followscan.TOOLING_REPO}
+        scan(st, work_dir=scratch)
     finally:
-        shutil.rmtree(stage_dir(st["key"]), ignore_errors=True)
+        shutil.rmtree(scratch, ignore_errors=True)
     print(json.dumps({"findings": st["findings"], "non_findings": st["non_findings"],
                       "mode": "report-only"}, indent=1))
     return 0
@@ -547,18 +674,37 @@ def main(argv=None):
             if len(a.stamp) != 1 or len(a.run_dir_list) > 1:
                 p.error("item-done takes exactly one --stamp and at most one --run-dir")
             return hook_item_done(a.stamp[0], (a.run_dir_list or [None])[0], a.origin)
-        if not a.origin or not re.fullmatch(r"[A-Za-z0-9._-]+", a.origin):
+        if not a.origin:
             p.error("run-end needs --origin (letters, digits, . _ -)")
+        try:
+            require_id(a.origin, "origin")
+        except ValueError as e:
+            p.error(str(e))
         return hook_run_end(a.origin, a.stamp, a.run_dir_list)
     if a.cmd == "drain":
         if recursion_suppressed():
             return 0
+        try:
+            if a.repo:
+                require_id(a.repo, "repo")
+            if a.origin:
+                require_id(a.origin, "origin")
+        except ValueError as e:
+            p.error(str(e))
         signal.signal(signal.SIGTERM, lambda *_: sys.exit(143))
         return drain(a.repo, a.origin, a.stage, a.wait_s)
     if a.cmd == "scan":
         if not a.stamp:
             p.error("scan needs --stamp")
-        return cmd_scan(a)
+        try:
+            return cmd_scan(a)
+        except ValueError as e:
+            p.error(str(e))
+    try:
+        if a.origin:
+            require_id(a.origin, "origin")
+    except ValueError as e:
+        p.error(str(e))
     rows = summary(a.origin)
     print(json.dumps(rows, indent=1) if a.json else (summary_line(rows) or "Follow-ups: none."))
     return 0

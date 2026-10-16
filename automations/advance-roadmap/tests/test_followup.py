@@ -544,6 +544,103 @@ class FollowupTest(unittest.TestCase):
         self.assertEqual(tooling["status"], "done", cases[1])
         self.assertTrue(any(p.endswith("worker-status.json") for p in tooling["corpus"]), cases[1])
 
+    def test_scan_rejects_path_traversal_and_never_deletes_outside_scratch(self):
+        """Hostile --origin/--stamp must not rmtree $ROOT/runs (or anything under followups)."""
+        import followup as fu
+        runs = self.root / "runs"
+        runs.mkdir(parents=True)
+        sentinel = runs / "keep-me"
+        sentinel.write_text("durable\n")
+        # Slash / .. in origin: argparse path would have been scan-x/../../runs → rmtree(runs).
+        p = self.run_followup("scan", "--stage", "tooling", "--origin", "x/../../runs",
+                             "--stamp", "s", check=False)
+        self.assertNotEqual(p.returncode, 0, p.stdout + p.stderr)
+        self.assertTrue(sentinel.exists(), "scan must not delete $ROOT/runs")
+        self.assertFalse(any((self.root / "followups").glob("scan-*")), "dry-run must not leave stage dirs")
+        p2 = self.run_followup("scan", "--stage", "tooling", "--origin", "..",
+                               "--stamp", "20261015-000001", check=False)
+        self.assertNotEqual(p2.returncode, 0)
+        self.assertTrue(sentinel.exists())
+        with self.assertRaises(ValueError):
+            fu.require_id("x/../../runs", "origin")
+        with self.assertRaises(ValueError):
+            fu.require_id("..", "origin")
+        with self.assertRaises(ValueError):
+            fu.under(self.root / "followups", "scan-x", "..", "runs")
+
+    def test_recover_interrupted_cas_skips_when_status_no_longer_running(self):
+        """A drain that finishes between snapshot and claim must not be reset to queued."""
+        import followup as fu
+        # Point the in-process module at this test's temp root (subprocess tests use self.env).
+        fu.ROOT = self.root
+        fu.STATE = self.root / "followups"
+        self.shipped_item("20261015-cas001")
+        self.run_followup("hook", "item-done", "--stamp", "20261015-cas001", "--origin", "batch-cas")
+        key = "cleanup-20261015-cas001"
+        st = self.state(key)
+        st.update(status="done", scanned=True, findings=[{"id": "keep", "status": "open"}],
+                  attempts=1, blockers=[])
+        (self.root / "followups" / key / "state.json").write_text(json.dumps(st))
+        # CAS: reloaded status is done, so a recover expecting running must not write.
+        self.assertFalse(fu.cas_status(dict(st), "running", "queued"))
+        self.assertEqual(self.state(key)["status"], "done")
+        self.assertEqual(self.state(key)["findings"], [{"id": "keep", "status": "open"}])
+        # A truly interrupted stage still recovers; the done sibling stays done.
+        other = self.root / "followups" / "cleanup-ghost"
+        other.mkdir(parents=True)
+        (other / "state.json").write_text(json.dumps({
+            "key": "cleanup-ghost", "stage": "project-cleanup", "repo": "demo", "origin": "x",
+            "status": "running", "created_at": "2026-10-15T00:00:00", "attempts": 1,
+            "findings": [], "non_findings": [], "blockers": [], "stamp": "ghost", "mode": "report-only"}))
+        fu.recover_interrupted()
+        ghost = self.state("cleanup-ghost")
+        self.assertEqual(ghost["status"], "queued")
+        self.assertTrue(any(b["kind"] == "interrupted" for b in ghost["blockers"]))
+        self.assertEqual(self.state(key)["status"], "done")
+        self.assertFalse(any(b.get("kind") == "interrupted" for b in self.state(key).get("blockers") or []))
+
+    def test_planner_error_evidence_uses_source_span_not_reserialized_json(self):
+        """Escaped strings and pretty-printed planner_error dicts must quote the file as stored."""
+        stamp = "20261015-planerr"
+        run = self.root / "runs" / stamp
+        run.mkdir(parents=True)
+        # Pretty-printed object with an escaped quote inside a string value.
+        orch_text = (
+            '{\n'
+            ' "action": null,\n'
+            ' "planner_error": {\n'
+            '  "kind": "invalid_output",\n'
+            '  "cause": "missing \\"ORCHESTRATOR_RESULT_JSON\\" fence"\n'
+            ' },\n'
+            ' "parse_error": "missing \\"ORCHESTRATOR_RESULT_JSON\\""\n'
+            '}\n'
+        )
+        orch_path = run / "orchestrator-result.json"
+        orch_path.write_text(orch_text)
+        row = {"stamp": stamp, "outcome": "error", "worker": "cursor",
+               "detail": "orchestrator: missing fence", "action": "dispatch_worker"}
+        (self.root / "runs.jsonl").write_text(json.dumps(row) + "\n")
+        findings, _ = followscan.tooling_scan(self.root, [stamp])
+        misfires = [f for f in findings if f["id"] == followscan.finding_id(
+            "tooling-hardening", "ai-tools", "misfiring-automation", "worker-after-failed-plan")]
+        self.assertTrue(misfires, findings)
+        orch_evs = [ev for f in misfires for ev in f["evidence"] if ev["source"].endswith("orchestrator-result.json")]
+        self.assertTrue(orch_evs)
+        raw = orch_path.read_text()
+        for ev in orch_evs:
+            self.assertTrue(followscan.evidence_holds(ev, [orch_path]), ev)
+            self.assertIn(ev["quote"], " ".join(raw.split()))
+            # Must not be a compact json.dumps of the decoded dict (spacing / escaping differ).
+            decoded = json.loads(raw)["parse_error"]
+            self.assertNotEqual(ev["quote"], decoded)
+            self.assertNotEqual(ev["quote"], json.dumps(json.loads(raw)["planner_error"]))
+        # orchestration_failure_evidence alone (fragile-tooling path) also uses source spans.
+        orch = json.loads(raw)
+        ev = followscan.orchestration_failure_evidence(row, orch, run, self.root / "runs.jsonl")
+        self.assertTrue(followscan.evidence_holds(ev, [orch_path]), ev)
+        self.assertIn('"parse_error"', ev["quote"])
+        self.assertIn(ev["quote"], " ".join(raw.split()))
+
 
 if __name__ == "__main__":
     unittest.main()

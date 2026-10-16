@@ -249,7 +249,8 @@ def cleanup_scan(run_dir, repo_dir=None):
     if result.get("outcome") not in SHIPPED:
         return [], [non_finding("item did not ship",
                                 f"outcome {result.get('outcome')!r} is recoverable work for the next run, "
-                                "not a completed-ticket cleanup trigger", [evidence(result_path, result.get("outcome"))])]
+                                "not a completed-ticket cleanup trigger",
+                                [source_key_evidence(result_path, "outcome")])]
     findings, quiet = [], []
     markers = added_markers(repo_dir, result.get("merge_commit"))
     for path, line in markers:
@@ -386,11 +387,12 @@ def orchestration_failure_evidence(row, orch, run, src):
     stamp = row.get("stamp") or "?"
     detail = str(row.get("detail") or "")
     orch_path = Path(run) / "orchestrator-result.json"
+    # Always quote the original source span — never decoded strings or json.dumps reconstructions
+    # (escaping / pretty-print whitespace would invent quotes absent from the file).
     if orch.get("parse_error"):
-        return evidence(orch_path, orch["parse_error"])
-    perr = orch.get("planner_error")
-    if perr:
-        return evidence(orch_path, perr if isinstance(perr, str) else json.dumps(perr))
+        return source_key_evidence(orch_path, "parse_error")
+    if orch.get("planner_error"):
+        return source_key_evidence(orch_path, "planner_error")
     if detail and ORCH_FAILURE.search(detail):
         return row_evidence(src, stamp, detail)
     # Incomplete always means the automation did not finish recording a result.
@@ -455,8 +457,8 @@ def tooling_scan(root, stamps, stages=(), run_dirs=None):
         banner = LIMIT_BANNER.search(orch.get("summary") or "")
         # 1. Misfiring automation: a worker spent tokens on a run that had no plan.
         if planner_failed and row.get("worker") not in (None, "none"):
-            err = orch.get("parse_error") or orch.get("planner_error")
-            orch_ev = evidence(orch_path, err if isinstance(err, str) else json.dumps(err)) if err else None
+            err_key = "parse_error" if orch.get("parse_error") else "planner_error"
+            orch_ev = source_key_evidence(orch_path, err_key)
             hit("misfiring-automation", "worker-after-failed-plan",
                 "a worker ran after the planner returned no usable plan",
                 "Stop before worker dispatch when ORCHESTRATOR_RESULT_JSON is missing or invalid.",
