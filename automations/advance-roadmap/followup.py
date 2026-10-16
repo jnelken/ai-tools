@@ -1,43 +1,26 @@
 #!/usr/bin/env python3
-"""advance-roadmap's follow-up runner — deterministic report-only (DEV-232 Phase B slice 2).
+"""advance-roadmap follow-up runner — deterministic report-only (DEV-232 Phase B slice 2).
 
-After work ships, scan what its logs prove went wrong and record findings. This slice does
-**not** call a model, repair, launch builders, open PRs, merge, install, or read/write Linear.
-Slice 3 adds the model analyst and the repair lifecycle on top of the same stage state (stable
-`finding_id`s, no ticket fields yet).
+After work ships, scan logs for proven problems and record findings. No model, repair, PRs,
+merge, install, or Linear (slice 3). Stages under $ROOT/followups/<key>/:
 
-Two stages, each a durable record under $ROOT/followups/<key>/ (runtime state, never ~/.ai-tools):
+  project-cleanup    one per shipped item once the repo is quiescent
+  tooling-hardening  one per batch/run/conductor session once children + cleanups finish
 
-  project-cleanup    one per shipped item (`shipped` / `shipped-deploy-failed`), once its builder
-                     and reviewers have exited and nothing else holds the repo. Corpus: that item's
-                     run dir — worker result, review log, the review markers its merge left, deploy.
-                     An item that did not ship is recoverable work for the next run, not a cleanup
-                     trigger.
-  tooling-hardening  one per batch / lone run / conductor session, once every run and every
-                     cleanup stage it started has finished. Corpus: those runs' orchestration,
-                     routing, review and reporting records. Findings are ai-tools' own.
-
-Findings come only from lib/followscan.py's recognition tests (each cites a file and a verbatim
-quote from that file). Drain runs ANALYZE then REPORT only: findings land in stage state and the
-run/batch summary. Every state transition happens under the stage claim.
-
-  followup.py hook item-done --stamp S [--run-dir D] [--origin O]   queue S's cleanup (idempotent)
-  followup.py hook run-end --origin O [--stamp S ...] [--run-dir D ...]   queue O's tooling stage
-  followup.py drain [--repo R] [--origin O] [--wait-s N]           analyze+report what is ready
-  followup.py scan --stage cleanup|tooling (--stamp S | --origin O --stamp S ...)   dry run
+  followup.py hook item-done --stamp S [--run-dir D] [--origin O]
+  followup.py hook run-end --origin O [--stamp S ...] [--run-dir D ...]
+  followup.py drain [--repo R] [--origin O] [--wait-s N]
   followup.py status [--origin O] [--json]
 
-Hooks seeing ADVANCE_ROADMAP_FOLLOWUP=1 do nothing, so a follow-up child never starts follow-ups.
+ADVANCE_ROADMAP_FOLLOWUP=1 suppresses nested follow-ups.
 """
 import argparse
 import fcntl
 import json
 import os
 import re
-import shutil
 import signal
 import sys
-import tempfile
 import time
 from datetime import datetime
 from pathlib import Path
@@ -57,9 +40,7 @@ STAGES = {"cleanup": "project-cleanup", "tooling": "tooling-hardening"}
 QUEUED, WAITING, READY, RUNNING, DONE, BLOCKED, RETRYABLE = (
     "queued", "waiting", "ready", "running", "done", "blocked", "retryable")
 ELIGIBLE = {QUEUED, WAITING, READY, RETRYABLE}
-COMPLETE_MARKER = "complete"  # explicit run-dir marker when no worker-result/status
 MAX_ATTEMPTS = int(os.environ.get("ADVANCE_ROADMAP_FOLLOWUP_MAX_ATTEMPTS", "3"))
-STALE_S = float(os.environ.get("ADVANCE_ROADMAP_FOLLOWUP_STALE_H", "12")) * 3600
 POLL_S = float(os.environ.get("ADVANCE_ROADMAP_FOLLOWUP_POLL_S", "15"))
 # Externally supplied path segments (stamp, origin, repo, key): no '/', '..', NUL, or empties.
 # Production stamps look like YYYYMMDD-HHMMSS; fixtures may use any SAFE_ID.
@@ -84,7 +65,7 @@ def require_id(value, name="id"):
 
 
 def under(root, *parts, name="path"):
-    """Join parts under root after validating each; resolve and refuse escape."""
+    """Join validated parts under root; refuse escape."""
     root = Path(root).resolve()
     for p in parts:
         require_id(p, name)
@@ -143,11 +124,7 @@ def save(st):
 
 
 def cas_status(st, expected, new_status=None, **fields):
-    """Compare-and-set under the caller's claim. expected is one status or a set of them.
-
-    Returns False (and writes nothing) when the reloaded status is not what the transition expects —
-    e.g. a concurrent drain finished between snapshot and claim.
-    """
+    """CAS under the caller's claim. False when status is no longer expected."""
     allowed = expected if isinstance(expected, (set, frozenset)) else {expected}
     if st.get("status") not in allowed:
         return False
@@ -182,18 +159,8 @@ def _usable_stage(st):
     return isinstance(st, dict) and st.get("key") and st.get("stage") and st.get("status")
 
 
-def _orphan_placeholder(st):
-    """Drain-written blocked stub for a dir that had no usable state — hooks may replace it."""
-    return _usable_stage(st) and any(
-        b.get("kind") == "orphan-stage" for b in (st.get("blockers") or []))
-
-
 def new_stage(key, stage, repo, origin, **extra):
-    """Create or recover a stage under its claim; a healthy existing stage is a no-op.
-
-    Directory creation alone is not enough: a crash after mkdir and before state.json left an
-    undiscoverable orphan. Init (and recover) always write state.json atomically under the claim.
-    """
+    """Create or recover a stage under its claim; healthy existing stage is a no-op."""
     require_id(key, "stage key")
     if origin is not None:
         require_id(origin, "origin")
@@ -206,13 +173,13 @@ def new_stage(key, stage, repo, origin, **extra):
         return None
     try:
         existing = load(key)
-        if _usable_stage(existing) and not _orphan_placeholder(existing):
+        if _usable_stage(existing):
             return None
         # Findings carry stable finding_id via followscan.finding; ticket fields arrive in slice 3.
         st = {"key": key, "stage": stage, "repo": repo, "origin": origin, "status": QUEUED,
               "created_at": now_iso(), "attempts": 0, "findings": [], "non_findings": [], "blockers": [],
               "usage_snapshots": [], "sessions": [], "mode": "report-only", **extra}
-        if preexisted or _orphan_placeholder(existing) or (existing is not None and not _usable_stage(existing)):
+        if preexisted or (existing is not None and not _usable_stage(existing)):
             st.setdefault("blockers", []).append({
                 "at": now_iso(), "kind": "recovered",
                 "reason": "stage dir existed without usable state.json; re-initialized from hook input"})
@@ -220,57 +187,6 @@ def new_stage(key, stage, repo, origin, **extra):
         return st
     finally:
         c.close()
-
-
-def recover_orphan_dirs():
-    """Dirs under followups/ with no/corrupt state.json become blocked stages drains can see."""
-    if not STATE.is_dir():
-        return
-    root = STATE.resolve()
-    for d in sorted(p for p in STATE.iterdir() if p.is_dir()):
-        try:
-            d.resolve().relative_to(root)
-            require_id(d.name, "stage key")
-        except ValueError:
-            continue
-        c = claim_stage(d.name)
-        if not c:
-            continue
-        try:
-            existing = load(d.name)
-            if _usable_stage(existing):
-                continue
-            key = d.name
-            if key.startswith("cleanup-"):
-                stage = STAGES["cleanup"]
-            elif key.startswith("tooling-"):
-                stage = STAGES["tooling"]
-            else:
-                stage = "unknown"
-            st = {"key": key, "stage": stage, "repo": None, "origin": None, "status": BLOCKED,
-                  "created_at": now_iso(), "attempts": 0, "findings": [], "non_findings": [],
-                  "blockers": [{"at": now_iso(), "kind": "orphan-stage",
-                                "reason": "stage directory existed without usable state.json"}],
-                  "usage_snapshots": [], "sessions": [], "mode": "report-only"}
-            if key.startswith("cleanup-"):
-                stamp = key[len("cleanup-"):]
-                try:
-                    require_id(stamp, "stamp")
-                    st["stamp"] = stamp
-                except ValueError:
-                    pass
-            elif key.startswith("tooling-"):
-                origin = key[len("tooling-"):]
-                try:
-                    require_id(origin, "origin")
-                    st["origin"] = origin
-                    st["repo"] = followscan.TOOLING_REPO
-                except ValueError:
-                    pass
-            save(st)
-            log(f"{key}: marked orphan stage blocked (no usable state.json)")
-        finally:
-            c.close()
 
 
 class Claim:
@@ -362,8 +278,8 @@ def hook_item_done(stamp, run_dir=None, origin=None):
 
 def hook_run_end(origin, stamps, run_dirs=()):
     """Queue the tooling pass. `run_dirs` are runs outside $ROOT/runs (a conductor session's), each
-    named for its stamp; those external runs may complete from artifacts alone. Internal stamps
-    still need a runs.jsonl row (see child_complete)."""
+    named for its stamp; those complete once worker-result.json exists. Internal stamps still need
+    a runs.jsonl row (see child_complete)."""
     if recursion_suppressed():
         return 0
     try:
@@ -405,10 +321,7 @@ def glob_escape(s):
 
 
 def quiescent(repo):
-    """(True, "") when no lane, thread, timed-out worker or other follow-up holds the repo.
-
-    Never call this while holding the repo's lock yourself: probing it opens and closes the same
-    file, and closing any descriptor drops every fcntl lock this process holds on it."""
+    """(True, "") when no lane/thread/follow-up holds the repo. Do not call while holding it."""
     if not repo or not isinstance(repo, str):
         return False, "no repo"
     try:
@@ -427,25 +340,8 @@ def quiescent(repo):
     return True, ""
 
 
-def cleanup_still_active(other):
-    """True when a queued/waiting/running cleanup is still being worked (no age-bypass)."""
-    repo = other.get("repo")
-    if repo and repo in shared.inflight_repos(ROOT):
-        return True
-    c = Claim(stage_dir(other["key"]) / "claim.lock")
-    if not c.ok:
-        return True
-    c.close()
-    return False
-
-
 def child_complete(stamp, external=None):
-    """True when a child run finished. Returns (done, how).
-
-    Internal runs (under $ROOT/runs) need a runs.jsonl row — artifact-only completion is for
-    conductor/external run dirs only. An interrupted internal run with a worker-result but no
-    ledger row must not look complete (tooling_scan reports `missing-run-record` instead).
-    """
+    """(done, how): internal via runs.jsonl; external via worker-result.json only."""
     external = external or {}
     try:
         require_id(stamp, "stamp")
@@ -461,33 +357,24 @@ def child_complete(stamp, external=None):
         return False, ""
     if (run / "worker-result.json").exists():
         return True, "worker-result"
-    status = read_json(run / "worker-status.json")
-    if isinstance(status, dict) and "exit" in status:
-        return True, "worker-status"
-    if (run / COMPLETE_MARKER).exists():
-        return True, "marker"
     return False, ""
 
 
 def ready(st):
+    """No age bypass — wait until every child run and cleanup is terminal."""
     if st["stage"] == STAGES["cleanup"]:
         return quiescent(st.get("repo"))
     children = st.get("children") or []
     external = st.get("run_dirs") or {}
     unfinished = [s for s in children if not child_complete(s, external)[0]]
-    stale = age_s(st) >= STALE_S
-    if unfinished and not stale:
+    if unfinished:
         names = ", ".join(unfinished[:5]) + ("…" if len(unfinished) > 5 else "")
         return False, f"{len(unfinished)} run(s) of {st['origin']} have not finished ({names})"
-    if unfinished:
-        st["unrecorded_children"] = unfinished
     active = {QUEUED, WAITING, READY, RUNNING, RETRYABLE}
     for other in all_stages():
         if other["stage"] != STAGES["cleanup"] or other.get("stamp") not in children:
             continue
-        if other.get("status") not in active:
-            continue
-        if cleanup_still_active(other) or not stale:
+        if other.get("status") in active:
             return False, f"{other['key']} has not finished"
     return True, ""
 
@@ -552,8 +439,8 @@ def recover_interrupted():
 
 # ── ANALYZE (deterministic recognition tests only — no model) ────────────────
 
-def scan(st, work_dir=None):
-    """Recognize findings. `work_dir` is scratch for dry-run scan (tempfile); durable drains use stage_dir."""
+def scan(st):
+    """Recognize findings (pure reads; no excerpts)."""
     if st["stage"] == STAGES["cleanup"]:
         if st.get("run_dir"):
             run_dir = Path(st["run_dir"])
@@ -562,18 +449,14 @@ def scan(st, work_dir=None):
         repo_dir = repo_path(st["repo"])
         findings, quiet = followscan.cleanup_scan(run_dir, repo_dir if repo_dir and repo_dir.is_dir() else None)
         files = [p for p in (run_dir / n for n in (
-            "worker-result.json", "reviews.jsonl", "worker-output.log", "review-markers.excerpt"))
-                 if p.exists()]
+            "worker-result.json", "reviews.jsonl", "worker-output.log")) if p.exists()]
     else:
         children = st.get("children") or []
         for child in children:
             require_id(child, "stamp")
         cleanups = [s for s in all_stages() if s.get("stamp") in children]
-        work = Path(work_dir) if work_dir else stage_dir(st["key"])
-        corpus_dir = work / "corpus"
         findings, quiet = followscan.tooling_scan(ROOT, children, cleanups, st.get("run_dirs"))
-        files = followscan.corpus_files(
-            ROOT, children, st.get("run_dirs"), excerpt_dir=corpus_dir, stages=cleanups)
+        files = followscan.corpus_files(ROOT, children, st.get("run_dirs"), stages=cleanups)
     st["findings"] = findings
     st["non_findings"] = quiet
     st["corpus"] = [str(p) for p in files]
@@ -584,10 +467,7 @@ def scan(st, work_dir=None):
 # ── process / drain (ANALYZE + REPORT only) ──────────────────────────────────
 
 def process(st):
-    """Run ANALYZE then REPORT. No model, no repair, no builders, no Linear.
-
-    Caller must hold the stage claim for the whole call — every save is claim-scoped.
-    """
+    """ANALYZE then REPORT under the caller's stage claim."""
     st.pop("waiting_reason", None)
     if not cas_status(st, READY, RUNNING, attempts=st.get("attempts", 0) + 1,
                       next={"step": "analyze"}):
@@ -615,7 +495,6 @@ def order(st):
 def drain(repo=None, origin=None, stage=None, wait_s=0.0):
     """Drain ready stages. Every status transition is claim → reload → eligibility → act → save."""
     STATE.mkdir(parents=True, exist_ok=True)
-    recover_orphan_dirs()
     recover_interrupted()
     deadline = time.time() + wait_s
     while True:
@@ -675,18 +554,27 @@ def summary(origin=None):
         reason = st.get("waiting_reason")
         if not reason and st.get("blockers"):
             reason = st["blockers"][-1].get("reason")
+        age = age_s(st)
         rows.append({"key": st["key"], "stage": st["stage"], "repo": st.get("repo"), "status": status,
                      "item": st.get("item"), "findings": len(fs),
                      "open_findings": sum(f.get("status") == "open" for f in fs),
                      "non_findings": len(st.get("non_findings") or []),
                      "mode": st.get("mode") or "report-only",
+                     "age_s": int(age),
                      "waiting_reason": st.get("waiting_reason"),
                      "blocker": reason if status in (BLOCKED, WAITING, RETRYABLE, "pending") else None})
     return rows
 
 
+def _age_label(seconds):
+    seconds = max(0, int(seconds or 0))
+    if seconds < 3600:
+        return f"{seconds // 60}m"
+    return f"{seconds // 3600}h{((seconds % 3600) // 60):02d}m"
+
+
 def summary_line(rows):
-    """One sentence for the batch/run summary. Never 'none' while stages are waiting."""
+    """Batch/run summary sentence; waiting stages include age and reason."""
     done = [r for r in rows if r["status"] == DONE]
     blocked = [r for r in rows if r["status"] == BLOCKED]
     waiting = [r for r in rows if r["status"] == WAITING]
@@ -697,41 +585,18 @@ def summary_line(rows):
         n_open = sum(r.get("open_findings") or 0 for r in done)
         parts.append(f"{len(done)} follow-up(s) reported ({n_find} finding(s), {n_open} open)")
     if waiting:
-        sample = waiting[0].get("waiting_reason") or waiting[0].get("blocker") or "not ready"
-        parts.append(f"{len(waiting)} waiting ({sample})")
+        bits = []
+        for r in waiting[:3]:
+            why = r.get("waiting_reason") or r.get("blocker") or "not ready"
+            bits.append(f"{r['key']} age {_age_label(r.get('age_s'))}: {why}")
+        extra = f" (+{len(waiting) - 3} more)" if len(waiting) > 3 else ""
+        parts.append(f"{len(waiting)} waiting ({'; '.join(bits)}{extra})")
     if blocked or retryable:
         parts.append(f"{len(blocked) + len(retryable)} blocked (see followups/report.jsonl)")
     return ("Follow-ups: " + "; ".join(parts) + ".") if parts else ""
 
 
 # ── CLI ──────────────────────────────────────────────────────────────────────
-
-def cmd_scan(a):
-    """Dry run: the findings and non-findings a stage would report. No durable state.
-
-    Scratch lives in a uniquely allocated tempfile — never under $ROOT/followups — so a hostile
-    origin/stamp cannot make rmtree delete anything durable.
-    """
-    require_id(a.origin, "origin")
-    for s in a.stamp:
-        require_id(s, "stamp")
-    scratch = Path(tempfile.mkdtemp(prefix="followup-scan-"))
-    try:
-        if a.stage == "cleanup":
-            stamp = a.stamp[0]
-            result = read_json(run_dir_for(stamp) / "worker-result.json") or {}
-            st = {"key": f"scan-{stamp}", "stage": STAGES["cleanup"], "stamp": stamp,
-                  "repo": result.get("repo")}
-        else:
-            st = {"key": f"scan-{a.origin}", "stage": STAGES["tooling"], "children": list(a.stamp),
-                  "origin": a.origin, "repo": followscan.TOOLING_REPO}
-        scan(st, work_dir=scratch)
-    finally:
-        shutil.rmtree(scratch, ignore_errors=True)
-    print(json.dumps({"findings": st["findings"], "non_findings": st["non_findings"],
-                      "mode": "report-only"}, indent=1))
-    return 0
-
 
 def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -747,10 +612,6 @@ def main(argv=None):
     d.add_argument("--origin")
     d.add_argument("--stage", choices=sorted(STAGES))
     d.add_argument("--wait-s", type=float, default=0.0, help="wait this long for repos/children to finish")
-    s = sub.add_parser("scan")
-    s.add_argument("--stage", choices=sorted(STAGES), required=True)
-    s.add_argument("--stamp", action="append", default=[])
-    s.add_argument("--origin", default="dry-run")
     t = sub.add_parser("status")
     t.add_argument("--origin")
     t.add_argument("--json", action="store_true")
@@ -779,13 +640,6 @@ def main(argv=None):
             p.error(str(e))
         signal.signal(signal.SIGTERM, lambda *_: sys.exit(143))
         return drain(a.repo, a.origin, a.stage, a.wait_s)
-    if a.cmd == "scan":
-        if not a.stamp:
-            p.error("scan needs --stamp")
-        try:
-            return cmd_scan(a)
-        except ValueError as e:
-            p.error(str(e))
     try:
         if a.origin:
             require_id(a.origin, "origin")

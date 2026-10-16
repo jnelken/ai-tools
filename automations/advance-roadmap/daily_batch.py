@@ -67,17 +67,14 @@ def followup_env():
 
 
 def followup(*args, timeout=300, log=None):
-    """followup.py in its own process group. None when it could not run (never fails the batch)."""
+    """Run followup.py isolated (timeout + catch-all). None on failure — never fails the batch."""
     try:
         kwargs = {"timeout": timeout, "env": followup_env(), "grace": 5.0}
         if log:
             kwargs.update(stdout=log, stderr=subprocess.STDOUT)
         return procrun.run([sys.executable, str(ROOT / "followup.py"), *args], **kwargs)
-    except OSError as error:
-        shared.log(f"followup.py {args[0]}: {error}")
-        return None
-    except subprocess.TimeoutExpired as error:
-        shared.log(f"followup.py {args[0]}: {error}")
+    except Exception as error:  # TimeoutExpired, OSError, or unexpected — never fail the batch
+        shared.log(f"followup.py {args[0] if args else '?'}: {error}")
         return None
 
 

@@ -118,27 +118,18 @@ never retry silently in a loop. Don't clean up the builder's branch.
 
 ## 4. Follow-ups (end of the session — deterministic report-only)
 
-The scheduled batch runs its follow-ups itself; a conductor session runs the same three commands
-(`F=~/.claude/automations/advance-roadmap/followup.py`). Slice 2 is **deterministic report-only**:
-drain runs recognition tests and records findings (no model calls); it does not repair, open PRs,
-or write Linear.
+Same commands as the batch (`F=~/.claude/automations/advance-roadmap/followup.py`). Slice 2 is
+**report-only** (recognition tests, no model/repair/PRs/Linear).
 
-1. After each item that ended `shipped` / `shipped-deploy-failed` — not for blocked, failed or
-   incomplete items, which are the next run's work — queue its cleanup, pointing at the dir that
-   holds its `worker-result.json` and `reviews.jsonl`:
+1. After each `shipped` / `shipped-deploy-failed` item:
    `python3 $F hook item-done --stamp <stamp> --run-dir <dir> --origin conductor-<session stamp>`.
-2. When you are done dispatching for the session (every builder you started has exited), queue one
-   tooling pass over every run of the session — shipped or not — by its run dir:
+2. When every builder has exited, queue tooling over each run dir (named for its stamp):
    `python3 $F hook run-end --origin conductor-<session stamp> --run-dir <dir> [--run-dir …]`.
-   Conductor runs write no `runs.jsonl` row, so the tooling pass reads each dir directly and counts
-   a run finished once its `worker-result.json` exists. Each dir must be named for its run's stamp
-   (`<scratch>/<stamp>/`, as in section 2) — that name is how the pass matches it to its cleanup.
-3. Drain: `python3 $F drain --origin conductor-<session stamp> --wait-s 600` (background is fine).
-   Report `python3 $F status --origin conductor-<session stamp>` to the user: reported findings and
-   any blocked stages (`followups/report.jsonl`).
+   A conductor run counts finished once `worker-result.json` exists (no `runs.jsonl` row).
+3. `python3 $F drain --origin conductor-<session stamp> --wait-s 600` then
+   `python3 $F status --origin conductor-<session stamp>` (waiting stages show age + reason).
 
-Each hook is idempotent, so re-running one is harmless. Drain is free of model calls in slice 2, so
-there is no quota trade-off for step 3.
+Hooks are idempotent. Drain makes no model calls in slice 2.
 
 ## What this skill does not do
 

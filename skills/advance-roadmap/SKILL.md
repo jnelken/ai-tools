@@ -70,14 +70,10 @@ windows are the retired scheduler; its helpers are still imported.) The batch ru
    runs inside a batch post nothing; the consecutive-failure alert is separate and still fires.
    A lone `run.sh` outside a batch still posts its own line.
 
-**Then report what the run proved went wrong (deterministic report-only).** After an item *ships*
-and its repo is quiet, a **project-cleanup** follow-up reads that run's records (review markers its
-merge left, unresolved review, a red deploy); after a whole batch / chain / conductor session, one
-**tooling-hardening** follow-up reads every run's records for automation friction. `followup.py`
-runs recognition tests only — no model calls — and records findings with stable ids. It does
-**not** repair, open PRs, or write Linear yet (DEV-232 Phase B slice 2; analyst + repair arrive in
-slice 3). Unfinished items are not cleanup triggers — they are the next run's work. Details:
-`automations/README.md` → *Follow-ups*.
+**Then report what the run proved went wrong (deterministic report-only).** After a ship, a
+**project-cleanup** follow-up reads that run's records; after a batch/chain/conductor session, one
+**tooling-hardening** follow-up reads automation friction. Slice 2 is recognition-only (no model,
+repair, PRs, or Linear). Details: `automations/README.md` → *Follow-ups*.
 
 **Never depends on Claude.** Every role has a non-Claude first choice: Codex orchestrates, Cursor
 builds, the reviewer is never Claude first, and the scheduling around them is plain shell and

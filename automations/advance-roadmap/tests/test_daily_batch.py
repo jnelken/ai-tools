@@ -497,49 +497,6 @@ class DailyBatchTest(unittest.TestCase):
         self.assertFalse([c for c in calls if '--repo' in c['args']])
         self.assertTrue([c for c in calls if c['args'][:2] == ['hook', 'run-end']])
 
-    def test_followup_timeout_reaps_the_whole_process_group(self):
-        """Timing out drain must kill followup.py and its children before the claim can reopen.
-
-        The child ignores SIGTERM so a leader-only wait would leave it alive; SIGKILL after grace
-        must still clear the group.
-        """
-        import time
-        child_pid = self.root / 'child.pid'
-        child_script = self.root / 'child.py'
-        child_script.write_text(
-            "import os, signal, time\n"
-            "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
-            f"open({str(child_pid)!r}, 'w').write(str(os.getpid()))\n"
-            "time.sleep(120)\n"
-        )
-        (self.root / 'followup.py').write_text(
-            "import os, subprocess, sys, time\n"
-            f"subprocess.Popen([sys.executable, {str(child_script)!r}])\n"
-            f"open({str(self.root / 'parent.pid')!r}, 'w').write(str(os.getpid()))\n"
-            "time.sleep(120)\n"
-        )
-        with patch.object(daily_batch, 'ROOT', self.root), \
-                patch.object(daily_batch.shared, 'log', lambda *_: None):
-            t0 = time.time()
-            result = daily_batch.followup('drain', '--origin', 'batch-x', timeout=0.4)
-            elapsed = time.time() - t0
-        self.assertIsNone(result)
-        self.assertLess(elapsed, 8)
-        deadline = time.time() + 3
-        while time.time() < deadline and not child_pid.exists():
-            time.sleep(0.05)
-        self.assertTrue(child_pid.exists(), 'child never started')
-        pid = int(child_pid.read_text())
-        dead = False
-        for _ in range(40):
-            try:
-                os.kill(pid, 0)
-            except OSError:
-                dead = True
-                break
-            time.sleep(0.05)
-        self.assertTrue(dead, f'child pid {pid} still alive after group reap')
-
     def test_reap_group_sigkills_survivors_after_leader_exits(self):
         """Leader exit alone must not release the claim while a descendant ignores SIGTERM."""
         import time

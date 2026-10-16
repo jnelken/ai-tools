@@ -142,45 +142,30 @@ Step 0 uses to tell a finished run from a killed one.
 
 ### Follow-ups (deterministic report-only — DEV-232 Phase B slice 2)
 
-[`followup.py`](advance-roadmap/followup.py) inspects what a finished run's own records prove went
-wrong and **reports** findings. This slice is **deterministic**: no model calls. It does **not**
-repair, launch builders, open PRs, merge, install, or read/write Linear — the model analyst and
-repair lifecycle arrive together in slice 3. It is not the code-health retrospective (Step 7c).
+[`followup.py`](advance-roadmap/followup.py) reports what a finished run's records prove went wrong
+(deterministic recognition tests in [`lib/followscan.py`](advance-roadmap/lib/followscan.py); no
+model). It does **not** repair, open PRs, merge, install, or write Linear — those arrive in slice 3.
 
 | Stage | Trigger | Corpus |
 | --- | --- | --- |
-| **project-cleanup** | an item ends `shipped` / `shipped-deploy-failed`, its builder and reviewers have exited, and the repo is quiescent (no live in-flight pid, every `repo-locks/<repo>*.lock` free) | its run dir: worker result, `reviews.jsonl`, the `FIXME/TODO(advance-roadmap review)` markers its merge added, its deploy |
-| **tooling-hardening** | once per batch / lone run chain / conductor session, after every child run has a `runs.jsonl` row (or a conductor `worker-result.json`) and every cleanup it started has finished | those runs' rows, orchestrator results, review logs, worker output, run logs, saved verdicts, follow-up blockers |
+| **project-cleanup** | item `shipped` / `shipped-deploy-failed`, repo quiescent | run dir + review markers in the repo |
+| **tooling-hardening** | batch / lone run / conductor session, after every child + cleanup finishes | those runs' rows, orch results, review logs, worker output, verdicts, follow-up blockers |
 
-An item that did not ship (`blocked-branch-left`, `failed`, `incomplete`, `quota-paused`) is
-recoverable work for the next run, never a cleanup trigger. Findings come only from recognition
-tests in [`lib/followscan.py`](advance-roadmap/lib/followscan.py) (each cites a file and a
-**verbatim** quote from that file as stored — never a re-serialized `json.dumps`; deliberate
-non-findings are recorded too). Every stage status transition runs under the stage claim
-(acquire → reload → eligibility → transition → save → release).
+Non-shipped outcomes are never cleanup triggers. Scans are pure reads of the original files
+(stamp-scoped validation for `runs.jsonl`). Tooling waits indefinitely; `status` shows age + reason.
 
-**Hooks.** `daily_batch.py` queues a cleanup when an item ships, starts that repo's cleanup drain
-once none of its threads is still active (it takes a lane slot), and after the last thread queues
-and drains the batch's tooling pass. Outcomes land in `batch.json` (`followups`, `followups_line`)
-and the webhook summary. A lone `run.sh` queues per chain link and drains detached when its chain
-stops — from its EXIT trap, so a later link that exits early still finishes the chain; only the
-chain's own re-exec skips it. The conductor runs the same commands by hand
-([conductor SKILL.md](../skills/conductor/SKILL.md)). Each hook is idempotent (one stage dir per
-stamp / origin), each stage is claimed with a kernel lock, and a stage a killed drain left
-`running` resumes next (never beside a live process holding its claim). Tooling waits for live
-cleanups; age bypass only skips confirmed-abandoned ones.
+**Hooks.** `daily_batch.py` queues cleanup on ship, drains per repo once its threads stop, then
+queues/drains the batch tooling pass (isolated: raise/hang/kill cannot change batch outcomes).
+`run.sh` EXIT trap does the same for a lone chain. Conductor: see its SKILL.md. Idempotent hooks,
+kernel stage claims, interrupted `running` stages resume. `ADVANCE_ROADMAP_FOLLOWUPS=0` disables.
 
 ```sh
 F=~/.claude/automations/advance-roadmap/followup.py
-python3 $F status [--origin batch-2026-10-14] [--json]   # reported / blocked
-python3 $F scan --stage tooling --origin dry --stamp <stamp> ...   # dry run: findings only
-python3 $F drain [--repo R] [--wait-s 600]                # analyze+report what is ready
+python3 $F status [--origin batch-2026-10-14] [--json]
+python3 $F drain [--repo R] [--wait-s 600]
 ```
 
-State lives in `~/.claude/automations/advance-roadmap/followups/<stage key>/state.json`
-(findings with stable ids and status). `ADVANCE_ROADMAP_FOLLOWUPS=0` turns the hooks off. Tests:
-`tests/test_followup.py` (stubbed usage; the tooling dry run replays the Oct 13 evidence in
-`tests/fixtures/oct13`).
+Tests: `tests/test_followup.py` (Oct 13 replay in `tests/fixtures/oct13`).
 
 ### Run record and failure alert
 
