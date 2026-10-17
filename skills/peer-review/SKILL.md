@@ -157,15 +157,22 @@ elif [ "$LAST_P1" = "0" ]; then
 else
   EFFORT=high   # a P1 last round, or no record of one, so don't step down yet
 fi
+
+# Metrics ledger inputs. Part of this block so no reviewer path (Codex, Claude,
+# inline or self-run fallbacks) can skip them: a missing start stamp leaves the
+# round without a duration. Keep the first start stamp if a throttled retry
+# re-dispatches the same round.
+echo "$EFFORT" > "$GIT_DIR/peer-review-requested-effort"
+[ -f "$GIT_DIR/peer-review-round-start" ] || date +%s > "$GIT_DIR/peer-review-round-start"
 ```
 
 `unknown` (no `$LAST_P1_FILE` yet, e.g. a worktree with rounds from before this
 signal existed) deliberately keeps the round at high — absence of a record is
 not evidence of a clean round.
 
-Pass the same `$EFFORT` to every reviewer agent this round.
+Pass the same `$EFFORT` to every reviewer agent this round. The block above also records it as the *requested* effort: a Claude reviewer treats effort as advisory and reports `default` as its effective effort, so the ledger keeps both (`requested_effort` vs `effort`) and a medium-vs-high comparison can group on what was asked for.
 
-Stamp the round's start for the metrics ledger, keeping the first stamp if a throttled retry re-dispatches the same round: `[ -f "$GIT_DIR/peer-review-round-start" ] || date +%s > "$GIT_DIR/peer-review-round-start"`.
+Run the whole block above, including its last two lines (requested effort and round-start stamp), before dispatching. If you run a review inline or without the Agent tool, you still run this block.
 
 **First round on a branch: build a focus prompt before dispatching the reviewer.** A bare `codex review` reports its top-confidence findings, not an exhaustive sweep — each new diff re-rolls its attention, so on a cross-cutting change it peels one layer per round and a review that should converge in 1–2 rounds takes 5+. Before the first round:
 

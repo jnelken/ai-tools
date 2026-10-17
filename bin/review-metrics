@@ -136,6 +136,13 @@ def cmd_round(a):
     start = int(start) if start.isdigit() else None
     if os.path.exists(start_file):
         os.remove(start_file)
+    req_file = os.path.join(gd, "peer-review-requested-effort")
+    requested_effort = read_file(req_file).strip() or None
+    if os.path.exists(req_file):
+        os.remove(req_file)
+    if start is None:
+        print("review-metrics round: no round-start stamp; duration_s will be null "
+              "(run the step-2 effort block, which stamps it)", file=sys.stderr)
     rnd = read_file(os.path.join(gd, "peer-review-rounds"), "0")
     rows = [l.split("\t") for l in read_file(os.path.join(gd, "peer-review-models.tsv")).splitlines() if l]
     last = rows[-1] if rows else []
@@ -151,6 +158,7 @@ def cmd_round(a):
         "duration_s": (now - start) if start else None,
         "reviewer_model": last[1] if len(last) > 1 else None,
         "effort": last[2] if len(last) > 2 else None,
+        "requested_effort": requested_effort,
         "reviewee_model": last[3] if len(last) > 3 else None,
         "lenses": len(lens_file.splitlines()) if lens_file else 1,
         "p1": a.p1, "p2": a.p2, "p3": a.p3,
