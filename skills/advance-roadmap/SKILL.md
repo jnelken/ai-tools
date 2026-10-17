@@ -32,11 +32,14 @@ passes. That's the only output Superset's Production Run leaderboard credits —
 and its plan kept for the next run. Merged workspaces are deleted by the next run, once Superset
 has recorded the merge (`lib/workspaces.py`). Why and how: [`../../docs/plans/production-run.md`](../../docs/plans/production-run.md).
 
-**Every item is reviewed by a second model before it merges.** The worker calls `review.sh`, which
-has a different provider review the branch diff read-only; the worker fixes findings and re-reviews,
-up to 3 rounds. Findings still open after round 3 merge anyway, marked in the code as
-`FIXME(advance-roadmap review)` (bugs) or `TODO(advance-roadmap review)` (lesser) and listed in the
-summary. `runs.jsonl` records the rounds and flags a ship with no logged review.
+**Every item gets a Cursor review cycle; once that cycle is clean, Codex gets one final pass.**
+Cursor reviews each round read-only, including its own work. Cursor handles findings from either
+reviewer; Codex is never repeated after feedback. If findings remain after 3 Cursor rounds, mark
+them in the code as `FIXME(advance-roadmap review)` (bugs) or
+`TODO(advance-roadmap review)` (lesser) and list them in the summary. If either required reviewer is
+unavailable, stop before merging. Codex runs only after the initial Cursor cycle is clean. If Codex
+finds issues, Cursor handles them and gets up to 3 follow-up rounds. `runs.jsonl` records the review
+phases and flags an unreviewed ship.
 
 **Nothing to ship? Clean something up.** When a repo has no dispatchable item, its first thread runs
 one bounded, behavior-preserving refactor (`work_kind: code_health`) — an open `code-health` ticket
@@ -74,7 +77,9 @@ windows are the retired scheduler; its helpers are still imported.) The batch ru
 builds, the reviewer is never Claude first, and the scheduling around them is plain shell and
 Python. Claude is only ever a fallback, so the job keeps shipping when Jake's Claude usage is spent.
 Anything added here (a scheduler, a slicer, the plan approver) must keep that true: the approver is
-Codex Sol first, Claude Opus only as the fallback.
+Codex Sol first, Claude Opus only as the fallback. Code review uses Cursor rounds, then one Codex
+final pass by default; the selectable `cross-provider` review strategy keeps the earlier Claude
+fallbacks.
 
 **Keep going while there's time (lone runs).** A `run.sh` outside a batch — a manual run — that
 ships a feature cleanly (`shipped`, deploy green) starts another run — fresh orchestrator pass,
@@ -98,7 +103,7 @@ only (see `SAFETY.md`) — from [[unblock-roadmap]] (the only dirty-tree excepti
 | **Orchestrator** | Codex **Sol** high → Claude Opus high | **No** | [`../conductor/ORCHESTRATOR.md`](../conductor/ORCHESTRATOR.md) |
 | **Worker** | Cursor Auto → Codex Sol → Claude Opus | **Yes** | [`WORKER.md`](WORKER.md) |
 | **Plan approver** | Codex **Sol** high → Claude Opus high | **No** | [`PLAN_APPROVAL.md`](PLAN_APPROVAL.md) |
-| **Reviewer** | a provider other than the worker's (Cursor ↔ Codex; Claude → Codex) | **No** | [`WORKER.md`](WORKER.md) Step 5b |
+| **Reviewer** | Selected strategy: Cursor rounds, then one Codex final pass by default | **No** | [`WORKER.md`](WORKER.md) Step 5b |
 | **Safety** | — | binds both | [`SAFETY.md`](SAFETY.md) |
 
 `run.sh` owns routing and `providers-usage.json` (`lib/usage.py`):
@@ -147,5 +152,5 @@ For human-driven work on an item you name, call `/conductor` directly.
 1. [`SAFETY.md`](SAFETY.md)
 2. [`../conductor/ORCHESTRATOR.md`](../conductor/ORCHESTRATOR.md) — Steps 0–2d + JSON protocol (lives in the [[conductor]] skill)
 3. [`PLAN_APPROVAL.md`](PLAN_APPROVAL.md) — only if you are the plan approver
-4. [`WORKER.md`](WORKER.md) — Steps 3–8 (including Step 5b's cross-model review, Step 7b's deploy watch and Step 7c's retrospective) + worker result fence
+4. [`WORKER.md`](WORKER.md) — Steps 3–8 (including Step 5b's Cursor/Codex review cycle, Step 7b's deploy watch and Step 7c's retrospective) + worker result fence
 5. [`CODE_HEALTH.md`](CODE_HEALTH.md) — the code-health rubric, retrospective, and refactor pass

@@ -229,6 +229,7 @@ def cmd_append(a):
         "linear_id": w.get("linear_id") or o.get("linear_id"),
         "review_rounds": len(reviews),
         "reviewer": reviews[-1].get("reviewer") if reviews else None,
+        "review_strategy": reviews[-1].get("strategy") if reviews else None,
         "review_verdict": reviews[-1].get("verdict") if reviews else None,
         "review_sessions": [r["session_id"] for r in reviews if r.get("session_id")],
         "review_unresolved": (w.get("review") or {}).get("unresolved"),

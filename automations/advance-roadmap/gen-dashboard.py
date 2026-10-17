@@ -309,6 +309,7 @@ def parse_runs(ledger, records=None):
             review = ""
             if rec.get("reviewer") or rec.get("review_rounds"):
                 review = " · ".join(str(x) for x in (
+                    rec.get("review_strategy"),
                     rec.get("reviewer"), rec.get("review_verdict"),
                     f'{rec.get("review_rounds")} round(s)' if rec.get("review_rounds") else None) if x)
             fields = {k: v for k, v in (

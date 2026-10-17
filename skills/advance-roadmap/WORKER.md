@@ -24,15 +24,13 @@ The prompt names a request JSON file. Modes:
   create a second goal. When `directive_ticket` is set, do **Step 2c first** — it clears the dirty
   tree that would otherwise block Step 3. If `worker_brief` names a recovered-deploy ticket to
   close out, do that alongside your own item's Step 6/7 bookkeeping (comment, `Done`, clear
-  `Paused`) — it's a different ticket than the one you're implementing. Run Step 2e for every
-  entry in `closeouts[]` too.
+  `Paused`) — it's a different ticket than the one you're implementing.
 - **code-health** — an implement/resume request whose orchestrator result says
   `"work_kind": "code_health"`. Read [`CODE_HEALTH.md`](CODE_HEALTH.md) first; its *code-health
   pass* section amends Steps 3–8 (baseline first, caps, stricter verification, commit trailer, no
   roadmap edits). The product must behave exactly as before.
 - **bookkeeping** — full orchestrator result with `blocked_no_item` / `nothing_qualified`
-  (request field `orchestrator`). Run Step 2b once per entry in `blockers[]`, Step 2e once per
-  entry in `closeouts[]`, perform `archives`,
+  (request field `orchestrator`). Run Step 2b once per entry in `blockers[]`, perform `archives`,
   close out any recovered-deploy ticket `worker_brief` names (comment, `Done`, clear `Paused` —
   see the conductor skill's `ORCHESTRATOR.md`, *A repo left with a red deploy*), write Step 8; do not start a feature
   branch unless an archive needs the Step 7 flow.
@@ -55,7 +53,7 @@ print the same object in a fence:
   "linear_id": "DEV-35",
   "limit_text": null,
   "deploy": {"status": "success", "url": "https://mailcruxh-abc123.vercel.app", "attempts": 0},
-  "review": {"reviewer": "codex", "rounds": 1, "unresolved": 0},
+  "review": {"reviewer": "codex", "rounds": 2, "unresolved": 0},
   "work_kind": "feature",
   "summary": "…",
   "slack_summary": "…"
@@ -74,8 +72,7 @@ rewrite on master; Vercel deploy succeeded. DEV-87 Done."
 
 `outcome`: `shipped` | `shipped-deploy-failed` | `blocked-branch-left` | `failed` | `limit_hit` |
 `archive-only` | `bookkeeping` (bookkeeping mode only — `run.sh` then records the orchestrator's
-`outcome_token`). `run.sh` records `limit_hit` as `quota-paused`, which pauses the lane without
-counting toward the error alert. `shipped` means the PR merged **and** the deploy is green (or there is no deploy);
+`outcome_token`). `shipped` means the PR merged **and** the deploy is green (or there is no deploy);
 `shipped-deploy-failed` means it merged but Step 7b's cap was hit with production still red.
 
 ---
@@ -190,24 +187,6 @@ fix cap.
    clean or the deploy's live check came back green, so the marker is stale. `Needs Input`
    never needs this from you — `/unblock-roadmap` is what moves it off, per its own design.
 
-## Step 2e — Close out a `Needs Input` ticket that already landed
-
-Once per entry in `closeouts[]` (`repo`, `linear_id`, `evidence`). The orchestrator found that
-the ticket's work already exists; you are the write side, and you re-check before you write.
-
-1. `linear issue view DEV-N`. If it's no longer `Needs Input`, skip it: Jake or another run
-   already moved it, and that state wins.
-2. Re-confirm the evidence against the live repo — the commit is on the default branch, the named
-   paths exist. If any part no longer holds, skip it and say so in your summary. Never widen the
-   evidence yourself to make a close-out stick.
-3. Post one comment (`linear issue comment add DEV-N --body-file <f>`) that starts with
-   `<!-- advance-roadmap:closeout -->`, says it's being closed as already shipped, and lists the
-   evidence: commits, paths, checkbox count. Note any gap between what shipped and the ticket's
-   original scope, so Jake can reopen it with one read if the call was wrong.
-4. `linear issue update DEV-N --state Done`.
-
-This is bookkeeping: no branch, no commit, and it doesn't count as the run's item.
-
 ## Threads — when other workers are in this repo
 
 If your `worker_brief` ends with a **Plan approval** section, the plan approver
@@ -282,9 +261,10 @@ merge, and report exactly what failed with the error output. If what stopped you
 rather than a bug — the fix depends on a decision that's the user's to make — write it up per
 Step 2b and name the branch in the ticket comment so the question and work in flight stay linked.
 
-## Step 5b — Cross-model review (up to 3 rounds)
+## Step 5b — Cursor review cycle, then one Codex pass
 
-Before anything merges, a model from a **different provider** reviews the branch. Run the review
+Before anything merges, run the selected review strategy against the branch diff. Under the default
+strategy, Cursor reviews in up to 3 rounds, including when Cursor wrote the change. Run the review
 command from your prompt (it names your provider and the log path) from the repo, with the round
 number:
 
@@ -292,31 +272,50 @@ number:
 ~/.claude/automations/advance-roadmap/review.sh --repo <repo> --worker <you> --round 1 --log <log>
 ```
 
-It picks the reviewer (Cursor's work → Codex, Codex's → Cursor, Claude's → Codex, falling back to
-the remaining provider on a limit), reviews `origin/main...HEAD` read-only, prints findings, and
-ends with a `VERDICT:` line. Commit your work before calling it: it reviews commits, not the
-working tree.
+The default strategy is `cursor-then-codex`. To select another strategy for a call, add
+`--strategy cross-provider`; the same choice can be set for scheduled runs with
+`ADVANCE_ROADMAP_REVIEW_STRATEGY` in the launch agent's environment. The named strategies are:
 
-- **`VERDICT: clean`** → go to Step 6.
-- **`VERDICT: findings`** (or `unparsed` — read the text as findings) → take each finding on its
-  merits. Fix the real ones, re-run Step 5's verification, commit (`fix: address review round N`),
-  and call the review again with the next round number. A finding you judge wrong is dismissed,
-  not fixed — note it and why in your summary; it doesn't need a code marker.
-- **After round 3, still findings** → **merge anyway**, with every unresolved finding marked in
-  the code where it applies, in the file's comment syntax:
+- **`cursor-then-codex`** — Cursor reviews each round, then Codex reviews once after Cursor is
+  clean. This is the default.
+- **`cross-provider`** — preserve the earlier policy: Cursor work is reviewed by Codex (then Claude
+  on limit), Codex work by Cursor (then Claude), and Claude work by Codex (then Cursor).
+
+Each call reviews `origin/main...HEAD` read-only. In `cursor-then-codex`, once a Cursor round is
+clean, that same call runs one final Codex review. The log records each provider, phase, and
+strategy. In `cursor-then-codex`, there is no provider fallback: if a required reviewer is missing
+or limited, stop before merging and report the blocker. Commit your work before calling it: it
+reviews commits, not the working tree.
+
+- **`VERDICT: clean`** from the Codex pass or a post-Codex Cursor follow-up → go to Step 6.
+- **`VERDICT: findings`** (or `unparsed` — read the text as findings) → have Cursor assess and
+  address the real findings, regardless of which provider did the initial implementation. Re-run
+  Step 5's verification, commit (`fix: address review round N`), then call the review command with
+  the next round number. After the one Codex pass, later calls run Cursor only; Codex is never
+  repeated. If you are not Cursor, dispatch the fixes to Cursor with
+  `~/.local/bin/agent -p --force --trust --model auto --workspace <repo> "<findings and context>"`
+  and inspect its diff before committing. A finding Cursor judges wrong is dismissed, not fixed —
+  note it and why in your summary.
+- **After 3 Cursor rounds before the Codex pass, still findings** → **merge anyway** without the
+  Codex pass, with every unresolved finding marked in the code where it applies, in the file's
+  comment syntax:
   - `FIXME(advance-roadmap review): <finding> — <reviewer>, <date>` for a bug or correctness risk;
   - `TODO(advance-roadmap review): <finding> — <reviewer>, <date>` for anything lesser (a missing
     test, an edge case worth handling).
 
   Commit the markers on their own (`chore: mark unresolved review findings`), list each one in the
-  final summary, and carry on to Step 6. Don't call the review a fourth time.
-- **`VERDICT: unavailable`** (every reviewer over its usage gate, limited or missing) → merge without review and say so in the
-  summary. The run record flags it.
+  final summary, and carry on to Step 6. Don't call a fourth Cursor round in that phase.
+- **`VERDICT: unavailable`** → stop before merge. Report which required reviewer was unavailable;
+  do not substitute another provider or merge unreviewed.
 
-Only the three rounds count toward the cap — a rebase-and-reverify in Step 7 doesn't trigger a new
-review unless the rebase changed your code. Bookkeeping-only runs (archives, no code) skip this step.
+The Codex pass is run once, immediately after Cursor first returns clean. If its findings require
+changes, use Cursor for those changes and allow up to 3 post-Codex Cursor follow-up rounds, without
+repeating Codex. If findings remain after those rounds, mark and summarize them as above. A
+rebase-and-reverify in Step 7 doesn't trigger a new review unless the rebase changed your code.
+Bookkeeping-only runs (archives, no code) skip this step.
 
-Record it in the result JSON as `"review": {"reviewer": "codex", "rounds": 2, "unresolved": 0}`.
+Record the review result in JSON; a clean first Cursor round followed by a clean Codex pass is
+`"review": {"reviewer": "codex", "rounds": 2, "unresolved": 0}`.
 
 ## Step 6 — Update the roadmap (and friends)
 
