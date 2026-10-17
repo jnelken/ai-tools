@@ -11,7 +11,7 @@ The last mile of a PR: review it until it's quiet, confirm CI is green, announce
 
 ```
 /loop /peer-review  →  resolve base conflicts  →  gh pr checks --watch  →  base is the default branch?
-                                                ├─ yes → Slack #pr-review → badge → gh pr ready
+                                                ├─ yes → Slack #pr-review → badge → gh pr ready → offer screenshot to #product-updates
                                                 └─ no  → gh pr merge --merge into the trunk → reap the sub-PR's sswt
 ```
 
@@ -240,6 +240,24 @@ gh pr ready <PR_NUMBER> --repo <OWNER/REPO>
 
 Only if it is currently a draft. Together with the badge this gives reviewers two independent signals that the PR has been shared and wants eyes.
 
+### 6.5 Offer a product update
+
+Only for a PR whose base is the default branch, after step 6 — a sub-PR merged into a trunk (step 3.6) never reaches this step. Skip it when the PR URL is already in `~/.claude/state/product-updates-posted.jsonl`, which records `posted` **and** `declined` lines so a re-run never re-asks.
+
+This is the one step that asks. Steps 4-6 are covered by the standing authorization in the global CLAUDE.md; a post to `#product-updates` (ID `C0C9DKM77HA`) is a user-facing announcement and is not, so Jake decides per PR whether the screenshot is worth announcing.
+
+1. **Find and download the screenshots.** `scripts/fetch-pr-screenshots.sh <owner/repo> <pr> "$(mktemp -d)"` prints one local image path per line (at most 4, de-duplicated, verified as real images under 10 MB). No output means the PR has no screenshot: report `n/a (no screenshot)` and stop without asking.
+2. **Show them, then ask once.** `Read` each image so Jake sees it, then `AskUserQuestion`: *Post this to #product-updates?* with **Post**, **Skip**, and Other for a caption of their own. If no human can answer (unattended run), treat it as no answer: report `not offered (unattended)`, record nothing, so a later interactive run still asks.
+3. **Caption.** Match the channel's existing posts: one plain sentence a customer would understand, naming the visible surface, then the PR as a link, e.g. `You can now continue someone else's folio thread that was shared with you (<PR_URL|#1618>)`. Draft it from the PR's `## Summary`; no CON-IDs, no file or function names, no `[ui]`/`[api]` label. Write it to a file (titles carry backticks and `$`).
+4. **Post.** `scripts/slack-upload-images.sh C0C9DKM77HA <caption-file> <image>...` — all images in one message, as the real user through the Keychain `xoxp` token, which needs the `files:write` user scope (`missing_scope` means it was lost). It exits nonzero with Slack's error; report it as `failed (<error>)` and do not record the PR, and never fail the run over it.
+5. **Record**, one `>>` line each, `posted` on success and `declined` on Skip:
+
+```json
+{"url": "...", "repo": "...", "pr": 0, "action": "posted", "postedAt": "2026-01-01T00:00:00Z"}
+```
+
+Never run `slack-upload-images.sh` to "test" it against a real channel — it posts for real. Point it at Jake's own DM channel instead.
+
 ### 7. Report
 
 Record the run in the metrics ledger before reporting (and before step 3.7's reap, which kills the terminal): `~/.ai-tools/bin/review-metrics run --outcome posted|merged|stopped|skipped [--gate review|ci|conflicts|merge]`. Use `stopped` with the gate that fired when the run halted early, `skipped` when the dedup check skipped the Slack post. It reads the phase stamps and round count from the worktree, so run it from there. `~/.ai-tools/bin/review-metrics summary` aggregates rounds, durations and gate stops.
@@ -252,6 +270,7 @@ Concentro-Inc/api#1271
 - CI: 4 checks, all pass
 - Slack: posted (or: skipped, already in dedup state)
 - Badge: appended    Draft: cleared
+- Product update: posted (or: declined, n/a (no screenshot), not offered (unattended), failed (<why>))
 ```
 
 For a sub-PR (step 3.5 classified it internal-only), report the trunk merge in place of the announcement — never omit the announcement steps silently:
@@ -262,7 +281,7 @@ Concentro-Inc/woodrow#1555
 - CI: 1 check (label), pass — unit-tests/e2e-tests don't run against a non-main base
 - Base: feature/vde-airtable-parity (not the default branch) — sub-PR, not announced
 - Merged into feature/vde-airtable-parity (merge commit abc1234); trunk PR #1500 now carries it
-- Slack / Badge: skipped (step 3.5 gate)
+- Slack / Badge / Product update: skipped (step 3.5 gate)
 - Reap: sswt + local branch deleted (or: skipped — <which check>)
 ```
 
@@ -291,3 +310,5 @@ Because it self-starts, it must also self-report: state plainly what it did to e
 Posting to Slack is outward-facing, and outward-facing actions normally warrant a confirmation. The standing instruction in the global CLAUDE.md **is** that authorization — it is durable and given in advance, which is exactly what removes the need to ask each time.
 
 The design stays safe because the gates, not the user's attention, are what hold a PR back: an unconverged review, a failing check, a missing PR, or a non-default base branch all stop the run before anything is announced. A PR reads as "not ready" until this skill has actually run, which is why [[create-pr]] and [[refresh-pr]] open PRs as drafts in the first place.
+
+The authorization covers the `#pr-review` post, the badge, the undraft and the trunk merge — nothing else. The `#product-updates` screenshot post (step 6.5) is a separate, user-facing announcement, so it is asked about once, after everything above is done.
