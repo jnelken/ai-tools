@@ -1,5 +1,7 @@
 # Repo hygiene checks + per-session handoff docs
 
+> **Status:** Implemented before 2026-10-18; archived by advance-roadmap. Evidence: hooks/personal-repo-hygiene-check.sh, hooks/session-doc-start.sh, hooks/session-doc-stop.sh, hooks/session-doc-end.sh, and their sections in hooks/README.md.
+
 > **Suggested execution:** Sonnet 4.6 with medium reasoning — mostly mechanical bash/jq hook scripting against a well-specified design below, no algorithmic complexity. Step up to Opus 4.7 only if the real Claude Code hook JSON schema (field names for `session_id`, `hook_event_name`, `cwd`) turns out to differ from what's assumed here and needs live experimentation to pin down; step down to Haiku 4.5 for nothing here — the scripts are short but the correctness bar (don't corrupt `~/.claude/settings.json`, don't leak state across sessions) warrants Sonnet throughout.
 
 ## Context
