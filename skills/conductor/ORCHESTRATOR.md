@@ -356,11 +356,11 @@ For each direct child of `$CODE_DIR` that is a git repo, in that order:
    are not roadmap items and rot differently, so gate them harder:
 
    - **Verify the plan is actually unbuilt before picking it.** Nothing ever marks a plan doc
-     done. `ai-tools/docs/plans/repo-hygiene-and-session-docs.md` is fully implemented —
-     `hooks/personal-repo-hygiene-check.sh` and `hooks/session-doc-*.sh` all exist and run — and
-     the doc still sits there looking like pending work. Grep the repo for the files, hooks or
-     symbols the plan names. **This check is mandatory**, and it is the single most likely way
-     this fallback wastes a run.
+     done. `ai-tools/docs/plans/repo-hygiene-and-session-docs.md` was fully implemented —
+     `hooks/personal-repo-hygiene-check.sh` and `hooks/session-doc-*.sh` all exist and run — yet
+     sat as pending work until archived to `docs/plans/archive/`. Grep the repo for the files,
+     hooks or symbols the plan names. **This check is mandatory**, and it is the single most
+     likely way this fallback wastes a run.
    - **A plan you find already implemented gets archived on the spot — don't ask.** Jake doesn't
      do this bookkeeping himself, so an unarchived finished plan is the expected state, not a
      signal. Archive it per Step 6 and keep looking for real work in the same run: archiving is
