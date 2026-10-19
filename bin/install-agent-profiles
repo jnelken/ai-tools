@@ -1,0 +1,38 @@
+#!/usr/bin/env python3
+"""Install profile entry points as maintained-source symlinks, preserving replaced files."""
+from pathlib import Path
+from datetime import datetime, timezone
+import argparse
+import os
+import subprocess
+import sys
+
+def install(root, home, dry_run=False):
+    pairs=[(root/'instructions/bootstrap/CLAUDE.md',home/'.claude/CLAUDE.md'),
+           (root/'instructions/bootstrap/AGENTS.md',home/'.codex/AGENTS.md'),
+           (root/'bin/agent-profile',home/'.local/bin/agent-profile'),
+           (root/'bin/agent-run',home/'.local/bin/agent-run')]
+    stamp=datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%fZ')
+    for source,dest in pairs:
+        if not source.exists(): raise FileNotFoundError(source)
+        if dest.is_symlink() and dest.resolve()==source.resolve(): continue
+        print(f'{"Would link" if dry_run else "Link"}: {dest} -> {source}')
+        if dry_run: continue
+        dest.parent.mkdir(parents=True,exist_ok=True)
+        if dest.exists() or dest.is_symlink(): dest.rename(dest.with_name(dest.name+'.before-profiles-'+stamp))
+        dest.symlink_to(source)
+        if not dest.exists(): raise RuntimeError('broken installed link: '+str(dest))
+    # Retire only the known installer-owned parent CLAUDE.md; preserve arbitrary local files.
+    sys.path.insert(0,str(root/'lib'))
+    from personal_code_dir import code_dir
+    personal=code_dir()
+    if personal:
+        parent=Path(personal)/'CLAUDE.md'
+        if parent.is_symlink() and parent.resolve().name=='code-CLAUDE.md' and parent.resolve().parent.name=='claude':
+            print('Retire installer-managed parent guidance: '+str(parent))
+            if not dry_run: parent.rename(parent.with_name(parent.name+'.before-profiles-'+stamp))
+
+if __name__=='__main__':
+    p=argparse.ArgumentParser(description=__doc__);p.add_argument('--dry-run',action='store_true');a=p.parse_args()
+    # Source selection follows ai-tools/install.sh, including its explicit --dev test mode.
+    install(Path(__file__).resolve().parents[1],Path.home(),a.dry_run)

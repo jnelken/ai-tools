@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+set -euo pipefail
+root="${AI_TOOLS_HOME:-$HOME/.ai-tools}"
+exec python3 "$root/bin/agent-profile" run "$@"

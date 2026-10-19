@@ -746,6 +746,7 @@ run_section "── hooks ──" section_hooks
 run_section "── automations ──" section_automations
 run_section "── statusline ──" section_statusline
 run_section "── personal context ──" section_personal
+python3 "$SRC_ROOT/bin/install-agent-profiles"
 
 echo ""
 if [ "$DEV_MODE" -eq 0 ] && [ -d "$AI_TOOLS_HOME/.git" ]; then

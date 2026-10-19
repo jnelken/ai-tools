@@ -207,3 +207,7 @@ cd ~/code/ai-tools
 ## Sharing with coworkers
 
 These are personal tools and may reference my specific workflows/repos. The one-liner installs *my* config into your `~/.claude` and keeps tracking my `origin/main` automatically via the `ai-tools-sync` hook — running it as-is means my future edits land in your config too. If that's not what you want, fork the repo and point `AI_TOOLS_REPO` at your fork before bootstrapping, or just copy the individual skills/commands you find useful and adapt them locally.
+
+## Instruction profiles
+
+[Profile selection, runtime isolation, installation and rollback](docs/instruction-profiles.md). Maintained recipes live in `instructions/`; `agent-profile` explains selection and `agent-run` composes CLI launches.
