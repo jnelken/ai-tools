@@ -373,8 +373,16 @@ tree to snapshot against; tell Jake it has to wait for a terminal sweep, and rec
 
 ## Step 2 — Work the list, one repo at a time
 
-Order doesn't matter much; alphabetical is fine. For each repo, before asking anything,
-show Jake enough to decide:
+Order doesn't matter much; alphabetical is fine.
+
+**Always lead with the repo name before any ticket id** — `Mailcrush DEV-40: …`, never bare
+`DEV-40: …`. Jake works across many repos and a ticket number alone doesn't tell him which
+project a question is about. This applies to every place a ticket id appears: each
+`AskUserQuestion` question text, every ticket you present in prose, and every line of the
+Step 3 summary. Use the repo's directory name, capitalized for display (`Tidbyt-api DEV-223`,
+`Minecraft DEV-193`). Linear comments and directive bodies keep their existing format.
+
+For each repo, before asking anything, show Jake enough to decide:
 
 - **Dirty-tree blocker:** the repo name, the full `status --porcelain` output, and
   `git -C <repo> diff --stat` (both tracked and, via `--stat` on a `diff` against an
@@ -383,7 +391,7 @@ show Jake enough to decide:
   tree contains per `project_advance-roadmap-runs.md`), mention it — Jake may not
   remember what he left uncommitted three days ago.
 - **Decisions-needed blocker:** the repo name and each unresolved question line verbatim.
-- **`Needs Input`-ticket blocker:** the ticket id and its newest `<!-- advance-roadmap:blocker -->`
+- **`Needs Input`-ticket blocker:** the repo name and ticket id (`<Repo> DEV-N`) and its newest `<!-- advance-roadmap:blocker -->`
   comment verbatim (Blocker type, Details, Needed from you) — always a decision or
   attended-acceptance question, never a dirty tree, so it never overlaps with the bullet above.
   For a hand-parked ticket (no bot comment, 14+ days stale), the title, its last update date and
@@ -416,7 +424,8 @@ For the dirty tree, two questions:
 
 For a decisions-needed blocker, or a `Needs Input`-ticket blocker, one question per unresolved line
 or comment (batch up to 4 per call when a repo has
-several — they're independent). For the options:
+several — they're independent). Start each question text with the repo and ticket id
+(`Mailcrush DEV-40: …`) so it stands alone. For the options:
 
 - If the line's own text already names two or three concrete alternatives (many do — the
   Step 2b format asks "does X or Y?"), offer those as the options.
@@ -477,7 +486,8 @@ Say up front **which discovery mode ran** — full live sweep, or the partial Li
 fallback (and if the latter, that a terminal sweep is needed for the complete picture).
 
 Then list, per repo: what was recorded (dirty-tree resolution / N answered decisions /
-both), which ticket now carries it, and what was skipped. **Name every ticket you had to
+both), which ticket now carries it, and what was skipped. Write every ticket as
+`<Repo> DEV-N` (`Minecraft DEV-193`). **Name every ticket you had to
 create**, and say which are cleanup-only — those are the ones whose go-ahead deliberately
 stops short of implementing anything.
 
