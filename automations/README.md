@@ -251,10 +251,10 @@ exits 3 when none remain) and the reviewer (`review.sh`). Check one by hand with
 | --- | --- | --- |
 | Claude | `~/.claude/state/claude-usage.json` (statusline) | 5h ≥ 70% or 7d ≥ 80% while that window is unexpired, or an observed limit hit until its reset |
 | Codex | 1. short-lived `codex app-server` → `account/rateLimits/read` (fresh, ~1s) · 2. newest `token_count.rate_limits` in `~/.codex/sessions/**/rollout-*.jsonl` (as fresh as the last Codex turn; never overwrites a newer stored reading) | 5h ≥ 70%, 7d ≥ 80%, or `rateLimitReachedType` set while a window is unexpired |
-| Cursor | `POST api2.cursor.sh/aiserver.v1.DashboardService/GetCurrentPeriodUsage` with the Agent CLI's Keychain token (`cursor-access-token` / `cursor-user`) — the RPC behind the CLI's own `/usage` | the pool the role draws from ≥ 95%: `autoPercentUsed` when that role's model (`ADVANCE_ROADMAP_CURSOR_WORKER_MODEL` / `ADVANCE_ROADMAP_CURSOR_REVIEW_MODEL`) is `auto` (default), `apiPercentUsed` otherwise; clears at `billingCycleEnd` |
+| Cursor | `POST api2.cursor.sh/aiserver.v1.DashboardService/GetCurrentPeriodUsage` with the Agent CLI's Keychain token (`cursor-access-token` / `cursor-user`) — the RPC behind the CLI's own `/usage` | the pool the role draws from ≥ 100%: `autoPercentUsed` when that role's model (`ADVANCE_ROADMAP_CURSOR_WORKER_MODEL` / `ADVANCE_ROADMAP_CURSOR_REVIEW_MODEL`) is `auto` (default), `apiPercentUsed` otherwise; clears at `billingCycleEnd` |
 
 Thresholds are env-overridable: `ADVANCE_ROADMAP_MAX_FIVE_HOUR_PCT` (70),
-`ADVANCE_ROADMAP_MAX_WEEKLY_PCT` (80) and `ADVANCE_ROADMAP_MAX_CURSOR_PCT` (95).
+`ADVANCE_ROADMAP_MAX_WEEKLY_PCT` (80) and `ADVANCE_ROADMAP_MAX_CURSOR_PCT` (100).
 
 Only the `codex` limit id is read (the separate `base_model_inference` / gpt-reserve pool is
 ignored). A window whose reset time has passed counts as 0% even without a fresh probe.

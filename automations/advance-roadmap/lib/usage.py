@@ -85,8 +85,8 @@ def _pct_env(name: str, default: float) -> float:
 MAX_FIVE_HOUR_PCT = _pct_env("ADVANCE_ROADMAP_MAX_FIVE_HOUR_PCT", 70)
 MAX_SEVEN_DAY_PCT = _pct_env("ADVANCE_ROADMAP_MAX_WEEKLY_PCT", 80)
 # Cursor quotas are monthly and worker.sh fails over within the tick, so gate
-# only when the pool is effectively spent.
-MAX_CURSOR_PCT = _pct_env("ADVANCE_ROADMAP_MAX_CURSOR_PCT", 95)
+# only when the pool is fully spent (Jake, 2026-10-19: use Cursor to 100%).
+MAX_CURSOR_PCT = _pct_env("ADVANCE_ROADMAP_MAX_CURSOR_PCT", 100)
 
 # `gate`'s exit code for "over its gate". Not 1 (a crash) or 2 (bad arguments): callers skip a
 # provider only on this code, so a broken usage.py never silently skips every provider.

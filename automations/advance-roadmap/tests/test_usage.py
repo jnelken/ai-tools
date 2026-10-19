@@ -180,16 +180,16 @@ class RoutingTests(unittest.TestCase):
         self.assertEqual(self.state["providers"]["codex"]["source"], "app_server")
 
     def test_cursor_auto_pool_gates(self):
-        usage.apply_cursor(self.state, probed(usage.parse_cursor_usage(cursor_response(auto=96, api=5)), "dashboard_api"))
+        usage.apply_cursor(self.state, probed(usage.parse_cursor_usage(cursor_response(auto=100, api=5)), "dashboard_api"))
         with mock.patch.dict(os.environ, {"ADVANCE_ROADMAP_CURSOR_WORKER_MODEL": "auto"}):
             self.assertFalse(self.flags()["cursor"]["available_for_worker"])
         self.assertEqual(usage.pick_worker_chain(self.state), ["codex", "claude"])
 
     def test_cursor_pinned_model_gates_on_api_pool(self):
-        usage.apply_cursor(self.state, probed(usage.parse_cursor_usage(cursor_response(auto=96, api=5)), "dashboard_api"))
+        usage.apply_cursor(self.state, probed(usage.parse_cursor_usage(cursor_response(auto=100, api=5)), "dashboard_api"))
         with mock.patch.dict(os.environ, {"ADVANCE_ROADMAP_CURSOR_WORKER_MODEL": "claude-sonnet-4-6"}):
             self.assertTrue(self.flags()["cursor"]["available_for_worker"])
-        usage.apply_cursor(self.state, probed(usage.parse_cursor_usage(cursor_response(auto=5, api=97)), "dashboard_api"))
+        usage.apply_cursor(self.state, probed(usage.parse_cursor_usage(cursor_response(auto=5, api=100)), "dashboard_api"))
         with mock.patch.dict(os.environ, {"ADVANCE_ROADMAP_CURSOR_WORKER_MODEL": "claude-sonnet-4-6"}):
             self.assertFalse(self.flags()["cursor"]["available_for_worker"])
 
@@ -217,7 +217,7 @@ class RoutingTests(unittest.TestCase):
 
 
 class GateMatrixTests(unittest.TestCase):
-    """70% five-hour / 80% weekly for Claude and Codex, 95% of the role's Cursor pool — in every role."""
+    """70% five-hour / 80% weekly for Claude and Codex, 100% of the role's Cursor pool — in every role."""
 
     def gate(self, provider, role, prov=None, env=None):
         state = usage.empty_state()
@@ -245,7 +245,7 @@ class GateMatrixTests(unittest.TestCase):
         for role, env_key in (("worker", "ADVANCE_ROADMAP_CURSOR_WORKER_MODEL"),
                               ("reviewer", "ADVANCE_ROADMAP_CURSOR_REVIEW_MODEL")):
             for model, pool in (("auto", "auto_pct"), ("claude-sonnet-4-6", "api_pct")):
-                for pct, available in ((94.9, True), (95, False)):
+                for pct, available in ((99.9, True), (100, False)):
                     with self.subTest(role=role, model=model, pct=pct):
                         inc = {"auto_pct": 0, "api_pct": 0, "reset_epoch": FUTURE, pool: pct}
                         got = self.gate("cursor", role, {"included": inc}, {env_key: model})
@@ -427,7 +427,7 @@ class QuotaRecordTests(unittest.TestCase):
         return state
 
     def test_lists_the_whole_role_even_when_the_lane_tried_one(self):
-        state = self.state(cursor={"included": {"auto_pct": 99, "reset_epoch": FUTURE}})
+        state = self.state(cursor={"included": {"auto_pct": 100, "reset_epoch": FUTURE}})
         rec = usage.quota_record(state, "worker", [{"provider": "claude", "state": "limited", "cause": "usage limit",
                                                     "reset_epoch": FUTURE + 60}], primary="claude")
         self.assertEqual([(p["provider"], p["state"], p["reset_epoch"]) for p in rec["providers"]],
