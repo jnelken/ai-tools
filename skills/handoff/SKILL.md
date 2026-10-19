@@ -1,6 +1,6 @@
 ---
 name: handoff
-description: "Summarize the current session's true state and spawn a continuation Claude agent in a new Superset terminal tab in the right workspace, so work continues on a small accurate context instead of a bloated one. Runs the close-out sweep first — filing follow-ups and writing durable memories — then hands the successor tracked work (ticket IDs, PRs, decisions) rather than a to-do list. Use whenever the user wants to hand a session off, continue in a fresh session/tab, spin up a new session with a summary, says the context is getting long/heavy, wants to save on context, or asks for a successor/handoff session. Bare invocation summarizes and tells the successor to continue; arguments become the successor's mission on top of the summary. `--cloud` targets a claude.ai cloud session instead of a Superset tab (also: \"hand this off to the cloud\", \"continue this in a cloud session\", \"teleport this to the cloud\")."
+description: "Summarize the current session's true state and spawn a continuation Claude agent in a new Superset terminal tab in the right workspace, so work continues on a small accurate context instead of a bloated one. Runs the close-out sweep first — filing follow-ups and writing durable memories — then hands the successor tracked work (ticket IDs, PRs, decisions) rather than a to-do list. Use whenever the user wants to hand a session off, continue in a fresh session/tab, spin up a new session with a summary, says the context is getting long/heavy, wants to save on context, or asks for a successor/handoff session. Bare invocation summarizes and tells the successor to continue; arguments become the successor's mission on top of the summary. `--cloud` targets a claude.ai cloud session instead of a Superset tab (also: \"hand this off to the cloud\", \"continue this in a cloud session\", \"teleport this to the cloud\"). When run *from inside* a cloud session (CLAUDE_CODE_REMOTE=true) there is no Superset and no durable local disk, so it skips the spawn and any IN_PROGRESS.md write and sends the user the full handoff prompt instead, to paste into a new session."
 ---
 
 # Handoff
@@ -13,7 +13,9 @@ A long session's context is mostly *spent* — the exploration, dead ends, and t
 
 The successor inherits *tracked* work: ticket IDs, open PRs, committed changes, and explicit decisions. Everything else — loose questions, findings, ephemeral state — belongs in a memory or a Linear ticket, so the successor reads it rather than re-deriving it.
 
-Two modes, chosen by the arguments:
+**Check the environment first.** If `[ "$CLAUDE_CODE_REMOTE" = "true" ]` (or there's no `superset` CLI and no `SUPERSET_WORKSPACE_ID`), this session is itself a cloud session: follow [Running inside a cloud session](#running-inside-a-cloud-session) below instead of steps 4–5. Nothing written to the VM's disk — `IN_PROGRESS.md`, memories, `~/.claude/handoffs/` — survives the session, so the prompt itself must carry everything.
+
+Modes, chosen by the arguments:
 
 - **Bare (`/handoff`)** — the successor's mission is "continue this work"; its first actions come from the session's own next-steps.
 - **With args (`/handoff <instructions>`)** — the args become the successor's mission, layered on top of the same summary. The summary is built identically either way; only the "First useful actions" framing changes.
@@ -128,6 +130,18 @@ superset terminals read --local --workspace "$SUPERSET_WORKSPACE_ID" --terminal 
 
 The tab prints `Created cloud session: <title>`, the `https://claude.ai/code/session_…` link, and `Resume with: claude --teleport session_…`, then drops back to a shell (the TUI doesn't stay attached). Report the link and the teleport command; the throwaway tab can be closed with `superset terminals close`. Outside Superset (no `SUPERSET_WORKSPACE_ID`), hand the user the `claude --cloud` command to run from a real terminal, not via `!`, and sign off 🛑. (Messaging an *existing* cloud session is non-interactive — `claude -p "<msg>" --cloud <session-id>` — so a follow-up nudge later can be scripted once the session has an ID.)
 
+### Running inside a cloud session
+
+When the environment check above says this session is a cloud VM, three things change:
+
+- **Step 1 (close-out):** run it, but its step 4 does **not** write `.claude/IN_PROGRESS.md` — the file would die with the VM. Collect those human-only items (pending decisions, blocked work, deferred promises with no ticket) and put them in the prompt's "Open decision points" section instead. Linear tickets and pushed branches are still durable; file and push as usual.
+- **Step 2 (memories):** skip the local memory write. Put the learnings and decisions inline in the prompt ("Settled decisions", "Gotchas") — don't point at memory files the successor can't see.
+- **Steps 4–5 (spawn):** skip entirely. No workspace resolution, no `superset` CLI. Push any unpushed commits to the branch first so the successor can see them.
+
+Then **send the user the prompt, ready to paste**: print the complete handoff prompt (step 3's skeleton, with the open items folded in) as the final message in one fenced block, with a line above it saying where to paste it (a new cloud session at claude.ai/code, or `claude` locally in the repo on this branch). If `PushNotification` is available, also send one with a short pointer so the user sees it without watching the session. Never summarize the prompt instead of printing it — the whole point is that the user receives it.
+
+Local-only items (anything needing `~/.superset`, local hooks, `.env`) are called out in the prompt as "needs a local session", same as the `--cloud` variant above.
+
 ### 6. Report and step back
 
 Tell the user: the new tab exists (label + workspace), what it knows, and what close-out filed on the way through.
@@ -148,6 +162,7 @@ Then **stop working the handed-off stream in this session.** Two sessions editin
 - **Spawning into the wrong workspace** because cwd happened to be a root checkout.
 - **Spawning the cloud successor from the Bash tool or telling the user to use `!`.** Both are piped and `--cloud` refuses without a TTY. Spawn it in a Superset terminal tab (a pty) and read the link back; don't fall back to `-p` tricks or the scheduler.
 - **A cloud summary that assumes the machine.** Paths under `~/.superset`, hook state, local DBs — the successor can't see any of it. Say what's unreachable up front, or it burns its first turns discovering it.
+- **Writing `IN_PROGRESS.md` (or a memory, or a handoff file) from inside a cloud session.** The VM's disk is discarded on exit; the user never sees it. Send the prompt to the user instead.
 - **Writing the cloud prompt to the scratchpad.** Session-scoped tmp can vanish before the user runs the command; use `~/.claude/handoffs/`.
 - **Continuing to edit the handed-off worktree from the parent session.** Pick one driver.
 - **Pasting a connection string "just to be helpful."** Scrollback and logs are forever; recipes by reference only.
