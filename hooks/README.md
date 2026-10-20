@@ -50,6 +50,32 @@ Every failure mode — missing deps, `$AI_TOOLS_HOME` not existing or not a git 
 
 Remove the entry from `settings.json`.
 
+## ui-hygiene-check.sh
+
+A **Stop hook** that turns the "any other style cleanup in the same vein?" question into a habit. When a turn did UI styling work, it sends Claude back **once** to run a short, read-only design-consistency pass over what it changed (radius scale, border/shadow/elevation, spacing constants, colour tokens, hover/active/focus parity, light/dark, collapsed/narrow variants, hand-rolled one-offs, stale class assertions) and to **offer, not apply**, a follow-up that unifies whatever it finds, either as a `ridealong` commit on the PR or as a separate PR.
+
+"UI work" means: after the last real user prompt the assistant edited or wrote a `.tsx/.jsx/.css/.scss/.vue/.svelte` file, or any tailwind config, and the edited text contains styling tokens (className/tailwind utilities, CSS vars, `hover:`/`dark:` variants, ...). Logic-only edits, tests, stories and generated files don't trigger it, and subagent (sidechain) edits are ignored. Work delegated to a subagent therefore only counts if the parent edits UI files itself.
+
+It fires at most once per user prompt (marker files under `~/.claude/state/ui-hygiene/`, pruned after 7 days), so the review turn and `status-glyph-check.sh` never loop, and it fails open on any parse problem.
+
+### Per-repo hints
+
+Drop a `.claude/ui-hygiene-hints.md` in a repo (first 2KB is appended to the review prompt), e.g. woodrow's radius scale, the shared card treatment, or "gutters come from `--pane-gap`".
+
+### Env
+
+`UI_HYGIENE_DISABLE=1` turns it off; `UI_HYGIENE_MIN_FILES=N` requires N distinct UI files (default 1); `UI_HYGIENE_STATE_DIR` moves the markers.
+
+### settings.json wiring
+
+Add its own `Stop` group **before** the `status-glyph-check.sh` group (so the review reply still gets its sign-off check). In `~/dotfiles/claude/settings.base.json`:
+
+```json
+{ "hooks": [ { "type": "command", "command": "bash \"$HOME/.claude/hooks/ui-hygiene-check.sh\"" } ] }
+```
+
+Tests: `bash hooks/tests/ui-hygiene-check.test.sh`.
+
 ## status-glyph-check.sh
 
 A **Stop hook** that enforces the response sign-off glyphs defined in the global `CLAUDE.md` ("Response Sign-off Glyphs"): the last non-blank line of every final assistant message must start with 🛑 ⚠️ ⏳ 💡 ✅ ⛏️ or 💬. If it doesn't, it returns `decision: "block"` with the legend, so Claude appends a single status line. ⚠️ and ⛏️ count only in emoji form (followed by U+FE0F); the bare text glyphs are rejected.
