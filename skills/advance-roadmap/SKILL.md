@@ -49,8 +49,10 @@ deduped `code-health` tickets. Those tickets rank below all feature work. Rubric
 refactor caps: [`CODE_HEALTH.md`](CODE_HEALTH.md). A code-health pass never runs beside a feature thread.
 
 **One batch a day: 10:30, `daily_batch.py`.** launchd starts it once; it lists the personal repos and
-plans each one in parallel (at most `ADVANCE_ROADMAP_LANES`, default 5, planners or workers at once).
-No refills, no quota retries, no second batch the same calendar day. (`supervisor.py`'s sprint
+plans each one in parallel, with a hard ceiling of five active agents across planning, approval,
+and implementation (including reviews). These phases run in sequence, so at most five agents are
+active at any moment. Run records accumulate across the whole batch and can contain more than five
+calls. No refills, no quota retries, no second batch the same calendar day. (`supervisor.py`'s sprint
 windows are the retired scheduler; its helpers are still imported.) The batch runs in four phases:
 
 1. **Plan.** One planner per repo (*thread 1*), read-only, picks one item and lists its

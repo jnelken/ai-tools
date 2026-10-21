@@ -42,11 +42,13 @@ PR merge flow. A repo's finished slot never queues another ticket from that repo
 hourly watchdog ticks. macOS may deliver a missed tick after waking; the dated manifest
 prevents a second batch that day. A batch already in progress can finish after 10:30.
 
-`ADVANCE_ROADMAP_LANES=5` caps active planners and workers independently. The controller
-enforces a maximum of **five repos at once**, including command-line/environment overrides;
-use 1–5 to lower concurrency (`0`/unlimited and values over five are rejected). Ready planners
-consume no model resources and free their planning slot, so a queue larger than five
-still reaches the barrier.
+`ADVANCE_ROADMAP_LANES=5` caps the total number of active agents in a batch. Planning, approval,
+and implementation run in sequence, so no more than **five agents at once** can be active across
+those phases, including worker reviews. The controller enforces the cap for command-line and
+environment overrides; use 1–5 to lower concurrency (`0`/unlimited and values over five are
+rejected). Ready planners consume no model resources and free their planning slot, so a queue
+larger than five still reaches the barrier. Run records are cumulative across the batch and can
+contain more than five calls.
 Planning times out after 30 minutes (`ADVANCE_ROADMAP_PLAN_TIMEOUT_S`); an individual
 failed or skipped planner does not block the rest. Worker timeouts remain in `run.sh`.
 

@@ -56,7 +56,7 @@ class SupervisorTest(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
-    def supervise(self, repos, dispatch_s=8, sleep_s=3, lanes=8):
+    def supervise(self, repos, dispatch_s=8, sleep_s=3, lanes=5):
         now = datetime.now()
         # The window string has minute resolution, so compute the cutoff from the same rounding.
         start = (now - timedelta(minutes=1)).replace(second=0, microsecond=0)

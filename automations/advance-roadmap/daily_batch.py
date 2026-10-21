@@ -34,7 +34,7 @@ import usage  # noqa: E402
 ROOT = shared.ROOT
 POLL_S = float(os.environ.get("ADVANCE_ROADMAP_BATCH_POLL_S", "1"))
 PLAN_TIMEOUT_S = float(os.environ.get("ADVANCE_ROADMAP_PLAN_TIMEOUT_S", "1800"))
-MAX_CONCURRENT_REPOS = 5
+MAX_CONCURRENT_AGENTS = 5
 MAX_THREADS_PER_REPO = 3
 DEFAULT_THREADS_PER_REPO = 2
 # Two workers of one repo creating Superset workspaces in the same second race the project import.
@@ -81,8 +81,8 @@ def plan_of(result, item):
 
 class Batch:
     def __init__(self, directory, repos, lanes, threads=1):
-        if not 1 <= lanes <= MAX_CONCURRENT_REPOS:
-            raise ValueError("batch concurrency must be between 1 and 5 lanes")
+        if not 1 <= lanes <= MAX_CONCURRENT_AGENTS:
+            raise ValueError("batch concurrency must be between 1 and 5 agents")
         if not 1 <= threads <= MAX_THREADS_PER_REPO:
             raise ValueError(f"threads per repo must be between 1 and {MAX_THREADS_PER_REPO}")
         self.directory = directory
@@ -468,8 +468,8 @@ def main():
              "needs the plan approver")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
-    if not 1 <= args.lanes <= MAX_CONCURRENT_REPOS:
-        parser.error("--lanes must be between 1 and 5 repos")
+    if not 1 <= args.lanes <= MAX_CONCURRENT_AGENTS:
+        parser.error("--lanes must be between 1 and 5 agents")
     if not 1 <= args.threads <= MAX_THREADS_PER_REPO:
         parser.error(f"--threads must be between 1 and {MAX_THREADS_PER_REPO}")
     marker = Path.home() / "dotfiles/bin/is-personal-machine"

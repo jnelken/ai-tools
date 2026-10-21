@@ -211,7 +211,7 @@ class DailyBatchTest(unittest.TestCase):
                         env['ADVANCE_ROADMAP_LANES'] = str(lanes)
                     p = subprocess.run(cmd, env=env, capture_output=True, text=True, timeout=10)
                     self.assertEqual(p.returncode, 2)
-                    self.assertIn('between 1 and 5 repos', p.stderr)
+                    self.assertIn('between 1 and 5 agents', p.stderr)
         self.assertFalse((self.root / 'batches').exists())
 
     def test_quota_defers_without_implementation_or_retry(self):

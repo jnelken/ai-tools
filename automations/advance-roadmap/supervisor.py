@@ -45,6 +45,7 @@ IDLE_CHECK_MIN = float(os.environ.get("ADVANCE_ROADMAP_IDLE_CHECK_MIN", "15"))
 CUTOFF_MIN = float(os.environ.get("ADVANCE_ROADMAP_DISPATCH_CUTOFF_MIN", "30"))
 QUOTA_PAUSE_MIN = float(os.environ.get("ADVANCE_ROADMAP_QUOTA_PAUSE_MIN", "30"))
 MAX_ERRORS = int(os.environ.get("ADVANCE_ROADMAP_MAX_LANE_ERRORS", "3"))
+MAX_CONCURRENT_LANES = 5
 NEXT_WINDOW_WAIT_MIN = 60  # between windows, stay up when the next one opens this soon
 # Outcomes that mean "nothing for this lane to do" — no new lane until something changes.
 NO_WORK = {"blocked-no-item", "nothing-qualified", "skipped-unchanged", "archive-only"}
@@ -413,10 +414,12 @@ def take_run_lock():
 def main(argv=None):
     global LOG
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--lanes", type=int, default=int(os.environ.get("ADVANCE_ROADMAP_LANES", "8")),
-                   help="most lanes at once (default 8); in practice, as many as there are repos with work")
+    p.add_argument("--lanes", type=int, default=int(os.environ.get("ADVANCE_ROADMAP_LANES", "5")),
+                   help="most lanes at once (default 5; maximum 5)")
     p.add_argument("--dry-run", action="store_true", help="log the first dispatch decision and stop")
     a = p.parse_args(argv)
+    if not 1 <= a.lanes <= MAX_CONCURRENT_LANES:
+        p.error("--lanes must be between 1 and 5")
 
     marker = os.path.expanduser("~/dotfiles/bin/is-personal-machine")
     if os.path.exists(marker) and subprocess.run([marker]).returncode == 1:
