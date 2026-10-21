@@ -156,6 +156,10 @@ If you already have a `hooks.SessionStart` array, append the new entry rather th
 - Posts one Slack message per missed day, from `last+1` through yesterday.
 - Marker advances only after a successful POST, so transient Slack failures resume cleanly on the next session.
 - Skips silently if any dependency (`npx` / `jq` / `curl`) is missing, or if the webhook env var is unset — never blocks a session.
+- **Self-heals a half-installed ccusage.** npx reuses a cache entry that already matches `ccusage@latest`, so a partial install (empty `@ccusage/` native package, error `ccusage native binary is not available for darwin-arm64`) used to fail on every session start with no output — it cost the 2026-10-19 post. The hook now deletes the `ccusage@latest` entry under `$(npm config get cache)/_npx/` and retries once.
+- **Failures are visible, never posted to Slack** (the webhook channel feeds sparky's leaderboard). A failed ccusage run or Slack POST appends to `~/.claude/.ccusage-state/errors.log` (last 200 lines, with the stderr excerpt) and raises one macOS notification per calendar day (`last-notified` holds the date). The marker still advances only on a successful POST, so the next healthy session catches the missed days up.
+
+Tests: `bash hooks/tests/post-yesterdays-ccusage.test.sh` (stubs `npx`/`npm`/`curl`/`osascript` on an isolated `HOME`).
 
 ### Disabling
 

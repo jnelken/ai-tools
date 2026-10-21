@@ -12,6 +12,13 @@
 # YYYY-MM-DD that was successfully posted. Catchup posts every day from
 # last+1 through yesterday, one message per day. The marker advances only
 # after each successful POST, so transient Slack failures resume cleanly.
+#
+# Failures: a failed ccusage run or Slack POST is appended to
+# ~/.claude/.ccusage-state/errors.log and raises one macOS notification per
+# day (nothing goes to Slack — the webhook channel feeds sparky's leaderboard).
+# A half-installed ccusage in the npx cache ("native binary is not available")
+# is evicted and retried once; npx reuses an entry that already matches
+# `@latest`, so without that it fails silently on every session.
 
 set -u  # NOT -e — graceful no-op on missing tools / transient failures
 
@@ -50,7 +57,56 @@ if [ -d "$lock" ]; then
   [ "$lock_age" -gt 7200 ] && rmdir "$lock" 2>/dev/null || true
 fi
 mkdir "$lock" 2>/dev/null || exit 0
-trap 'rmdir "$lock" 2>/dev/null || true' EXIT
+err_file=$(mktemp "${TMPDIR:-/tmp}/ccusage-hook.XXXXXX" 2>/dev/null) || err_file=/dev/null
+trap 'rmdir "$lock" 2>/dev/null || true; [ "$err_file" = /dev/null ] || rm -f "$err_file"' EXIT
+
+# Evict npx cache entries for ccusage@latest. The entry hash is derived from the
+# package spec, so this removes exactly the entry the hook's npx calls reuse.
+evict_ccusage_npx_cache() {
+  local cache entry
+  cache=$(npm config get cache 2>/dev/null) || cache=""
+  [ -n "$cache" ] || cache="$HOME/.npm"
+  for entry in "$cache"/_npx/*/; do
+    grep -q '"ccusage@latest"' "${entry}package.json" 2>/dev/null && rm -rf "$entry"
+  done
+  return 0
+}
+
+# `npx -y ccusage@latest <args>` — stdout is the result, stderr lands in
+# $err_file for the failure report. Retries once after evicting the cache when
+# the native binary is missing (a half-installed cache entry).
+run_ccusage() {
+  local out rc
+  out=$(npx -y ccusage@latest "$@" 2>"$err_file"); rc=$?
+  if [ "$rc" -ne 0 ] && grep -q 'native binary is not available' "$err_file" 2>/dev/null; then
+    echo "[ccusage-hook] ccusage native binary missing; evicting npx cache and retrying" >&2
+    evict_ccusage_npx_cache
+    out=$(npx -y ccusage@latest "$@" 2>"$err_file"); rc=$?
+  fi
+  printf '%s' "$out"
+  return "$rc"
+}
+
+# report_failure <day> <what> — log it, and notify at most once per calendar day
+# so a persistent failure doesn't re-alert on every session start.
+report_failure() {
+  local msg="ccusage hook: $2 for $1" today
+  echo "[ccusage-hook] $msg" >&2
+  {
+    printf '%s %s\n' "$(date '+%F %T')" "$msg"
+    head -c 400 "$err_file" 2>/dev/null | sed 's/^/    /'
+    echo
+  } >> "$state_dir/errors.log" 2>/dev/null
+  tail -n 200 "$state_dir/errors.log" > "$state_dir/errors.log.tmp" 2>/dev/null \
+    && mv "$state_dir/errors.log.tmp" "$state_dir/errors.log" 2>/dev/null
+  today=$(date +%F)
+  if [ "$(cat "$state_dir/last-notified" 2>/dev/null)" != "$today" ]; then
+    printf '%s' "$today" > "$state_dir/last-notified"
+    command -v osascript >/dev/null 2>&1 \
+      && osascript -e "display notification \"$msg\" with title \"ccusage Slack post missed\"" >/dev/null 2>&1
+  fi
+  return 0
+}
 
 # Start = day after last-posted, or yesterday if first run
 if last_posted=$(cat "$last_file" 2>/dev/null) && [ -n "$last_posted" ]; then
@@ -79,14 +135,14 @@ while [[ ! "$current" > "$yesterday" ]]; do
   # emits `modelBreakdowns[]`. The top-level command went multi-agent and only
   # returns `modelsUsed` (a flat array of names), which collapses our table to
   # just the Total row. We make a second call for `codex daily` and merge in jq.
-  claude_json=$(npx -y ccusage@latest claude daily --since "$compact" --until "$compact" --json 2>/dev/null) || {
-    echo "[ccusage-hook] ccusage claude failed for $current" >&2
+  claude_json=$(run_ccusage claude daily --since "$compact" --until "$compact" --json) || {
+    report_failure "$current" "ccusage claude failed"
     break
   }
   # Codex support landed in ccusage 20. On older versions the subcommand exits
   # with "Command not found: codex" — treat that (and any other failure) as an
   # empty result so we degrade to a Claude-only post instead of breaking.
-  codex_json=$(npx -y ccusage@latest codex daily --since "$compact" --until "$compact" --json 2>/dev/null) || codex_json='{}'
+  codex_json=$(run_ccusage codex daily --since "$compact" --until "$compact" --json) || codex_json='{}'
   [ -z "$codex_json" ] && codex_json='{}'
 
   summary=$(jq -nr \
@@ -224,7 +280,8 @@ while [[ ! "$current" > "$yesterday" ]]; do
   if curl -sf -X POST -H 'Content-Type: application/json' -d "$payload" "$WEBHOOK" > /dev/null; then
     printf '%s' "$current" > "$last_file"   # advance ONLY on success
   else
-    echo "[ccusage-hook] slack POST failed for $current; will retry next session" >&2
+    : > "$err_file"
+    report_failure "$current" "slack POST failed (will retry next session)"
     break
   fi
 
