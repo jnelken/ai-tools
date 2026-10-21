@@ -69,6 +69,7 @@ settings_target() {
   printf '%s\n' "$p"
 }
 
+INSTALL_ARGS=("$@")
 DEV_MODE=0
 NO_UPDATE=0
 QUIET=0
@@ -332,6 +333,51 @@ clone_lock() {
   fi
 }
 
+# A successful update can replace this script and helpers already parsed by Bash.
+# Restart before linking so this invocation uses the deployed revision throughout.
+# --no-update and the process-local marker independently prevent restart loops.
+restart_updated_installer() {
+  [ "${AI_TOOLS_INSTALL_RESTARTED:-0}" != 1 ] || return 0
+  [ -r "$AI_TOOLS_HOME/install.sh" ] || return 0
+  if [ "$QUIET" -eq 0 ]; then echo "Continuing with the updated installer."; fi
+  export AI_TOOLS_HOME AI_TOOLS_INSTALL_RESTARTED=1
+  # Bash 3.2 treats an empty array as unset under nounset.
+  exec "$BASH" "$AI_TOOLS_HOME/install.sh" ${INSTALL_ARGS[@]+"${INSTALL_ARGS[@]}"} --no-update
+}
+
+# Diagnostics only: preserve the dirty-tree guard and never repair permissions implicitly.
+explain_deploy_drift() {
+  local mode_changes content_changes structural_changes untracked metadata changed_path operation
+  mode_changes="$(git -C "$AI_TOOLS_HOME" diff --no-ext-diff --summary HEAD -- | sed -n '/^ mode change /p')"
+  [ -n "$mode_changes" ] || return 0
+  content_changes="$(git -C "$AI_TOOLS_HOME" diff --no-ext-diff --numstat HEAD -- | awk '$1 != "0" || $2 != "0" {print}')"
+  structural_changes="$(git -C "$AI_TOOLS_HOME" diff --no-ext-diff --no-renames --name-only --diff-filter=ADRTUXB HEAD --)"
+  untracked="$(git -C "$AI_TOOLS_HOME" ls-files --others --exclude-standard)"
+  if [ -z "$content_changes" ] && [ -z "$structural_changes" ] && [ -z "$untracked" ]; then
+    echo "  Detected mode-only deploy drift (executable bits; no content changes):"
+  else
+    echo "  Executable-bit changes are present alongside other edits:"
+  fi
+  printf '%s\n' "$mode_changes"
+  echo "  Preserve tracked changes before any explicit repair:"
+  echo '    deploy_patch=$(mktemp -t ai-tools-deploy.XXXXXX)'
+  printf '    git -C %q diff --binary HEAD > "$deploy_patch"\n' "$AI_TOOLS_HOME"
+  echo '    printf "Saved tracked changes to %s\n" "$deploy_patch"'
+  echo "  This patch does not include untracked files; preserve those separately."
+  echo "  Review the diff first. If these executable-bit changes are unintended,"
+  echo "  restore only the tracked executable bits with the clone-lock helper:"
+  while IFS= read -r -d '' metadata && IFS= read -r -d '' changed_path; do
+    case "$metadata" in
+      ':100644 100755 '*) operation=a-x ;;
+      ':100755 100644 '*) operation=u+x ;;
+      *) continue ;;
+    esac
+    printf '    %q run -- chmod %s %q\n' "$AI_TOOLS_HOME/bin/ai-tools-clone-lock" "$operation" "$AI_TOOLS_HOME/$changed_path"
+  done < <(git -C "$AI_TOOLS_HOME" diff --no-ext-diff --no-renames --diff-filter=M --raw -z HEAD --)
+  echo "  These commands change working-tree bits only; review staged changes separately with git diff --cached."
+  echo "  Re-run install.sh after reviewing and repairing the drift. No edits were discarded."
+}
+
 # ── update step: sync $AI_TOOLS_HOME from origin (skipped w/ --no-update or --dev) ──
 update_ai_tools_home() {
   if [ ! -e "$AI_TOOLS_HOME" ] || { [ -d "$AI_TOOLS_HOME" ] && [ -z "$(ls -A "$AI_TOOLS_HOME" 2>/dev/null)" ]; }; then
@@ -339,6 +385,7 @@ update_ai_tools_home() {
     git clone --branch "$AI_TOOLS_REF" "$AI_TOOLS_REPO" "$AI_TOOLS_HOME"
     install_deploy_guard
     clone_lock lock -q || echo "⚠ Could not lock $AI_TOOLS_HOME — continuing."
+    restart_updated_installer
     return
   fi
 
@@ -348,6 +395,7 @@ update_ai_tools_home() {
       echo "⚠ $AI_TOOLS_HOME (the deployed copy) has uncommitted edits — skipping update."
       echo "  Edits belong in $AI_TOOLS_DEV_HINT (commit + push there); this deploy clone is"
       echo "  managed by install.sh and gets overwritten on the next clean update."
+      explain_deploy_drift
       return
     fi
     local before_rev after_rev
@@ -357,6 +405,7 @@ update_ai_tools_home() {
       after_rev="$(git -C "$AI_TOOLS_HOME" rev-parse HEAD 2>/dev/null || true)"
       if [ "$before_rev" != "$after_rev" ]; then
         echo "Updated $AI_TOOLS_HOME to latest $AI_TOOLS_REF."
+        restart_updated_installer
       elif [ "$QUIET" -eq 0 ]; then
         echo "$AI_TOOLS_HOME already up to date with $AI_TOOLS_REF."
       fi

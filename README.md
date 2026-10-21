@@ -211,3 +211,11 @@ These are personal tools and may reference my specific workflows/repos. The one-
 ## Instruction profiles
 
 [Profile selection, runtime isolation, installation and rollback](docs/instruction-profiles.md). Maintained recipes live in `instructions/`; `agent-profile` explains selection and `agent-run` composes CLI launches.
+
+### Installer self-updates and deploy drift
+
+A successful clone or fast-forward restarts into the deployed installer once, preserving flags and skipping another update. This avoids mixing old parsed functions with newly deployed scripts. `--dev`, `--no-update`, and unchanged revisions do not restart.
+
+Dirty deploy clones still skip updates. Executable-bit drift gets a specific diagnostic, a command to preserve tracked changes in a patch, and shell-escaped permission repair commands through `ai-tools-clone-lock`. Repairs remain explicit; untracked files require separate preservation, and staged changes require separate review. No local edits are automatically discarded.
+
+Regression checks (temporary local Git remotes; no network): `python3 -m unittest discover -s lib -p test_installer.py`.
