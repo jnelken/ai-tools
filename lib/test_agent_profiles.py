@@ -95,6 +95,30 @@ class Profiles(unittest.TestCase):
         self.assertEqual(data['profile'],'runtime/text')
         self.assertIn('features.shell_tool=false',data['args'])
         self.assertEqual(data['args'][-1],'literal $(bad)')
+    @unittest.skipIf(os.name == 'nt', 'Windows cannot exec a shebang script')
+    def test_claude_connector_version_guard_fails_closed_and_allows_verified_override(self):
+        import sys
+        fake=self.base/'claude-fixture'
+        fake.write_text('#!'+sys.executable+'\nimport sys,json\nif "--help" in sys.argv: print("--safe-mode --restricted --disable-slash-commands --strict-mcp-config --append-system-prompt");sys.exit(0)\nif "--version" in sys.argv: print("9.9.999 (fixture)");sys.exit(0)\nprint(json.dumps({"args":sys.argv[1:]}))\n')
+        fake.chmod(0o755)
+        mcp=self.base/'mcp.json'
+        mcp.write_text(json.dumps({'mcpServers':{'mailcrush':{'command':'unused-fixture'}}}))
+        config=self.base/'config.json'
+        config.write_text('{}')
+        command=[sys.executable,str(p.ROOT/'bin/agent-profile'),'run','--profile','runtime/slackagent','--harness','claude','--',str(fake),'-p','hello','--mcp-config',str(mcp)]
+        with patch.dict(os.environ,{'AGENT_PROFILE_CONFIG':str(config)}):
+            blocked=subprocess.run(command,text=True,capture_output=True)
+            self.assertEqual(blocked.returncode,2)
+            self.assertIn('needs a smoke check for version 9.9.999',blocked.stderr)
+            self.assertEqual(blocked.stdout,'')
+            config.write_text(json.dumps({'runtime':{'claude':{'verified_connector_version':'9.9.999'}}}))
+            allowed=subprocess.run(command,text=True,capture_output=True)
+            self.assertEqual(allowed.returncode,0,allowed.stderr)
+            args=json.loads(allowed.stdout)['args']
+            self.assertIn('--restricted',args)
+            self.assertIn('--strict-mcp-config',args)
+            self.assertEqual(args[args.index('--tools')+1],'')
+
     def test_worktree_uses_repository_owner(self):
         r=self.repo()
         subprocess.run(['git','-C',str(r),'-c','user.name=Test','-c','user.email=test@example.invalid','commit','--allow-empty','-qm','fixture'],check=True)

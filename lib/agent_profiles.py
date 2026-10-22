@@ -222,7 +222,7 @@ def main():
                 servers, _ = runtime_mcp(config, harness, cli_args, result['profile'] == 'runtime/text')
                 if servers:
                     version = subprocess.run([command[0], '--version'], capture_output=True, encoding='utf-8', errors='replace', check=True).stdout.split()[0]
-                    verified = config.get('runtime', {}).get('claude', {}).get('verified_connector_version', '2.1.303')
+                    verified = config.get('runtime', {}).get('claude', {}).get('verified_connector_version', '2.1.308')
                     if version != verified:
                         raise ValueError('Claude connector isolation needs a smoke check for version ' + version + '; tested version: ' + verified)
             cli_args=runtime_args(result,harness,cli_args,config)
