@@ -11,7 +11,8 @@ def install(root, home, dry_run=False):
     pairs=[(root/'instructions/bootstrap/CLAUDE.md',home/'.claude/CLAUDE.md'),
            (root/'instructions/bootstrap/AGENTS.md',home/'.codex/AGENTS.md'),
            (root/'bin/agent-profile',home/'.local/bin/agent-profile'),
-           (root/'bin/agent-run',home/'.local/bin/agent-run')]
+           (root/'bin/agent-run',home/'.local/bin/agent-run'),
+           (root/'skills/instruction-profile-maintenance',home/'.codex/skills/instruction-profile-maintenance')]
     stamp=datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%fZ')
     for source,dest in pairs:
         if not source.exists(): raise FileNotFoundError(source)
