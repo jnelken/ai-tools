@@ -1,5 +1,7 @@
 # Preset subagents from session history
 
+> **Status:** Implemented before 2026-10-22; archived by advance-roadmap. Evidence: agents/{codex-reviewer,claude-reviewer,implementer,researcher,ops-investigator}.md, install.sh section_agents, skills/peer-review/SKILL.md preset routing, and hooks/readonly-ops-guard.sh.
+
 > **Suggested execution:** Sonnet 5 with medium reasoning: the plan pins down each agent's frontmatter and integration points, so most of the work is writing markdown and one hook script. Step up to Opus 5 for the peer-review SKILL.md rewrite (a 463-line skill with state and loop semantics that must not regress). Step down to Haiku 4.5 only for the CLAUDE.md trim.
 
 ## Context

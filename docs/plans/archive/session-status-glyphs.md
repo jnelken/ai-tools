@@ -1,5 +1,7 @@
 # Session status sign-off glyphs
 
+> **Status:** Implemented before 2026-10-22; archived by advance-roadmap. Evidence: hooks/status-glyph-check.sh and hooks/tests/status-glyph-check.test.sh cover glyph validation, transcript fallback, fail-open handling, and session-only schedule warnings.
+
 > **Suggested execution:** Sonnet 5 with medium reasoning — one small bash hook, one test, one CLAUDE.md section; the design is settled. Step up to Opus 5 if transcript parsing misbehaves (e.g. the last message isn't visible when Stop fires); step down to Haiku 4.5 for only the CLAUDE.md/memory edits.
 
 ## Context
