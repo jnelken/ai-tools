@@ -13,7 +13,7 @@ class Profiles(unittest.TestCase):
     def setUp(self):
         self.temp=tempfile.TemporaryDirectory();self.addCleanup(self.temp.cleanup)
         self.base=Path(self.temp.name);self.home=self.base/'home';self.home.mkdir()
-        self.env=patch.dict(os.environ,{'HOME':str(self.home),'PERSONAL_CODE_DIR':str(self.home/'personal code')})
+        self.env=patch.dict(os.environ,{'HOME':str(self.home),'USERPROFILE':str(self.home),'PERSONAL_CODE_DIR':str(self.home/'personal code')})
         self.env.start();self.addCleanup(self.env.stop)
         (self.home/'personal code').mkdir()
     def repo(self,owner='jnelken'):
@@ -83,6 +83,7 @@ class Profiles(unittest.TestCase):
         backups=list(dest.parent.glob('*.before-profiles-*'));self.assertEqual(backups[0].read_text(),'local edits')
         module.install(p.ROOT,self.home);self.assertEqual(len(list(dest.parent.glob('*.before-profiles-*'))),1)
 
+    @unittest.skipIf(os.name == 'nt', 'Windows cannot exec a shebang script')
     def test_fake_cli_is_execed_and_exit_status_is_preserved(self):
         import sys
         fake=self.base/'custom-cli'
@@ -107,20 +108,20 @@ class Profiles(unittest.TestCase):
         with self.assertRaises(ValueError): p.codex_servers({'mailcrush':{'unknown':'bad'}})
 
     def test_bootstrap_glyph_contract_matches_provider_and_stop_hook(self):
-        import re
-        provider = (p.ROOT/'instructions/providers/claude-development.md').read_text()
+        import re, shutil
+        provider = (p.ROOT/'instructions/providers/claude-development.md').read_text(encoding='utf-8')
         glyphs = re.findall(r'^\| ([^\x00-\x7f]\S*) \|', provider, re.MULTILINE)
         self.assertTrue(glyphs, 'provider status table must define the accepted glyphs')
-        bootstrap = (p.ROOT/'instructions/bootstrap/CLAUDE.md').read_text()
-        codex_bootstrap = (p.ROOT/'instructions/bootstrap/AGENTS.md').read_text()
+        bootstrap = (p.ROOT/'instructions/bootstrap/CLAUDE.md').read_text(encoding='utf-8')
+        codex_bootstrap = (p.ROOT/'instructions/bootstrap/AGENTS.md').read_text(encoding='utf-8')
         for glyph in glyphs:
             self.assertIn(glyph, bootstrap)
             self.assertNotIn(glyph, codex_bootstrap)
             result = subprocess.run(
-                ['/bin/bash', str(p.ROOT/'hooks/status-glyph-check.sh')],
+                [shutil.which('bash') or '/bin/bash', str(p.ROOT/'hooks/status-glyph-check.sh')],
                 input=json.dumps({'last_assistant_message': 'Pong.\n\n'+glyph+' answer only',
                                   'stop_hook_active': False}),
-                capture_output=True, text=True, check=True,
+                capture_output=True, encoding='utf-8', check=True,
             )
             self.assertEqual(result.stdout.strip(), '', 'bootstrap glyph rejected by Stop hook: '+glyph)
 

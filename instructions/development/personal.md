@@ -2,6 +2,8 @@
 
 **In my personal (`jnelken`-owned) repos, push `main` freely — don't gate it on my confirmation.** I'd rather main move constantly and get reviewed in small increments than sit on a local commit waiting for a yes. Merging a finished, verified branch to main and pushing it is one action, not two, and neither half needs asking. This includes repos that deploy to production on push (Netlify, Vercel) — none of them are P0, and shipping quickly is the point. Say what you pushed after the fact; that's the report, not a request.
 
+**Commit there without asking, too, and don't leave uncommitted work.** In a `jnelken`-owned repo, whenever changes are visible in the diff at the end of a task, commit and push them proactively, including work in the tree from another session. I work across several machines, and an uncommitted or unpushed change doesn't propagate. Still check what's staged for secrets, and keep gitignored state out.
+
 Two things this does **not** cover, which still need a heads-up: rewriting shared history (`--force` without a lease, or any force-push of `main`), and pushing work I've told you is parked or deliberately unfinished. Concentro repos (`woodrow`, `api`, `folio-platform`) are unaffected — they keep the PR flow and `/post-pr`.
 
 A corollary worth knowing: anything left merged on local `main` in one of these repos will get pushed by the next scheduled `advance-roadmap` run regardless of what that run was working on. So work I want held back has to stay on a branch — leaving it on main is not a hold.

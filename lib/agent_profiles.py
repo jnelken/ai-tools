@@ -7,6 +7,8 @@ import re
 import subprocess
 import sys
 
+from personal_code_dir import code_dir
+
 ROOT = Path(__file__).resolve().parents[1]
 PROFILES = ('development/auto', 'development/work', 'development/personal', 'development/unknown',
             'runtime/slackagent', 'runtime/text')
@@ -18,12 +20,12 @@ def within(target, parent):
     return target == parent or parent in target.parents
 
 def git(target, *args):
-    r = subprocess.run(['git', '-C', str(target), *args], text=True, capture_output=True)
+    r = subprocess.run(['git', '-C', str(target), *args], capture_output=True, encoding='utf-8', errors='replace')
     return r.stdout.strip() if r.returncode == 0 else ''
 
 def configuration():
     p = path(os.environ.get('AGENT_PROFILE_CONFIG', '~/.config/agent-profiles/config.json'))
-    return (json.loads(p.read_text()) if p.exists() else {}), p
+    return (json.loads(p.read_text(encoding='utf-8')) if p.exists() else {}), p
 
 def classify(target, config):
     target = path(target)
@@ -40,7 +42,7 @@ def classify(target, config):
         # Do not grant personal permissions to an unidentified repo under a personal root.
         return 'unknown', 'repository owner is not classified; configure a repository mapping'
     roots = dict(config.get('roots', {}))
-    for value in [os.environ.get('PERSONAL_CODE_DIR'), '~/Dropbox/code', '~/Library/CloudStorage/Dropbox/code']:
+    for value in [code_dir(), os.environ.get('PERSONAL_CODE_DIR'), '~/Dropbox/code', '~/Library/CloudStorage/Dropbox/code']:
         if value and path(value).is_dir(): roots.setdefault(str(path(value)), 'personal')
     roots.setdefault(str(path('~/code')), 'work')
     for root, environment in sorted(roots.items(), key=lambda kv: -len(str(path(kv[0])))):
@@ -62,7 +64,7 @@ def resolve(profile, target, harness, config):
     else:
         sources += ['runtime/shared.md', 'runtime/text.md' if profile == 'runtime/text' else 'runtime/slackagent.md']
     files = [ROOT / 'instructions' / source for source in sources]
-    text = '\n\n'.join('# Source: ' + source + '\n\n' + f.read_text() for source, f in zip(sources, files))
+    text = '\n\n'.join('# Source: ' + source + '\n\n' + f.read_text(encoding='utf-8') for source, f in zip(sources, files))
     text = text.replace('${AI_TOOLS_HOME}', str(ROOT))
     return {'profile': profile, 'target': str(target), 'reason': reason,
             'sources': [str(f) for f in files], 'instructions': text}
@@ -92,7 +94,7 @@ def runtime_mcp(config, harness, cli_args, text_only):
     allowed = config.get('runtime', {}).get('allowed_mcp_names', ['mailcrush', 'linear', 'lunch-money', 'google-calendar', 'gmail'])
     if text_only: return {}, remaining
     for name in files:
-        data = json.loads(path(name).read_text()).get('mcpServers', {})
+        data = json.loads(path(name).read_text(encoding='utf-8')).get('mcpServers', {})
         for server, definition in data.items():
             if server not in allowed: raise ValueError('runtime MCP server is not allowlisted: ' + server)
             servers[server] = definition
@@ -182,6 +184,8 @@ def runtime_args(result, harness, args, config):
             *overrides(values), *(['--', *prompt] if prompt else [])]
 
 def main():
+    # Windows consoles default to a legacy code page that can't print the status glyphs.
+    sys.stdout.reconfigure(encoding='utf-8'); sys.stderr.reconfigure(encoding='utf-8')
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('command',choices=['resolve','run'])
     parser.add_argument('--profile', default=os.environ.get('AGENT_PROFILE','development/auto'))
@@ -211,13 +215,13 @@ def main():
         if result['profile'].startswith('runtime/'):
             # Reject unknown flags in the underlying CLI instead of silently losing isolation.
             help_args=['exec','--help'] if harness=='codex' else ['--help']
-            help_text=subprocess.run([command[0],*help_args],capture_output=True,text=True,check=True).stdout
+            help_text=subprocess.run([command[0],*help_args],capture_output=True,encoding='utf-8',errors='replace',check=True).stdout
             needed=['--ignore-user-config','--ignore-rules','--strict-config'] if harness=='codex' else ['--safe-mode','--restricted','--disable-slash-commands','--strict-mcp-config','--append-system-prompt']
             if any(flag not in help_text for flag in needed): raise ValueError('CLI version lacks required runtime isolation flags')
             if harness == 'claude':
                 servers, _ = runtime_mcp(config, harness, cli_args, result['profile'] == 'runtime/text')
                 if servers:
-                    version = subprocess.run([command[0], '--version'], capture_output=True, text=True, check=True).stdout.split()[0]
+                    version = subprocess.run([command[0], '--version'], capture_output=True, encoding='utf-8', errors='replace', check=True).stdout.split()[0]
                     verified = config.get('runtime', {}).get('claude', {}).get('verified_connector_version', '2.1.303')
                     if version != verified:
                         raise ValueError('Claude connector isolation needs a smoke check for version ' + version + '; tested version: ' + verified)
