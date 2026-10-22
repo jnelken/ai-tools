@@ -28,6 +28,14 @@ Automatic development selection checks explicit repository mappings, recognized 
 
 Direct CLI and desktop starts retain short global bootstraps that tell the agent to resolve guidance. This path is model-mediated. The launcher resolves before model startup. Neither path relies on parent `code/AGENTS.md` inheritance.
 
+### Always-active enforcement contracts
+
+Instructions required by always-active enforcement must be available before optional profile resolution. The bootstrap may therefore contain the minimum contract for a hook that runs on every turn, including a safe default for trivial turns. It should still defer full policy meanings and situational procedures to their maintained fragments.
+
+Claude's development Stop hook checks every final response, whereas the resolver is only required before substantive work. A first-turn `ping` can therefore reach the hook without the provider fragment having been loaded. The Claude bootstrap carries the status-line format, accepted glyphs, and the answer-only default; the provider fragment remains authoritative for meanings and priorities. A contract check compares the advertised glyphs with the provider table and actual hook acceptance. Codex's bootstrap does not acquire this Claude-specific rule.
+
+Wrapped development launches can still load the global bootstrap; an already-composed profile prevents redundant resolution. Only explicit runtime launches suppress the bootstrap and development hooks. Do not interpret all `agent-run` launches as bypassing global instructions.
+
 Before working in each repository, development sessions resolve that target and read its local and applicable nested instructions. Repeat when switching repositories within one remote-control session. Previously loaded guidance remains historical context; its permissions do not transfer to another target. Explicit development overrides are deliberate caller choices.
 
 For runtimes, control automatic configuration loading as well as the added prompt. Preserve subscription authentication and built-in harness instructions. Exclude development instructions, hooks, skills, memory, and unselected integrations. Use provider-specific adapters and fail rather than silently reverting to full development configuration when isolation controls are unavailable. Keep owner-only connectors out of household/background calls.

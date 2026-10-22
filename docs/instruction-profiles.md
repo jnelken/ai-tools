@@ -14,6 +14,8 @@ agent-run --profile runtime/text -- codex exec -m gpt-6.1-sol 'Return OK'
 
 Direct Claude/Codex starts (including desktop) receive a short global bootstrap instructing the model to run the resolver. This is model-mediated, not a pre-launch guarantee. The wrapper composes before launching. Desktop tool configuration is unchanged. A remote-control session can stay at a code root: resolve each target repository again before working there, and read local/nested repository instructions. Policies from another target confer no permissions on the current target. Begin new sessions after changing profile sources; existing prompts are not rewritten.
 
+Claude's bootstrap also carries the minimum status-line contract required by its always-active development Stop hook. Even a trivial first turn that skips resolution uses the answer-only default. Full status meanings and priorities remain in the provider fragment, with an unambiguous `AI_TOOLS_HOME`-aware reference. Wrapped development sessions can still load the bootstrap and skip redundant resolution; explicit runtimes suppress it and the hook. Codex has no corresponding bootstrap sign-off requirement.
+
 Explicit profile (`--profile`, then `AGENT_PROFILE`) wins. Otherwise choose `development/auto`: explicit repository mapping, recognized remote owner, then configured root for a directory without an origin. An unrecognized remote remains unknown even under a personal root. Bare/unclassified directories load shared guidance only. Personal roots reuse the existing `PERSONAL_CODE_DIR`/Dropbox conventions. `~/code` is a work-root default, not a personal root.
 
 Configure a machine locally at `~/.config/agent-profiles/config.json` (or `AGENT_PROFILE_CONFIG`). Example:
@@ -50,7 +52,7 @@ python3 -m unittest discover -s lib -p 'test_agent_profiles.py'
 python3 bin/install-agent-profiles --dry-run
 ```
 
-Install through the normal ai-tools deploy process. The installer preserves replaced files/symlinks as `*.before-profiles-<timestamp>`, verifies links, and retires only its known parent CLAUDE.md symlink. It leaves arbitrary parent AGENTS.md files alone. Re-running installation must make no replacements.
+Install through the normal ai-tools deploy process: push the source commit, then run `~/.ai-tools/install.sh`. A local commit alone is not proof of deployment; do not assume a post-commit redeploy hook is installed. The installer preserves replaced files/symlinks as `*.before-profiles-<timestamp>`, verifies links, and retires only its known parent CLAUDE.md symlink. It leaves arbitrary parent AGENTS.md files alone. Re-running installation must make no replacements.
 
 Before cutover, start fresh sessions through both providers and verify: runtime-only instructions, intended MCP tools, no development skills/hooks or checkout instructions, existing subscription login, and no external writes. Compare text/profile sizes and startup time using a fixed short prompt. Smoke-check direct CLI and desktop starts and one code-root remote-control session switching targets. Work-machine rollout remains pending until this check runs there; local fixtures do not prove that deployment.
 

@@ -106,4 +106,22 @@ class Profiles(unittest.TestCase):
                          {'mailcrush':{'url':'http://localhost:9999','http_headers':{'X-Example':'test'}}})
         with self.assertRaises(ValueError): p.codex_servers({'mailcrush':{'unknown':'bad'}})
 
+    def test_bootstrap_glyph_contract_matches_provider_and_stop_hook(self):
+        import re
+        provider = (p.ROOT/'instructions/providers/claude-development.md').read_text()
+        glyphs = re.findall(r'^\| ([^\x00-\x7f]\S*) \|', provider, re.MULTILINE)
+        self.assertTrue(glyphs, 'provider status table must define the accepted glyphs')
+        bootstrap = (p.ROOT/'instructions/bootstrap/CLAUDE.md').read_text()
+        codex_bootstrap = (p.ROOT/'instructions/bootstrap/AGENTS.md').read_text()
+        for glyph in glyphs:
+            self.assertIn(glyph, bootstrap)
+            self.assertNotIn(glyph, codex_bootstrap)
+            result = subprocess.run(
+                ['/bin/bash', str(p.ROOT/'hooks/status-glyph-check.sh')],
+                input=json.dumps({'last_assistant_message': 'Pong.\n\n'+glyph+' answer only',
+                                  'stop_hook_active': False}),
+                capture_output=True, text=True, check=True,
+            )
+            self.assertEqual(result.stdout.strip(), '', 'bootstrap glyph rejected by Stop hook: '+glyph)
+
 if __name__=='__main__':unittest.main()
