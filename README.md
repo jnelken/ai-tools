@@ -210,7 +210,7 @@ These are personal tools and may reference my specific workflows/repos. The one-
 
 ## Instruction profiles
 
-[Profile selection, runtime isolation, installation and rollback](docs/instruction-profiles.md). Maintained recipes live in `instructions/`; `agent-profile` explains selection and `agent-run` composes CLI launches.
+[Profile selection, runtime isolation, installation and rollback](docs/instruction-profiles.md). [ADR 0001](adr/0001-compose-instructions-by-role-and-repository.md) records the intent, alternatives, and adopted implementation plan. Maintained recipes live in `instructions/`; `agent-profile` explains selection and `agent-run` composes CLI launches.
 
 ### Installer self-updates and deploy drift
 
