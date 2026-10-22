@@ -111,6 +111,12 @@ If the session produced a durable, reusable fact — a gotcha, a corrected assum
 
 ### 3. File follow-ups in Linear
 
+For personal DEV work, only create tickets explicitly requested by Jake or describing concrete
+future work outside the current branch. Do not backfill tickets for finished/current work, and
+log hygiene observations with `~/.ai-tools/bin/hygiene-log` instead of filing them. Existing
+planned tickets are retained after completion; preserve their details on merged PRs with
+`~/.ai-tools/bin/linear-pr-archive`. Work CON backfill requirements remain unchanged.
+
 Follow [[linear-ticket-gen]] for access, ID resolution, and the state/cycle defaults (including the Triage trap). If Linear MCP tools aren't authenticated, that skill owns the fallback — don't re-derive it here.
 
 **Duplicate-check FIRST, before creating anything.** Run `mcp__claude_ai_Linear__list_issues` with a keyword query built from the finding's core terms, and read descriptions, not just titles. If an overlapping ticket exists, **comment on it** (`mcp__claude_ai_Linear__save_comment`) instead of filing a near-duplicate. Creating a second ticket for work someone already tracked is a worse outcome than a slightly-off comment.

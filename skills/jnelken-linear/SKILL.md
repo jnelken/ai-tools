@@ -1,6 +1,6 @@
 ---
 name: jnelken-linear
-description: Create or relabel an issue in Jake's personal Linear workspace (`jnelken`, team Dev, keys DEV-*) — the only sanctioned way to file one, because it refuses to create an issue without a `repo/<directory>` label and infers that label from the checkout you're in. Use whenever filing a ticket about a personal repo under the personal code dir, capturing an idea or bug for one of Jake's side projects, fixing an issue that's missing its repo label, or when advance-roadmap reports "has no repo/* label". Not for Concentro (CON-*) tickets — those use [[linear-ticket-gen]].
+description: Create or relabel an issue in Jake's personal Linear workspace (`jnelken`, team Dev, keys DEV-*) — the only sanctioned way to file one, because it refuses to create an issue without a a repo directory label label and infers that label from the checkout you're in. Use whenever filing a ticket about a personal repo under the personal code dir, capturing an idea or bug for one of Jake's side projects, fixing an issue that's missing its repo label, or when advance-roadmap reports "has no repo/* label". Not for Concentro (CON-*) tickets — those use [[linear-ticket-gen]].
 ---
 
 > **Personal machines only (OMEN, JXIV).** `install.sh` doesn't link this skill on the work laptop
@@ -17,6 +17,15 @@ which checkout under the personal code dir (`~/.ai-tools/bin/personal-code-dir`)
 Linear can't make a label required, so `jlin.py` does. **Never create a Dev issue any other way** —
 not `linear issue create`, not the Linear MCP `save_issue`, not raw `issueCreate`. In 2026-09 an
 agent that didn't know this filed eight unlabeled issues in one sitting.
+
+## Creation eligibility
+
+For personal DEV issues, create tickets only on Jake's explicit request or for concrete future
+work outside the current branch. Do not retroactively ticket a PR or current implementation.
+Hygiene observations belong in `~/.ai-tools/bin/hygiene-log`, unless Jake explicitly asks for
+hygiene tickets. Work CON PRs keep their required `create-pr` backfill. This gate applies before
+ID resolution, deduplication, or creation; see the shared development instructions.
+
 
 ## Create
 

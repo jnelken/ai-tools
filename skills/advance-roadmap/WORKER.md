@@ -392,6 +392,9 @@ gh pr create -R jnelken/<github-repo> --head <branch> --base <default-branch> \
   Linear: <DEV-N> · Shipped by advance-roadmap (stamp <stamp>), reviewed by <reviewer> in <N> round(s).
   ```
 
+  When there is no existing DEV ticket, omit ticket decoration from the title and omit the
+  Linear line from the body. Never create a ticket to fill this template.
+
   Keep it skimmable: no file names or function names unless the change is about them, and no "all
   tests pass" in Validation. A code-health PR says it preserves behavior.
 - Merge it right away; Step 5b's review was the gate. Use a merge commit:
@@ -475,13 +478,21 @@ than fixed, since the push didn't change built code.
 
 ## Step 7c — Code-health retrospective
 
-Only when this run's outcome is `shipped` (feature or code-health; never bookkeeping): before you
-write run memory, look at the repo you just worked in and file what you saw, per
-[`CODE_HEALTH.md`](CODE_HEALTH.md)'s *retrospective* — dedupe against the repo's open
-`code-health` tickets, file at most 2 new ones through `jlin.py`, change no code. A code-health
-pass that already filed its leftovers has done this; don't repeat it. Name what you filed in
-`summary`. It must never change the outcome: if Linear fails, list the findings in `summary` and
-finish the run.
+Only when the outcome is `shipped`, record substantive hygiene observations through
+[`CODE_HEALTH.md`](CODE_HEALTH.md)'s retrospective and `~/.ai-tools/bin/hygiene-log`.
+Record evidence and disposition for aggregate analysis; create no hygiene tickets. A PR or
+current branch does not require a DEV ticket. Future work outside this branch can still be
+planned in Linear under the shared DEV policy.
+
+If this run completed an existing ticket, preserve it on its merged PR with:
+
+```sh
+~/.ai-tools/bin/linear-pr-archive --issue DEV-N --directory <private-export-dir> --apply
+```
+
+Retain original planning tickets. Legacy `create-pr` backfills may be deleted only with verified
+creation provenance recorded in the reviewed plan and a successful archive readback. A missing
+PR is not evidence of backfill. Archive/log failures are reported and never block a clean ship.
 
 ## Step 8 — Update run memory
 

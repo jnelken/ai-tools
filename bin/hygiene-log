@@ -1,0 +1,63 @@
+#!/usr/bin/env python3
+"""Append a structured hygiene observation for later aggregation; never creates tickets."""
+import argparse
+from datetime import datetime, timezone
+try:
+    import fcntl
+except ImportError:  # Windows personal machine
+    fcntl = None
+    import msvcrt
+import hashlib
+import json
+import os
+from pathlib import Path
+import sys
+
+
+def default_path():
+    root = Path(__file__).resolve().parent.parent
+    sys.path.insert(0, str(root / 'lib'))
+    import personal_code_dir
+    code = personal_code_dir.code_dir()
+    if not code:
+        raise RuntimeError('No personal code directory; supply --output')
+    return Path(personal_code_dir.memory_dir(code)) / 'hygiene.jsonl'
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--repo', required=True)
+    parser.add_argument('--category', required=True)
+    parser.add_argument('--finding', required=True)
+    parser.add_argument('--evidence', default='')
+    parser.add_argument('--disposition', choices=['observed', 'fixed', 'deferred', 'dismissed'], default='observed')
+    parser.add_argument('--reason', default='')
+    parser.add_argument('--commit', default='')
+    parser.add_argument('--pr', default='')
+    parser.add_argument('--source-ticket', default='')
+    parser.add_argument('--observed-at', default='')
+    parser.add_argument('--run', default=os.environ.get('ADVANCE_ROADMAP_STAMP', ''))
+    parser.add_argument('--output', type=Path)
+    args = parser.parse_args()
+    record = {key: value for key, value in vars(args).items() if key != 'output'}
+    record['timestamp'] = datetime.now(timezone.utc).isoformat()
+    group = '\n'.join([args.repo, args.category, ' '.join(args.finding.lower().split())])
+    record['fingerprint'] = hashlib.sha256(group.encode()).hexdigest()[:20]
+    path = args.output or default_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    # Shared across simultaneous agents; one complete JSON object per line.
+    with path.open('a+', encoding='utf-8') as stream:
+        if fcntl:
+            fcntl.flock(stream, fcntl.LOCK_EX)
+        else:
+            stream.seek(0)
+            msvcrt.locking(stream.fileno(), msvcrt.LK_LOCK, 1)
+        stream.seek(0, os.SEEK_END)
+        stream.write(json.dumps(record, ensure_ascii=False) + '\n')
+        stream.flush()
+        os.fsync(stream.fileno())
+    print(json.dumps({'path': str(path), 'fingerprint': record['fingerprint']}))
+
+
+if __name__ == '__main__':
+    main()

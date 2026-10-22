@@ -1,18 +1,13 @@
 ---
 name: advance-roadmap
 description: >-
-  Ship planned items end-to-end, one per thread (a repo may run a few threads at once once a plan approver clears them), from a personal repo's ROADMAP.md, from docs/plans/ when the
-  repo has no roadmap, or from a Linear issue carrying a repo label. Pick a qualifying repo under
-  the personal code dir, implement the item in its own Superset workspace, verify with the repo's
-  test/build, move it to Shipped, then open a PR and merge it. Never pushes code to main directly.
-  When nothing is actionable anywhere, runs one
-  bounded, behavior-preserving code-health refactor instead; after each clean ship, files what it
-  noticed as code-health tickets. Use on-demand ("/advance-roadmap", "work a
-  roadmap item", "advance the roadmap", "ship something off the roadmap") or via an unattended
-  scheduled run. After merging, watches the production deploy (usually Vercel) and fixes forward
-  until it's green, within a bounded number of attempts. Sibling of [[wrapup-repos]] but NOT the same: this one merges to main. Sibling of
-  [[unblock-roadmap]] too: that skill only asks Jake questions and records his answers as
-  directives; this is the only skill that ever acts on them.
+  Ship planned items from personal repos' ROADMAP.md, docs/plans, or repo-labeled Linear issues
+  through isolated branches, reviewed PRs, merge, and successful production deploy. Use for
+  "advance the roadmap", "ship a roadmap item", or scheduled roadmap runs. Plans independent
+  threads before dispatching workers. With no actionable feature, performs a bounded
+  behavior-preserving code-health pass and logs hygiene observations without creating tickets.
+  Stops with evidenced blockers when work cannot proceed. Unlike unblock-roadmap, implements
+  and merges the work rather than only recording decisions.
 ---
 
 > **Personal machines only (OMEN, JXIV).** `install.sh` doesn't link this skill or its automation on
@@ -44,8 +39,8 @@ phases and flags an unreviewed ship.
 **Nothing to ship? Clean something up.** When a repo has no dispatchable item, its first thread runs
 one bounded, behavior-preserving refactor (`work_kind: code_health`) — an open `code-health` ticket
 first, otherwise an audit against a shared rubric — instead of stopping. And after every clean ship,
-the worker runs a short code-health retrospective on the repo it just touched and files up to 2
-deduped `code-health` tickets. Those tickets rank below all feature work. Rubric, retrospective and
+the worker runs a short retrospective and records structured hygiene observations rather than
+creating tickets. Existing planned tickets rank below feature work. Rubric, retrospective and
 refactor caps: [`CODE_HEALTH.md`](CODE_HEALTH.md). A code-health pass never runs beside a feature thread.
 
 **One batch a day: 10:30, `daily_batch.py`.** launchd starts it once; it lists the personal repos and

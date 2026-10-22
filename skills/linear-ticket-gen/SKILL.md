@@ -5,6 +5,15 @@ description: Use when creating or updating Linear issues — filing tickets from
 
 # Linear Ticket Gen
 
+## Creation eligibility
+
+For personal DEV issues, create tickets only on Jake's explicit request or for concrete future
+work outside the current branch. Do not retroactively ticket a PR or current implementation.
+Hygiene observations belong in `~/.ai-tools/bin/hygiene-log`, unless Jake explicitly asks for
+hygiene tickets. Work CON PRs keep their required `create-pr` backfill. This gate applies before
+ID resolution, deduplication, or creation; see the shared development instructions.
+
+
 ## Overview
 
 Turning feedback or a feature list into well-placed Linear issues: resolve the target team/project/milestone/cycle, check for overlap before creating duplicates, then create or update via the API. Org-specific facts (known project IDs, sizing conventions) belong in reference memory, not here — this skill is the procedure, memory is the data.

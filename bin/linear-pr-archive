@@ -1,0 +1,258 @@
+#!/usr/bin/env python3
+"""Preserve completed personal Linear issues on their merged PRs before deletion.
+
+Default: produce a local plan. --apply posts/reads back comments. --delete only
+removes create-pr backfills with backfill_evidence in the reviewed plan.
+"""
+import argparse
+import concurrent.futures
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import subprocess
+import sys
+import time
+
+PR_RE = re.compile(r'https://github\.com/(jnelken/[\w.-]+)/pull/(\d+)\b')
+KEY_RE = re.compile(r'\bDEV-\d+\b', re.I)
+FIELDS = '''id identifier title description url createdAt updatedAt completedAt
+ state { name type } creator { name } assignee { name }
+ labels { nodes { name } }
+ parent { identifier title state { type } }
+ children(first:100) { nodes { identifier title state { type } } pageInfo { hasNextPage } }
+ documents { nodes { id title } }
+ attachments(first:100) { nodes { title url } pageInfo { hasNextPage } }
+ comments(first:100) { nodes { id body createdAt updatedAt user { name } } pageInfo { hasNextPage } }'''
+
+
+def command(args, payload=None):
+    env = dict(os.environ)
+    if not env.get('LINEAR_API_KEY') and env.get('LINEAR_API_TOKEN'):
+        env['LINEAR_API_KEY'] = env['LINEAR_API_TOKEN']
+    result = subprocess.run(args, input=json.dumps(payload) if payload is not None else None,
+                            text=True, capture_output=True, env=env, timeout=120)
+    if result.returncode:
+        raise RuntimeError(result.stderr.strip() or result.stdout.strip())
+    return json.loads(result.stdout)
+
+
+class Client:
+    def linear(self, query, **variables):
+        args = ['linear', 'api', query]
+        if variables:
+            args += ['--variables-json', json.dumps(variables)]
+        result = command(args)
+        if result.get('errors'):
+            raise RuntimeError(json.dumps(result['errors']))
+        return result['data']
+
+    def issue(self, key):
+        return self.linear('query($key:String!){issue(id:$key){' + FIELDS + '}}', key=key)['issue']
+
+    def completed(self):
+        cursor, rows = None, []
+        while True:
+            page = self.linear('''query($cursor:String){issues(first:100,after:$cursor,
+              filter:{team:{key:{eq:"DEV"}},state:{type:{eq:"completed"}}}){
+              nodes { identifier } pageInfo { hasNextPage endCursor } }}''', cursor=cursor)['issues']
+            rows += page['nodes']
+            if not page['pageInfo']['hasNextPage']:
+                return rows
+            cursor = page['pageInfo']['endCursor']
+
+    def merged_index(self):
+        pages = command(['gh', 'api', '--method', 'GET', 'search/issues',
+                         '-f', 'q=is:pr is:merged user:jnelken', '-f', 'per_page=100',
+                         '--paginate', '--slurp'])
+        index = {}
+        for page in pages:
+            if page.get('incomplete_results') or page.get('total_count', 0) > 1000:
+                raise RuntimeError('Merged PR search incomplete; narrow the backlog first')
+            for pr in page['items']:
+                for key in KEY_RE.findall(pr['title']):
+                    index.setdefault(key.upper(), []).append(pr['html_url'])
+        return index
+
+    def pr(self, repo, number):
+        return command(['gh', 'api', f'repos/{repo}/pulls/{number}'])
+
+    def comments(self, repo, number):
+        pages = command(['gh', 'api', f'repos/{repo}/issues/{number}/comments',
+                         '--paginate', '--slurp'])
+        return [item for page in pages for item in page]
+
+    def save_comment(self, repo, number, body, comment_id=None):
+        endpoint = (f'repos/{repo}/issues/comments/{comment_id}' if comment_id
+                    else f'repos/{repo}/issues/{number}/comments')
+        current = (command(['gh', 'api', f'repos/{repo}/issues/comments/{comment_id}'])
+                   if comment_id else None)
+        if current and current['body'] == body:
+            return current['html_url']
+        result = command(['gh', 'api', endpoint, '--method', 'PATCH' if comment_id else 'POST',
+                          '--input', '-'], {'body': body})
+        saved = command(['gh', 'api', f'repos/{repo}/issues/comments/{result["id"]}'])
+        if saved['body'] != body:
+            raise RuntimeError('GitHub archive readback differed; retaining Linear issue')
+        return saved['html_url']
+
+    def delete(self, issue):
+        result = self.linear('mutation($id:String!){issueDelete(id:$id){success}}', id=issue['id'])
+        if not result['issueDelete']['success']:
+            raise RuntimeError('Linear deletion was not confirmed')
+
+
+def candidate_urls(issue, index):
+    urls = set(index.get(issue['identifier'], []))
+    for attachment in issue['attachments']['nodes']:
+        urls.update(m.group(0) for m in PR_RE.finditer(attachment['url']))
+    for comment in issue['comments']['nodes']:
+        # A ticket's own completion discussion is evidence of its shipping PR.
+        if re.search(r'closeout|clos(e|ing|ed)|merged|shipped', comment['body'], re.I):
+            urls.update(m.group(0) for m in PR_RE.finditer(comment['body']))
+    return sorted(urls)
+
+
+def blockers(issue):
+    reasons = []
+    if issue['state']['type'] != 'completed':
+        reasons.append('not completed')
+    for field in ('comments', 'attachments', 'children'):
+        if issue[field]['pageInfo']['hasNextPage']:
+            reasons.append(f'{field} export incomplete')
+    if any(c['state']['type'] not in ('completed', 'canceled') for c in issue['children']['nodes']):
+        reasons.append('unfinished sub-issues')
+    if issue['documents']['nodes']:
+        reasons.append('linked documents need a separate export')
+    raw = json.dumps(issue)
+    if re.search(r'https://(?:uploads|public|private)\.linear\.app/', raw):
+        reasons.append('Linear-hosted attachment needs copying')
+    return reasons
+
+
+def archive_bodies(issue):
+    snapshot = json.dumps(issue, ensure_ascii=False, sort_keys=True, indent=2)
+    digest = hashlib.sha256(snapshot.encode()).hexdigest()
+    metadata = json.loads(snapshot)
+    metadata.pop('description', None)
+    discussion = []
+    for comment in metadata['comments']['nodes']:
+        body = comment.pop('body')
+        author = (comment.get('user') or {}).get('name', 'Unknown')
+        discussion.append(f"### {comment['createdAt']} — {author}\n\n{body}")
+    content = '### Original requirements\n\n' + (issue.get('description') or '(No description)')
+    content += '\n\n<details>\n<summary>Original discussion</summary>\n\n'
+    content += '\n\n'.join(discussion) or '(No comments)'
+    content += '\n\n</details>\n\n<details>\n<summary>Source metadata and links</summary>\n\n```json\n'
+    content += json.dumps(metadata, ensure_ascii=False, sort_keys=True, indent=2)
+    content += '\n```\n\n</details>\n'
+    chunks = [content[n:n + 46000] for n in range(0, len(content), 46000)]
+    return [f'<!-- ai-tools:linear-archive:{issue["identifier"]}:part:{n + 1} sha256:{digest} -->\n'
+            f'## Linear archive: {issue["identifier"]} — {issue["title"]}\n\n'
+            f'Original: {issue["url"]}\n\n'
+            f'Completed: {issue.get("completedAt") or "recorded Done"}. '
+            f'Original requirements, decisions and discussion, part {n + 1}/{len(chunks)}.\n\n{chunk}'
+            for n, chunk in enumerate(chunks)]
+
+
+def prepare(client, issue, index):
+    reasons = blockers(issue)
+    targets = []
+    for url in candidate_urls(issue, index):
+        match = PR_RE.fullmatch(url)
+        repo, number = match.group(1), int(match.group(2))
+        pr = client.pr(repo, number)
+        if pr.get('merged'):
+            targets.append({'repo': repo, 'number': number, 'url': pr['html_url']})
+        elif pr.get('state') == 'open':
+            reasons.append('linked PR still open: ' + url)
+    if not targets:
+        reasons.append('no confirmed merged PR')
+    retention = (['unfinished parent'] if issue.get('parent')
+                 and issue['parent']['state']['type'] not in ('completed', 'canceled') else [])
+    return {'issue': issue, 'targets': targets, 'blockers': reasons, 'retention': retention}
+
+
+def apply(client, record, delete=False):
+    issue = record['issue']
+    if record['blockers']:
+        return {'issue': issue['identifier'], 'status': 'skipped', 'reasons': record['blockers']}
+    # Re-read before any publication; the prepared plan must describe the current source.
+    if client.issue(issue['identifier']) != issue:
+        raise RuntimeError('Ticket changed after planning; rebuild its archive plan')
+    links = []
+    for target in record['targets']:
+        repo, number = target['repo'], target['number']
+        if not client.pr(repo, number).get('merged'):
+            raise RuntimeError('Target is no longer confirmed merged')
+        existing = client.comments(repo, number)
+        for n, body in enumerate(archive_bodies(issue), 1):
+            marker = f'<!-- ai-tools:linear-archive:{issue["identifier"]}:part:{n} '
+            matches = [c for c in existing if c['body'].startswith(marker)]
+            if len(matches) > 1:
+                raise RuntimeError('Duplicate archive markers require review')
+            old = matches[0] if matches else None
+            links.append(client.save_comment(repo, number, body, old['id'] if old else None))
+            # Space writes to avoid GitHub notification/secondary-rate-limit bursts.
+            time.sleep(1)
+    delete = delete and bool(record.get('backfill_evidence')) and not record.get('retention')
+    if delete:
+        if client.issue(issue['identifier']) != issue:
+            raise RuntimeError('Ticket changed during publication; retaining Linear source')
+        client.delete(issue)
+    return {'issue': issue['identifier'], 'status': 'deleted' if delete else 'archived', 'comments': links}
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--issue', help='One DEV issue; default: completed backlog')
+    parser.add_argument('--directory', type=Path, required=True, help='Private export/plan directory')
+    parser.add_argument('--apply', action='store_true')
+    parser.add_argument('--delete', action='store_true', help='Delete proven create-pr backfills after verification (plan needs backfill_evidence)')
+    parser.add_argument('--use-plan', action='store_true', help='Apply an existing reviewed plan')
+    args = parser.parse_args()
+    if args.delete and not args.apply:
+        parser.error('--delete requires --apply')
+    client = Client()
+    if client.linear('{organization{urlKey}}')['organization']['urlKey'] != 'jnelken':
+        parser.error('This command only handles the personal jnelken workspace')
+    args.directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+    os.chmod(args.directory, 0o700)
+    path = args.directory / 'plan.json'
+    if args.use_plan:
+        records = json.loads(path.read_text())
+    else:
+        index = client.merged_index()
+        keys = [{'identifier': args.issue}] if args.issue else client.completed()
+        def inspect(key):
+            try:
+                return prepare(client, client.issue(key['identifier']), index)
+            except Exception as exc:
+                return {'issue': key, 'targets': [], 'blockers': [str(exc)]}
+        with concurrent.futures.ThreadPoolExecutor(max_workers=3) as pool:
+            records = list(pool.map(inspect, keys))
+        path.write_text(json.dumps(records, ensure_ascii=False, indent=2) + '\n')
+        os.chmod(path, 0o600)
+    if args.issue:
+        records = [r for r in records if r['issue']['identifier'] == args.issue]
+    counts = {}
+    for record in records:
+        if args.apply:
+            try:
+                result = apply(client, record, delete=args.delete)
+            except Exception as exc:
+                result = {'issue': record['issue']['identifier'], 'status': 'error', 'error': str(exc)}
+        else:
+            result = {'issue': record['issue']['identifier'], 'status': 'skipped' if record['blockers'] else 'ready',
+                      'reasons': record['blockers'], 'targets': record['targets']}
+        counts[result['status']] = counts.get(result['status'], 0) + 1
+        print(json.dumps(result), flush=True)
+        with (args.directory / 'results.jsonl').open('a') as stream:
+            stream.write(json.dumps(result) + '\n')
+    print(json.dumps({'summary': counts}), flush=True)
+    return 1 if counts.get('error') else 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())

@@ -1,16 +1,17 @@
 ---
 name: create-pr
-description: Generate a dead-simple PR title/body from the net diff vs base, backfill a Linear ticket, and open the PR as a draft by default; `draft=false` opens it ready (or update an existing one). Use when the user wants to open a PR from the current branch, e.g. "create a PR", "open a PR for this", "push this and make a PR". Preserves an existing non-empty PR body — only normalizes the title. For force-rewriting an existing description instead, see [[refresh-pr]].
+description: Generate a dead-simple PR title/body from the net diff vs base, backfill a required CON ticket in the work environment, and open the PR as a draft by default; `draft=false` opens it ready (or update an existing one). Use when the user wants to open a PR from the current branch, e.g. "create a PR", "open a PR for this", "push this and make a PR". Preserves an existing non-empty PR body — only normalizes the title. For force-rewriting an existing description instead, see [[refresh-pr]].
 ---
 
 # Create PR
 
 
-**Personal workspace (`jnelken`, team Dev, DEV-\*)?** Don't create the issue here — use [[jnelken-linear]] (`jlin.py new`), which refuses to file one without its `repo/*` label.
+**Personal DEV PRs do not need a ticket.** Reuse an existing ticket when present; otherwise
+continue without one. Work CON PRs retain the mandatory backfill procedure below.
 
 ## Overview
 
-Push the current branch, generate (or preserve) a minimal PR description, backfill a Linear ticket, and open the PR **as a draft** (override with `draft=false`). New PRs start as drafts by default, on purpose — the Post-PR Workflow (in the user's global CLAUDE.md) marks them ready and badges the description once the PR has actually been shared to Slack. Don't undraft or badge here; that's a different step's job.
+Push the current branch, generate (or preserve) a minimal PR description, backfill a required CON ticket in the work environment, and open the PR **as a draft** (override with `draft=false`). New PRs start as drafts by default, on purpose — the Post-PR Workflow (in the user's global CLAUDE.md) marks them ready and badges the description once the PR has actually been shared to Slack. Don't undraft or badge here; that's a different step's job.
 
 ## Invocation
 
@@ -73,7 +74,18 @@ Before anything else, collect:
 10. **Verify the draft state matches the request** — `gh pr view --json isDraft -q .isDraft` should be `true` unless `draft=false` was passed. A repo wrapper (e.g. a `pr:create` script) that opens PRs itself may ignore `--draft`; if the state is wrong, fix it (`gh pr ready --undo` to draft, `gh pr ready` to undraft) and say so. This applies to an existing PR too: don't silently leave a PR in a state the caller didn't ask for.
 11. Output the PR URL (printed by `gh pr create`, or `gh pr view --json url -q .url`).
 
-## Linear ticket backfill
+## Linear ticket routing
+
+**Personal DEV PRs:** Reuse an existing ticket in the branch/title if one exists. Otherwise open
+the PR without a ticket. Do not create a ticket for work already underway, and do not call
+`backfill-linear-ticket` automatically. Jake may explicitly request a ticket separately.
+
+For personal DEV PRs, skip the remaining backfill subsections and continue with pushing/creating
+the PR.
+
+**Work CON PRs:** A ticket is required; run the backfill procedure below. This exception is
+specific to the work environment and does not apply to personal DEV issues.
+
 
 After determining the PR title (step 6), perform these steps before pushing/creating the PR:
 
@@ -99,7 +111,7 @@ If the user says **new**: create a new Linear issue using the steps below.
 ### No ticket found — sub-PR into a trunk: reuse the trunk's ticket
 If no ticket is found and the base (step 1) is a `feature/*` trunk, look up the trunk's own PR (`gh pr list --head <trunk> --state open --json title`) and reuse the ticket in its title without asking. Sub-PRs share their trunk's ticket by default — ticket count no longer dictates PR count. Fall through to creating one only if the trunk PR carries no ticket either.
 
-### No ticket found — create one automatically
+### Work CON only: no ticket found — create one automatically
 Otherwise, proceed directly to creating a Linear issue without asking.
 
 ### Creating a Linear issue
@@ -124,6 +136,6 @@ Prepend `Linear issue: <url>` to the very top of the PR body (replacing any exis
 - Body shape comes from the user's global CLAUDE.md — do not hardcode or duplicate a format here.
 - DO NOT use EnterPlanMode or ExitPlanMode tools.
 - DO NOT ask for user approval on the PR itself — just analyze and create.
-- The Linear ticket check is the one exception — only ask if a ticket is already found (use it or create new); auto-create without asking if none is found.
+- The ticket backfill procedure applies only to work CON PRs. Personal DEV PRs reuse an existing ticket or proceed without one.
 - You can call multiple tools in a single response. When multiple independent pieces of information are requested and all commands are likely to succeed, run multiple tool calls in parallel for optimal performance.
 - Return the PR URL so the user can view it.

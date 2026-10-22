@@ -33,6 +33,20 @@ Apply this when creating new PRs (`gh pr create`) and when editing existing ones
 
 ## Linear
 
+**Personal DEV ticket policy (2026-10-22):** Create a ticket only when Jake explicitly
+requests one, or when planning concrete future work that will not be done immediately on the
+current branch. A PR does not need a DEV ticket. Never backfill a ticket merely to describe work
+already underway or completed. Hygiene/refactor observations go through
+`~/.ai-tools/bin/hygiene-log`, not into Linear, unless Jake explicitly requests tickets.
+Work-environment CON PRs retain `create-pr`'s required ticket backfill.
+
+**Completed personal tickets:** Preserve their requirements, decisions and comments on confirmed
+merged PRs with `~/.ai-tools/bin/linear-pr-archive --issue DEV-N --directory <private-export-dir> --apply`. Retain original planning tickets. Delete legacy `create-pr` backfills only when their
+creation provenance is verified, recorded as `backfill_evidence` in the reviewed plan, and every
+archive comment has been read back successfully (`--use-plan --apply --delete`). Keep sources
+without a merged PR or with documents/assets that have not been exported. Never infer backfill
+provenance merely from a ticket's age, Done status, or missing PR.
+
 **Any time you create or update a Linear issue, invoke the `linear-ticket-gen` skill first** — never call the Linear MCP tools or GraphQL directly. Concentro (`CON`) issues need exactly one surface label (plus engine labels only when the engine is the ticket's subject). `jnelken`-workspace issues need a `repo/*` label and go through the `jnelken-linear` skill. Details: `~/.claude/instructions/linear.md`.
 
 

@@ -5,6 +5,9 @@ description: Create a Linear issue from the current git branch (or reuse one alr
 
 # Backfill Linear Ticket
 
+Invoke this for a personal DEV ticket only when Jake explicitly requests backfilling.
+`create-pr` must not call it automatically for DEV PRs; work CON PRs still require backfill.
+
 
 **Personal workspace (`jnelken`, team Dev, DEV-\*)?** Don't create the issue here — use [[jnelken-linear]] (`jlin.py new`), which refuses to file one without its `repo/*` label.
 
