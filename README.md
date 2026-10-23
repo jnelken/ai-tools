@@ -44,6 +44,16 @@ Personal AI coding tools — Claude Code and Cursor skills, slash commands, hook
 
 Each skill is a directory with a `SKILL.md` (required) plus optional `scripts/`, `references/`, `assets/`.
 
+### Public plugin
+
+**[Developer Workflow Kit](plugins/unblock-roadmap/README.md)** generalizes eight of these
+workflows for other developers: roadmap unblocking and implementation, moving diffs,
+rebasing after squash merges, stale-doc repairs, session close-out/resumption, and session
+hardening. Public editions live at `skills/<name>/public/SKILL.md`; the personal entrypoints
+above keep their existing behavior. Build the skills-only archive with
+`python3 bin/build-developer-workflow-kit /tmp/developer-workflow-kit.zip`.
+Public submission requirements and excluded candidates are tracked with the plugin source.
+
 ### Ticket retention and hygiene data
 
 Personal DEV tickets represent explicitly requested tickets or concrete future work outside the

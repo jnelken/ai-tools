@@ -1,0 +1,13 @@
+Built-in image generation; use case: logo-brand.
+
+Create one polished square app icon for Developer Workflow Kit, a software developer's
+toolkit for unblocking roadmap decisions and carrying work through to completion. Simple
+distinctive geometric mark: an open square tool frame made of two substantial bracket
+forms, with a single rising stepped path ending in an arrow inside the frame. Minimal
+flat graphic, large clear silhouette, no words, letters, tiny details, gradients, shadows,
+mockups, or collage. Deep midnight navy solid square background with generous safe margins;
+bright warm ivory brackets and a vivid orange rising path. Crisp precise edges. Intended
+as an actual app listing icon, readable at 48px, square 1024x1024 composition.
+
+Actual generated PNG: 1254x1254 pixels. Original image retained in the host image library;
+the project asset is icon.png. No image edits were applied.

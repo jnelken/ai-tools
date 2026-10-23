@@ -1,0 +1,41 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "unblock-roadmap",
+  "version": "0.3.0",
+  "description": "Practical developer workflows for roadmap decisions, scoped implementation, Git recovery, documentation maintenance, and session continuity.",
+  "author": {
+    "name": "Jake Nelken",
+    "email": "jnelks@gmail.com"
+  },
+  "keywords": ["developer-workflows", "roadmap", "git", "documentation", "handoff"],
+  "extensions": {
+    "com.openai": {
+      "interface": {
+        "displayName": "Developer Workflow Kit",
+        "shortDescription": "Unblock, ship, and finish work",
+        "longDescription": "A practical toolkit for developers working with an AI coding assistant. Resolve roadmap decisions one question at a time, implement one scoped roadmap item, move uncommitted work between Git worktrees, recover a stacked branch after a parent squash merge, repair stale documentation, close a session with a durable handoff, resume unfinished work, and turn observed tooling friction into improvements. The workflows are bundled with the plugin and require no publisher-hosted service, personal repository layout, or mandatory GitHub or Linear connection. Repository changes and Git workflows require a host with access to your actual checkout and local tools. In a chat without that access, use supplied plans and text for decision support; the plugin cannot inspect or modify your local files. It follows your repository instructions and existing authorization for commits, pushes, merges, deployment, and external messages. It does not install background automation.",
+        "developerName": "Jake Nelken",
+        "category": "Developer Tools",
+        "logo": "assets/icon.png",
+        "composerIcon": "assets/icon.png",
+        "capabilities": ["Interactive"],
+        "defaultPrompt": "Unblock Roadmap"
+      },
+      "review": {
+        "prompts": [
+          "Help me resolve the decisions blocking this roadmap, one question at a time.",
+          "Implement the next unblocked item in this repository's roadmap and verify it.",
+          "I started work in the wrong worktree. Move my staged and unstaged changes to the feature branch.",
+          "My parent PR was squash-merged. Rebase this child branch without replaying the parent's commits.",
+          "Check this repository's docs for stale paths and behavior descriptions.",
+          "Close out this coding session and save the unresolved decisions and next steps.",
+          "Pick up the previous session from this repository's handoff note.",
+          "Review what slowed this session down and propose concrete tooling improvements."
+        ]
+      },
+      "publication": {
+        "release_notes": "Renamed to Developer Workflow Kit. Generalized the two roadmap workflows and added six workflows for Git recovery, documentation maintenance, session continuity, and session retrospectives. Removed mandatory personal GitHub and Linear bindings and runtime instruction downloads."
+      }
+    }
+  }
+}
