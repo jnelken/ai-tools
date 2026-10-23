@@ -119,7 +119,7 @@ else
   case "$last_sync" in ''|*[!0-9]*) last_sync=0 ;; esac
   now_epoch=$(date +%s)
 
-  if [ $((now_epoch - last_sync)) -ge 3600 ]; then
+  if [ $((now_epoch - last_sync)) -ge 86400 ]; then
     record_cooldown_simple() { printf '%s\n' "$now_epoch" > "$sync_state_file" 2>/dev/null || true; }
     record_cooldown_simple
 
@@ -213,14 +213,25 @@ classify_link() {
   fi
 }
 
-for sub in skills commands hooks agents automations; do
-  d="$CLAUDE_DIR/$sub"
-  [ -d "$d" ] || continue
-  while IFS= read -r link; do
-    classify_link "$link"
-  done < <(find "$d" -maxdepth 2 -type l 2>/dev/null)
-done
-classify_link "$CLAUDE_DIR/awesome-statusline.sh"
+# The walk forks several processes per link (~85 links, ~2s warm), so it runs
+# at most once a day. The nudges below keep their own 24h cooldown.
+links_state_file="$STATE_DIR/ai-tools-links-scan.txt"
+last_links_scan=0
+[ -f "$links_state_file" ] && last_links_scan="$(cat "$links_state_file" 2>/dev/null || echo 0)"
+case "$last_links_scan" in ''|*[!0-9]*) last_links_scan=0 ;; esac
+links_scan_now=$(date +%s)
+
+if [ $((links_scan_now - last_links_scan)) -ge 86400 ]; then
+  printf '%s\n' "$links_scan_now" > "$links_state_file" 2>/dev/null || true
+  for sub in skills commands hooks agents automations; do
+    d="$CLAUDE_DIR/$sub"
+    [ -d "$d" ] || continue
+    while IFS= read -r link; do
+      classify_link "$link"
+    done < <(find "$d" -maxdepth 2 -type l 2>/dev/null)
+  done
+  classify_link "$CLAUDE_DIR/awesome-statusline.sh"
+fi
 
 if [ -n "$dev_offenders" ]; then
   dev_state_file="$STATE_DIR/ai-tools-devmode-nudge.txt"

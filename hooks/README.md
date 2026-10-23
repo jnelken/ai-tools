@@ -36,13 +36,13 @@ If you already have a `hooks.SessionStart` array, append the new entry rather th
 Three independent checks, each best-effort and non-blocking:
 
 1. **Dirty deploy clone.** If `$AI_TOOLS_HOME` has uncommitted changes (`git status --porcelain`), it was edited in place — that's a mistake, since `install.sh` treats it as disposable and it isn't the source of truth. Nudges to move the edit to `~/code/ai-tools`, commit, and push there instead, and explicitly does **not** fetch/merge while dirty (so it never clobbers the local edit). Cooldown: 24h, keyed by a hash of the dirty status so a *changed* dirty state re-nudges immediately even mid-cooldown.
-2. **Sync (only when clean).** With a 1h cooldown, runs a `timeout`-guarded `git fetch` + `git merge --ff-only` against `origin/$AI_TOOLS_REF` (default `main`). If HEAD moved, re-runs `install.sh --no-update --quiet` so newly added skills/commands/hooks/agents get linked immediately, and emits a short context line (`ai-tools deployed: <old>..<new>, N files`). If the fast-forward fails (local history diverged), emits a warning instead. A plain fetch failure (offline, etc.) is silent — never worth nudging about.
+2. **Sync (only when clean).** With a 24h cooldown, runs a `timeout`-guarded `git fetch` + `git merge --ff-only` against `origin/$AI_TOOLS_REF` (default `main`). If HEAD moved, re-runs `install.sh --no-update --quiet` so newly added skills/commands/hooks/agents get linked immediately, and emits a short context line (`ai-tools deployed: <old>..<new>, N files`). If the fast-forward fails (local history diverged), emits a warning instead. A plain fetch failure (offline, etc.) is silent — never worth nudging about.
 3. **Dev mode left on / stale link.** Scans every symlink under `~/.claude/{skills,commands,hooks,agents,automations}/` and `~/.claude/awesome-statusline.sh`, ignoring any link that resolves inside `$AI_TOOLS_HOME`. What's left is bucketed:
    - A target that resolves into some *other* ai-tools checkout — detected by the checkout's shape (a parent directory containing both `install.sh` and `skills/`, so a Superset worktree of the repo counts even though its path never contains the literal string "ai-tools") — is **dev mode left on**: nudges to run `~/.ai-tools/install.sh` to flip back.
    - A dangling target (the path no longer exists) that lies under `$AI_TOOLS_HOME` or contains `ai-tools` is a **stale link**: same fix, since `install.sh` now prunes those.
    - Anything else (e.g. third-party skills linked from `~/.agents/skills`) is ignored.
 
-   Cooldown: 24h, same hash-based re-nudge-on-change pattern as the dirty check.
+   Cooldown: 24h, same hash-based re-nudge-on-change pattern as the dirty check. The scan itself also runs at most once per 24h (it forks several processes per link, ~2s), so a newly left-on `--dev` can take up to a day to be noticed.
 
 Every failure mode — missing deps, `$AI_TOOLS_HOME` not existing or not a git repo, network errors — exits 0 silently; this hook must never block a session.
 
