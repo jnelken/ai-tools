@@ -9,7 +9,7 @@ description: Use when the user wants an independent code review of the current b
 
 Choose the reviewer from the last commit's authorship: the `claude-reviewer` agent for Codex-authored work, the `codex-reviewer` agent otherwise. Review the current branch's diff, triage the findings, apply the mechanical fixes, and commit. Two modes, chosen by the optional `local` argument (step 1):
 
-- **Default (push mode):** once the review comes back clean (or the `/loop` ceiling is hit) with no unresolved P1/P2 findings, push the branch and — if a PR already exists for it — post a comment reporting how many review rounds ran before this push, plus the model and reasoning effort for both sides: the selected reviewer and the orchestrating reviewee that triaged/applied its findings. Gives human reviewers a signal for how much ground the independent reviewer already covered before they open the diff.
+- **Default (push mode):** once the review comes back clean (or a round 3+ finds no P1, or the `/loop` ceiling is hit) with no unresolved P1/P2 findings, push the branch and — if a PR already exists for it — post a comment reporting how many review rounds ran before this push, plus the model and reasoning effort for both sides: the selected reviewer and the orchestrating reviewee that triaged/applied its findings. Gives human reviewers a signal for how much ground the independent reviewer already covered before they open the diff.
 - **`local` mode:** the original behavior — review → fix → commit, never push, never touch `gh`. Use this for a review pass with zero PR-side effects (e.g. reviewing someone else's branch, or you're not ready for this to be visible).
 
 Composes with `/loop` for iterative convergence in either mode.
@@ -137,6 +137,10 @@ When Codex is selected, dispatch via the Agent tool with `subagent_type: "codex-
 - **Never below medium.** A low-effort round that comes back quiet reads exactly like convergence, which is the one thing it cannot be trusted to establish — and the later rounds where it would apply are precisely where a trustworthy "it's quiet" matters most. Cheap silence is worse than no round at all.
 
 Step 3 can still override back to high when a round surfaces genuinely new ground.
+
+**Why the floor is high (paired runs, 2026-10-16).** `codex review` at high vs medium on the same diff, 26 merged api PRs, 116 runs, every finding triaged against the code. Medium was ~40% faster (median ~24–26 s vs ~41 s per pass) but found a real bug in 2 of 9 runs on the three PRs that had one, against 7 of 9 for high, and never caught one high missed. 69% of medium's findings were false positives (high: 21%), and 12 of its 14 P1 labels were false or overstated, so severity did not separate real bugs from noise. A pass saves ~15 s while triage load rises, so the floor stays high. Untested: medium at round 2, and two medium passes vs one high.
+
+Because step 7 now ends the loop at the first P1-free round 3+, the medium step-down above only fires when `/peer-review` is invoked again on the same PR after new commits (the last-P1 record persists in `$GIT_DIR`).
 
 ```bash
 GIT_DIR=$(git rev-parse --git-dir)
@@ -350,6 +354,7 @@ If invoked under `/loop`:
 
 | State | Next |
 |---|---|
+| Round ≥3 just completed AND its step-3 P1 count is 0 AND no unresolved P1/P2 findings remain | omit `ScheduleWakeup` — stop after the first P1-free round, even if P2/P3 fixes were applied this round (they go unverified by a further pass); exit `/loop`, proceed to step 8. Rounds 1–2 always follow the rows below |
 | Applied ≥1 fix this iteration | `ScheduleWakeup(60s)` — re-run review to confirm convergence or catch second-order issues |
 | Zero fixes this iteration AND zero P1/P2 findings | omit `ScheduleWakeup` — clean, exit `/loop`, proceed to step 8 |
 | Zero fixes this iteration AND only dismissed P1/P2 findings (step 3) | omit `ScheduleWakeup` — clean, exit `/loop`, proceed to step 8 |
