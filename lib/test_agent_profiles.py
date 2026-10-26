@@ -27,6 +27,7 @@ class Profiles(unittest.TestCase):
     def test_repository_ownership_beats_machine(self):
         r=self.repo();self.assertEqual(p.classify(r,{})[0],'personal')
         self.assertEqual(p.classify(self.repo('Concentro'),{})[0],'work')
+        self.assertEqual(p.classify(self.repo('Concentro-Inc'),{})[0],'work')
     def test_unknown_remote_does_not_inherit_personal_grants(self):
         r=self.repo('someone');self.assertEqual(p.classify(r,{'roots':{str(self.base):'personal'}})[0],'unknown')
     def test_explicit_mapping_and_symlink(self):

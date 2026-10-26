@@ -36,7 +36,7 @@ def classify(target, config):
     if re.search(r'[:/]jnelken/[^/]+?(?:\.git)?/?$', origin):
         return 'personal', 'jnelken repository ownership'
     if origin:
-        for owner in config.get('work_owners', ['Concentro', 'concentro']):
+        for owner in config.get('work_owners', ['Concentro-Inc', 'Concentro']):
             if re.search(r'[:/]' + re.escape(owner) + r'/[^/]+?(?:\.git)?/?$', origin, re.I):
                 return 'work', 'configured work repository ownership'
         # Do not grant personal permissions to an unidentified repo under a personal root.

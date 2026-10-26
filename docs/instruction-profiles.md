@@ -28,7 +28,7 @@ Configure a machine locally at `~/.config/agent-profiles/config.json` (or `AGENT
 {
   "roots": {"~/code": "work", "~/Dropbox/code": "personal"},
   "repositories": {"~/code/others/personal-project": "personal"},
-  "work_owners": ["Concentro"],
+  "work_owners": ["Concentro-Inc"],
   "runtime": {
     "allowed_mcp_names": ["mailcrush", "linear", "lunch-money", "gmail", "google-calendar"],
     "claude": {"mcp_files": []},
@@ -36,6 +36,8 @@ Configure a machine locally at `~/.config/agent-profiles/config.json` (or `AGENT
   }
 }
 ```
+
+`work_owners` entries are exact GitHub org logins matched as the whole owner segment of the origin URL (`Concentro-Inc` does not match `Concentro`); the built-in default already covers `Concentro-Inc`, so a config file is only needed for other owners or overrides.
 
 MCP files use the existing `mcpServers` JSON format and live locally; refer to credentials through existing supported mechanisms. Do not put credentials in ai-tools. Only configure existing integrations. Runtime text processing ignores all optional integrations. An explicit `--mcp-config` from the application is subject to the same server-name allowlist. Do not populate global runtime MCP files with owner-only connectors in a multi-user application: Slackagent supplies its owner mail config per call, while household/background calls use runtime/text. Mail/calendar may be unavailable for Codex until an existing connector is explicitly configured; app-supplied finance and Linear commands remain available.
 
