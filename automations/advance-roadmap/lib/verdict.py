@@ -91,7 +91,7 @@ def repo_print(repo):
         return "noroadmap"
     sessions = sorted(
         (os.path.basename(p), int(os.path.getmtime(p)))
-        for p in glob.glob(os.path.join(repo, ".claude-sessions", "*.md"))
+        for p in glob.glob(os.path.join(repo, ".claude", ".sessions", "*.md"))
     )
     return sha(json.dumps([
         git(repo, "rev-parse", "HEAD").decode(errors="replace"),

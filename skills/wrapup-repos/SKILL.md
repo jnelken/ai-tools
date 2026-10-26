@@ -43,7 +43,7 @@ stop; never fall back to `~/code`, which holds work checkouts.
   script is the single source of truth, shared with the dotfiles auto-sync shell hook — don't
   reimplement the check inline here; a divergent inlined copy is what let the hook commit on top of
   a stuck rebase for two weeks unnoticed.
-- SKIP any repo with a **live** session doc: if any `.claude-sessions/*.md` at the repo root has
+- SKIP any repo with a **live** session doc: if any `.claude/.sessions/*.md` at the repo root has
   `updated_at_epoch` within the last 15 minutes, someone is actively working there right now — do
   not touch it, pick a different repo. (These docs are written by this machine's session-doc hooks;
   see `hooks/README.md`. A doc that's present but NOT within that window is a different case — see
@@ -68,7 +68,7 @@ Then, for each ELIGIBLE repo:
 2. `recency` = the most recent of: last commit time (`git -C <repo> log -1 --format=%ct`) and the
    newest modification time among working-tree files (ignore `.git`, `node_modules`, other
    ignored paths, and — always, even where not gitignored — `.claude/IN_PROGRESS.md` and
-   `.claude-sessions/`: this skill and the session hooks write those, so counting them would make
+   `.claude/.sessions/`: this skill and the session hooks write those, so counting them would make
    every repo it touched look "recently worked on" forever). NOTE: a repo can have an old last-commit date but very recent file edits — the
    file mtimes are what matter for "recently worked on."
 
@@ -95,7 +95,7 @@ In the selected repo:
   comments touched by the recent diff. Also read the diff itself for architectural intent: a new
   abstraction introduced but not yet used elsewhere, a stubbed function, a half-wired
   integration — these imply a direction even when no doc states it.
-- Check `.claude-sessions/*.md` at the repo root too. Since the hard safety rule above already
+- Check `.claude/.sessions/*.md` at the repo root too. Since the hard safety rule above already
   skipped this repo if one was live, any file you find here belongs to a session that ended
   *without* a clean exit — a crash, a `kill -9`, a closed lid — so it's the only record of what
   that session was actually trying to do; a cleanly-closed session's doc is deleted immediately and

@@ -61,7 +61,7 @@ commit, merge, or push (see WORKER.md).
   and skip the repo on a non-zero exit. It refuses repos mid-rebase/merge/cherry-pick/revert/bisect
   and repos with a detached HEAD. Do not inline your own version of this check — a divergent copy
   is exactly what let a sibling automation commit on top of a stuck rebase for two weeks unnoticed.
-- **Skip live sessions.** If any `.claude-sessions/*.md` at the repo root has `updated_at_epoch`
+- **Skip live sessions.** If any `.claude/.sessions/*.md` at the repo root has `updated_at_epoch`
   within the last 15 minutes, someone is working there right now. Pick a different repo.
 - **More than one thread in a repo only with an approved plan.** Several workers may share a repo
   in one daily batch only after [`PLAN_APPROVAL.md`](PLAN_APPROVAL.md)'s approver ruled on every

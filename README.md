@@ -97,7 +97,7 @@ deletes proven legacy create-pr backfills when explicitly run with `--delete` an
 | [`enforce-claude-symlinks.sh`](hooks/enforce-claude-symlinks.sh) | git `pre-commit` hook (not a `settings.json` hook — runs only from the dev checkout) | Reject a commit that adds an unsymlinked regular file under `~/.claude/` |
 | [`claude-symlink-hygiene.sh`](hooks/claude-symlink-hygiene.sh) | SessionStart | Nudge about new unsymlinked files in `~/.claude/{hooks,commands,agents}/` before they become a blocker |
 | [`personal-repo-hygiene-check.sh`](hooks/personal-repo-hygiene-check.sh) | SessionStart | Nudge personal-repo conventions — misplaced plan files, malformed ADRs, missing `PRODUCT.md`/`DESIGN.md`, missing `.superset/config.json` |
-| [`session-doc-start.sh`](hooks/session-doc-start.sh) | SessionStart | Create/refresh the live `.claude-sessions/<id>.md` presence doc for the worktree, plus its durable global mirror |
+| [`session-doc-start.sh`](hooks/session-doc-start.sh) | SessionStart | Create/refresh the live `.claude/.sessions/<id>.md` presence doc for the worktree, plus its durable global mirror |
 | [`session-doc-stop.sh`](hooks/session-doc-stop.sh) | Stop | Mechanically refresh the session doc's timestamp and `git diff --stat` summary |
 | [`session-doc-end.sh`](hooks/session-doc-end.sh) | SessionEnd | Delete the local session doc on clean exit; mark its global mirror `ended_cleanly` |
 | [`hygiene-scan-all.sh`](hooks/hygiene-scan-all.sh) | SessionStart (async) | Regenerate the cross-repo `~/.claude/HYGIENE.md` hygiene report cache |

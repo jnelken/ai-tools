@@ -172,7 +172,7 @@ the **in-flight run stamps**:
 
 When the last run found no work and its bookkeeping landed, `run.sh` stores that verdict with a
 fingerprint of everything it was derived from (each repo's HEAD, branches, working tree and
-`.claude-sessions`; the Linear snapshot; each repo's production deploy status; the allowlist;
+`.claude/.sessions`; the Linear snapshot; each repo's production deploy status; the allowlist;
 these skill docs) in
 `$CODE_DIR/.advance-roadmap/last-verdict.json`. If nothing moved, the run is skipped
 before you start (`skipping — verdict: nothing changed since …`, no run header — a gate skip, not

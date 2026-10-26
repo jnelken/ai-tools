@@ -52,7 +52,7 @@ Code-health work follows [`../advance-roadmap/CODE_HEALTH.md`](../advance-roadma
 
 **Gates, checked by you before dispatch** (SAFETY.md has the full list): `origin` owner is
 `jnelken`; `git status --porcelain` is empty; `~/dotfiles/bin/git-safe-to-autocommit <repo>`
-exits 0; no live `.claude-sessions/*.md` (<15 min). You have a human, so on a failed gate or an
+exits 0; no live `.claude/.sessions/*.md` (<15 min). You have a human, so on a failed gate or an
 open product decision **ask them inline** instead of the scheduled path's Linear `Needs Input`
 comment. Never stash, reset or commit their WIP to get a clean tree.
 

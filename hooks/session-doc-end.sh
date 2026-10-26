@@ -46,7 +46,7 @@ if [ -n "$origin_url" ]; then
   [ "$is_personal" -eq 1 ] || exit 0
 fi
 
-rm -f "$repo_root/.claude-sessions/$session_id.md" 2>/dev/null || true
+rm -f "$repo_root/.claude/.sessions/$session_id.md" "$repo_root/.claude-sessions/$session_id.md" 2>/dev/null || true
 
 # --- Durable, worktree-independent mirror -----------------------------
 main_repo_root=$(git -C "$repo_root" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)

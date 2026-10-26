@@ -38,7 +38,7 @@ if [ -n "$origin_url" ]; then
   [ "$is_personal" -eq 1 ] || exit 0
 fi
 
-file="$repo_root/.claude-sessions/$session_id.md"
+file="$repo_root/.claude/.sessions/$session_id.md"
 [ -f "$file" ] || exit 0
 
 get_field() { grep -m1 "^$1:" "$file" 2>/dev/null | sed "s/^$1: *//"; }

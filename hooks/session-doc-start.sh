@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # SessionStart hook: create/refresh this session's handoff doc at
-# .claude-sessions/<session_id>.md (worktree root, globally gitignored —
-# see ~/.gitignore_global), and sweep stale docs from prior sessions.
+# .claude/.sessions/<session_id>.md (under the worktree's .claude/ dir,
+# globally gitignored — see ~/.config/git/ignore, tracked in dotfiles as
+# git/ignore), and sweep stale docs from prior sessions.
 #
 # Staleness, not liveness: a doc is swept purely by updated_at age
 # (default SESSION_DOC_STALE_HOURS=6), never by checking whether the
@@ -46,8 +47,20 @@ if [ -n "$origin_url" ]; then
   [ "$is_personal" -eq 1 ] || exit 0
 fi
 
-dir="$repo_root/.claude-sessions"
+dir="$repo_root/.claude/.sessions"
 mkdir -p "$dir" 2>/dev/null || exit 0
+
+# One-time migration from the pre-2026-10-26 location at the worktree root
+# (.claude-sessions/): carry any docs over so the staleness sweep below
+# still sees them, then drop the old dir once it's empty.
+legacy_dir="$repo_root/.claude-sessions"
+if [ -d "$legacy_dir" ]; then
+  for f in "$legacy_dir"/*.md; do
+    [ -e "$f" ] || continue
+    [ -e "$dir/$(basename "$f")" ] || mv "$f" "$dir/" 2>/dev/null || true
+  done
+  rmdir "$legacy_dir" 2>/dev/null || true
+fi
 
 this_file="$dir/$session_id.md"
 stale_hours="${SESSION_DOC_STALE_HOURS:-6}"
