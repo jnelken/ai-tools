@@ -174,6 +174,19 @@ Deleting the workspace closes the terminal of whatever session runs inside it â€
 
 When `/post-pr` runs from outside the sub-PR's worktree (a coordinator targeting it), the same checks and commands apply, and the coordinator simply keeps running afterwards.
 
+### 3.8. Point the Preview at the changed screen
+
+Only for a `Concentro-Inc/woodrow` PR whose base is the default branch, before step 4. api and folio-platform have no deploy previews, and a sub-PR into a trunk never gets one (step 3.5).
+
+woodrow's PR guide (`docs/guides/pr-descriptions.md`, `## Preview`) owns the host, flag-param and omit rules. This step only makes sure each link opens the screen a reviewer has to look at, not the app's front page:
+
+- Find the route in `app/lib/routes/definitions.ts`. For a screen inside an entity (an entity's tab, such as Document Studio), use `buildEntityViewPath.ts`. Link the deepest path that shows the change, with any flag params after it.
+- A screen that needs an entity uses the stage entity `/e/portfolios/legends-solar-bc65ea81da/<view>`: swap `dashboard` for the view under review. Never invent an entity id. Deploy previews talk to the stage API, so this entity exists there. Claudio's drafter uses the same entity (`WOODROW_PREVIEW_ENTITY_PATH` in internal-tools' `services/claudio-slack-bot/src/prDrafter.ts`); change both together.
+- When the change shows on several distinct screens, give one link per screen, each on its own line as `<label>: <url>`.
+- Link the bare host only when the change is genuinely app-wide (theme tokens, global layout, the app shell) and no single screen represents it.
+
+If the body's `## Preview` already follows these rules, leave it. Otherwise rewrite only that section, reading and writing the body through a file the same way step 5 does. Add the section, placed after `## Summary` as the guide's template has it, when it's missing and the change is visible in a preview.
+
 ### 4. Post to Slack
 
 Channel `#pr-review` (ID `C0APAAD3PP0`). The message body is *only* the link:
@@ -268,6 +281,7 @@ Per target, one block:
 Concentro-Inc/api#1271
 - Review: clean after 3 rounds
 - CI: 4 checks, all pass
+- Preview: woodrow only â€” set (or: already set, n/a (not visible in a preview))
 - Slack: posted (or: skipped, already in dedup state)
 - Badge: appended    Draft: cleared
 - Product update: posted (or: declined, n/a (no screenshot), not offered (unattended), failed (<why>))
