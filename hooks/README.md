@@ -2,6 +2,24 @@
 
 Symlinked into `~/.claude/hooks/` by `install.sh`. Each hook needs to be **wired up** in `~/.claude/settings.json` to actually fire — symlinking the script alone does nothing.
 
+## codex-turn-activity.py
+
+A **Codex `UserPromptSubmit`, `Stop`, and `Interrupt` hook** that writes one JSON object per lifecycle event to `~/.codex/turn-activity.jsonl` and keeps the latest status for each session in `~/.codex/turn-state/<session_id>.json`. Status is `active` after prompt submission, `idle` after a stop, and `interrupted` after an interruption. Records include timestamps, event, status, session ID, turn ID, and working directory; prompt and response text are never logged.
+
+Add these groups to `~/.codex/hooks.json`, preserving existing entries:
+
+```json
+{
+  "hooks": {
+    "UserPromptSubmit": [{ "hooks": [{ "type": "command", "command": "python3 \"$HOME/.claude/hooks/codex-turn-activity.py\"" }] }],
+    "Stop": [{ "hooks": [{ "type": "command", "command": "python3 \"$HOME/.claude/hooks/codex-turn-activity.py\"" }] }],
+    "Interrupt": [{ "hooks": [{ "type": "command", "command": "python3 \"$HOME/.claude/hooks/codex-turn-activity.py\"" }] }]
+  }
+}
+```
+
+Codex hook entries need trust approval in the Hooks UI. To inspect all session states, read `~/.codex/turn-state/*.json`; to follow event history, use `tail -f ~/.codex/turn-activity.jsonl`. `CODEX_TURN_LOG_PATH` and `CODEX_TURN_STATE_DIR` can override the output paths.
+
 ## ai-tools-sync.sh
 
 A **SessionStart hook** that keeps the deploy clone (`$AI_TOOLS_HOME`, default `~/.ai-tools`) in sync with `origin/main` on every machine, so a pushed change from `~/code/ai-tools` (the dev checkout) reaches `~/.claude/*` without waiting for someone to remember to re-run `install.sh` by hand. It's the runtime counterpart to `install.sh`'s one-time bootstrap.
