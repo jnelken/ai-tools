@@ -45,7 +45,7 @@ MCP files use the existing `mcpServers` JSON format and live locally; refer to c
 
 Claude uses safe mode for text-only calls. Connector-enabled calls use restricted mode, no settings sources, disabled hooks and skills, and explicit MCP configuration. Both retain subscription authentication (`--bare` is not suitable). Connector-enabled calls set the installed CLI’s `CLAUDE_CODE_DISABLE_CLAUDE_MDS=1` and `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1` controls; these require a fresh isolation smoke test after CLI upgrades. Connector-enabled Claude launches fail closed outside verified version 2.1.308; after a successful smoke check, set local `runtime.claude.verified_connector_version` to the newly verified version. The 2026-10-22 check on 2.1.308 exposed only the explicitly configured Mailcrush tools, no skills or slash commands, and suppressed a project instruction sentinel and SessionStart hook; no connector tools were called. Built-in harness plugins remained present. Safe mode alone suppresses explicit MCP connectors and therefore cannot serve the owner mail runtime. Built-in tools are removed in both variants. Codex ignores user config/rules, disables project instruction loading, treats the target checkout as untrusted for project config, disables hooks, skills, memory, shell, apps, and delegation, and injects composed guidance as additional developer instructions. Built-in harness instructions and managed policy remain in force. Runtime arguments cannot override these controls. Missing required CLI flags fail the launch.
 
-Profiles organize context and configuration; they are not an OS security sandbox. Runtime processes retain existing authentication and working directories. The launcher uses exec so cancellation reaches the model process directly. CLI upgrades require repeating the runtime smoke checks below.
+Profiles organize context and configuration; they are not an OS security sandbox. Runtime processes retain existing authentication and working directories. Claude launches use a signal-forwarding supervisor for quota snapshots; Codex launches use exec. CLI upgrades require repeating the runtime smoke checks below.
 
 ## Migration, checks and rollback
 
@@ -63,3 +63,12 @@ Install through the normal ai-tools deploy process: push the source commit, then
 Before cutover, start fresh sessions through both providers and verify: runtime-only instructions, intended MCP tools, no development skills/hooks or checkout instructions, existing subscription login, and no external writes. Compare text/profile sizes and startup time using a fixed short prompt. Smoke-check direct CLI and desktop starts and one code-root remote-control session switching targets. Work-machine rollout remains pending until this check runs there; local fixtures do not prove that deployment.
 
 Rollback: restore the preserved global symlinks/files, restore the previous Slackagent runner configuration, and start fresh sessions. The installer will reapply profiles on future runs; roll back the source commits too when reverting the feature permanently. No database/log/cache/report moves are involved.
+
+### Claude quota lifecycle logging
+
+Claude launches through `agent-run` use the `claude-session` supervisor so isolated
+runtimes keep development hooks disabled while logging quota at start and finish.
+The supervisor inherits stdio/cwd, forwards termination signals, preserves the CLI
+exit status, and never adds model instructions or tools. Codex remains exec-based.
+See [quota snapshots](../hooks/README.md#claude-quota-snapshots) for log access,
+freshness, account-wide attribution and forced-kill limitations.

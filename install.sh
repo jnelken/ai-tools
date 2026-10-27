@@ -600,6 +600,27 @@ wire_ai_tools_deploy_guard_hook() {
   fi
 }
 
+# Preserve existing settings, adding only missing quota lifecycle hooks.
+wire_claude_quota_hooks() {
+  command -v jq >/dev/null 2>&1 || return 0
+  [ -f "$SRC_ROOT/hooks/claude-quota.sh" ] || return 0
+  mkdir -p "$CLAUDE_DIR"
+  if [ -f "$SETTINGS" ]; then
+    backup_settings_once
+  else
+    echo '{}' > "$SETTINGS"
+  fi
+  local real; real="$(settings_target)"
+  local cmd='bash "$HOME/.claude/hooks/claude-quota.sh"'
+  jq --arg cmd "$cmd" '
+    reduce ["SessionStart", "SessionEnd"][] as $event (. ;
+      if any((.hooks[$event] // [])[]?.hooks[]?; (.command // "" | contains("claude-quota.sh")))
+      then . else .hooks[$event] = ((.hooks[$event] // []) + [{hooks:[{
+        type:"command", command:$cmd, timeout:10
+      }]}]) end)
+  ' "$real" > "$real.tmp" && mv "$real.tmp" "$real"
+}
+
 # ── hooks/ ──
 section_hooks() {
   [ -d "$SRC_ROOT/hooks" ] || return 0
@@ -624,6 +645,7 @@ section_hooks() {
 
   wire_ai_tools_sync_hook
   wire_ai_tools_deploy_guard_hook
+  wire_claude_quota_hooks
 
   # Diff symlinked hook scripts against settings.json to flag ones that are
   # present on disk but not actually wired into any hooks.<EVENT> entry.

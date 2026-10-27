@@ -234,6 +234,9 @@ def main():
         if result['profile'].startswith('runtime/') and harness == 'claude':
             env.pop('CLAUDE_CODE_SAFE_MODE', None)
             env.update(CLAUDE_CODE_DISABLE_CLAUDE_MDS='1', CLAUDE_CODE_DISABLE_AUTO_MEMORY='1')
+        if harness == 'claude':
+            from claude_quota import run as quota_run
+            sys.exit(quota_run([command[0], *cli_args], label='agent-run:' + args.profile, env=env))
         os.execvpe(command[0],[command[0],*cli_args],env)
     except (ValueError,OSError,KeyError,StopIteration,subprocess.CalledProcessError) as e:
         print('agent-profile: '+str(e),file=sys.stderr);sys.exit(2)

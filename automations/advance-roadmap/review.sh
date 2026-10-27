@@ -124,7 +124,7 @@ run_reviewer() {
       return $rc ;;
     claude)
       [ -x "$CLAUDE" ] || return 127
-      ( cd "$REPO" && "$CLAUDE" -p "$PROMPT" --model "$CLAUDE_REVIEW_MODEL" --effort "$REVIEW_EFFORT" \
+      ( cd "$REPO" && python3 "${AI_TOOLS_HOME:-$HOME/.ai-tools}/bin/claude-session" run --label "roadmap:reviewer:${STAMP:-unknown}" -- "$CLAUDE" -p "$PROMPT" --model "$CLAUDE_REVIEW_MODEL" --effort "$REVIEW_EFFORT" \
         --permission-mode plan --disallowedTools "Edit,Write,NotebookEdit" \
         --output-format json ) >"$out.json" 2>&1
       local rc=$?

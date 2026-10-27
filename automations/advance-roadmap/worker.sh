@@ -256,7 +256,7 @@ run_claude() {
   local prompt
   prompt="$(prompt_for_provider claude)" || return 2
   [ -x "$CLAUDE" ] || return 127
-  "$CLAUDE" -p "$prompt" \
+  python3 "${AI_TOOLS_HOME:-$HOME/.ai-tools}/bin/claude-session" run --label "roadmap:worker:${STAMP:-unknown}" -- "$CLAUDE" -p "$prompt" \
     --model "$CLAUDE_WORKER_MODEL" \
     --effort high \
     --dangerously-skip-permissions \

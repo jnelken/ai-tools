@@ -419,3 +419,36 @@ A **PreToolUse hook on Bash** for machines whose login shell is zsh, which is wh
 
 Append to an existing `PreToolUse` array rather than replacing it.
 
+
+## Claude quota snapshots
+
+`install.sh` wires `claude-quota.sh` into SessionStart and SessionEnd. The shared
+`bin/claude-session run --label <job> -- <CLI> [arguments]` supervisor also wraps
+roadmap planners/workers/reviewers and Claude launches through `agent-run`, including
+isolated Slackagent calls with hooks disabled. The supervisor forwards termination
+signals and records completion for errors, spawn failures and timeouts. Its child
+skips the native quota hook to avoid duplicate boundary records.
+
+Read the private append-only log without a model:
+
+```sh
+tail -n 20 ~/.claude/state/quota-snapshots.jsonl | jq .
+```
+
+Each row contains start/finish, UTC timestamp, session ID (native hook) or paired
+launch ID (supervisor), cwd, profile/job label, and 5-hour/weekly percentages and
+reset times. Supervisor finishes include exit code and received signal. Quota is
+**account-wide**; overlapping sessions prevent interpreting a before/after change
+as one session's exact consumption.
+
+Snapshots make a bounded read-only OAuth usage request using existing subscription
+credentials, never a model call, token refresh, or authentication mutation. Parallel
+boundaries coalesce probes for five seconds; every boundary still logs its observation
+time, age, source and freshness. Errors are sanitized; missing values stay unknown,
+never zero. A failed probe may retain an explicitly stale observation. Files are
+created mode 0600. Credentials, prompts and response bodies are never logged.
+
+Native SessionEnd depends on Claude invoking its hook; SIGKILL or power loss cannot
+record a finish. Supervised sessions can log normal termination/timeouts, but also
+cannot survive SIGKILL of the supervisor. Other machines pick up hooks on their next
+install/sync; external launchers that disable hooks must use `claude-session`.

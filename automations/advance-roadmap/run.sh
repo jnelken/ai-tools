@@ -465,7 +465,7 @@ run_orchestrator_codex() {
 run_orchestrator_claude() {
   local out="$1" prompt="$2"
   rm -f "$out.last" "$out.json" "$out.session"
-  "$CLAUDE" -p "$prompt" \
+  python3 "${AI_TOOLS_HOME:-$HOME/.ai-tools}/bin/claude-session" run --label "roadmap:orchestrator:${STAMP:-unknown}" -- "$CLAUDE" -p "$prompt" \
     --model "$ORCH_CLAUDE_MODEL" \
     --effort high \
     --permission-mode plan \
