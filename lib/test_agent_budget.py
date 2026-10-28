@@ -167,6 +167,29 @@ print(bool(b.acquire('codex','planner',pid=int(sys.argv[2]))))
             self.assertEqual(env['SUPERSET_WORKSPACE_ID'], 'workspace')
             self.assertEqual(env['SUPERSET_ACCOUNT_ATTRIBUTION_TOKEN'], 'keep')
 
+    def test_nested_session_end_cannot_dispatch_via_superset_tab_fallback(self):
+        identity = {'SUPERSET_TAB_ID': 'parent-tab', 'SUPERSET_PANE_ID': 'parent-pane',
+                    'SUPERSET_TERMINAL_ID': 'parent-terminal', 'SUPERSET_AGENT_ID': 'claude',
+                    'SUPERSET_AGENT_LAUNCH_ID': 'parent-launch', 'SUPERSET_AGENT_HOOK_PORT': '1234',
+                    'SUPERSET_AGENT_HOOK_VERSION': '2', 'SUPERSET_HOST_AGENT_HOOK_URL': 'private',
+                    'SUPERSET_HOOK_HARNESS': 'claude', 'SUPERSET_HOOK_VERSION': '20',
+                    'SUPERSET_HOOK_DEBUG_LOG': str(self.home / 'hook.log'), 'SUPERSET_PORT': '1234',
+                    'SUPERSET_DEBUG_HOOKS': '1'}
+        # notify.sh v20 line 18 admits either a terminal OR a tab. This routing
+        # fixture emits a marker instead of curl, so the regression is offline.
+        notify = 'cat >/dev/null; [ -n "$SUPERSET_TERMINAL_ID" ] || [ -n "$SUPERSET_TAB_ID" ] || exit 0; printf Stop'
+        payload = json.dumps(dict(hook_event_name='SessionEnd', session_id='nested'))
+        with patch.dict(os.environ, identity):
+            control = subprocess.run(['sh', '-c', notify], input=payload, text=True, capture_output=True)
+            self.assertEqual(control.stdout, 'Stop')
+            env = b.child_env()
+            for key in identity:
+                self.assertNotIn(key, env)
+            nested = subprocess.run(['sh', '-c', notify], input=payload, text=True, capture_output=True, env=env)
+            self.assertEqual(nested.returncode, 0)
+            self.assertEqual(nested.stdout, '')
+            self.assertFalse((self.home / 'hook.log').exists())
+
     def test_history_ledgers_transcripts_and_snapshot_calibration(self):
         ch = b.claude_home()
         self.append(ch / 'automations/advance-roadmap/runs.jsonl', [
@@ -327,6 +350,43 @@ print(bool(b.acquire('codex','planner',pid=int(sys.argv[2]))))
             'model_reasoning_effort="high"', 'hello $world; `literal`'])
         self.assertFalse(f.state_dir().exists())
 
+    def test_fanout_resolves_workspace_for_repo_subdirectory_and_worktree(self):
+        repo, worktree = self.home / 'repo', self.home / 'worktree'
+        for directory in (repo, worktree):
+            subprocess.run(['git', 'init', '-q', str(directory)], check=True, capture_output=True)
+            (directory / 'src').mkdir()
+        alias = self.home / 'repo-alias'
+        alias.symlink_to(repo, target_is_directory=True)
+        workspaces = [dict(id='parent', worktreePath=str(self.home)), dict(id='repo', worktreePath=str(repo)),
+                      dict(id='worktree', worktreePath=str(worktree)),
+                      dict(id='archived', worktreePath=str(worktree), archivedAt=1)]
+        actual_run = subprocess.run
+        def command(argv, **kwargs):
+            if argv[0] == f.SUPERSET:
+                self.assertEqual(argv, [f.SUPERSET, 'workspaces', 'list', '--local', '--json'])
+                return subprocess.CompletedProcess(argv, 0, json.dumps(workspaces))
+            return actual_run(argv, **kwargs)
+        with patch.object(f.subprocess, 'run', side_effect=command):
+            for cwd, expected in [(repo / 'src', 'repo'), (alias / 'src', 'repo'), (worktree / 'src', 'worktree')]:
+                self.assertEqual(f.resolve_workspace(cwd), expected)
+            prompt = self.home / 'prompt'
+            prompt.write_text('hello')
+            out = io.StringIO()
+            with patch.dict(os.environ, SUPERSET_WORKSPACE_ID=''), patch.object(f.os, 'getcwd', return_value=str(worktree / 'src')), contextlib.redirect_stdout(out):
+                self.assertEqual(f.main(['spawn', '--provider', 'codex', '--role', 'planner', '--label', 'fallback',
+                                         '--prompt-file', str(prompt), '--dry-run']), 0)
+            self.assertEqual(json.loads(out.getvalue())['command'][4], 'worktree')
+        self.assertFalse(f.state_dir().exists())
+
+    def test_workspace_resolution_reports_no_match_and_list_failure(self):
+        with patch.object(f.subprocess, 'run') as run:
+            run.side_effect = [subprocess.CompletedProcess([], 128, ''), subprocess.CompletedProcess([], 0, '[]')]
+            with self.assertRaisesRegex(ValueError, 'no local Superset workspace matches.*--workspace ID'):
+                f.resolve_workspace(self.home)
+            run.side_effect = [subprocess.CompletedProcess([], 128, ''), subprocess.CalledProcessError(1, [])]
+            with self.assertRaisesRegex(ValueError, 'could not list local Superset workspaces.*--workspace ID'):
+                f.resolve_workspace(self.home)
+
     def test_interactive_dry_run_uses_agents_create(self):
         prompt = self.home / 'prompt'
         prompt.write_text('hello')
@@ -373,10 +433,26 @@ print(bool(b.acquire('codex','planner',pid=int(sys.argv[2]))))
             out, err = self.invoke_hook(payload)
             self.assertEqual(out, '')
             self.assertIn('PermissionError', err)
+        with patch.object(hook.json, 'load', side_effect=OSError('stdin failed')):
+            out, err = self.invoke_hook(payload)
+            self.assertEqual(out, '')
+            self.assertIn('allowing tool', err)
         for bad_input in ('not json', 'null'):
             out, err = self.invoke_hook(bad_input)
             self.assertEqual(out, '')
             self.assertIn('allowing tool', err)
+
+    def test_hook_import_failure_also_fails_open(self):
+        import builtins
+        actual_import = builtins.__import__
+        def fail_budget(name, *args, **kwargs):
+            if name == 'agent_budget':
+                raise ImportError('fixture')
+            return actual_import(name, *args, **kwargs)
+        with patch.object(hook, 'budget', None), patch.object(builtins, '__import__', side_effect=fail_budget):
+            out, err = self.invoke_hook(json.dumps(dict(hook_event_name='PreToolUse', tool_name='Agent')))
+        self.assertEqual(out, '')
+        self.assertIn('ImportError', err)
 
     def test_hook_timeout_and_sigterm_allow_without_output(self):
         payload = json.dumps(dict(hook_event_name='PreToolUse', tool_name='Workflow'))

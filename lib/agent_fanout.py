@@ -71,10 +71,43 @@ def write_exit(job, code):
     os.replace(temporary, job / 'exit')
 
 
+def resolve_workspace(cwd):
+    """Prefer the cwd's exact Git worktree, then the closest containing path."""
+    cwd = Path(cwd).resolve()
+    root = None
+    try:
+        result = subprocess.run(['git', '-C', str(cwd), 'rev-parse', '--show-toplevel'],
+                                capture_output=True, text=True, timeout=5)
+        if result.returncode == 0 and result.stdout.strip():
+            root = Path(result.stdout.strip()).resolve()
+    except (OSError, subprocess.SubprocessError):
+        pass
+    try:
+        result = subprocess.run([SUPERSET, 'workspaces', 'list', '--local', '--json'],
+                                capture_output=True, text=True, check=True, timeout=20)
+        data = json.loads(result.stdout)
+        workspaces = data if isinstance(data, list) else data.get('workspaces', [])
+    except (OSError, ValueError, subprocess.SubprocessError) as error:
+        raise ValueError('could not list local Superset workspaces; pass --workspace ID') from error
+    matches = []
+    for workspace in workspaces:
+        if not isinstance(workspace, dict) or workspace.get('archivedAt') or not workspace.get('id'):
+            continue
+        path = workspace.get('worktreePath')
+        if not path:
+            continue
+        path = Path(path).expanduser().resolve()
+        if root is not None and path == root:
+            matches.append(((2, len(path.parts)), workspace['id']))
+        elif cwd == path or path in cwd.parents:
+            matches.append(((1, len(path.parts)), workspace['id']))
+    if not matches:
+        raise ValueError(f'no local Superset workspace matches {root or cwd}; pass --workspace ID')
+    return max(matches, key=lambda match: match[0])[1]
+
+
 def spawn(args):
-    workspace = args.workspace or os.environ.get('SUPERSET_WORKSPACE_ID')
-    if not workspace:
-        raise ValueError('set SUPERSET_WORKSPACE_ID or pass --workspace ID')
+    workspace = args.workspace or os.environ.get('SUPERSET_WORKSPACE_ID') or resolve_workspace(os.getcwd())
     prompt = Path(args.prompt_file).read_text()
     identifier = uuid.uuid4().hex
     job = state_dir() / identifier
@@ -119,14 +152,12 @@ def attach(job):
         raise ValueError('Superset did not return a terminal session id')
     (job / 'result.json').write_text(json.dumps(response) + '\n')
     update(job, terminal_id=terminal, state='running')
-    # Bind the reservation to the new terminal. SessionStart can adopt it rather
-    # than adding a second interactive reservation for the same agent.
+    # Attach terminal identity for status/debugging; only this watcher owns the lease.
     with budget.lock():
         leases = budget.reap()
         owned = next((l for l in leases if l['id'] == os.environ.get('AGENT_BUDGET_LEASE_ID')), None)
         if owned:
             owned['terminal_id'] = terminal
-            leases = [l for l in leases if l is owned or l.get('terminal_id') != terminal]
             budget.write_json(budget.budget_dir() / 'leases.json', leases)
     while True:
         time.sleep(5)

@@ -12,7 +12,7 @@ import sys
 import signal
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'lib'))
-import agent_budget as budget
+budget = None
 
 # Finish before Claude's 30s hook timeout, including a blocked stdin or flock.
 HOOK_TIMEOUT_SECONDS = 25
@@ -37,6 +37,10 @@ def deny(reason):
 
 
 def handle(data):
+    global budget
+    if budget is None:
+        # Import failures and slow startup share the same fail-open deadline.
+        import agent_budget as budget
     event = data.get('hook_event_name')
     session = data.get('session_id')
     if event == 'PreToolUse':

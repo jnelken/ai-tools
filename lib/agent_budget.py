@@ -458,7 +458,8 @@ def child_env():
     # Keep workspace/account attribution for leaderboard binding, but remove the
     # parent agent identity and all hook endpoints. Never print environment values.
     return {k: v for k, v in os.environ.items() if not (
-        k.startswith('SUPERSET_AGENT_') or k in ('SUPERSET_HOST_AGENT_HOOK_URL', 'SUPERSET_TERMINAL_ID',
+        k.startswith(('SUPERSET_AGENT_', 'SUPERSET_HOOK_', 'SUPERSET_HOST_AGENT_')) or k in (
+        'SUPERSET_TERMINAL_ID', 'SUPERSET_TAB_ID', 'SUPERSET_PANE_ID', 'SUPERSET_PORT', 'SUPERSET_DEBUG_HOOKS',
         'CLAUDECODE', 'CLAUDE_CODE_ENTRYPOINT', 'CLAUDE_CODE_SESSION_ID'))}
 
 

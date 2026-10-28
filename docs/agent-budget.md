@@ -14,7 +14,10 @@ fanout status
 fanout collect <id>
 ```
 
-Pass `--workspace ID` when `SUPERSET_WORKSPACE_ID` is absent. `--dry-run` on
+Workspace selection prefers `--workspace ID`, then `SUPERSET_WORKSPACE_ID`, then
+`superset workspaces list --local --json`. Fallback matches the cwd's Git toplevel
+or nearest containing worktree path (resolving symlinks and ignoring archived
+workspaces); no match reports a clear `--workspace` hint. `--dry-run` on
 `spawn` prints the exact Superset argv and planned model argv without creating
 state, a terminal, or a model call. Headless Claude emits a JSON result; Codex
 emits its JSON event stream. `collect` returns the saved output as a string so
@@ -26,8 +29,8 @@ Leases live in `~/.claude/state/agent-budget/leases.json`. All admissions, relea
 and reads use a separate stable flock file; writes replace the JSON atomically.
 Each lease stores its owner PID and process start identity (`ps lstart` on macOS;
 `/proc` start ticks on Linux). Reads reap dead/reused PIDs and expired TTLs. Old
-PID-only leases are retired because their owner incarnation cannot be verified. Only admitted children (fanout
-terminals, batch jobs, and gated subagents) hold leases. Open interactive sessions
+PID-only leases are retired because their owner incarnation cannot be verified.
+Only admitted children (fanout terminals, batch jobs, and gated subagents) hold leases. Open interactive sessions
 are not leased: their consumed usage is in the live reading, and the 30% above
 the five-hour 70% cap is reserved for interactive use. `run` owns its lease, forwards
 TERM/INT/HUP to the command's process group, preserves exit status, and releases
@@ -55,14 +58,14 @@ provider, then use p80 percentage points/token. Paired Claude snapshots match
 launch/session ids to per-session ledger usage, preserving review-round boundaries.
 They never pair a role's whole-job total with each session. Ambiguous multi-session
 rows are skipped. Transcript calibration counts only assistant messages within the
-start/finish interval, so resuming a session does not charge its earlier history. Reset-crossing,
+start/finish interval, so resuming a session does not charge its earlier history.
+Reset-crossing,
 stale, zero and negative deltas are excluded. Codex uses cumulative token deltas
 paired with rate-limit deltas within one reset window. Account-wide Claude deltas
 can include concurrent work, so their estimates deliberately err high. Samples
 are deduplicated in `samples.jsonl`; generated samples are rebuilt to repair old
 denominators after an upgrade. Parsed files and bounded transcript intervals are
-cached by parser version, size and mtime.
-Only the five-hour factor is calibrated and is conservatively applied to weekly
+cached by parser version, size and mtime. Only the five-hour factor is calibrated and is conservatively applied to weekly
 windows too. Cursor remains provisional until measured samples are available.
 
 Seeds: Codex 3 points per 70k-token planner (10-27); Claude 10 points per
@@ -87,9 +90,12 @@ missing metadata or a failed spawn leaves a bounded TTL reservation. Interactive
 fanout reservations are held only by their terminal watcher.
 
 Nested headless children retain workspace/account attribution but drop
-`SUPERSET_AGENT_*`, `SUPERSET_HOST_AGENT_HOOK_URL`, `SUPERSET_TERMINAL_ID` and
-Claude's parent session markers. This prevents their lifecycle hooks from being
-reported as the enclosing terminal's agent. Completion always uses the exit file.
+`SUPERSET_AGENT_*`, `SUPERSET_HOST_AGENT_*`, `SUPERSET_HOOK_*`,
+`SUPERSET_TERMINAL_ID`, `SUPERSET_TAB_ID`, `SUPERSET_PANE_ID`, `SUPERSET_PORT`,
+`SUPERSET_DEBUG_HOOKS`, and Claude's parent session markers. Superset's installed
+`notify.sh` v20 admits either terminal **or tab** identity at line 18 and routes
+the v1 fallback with pane/tab IDs (lines 276–314), so all three must be removed.
+This prevents their lifecycle hooks from being reported as the enclosing terminal's agent. Completion always uses the exit file.
 
 For isolated tests, set `HOME`, `AGENT_BUDGET_CLAUDE_HOME` and
 `ADVANCE_ROADMAP_CODEX_SESSIONS` to temporary directories, disable probes with
