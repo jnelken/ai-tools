@@ -17,6 +17,8 @@
 set -u
 
 ROOT="${ADVANCE_ROADMAP_ROOT:-/Users/jake/.claude/automations/advance-roadmap}"
+# Unattended: the status-glyph Stop hook must not force a sign-off turn over a result fence.
+export ADVANCE_ROADMAP_HEADLESS=1
 [ -r "$ROOT/lib/models.sh" ] || { echo "advance-roadmap: missing model defaults: $ROOT/lib/models.sh" >&2; exit 1; }
 . "$ROOT/lib/models.sh"
 # Personal machines only (OMEN, JXIV): this commits across the personal repos.
@@ -47,6 +49,9 @@ TOKENS_PY="$ROOT/lib/tokens.py"
 LINEAR_SNAP_PY="$ROOT/lib/linearsnap.py"
 DEPLOY_SNAP_PY="$ROOT/lib/deploysnap.py"
 VERDICT_PY="$ROOT/lib/verdict.py"
+FENCE_PY="$ROOT/lib/lastfence.py"
+MEMORY_PY="$ROOT/lib/runmemory.py"
+SCOPE_PY="$ROOT/lib/linearscope.py"
 LAST_VERDICT="${ADVANCE_ROADMAP_LAST_VERDICT:-$CODE_DIR/.advance-roadmap/last-verdict.json}"
 # Provider-neutral: the plan belongs to the repos, not to whichever CLI orchestrates. One file
 # per repo (pending-plan-<repo>.json), so parallel lanes never pick up each other's plan.
@@ -65,7 +70,8 @@ CLAUDE="${ADVANCE_ROADMAP_CLAUDE_BIN:-/Users/jake/.local/bin/claude}"
 CODEX="${ADVANCE_ROADMAP_CODEX_BIN:-/opt/homebrew/bin/codex}"
 
 ORCH_CODEX_MODEL="${ADVANCE_ROADMAP_ORCH_CODEX_MODEL:-$CODEX_MODEL_DEFAULT}"
-ORCH_CLAUDE_MODEL="${ADVANCE_ROADMAP_ORCH_CLAUDE_MODEL:-claude-opus-5}"
+ORCH_CLAUDE_MODEL="${ADVANCE_ROADMAP_ORCH_CLAUDE_MODEL:-$CLAUDE_PLANNER_MODEL_DEFAULT}"
+ORCH_CLAUDE_EFFORT="${ADVANCE_ROADMAP_ORCH_CLAUDE_EFFORT:-$CLAUDE_PLANNER_EFFORT_DEFAULT}"
 
 export PATH="/opt/homebrew/bin:/opt/homebrew/opt/node@22/bin:/usr/bin:/bin:/usr/sbin:/sbin:/Users/jake/.local/bin"
 
@@ -467,7 +473,7 @@ run_orchestrator_claude() {
   rm -f "$out.last" "$out.json" "$out.session"
   python3 "${AI_TOOLS_HOME:-$HOME/.ai-tools}/bin/claude-session" run --label "roadmap:orchestrator:${STAMP:-unknown}" -- "$CLAUDE" -p "$prompt" \
     --model "$ORCH_CLAUDE_MODEL" \
-    --effort high \
+    --effort "$ORCH_CLAUDE_EFFORT" \
     --permission-mode plan \
     --permission-prompts none \
     --disallowedTools "Edit,Write,NotebookEdit" \
@@ -518,11 +524,25 @@ deploy_scope=()
 [ -n "$TARGET_REPO" ] && deploy_scope=(--repo "$TARGET_REPO")
 python3 "$DEPLOY_SNAP_PY" --code-dir "$CODE_DIR" --out "$DEPLOY_SNAPSHOT" "${deploy_scope[@]}" >> "$LOG" 2>&1 \
   || echo "(deploy snapshot failed — non-fatal)" >> "$LOG"
-python3 "$VERDICT_PY" fingerprint --snapshot "$LINEAR_SNAPSHOT" --deploys "$DEPLOY_SNAPSHOT" --out "$FINGERPRINT" >> "$LOG" 2>&1
+# A daily batch plans one repo per planner: its verdict depends on that repo (and the issues labeled
+# for it or for none) alone, so another repo's commit or ticket edit leaves it valid.
+fp_scope=()
+[ -n "$TARGET_REPO" ] && fp_scope=(--repo "$TARGET_REPO")
+python3 "$VERDICT_PY" fingerprint --snapshot "$LINEAR_SNAPSHOT" --deploys "$DEPLOY_SNAPSHOT" --out "$FINGERPRINT" "${fp_scope[@]}" >> "$LOG" 2>&1
+# Batch runs plan once a day and carry a no-work verdict for 72h (ORCHESTRATOR.md, *A carried no-work
+# verdict exists*); a lone tick keeps 24h.
+verdict_max_age=24
+[ -n "$BATCH_PID" ] && verdict_max_age=72
+# A pending plan always runs: it is work, not a verdict. In a target-scoped run only this repo's
+# plans count (pending-plan-R.json and pending-plan-R.tN.json, not a repo that merely starts with R).
+if [ -n "$TARGET_REPO" ]; then
+  pending_plans=("$PENDING_DIR/pending-plan-$TARGET_REPO.json"(N) "$PENDING_DIR/pending-plan-$TARGET_REPO".t[0-9]*.json(N))
+else
+  pending_plans=("$PENDING_DIR"/pending-plan*.json(N))
+fi
 # The last run found no work and its bookkeeping landed. If no repo, issue, allowlist or skill
 # doc has moved since, this run would re-derive the same verdict — skip planning and worker both.
-# A pending plan always runs: it is work, not a verdict.
-if [ -z "$(print -l "$PENDING_DIR"/pending-plan*.json(N))" ] && python3 "$VERDICT_PY" check --file "$LAST_VERDICT" \
+if [ ${#pending_plans} -eq 0 ] && python3 "$VERDICT_PY" check --file "$LAST_VERDICT" --max-age-hours "$verdict_max_age" \
      --fingerprint "$FINGERPRINT" --changes "$VERDICT_CHANGES" --root "$ROOT" > "$RUN_DIR/verdict-check.txt" 2>&1; then
   echo "=== advance-roadmap $STAMP: skipping — $(cat "$RUN_DIR/verdict-check.txt") ===" >> "$LOG"
   record skipped-unchanged "$(cat "$RUN_DIR/verdict-check.txt")"
@@ -614,9 +634,15 @@ If a PushNotification probe would have been useful, set a note in summary; the w
     ORCH=pending-plan  # the run record shows no planning pass ran
   else
     orch_out="$RUN_DIR/orchestrator-stdout.txt"  # kept, so a killed planning pass leaves a trace
+    # The fingerprint above keeps the full snapshot; a target-scoped planner reads its repo's slice.
+    PLANNER_SNAPSHOT="$LINEAR_SNAPSHOT"
+    if [ -n "$TARGET_REPO" ] && python3 "$SCOPE_PY" --snapshot "$LINEAR_SNAPSHOT" --repo "$TARGET_REPO" \
+         --out "$RUN_DIR/linear-snapshot-planner.json" >> "$LOG" 2>&1; then
+      PLANNER_SNAPSHOT="$RUN_DIR/linear-snapshot-planner.json"
+    fi
     ORCH_PROMPT="$ORCH_PROMPT
 
-Linear snapshot (read this; never call Linear yourself): $LINEAR_SNAPSHOT
+Linear snapshot (read this; never call Linear yourself): $PLANNER_SNAPSHOT
 Production deploy snapshot (read this; never call GitHub yourself): $DEPLOY_SNAPSHOT"
     if [ -s "$VERDICT_CHANGES" ]; then
       ORCH_PROMPT="$ORCH_PROMPT
@@ -651,7 +677,7 @@ Previous no-work verdict and what changed since (carry unchanged verdicts forwar
       planner_hit=""   # only the planner that answers last decides quota vs invalid output
       # Per-attempt artifacts: a prior Claude/Cursor .json must not be passed to the next
       # planner's live-limit (Codex writes no .json; stale is_error would gate the wrong provider).
-      rm -f "$orch_out.last" "$orch_out.json" "$orch_out.session"
+      rm -f "$orch_out.last" "$orch_out.json" "$orch_out.session" "$orch_out.fence"
       run_orchestrator "$ORCH" "$orch_out" "$ORCH_PROMPT" || orch_rc=$?
       cat "$orch_out" 2>/dev/null
       echo ""
@@ -659,6 +685,15 @@ Previous no-work verdict and what changed since (carry unchanged verdicts forwar
       # The plan comes only from the planner's final answer. The transcript echoes the prompt and
       # ORCHESTRATOR.md, whose example fences are valid plans; no final answer means no plan.
       if [ -s "$orch_out.last" ] && extract_json_fence ORCHESTRATOR_RESULT_JSON "$orch_out.last" "$result"; then
+        had_json=1; break
+      fi
+      # A turn after the fence (a sign-off, a closing remark) pushes it out of the final answer. The
+      # session transcript still has the assistant message that carried it: take the newest one, never
+      # the prompt echo, which is a user entry.
+      if [ "$ORCH" = claude ] && [ -s "$orch_out.json" ] \
+         && python3 "$FENCE_PY" --result-json "$orch_out.json" --label ORCHESTRATOR_RESULT_JSON --out "$orch_out.fence" \
+         && extract_json_fence ORCHESTRATOR_RESULT_JSON "$orch_out.fence" "$result"; then
+        echo "(plan recovered from the planner's transcript: its final answer held no fence)"
         had_json=1; break
       fi
       # Live-limit rule: a banner counts only when this planner produced no final answer
@@ -841,7 +876,20 @@ PY
     fi
   fi
 
-  if [ -n "$BATCH_PID" ]; then
+  # A no-work result with nothing to post (no archives, closeouts, directive, or blocker the previous
+  # verdict doesn't already hold) needs no bookkeeping worker. Write the Step 8 ledger row here, in
+  # WORKER.md's format, so the next run's "did the previous run finish?" lookup sees it, and let the
+  # verdict save below carry the result. It skips the batch barrier too: it waits on no worker.
+  if [ "$reused" -eq 0 ] && [ "$THREAD" -le 1 ] \
+     && python3 "$VERDICT_PY" noop-check --file "$LAST_VERDICT" --orch-result "$ORCH_RESULT" >> "$LOG" 2>&1 \
+     && python3 "$MEMORY_PY" append-ledger --repo "${TARGET_REPO:-none}" --stamp "$STAMP" \
+          --outcome "$(jq -r '.outcome_token // "blocked-no-item"' "$ORCH_RESULT")" \
+          --detail "no-op: verdict carried, no bookkeeping worker" >> "$LOG" 2>&1; then
+    : > "$RUN_DIR/bookkeeping-skipped"
+    echo "(no-op no-work result: nothing to post, bookkeeping worker skipped)"
+  fi
+
+  if [ -n "$BATCH_PID" ] && [ ! -f "$RUN_DIR/bookkeeping-skipped" ]; then
     # Persist the plan before announcing readiness. No implementation/bookkeeping model runs
     # until every planner finishes and the controller releases this slot in the finite batch.
     touch "$RUN_DIR/batch-ready"
@@ -851,6 +899,15 @@ PY
         # (the plan may duplicate what thread 1 just shipped), so don't leave it to be replayed.
         [ "$THREAD" -gt 1 ] && [ -n "$PENDING_PLAN" ] && python3 "$PLAN_PY" --file "$PENDING_PLAN" clear
         [ "$reused" -eq 1 ] && python3 "$PLAN_PY" --file "$PENDING_PLAN" refund
+        # A no-work result is a finished verdict, not a plan to replay: keep it, marked as having had
+        # no bookkeeping, so tomorrow's run is skipped-unchanged or re-posts its blockers instead of
+        # re-triaging a repo that was already triaged. Fingerprint as planned (no worker changed anything).
+        if [ "$THREAD" -le 1 ] && [ "$reused" -eq 0 ] \
+           && [[ "$(jq -r '.action // empty' "$ORCH_RESULT" 2>/dev/null)" == (blocked_no_item|nothing_qualified) ]]; then
+          python3 "$VERDICT_PY" save --file "$LAST_VERDICT" --fingerprint "$FINGERPRINT" \
+            --orch-result "$ORCH_RESULT" --worker-result "$WORKER_RESULT" --stamp "$STAMP" \
+            --bookkeeping-pending >> "$LOG" 2>&1 || true
+        fi
         record skipped-quota "daily batch deferred before worker launch; pending plan retained"
         exit 0
       fi
@@ -940,6 +997,9 @@ PY
     echo "(dispatch refused: $(cat "$RUN_DIR/dispatch-rejected") — no worker)"
     print -r -- '{"used":"none","exit":0,"fatal":null}' > "$WORKER_STATUS"
     jq -n --arg s "$(cat "$RUN_DIR/dispatch-rejected")" '{outcome:"bookkeeping",provider:"cursor",summary:$s}' > "$WORKER_RESULT"
+  elif [ -f "$RUN_DIR/bookkeeping-skipped" ]; then
+    print -r -- '{"used":"none","exit":0,"fatal":null}' > "$WORKER_STATUS"
+    jq -n '{outcome:"bookkeeping",provider:"none",summary:"no-op no-work result: nothing to post, no bookkeeping worker ran"}' > "$WORKER_RESULT"
   elif [ "$SUPERSET_MODE" = "1" ] && [ -n "${WORKERS:-}" ] && [ "$action" = "dispatch_worker" -o "$action" = "resume_worker" ]; then
     # Keep the request where the workspace terminal can read it after this block's cleanup.
     cp "$req" "$RUN_DIR/worker-request.json"; req="$RUN_DIR/worker-request.json"
@@ -965,8 +1025,13 @@ PY
   # overwrites $LINEAR_SNAPSHOT — that's the record of what the orchestrator actually triaged.
   POST_SNAPSHOT="$RUN_DIR/linear-snapshot-post.json"
   POST_FINGERPRINT="$RUN_DIR/fingerprint-post.json"
-  python3 "$LINEAR_SNAP_PY" --out "$POST_SNAPSHOT" >> "$LOG" 2>&1
-  python3 "$VERDICT_PY" fingerprint --snapshot "$POST_SNAPSHOT" --out "$POST_FINGERPRINT" >> "$LOG" 2>&1
+  if [ -f "$RUN_DIR/bookkeeping-skipped" ]; then
+    POST_FINGERPRINT="$FINGERPRINT"  # no worker ran: nothing moved since the fingerprint was taken
+  else
+    python3 "$LINEAR_SNAP_PY" --out "$POST_SNAPSHOT" >> "$LOG" 2>&1
+    # Same inputs as the check-time fingerprint (deploys, repo scope), or `check` sees them all as changed.
+    python3 "$VERDICT_PY" fingerprint --snapshot "$POST_SNAPSHOT" --deploys "$DEPLOY_SNAPSHOT" --out "$POST_FINGERPRINT" "${fp_scope[@]}" >> "$LOG" 2>&1
+  fi
   # A no-work verdict reached while other lanes hold repos only covers the rest, so it isn't
   # one the next run may carry forward.
   if [ -z "$BUSY_REPOS" ] || [ -n "$TARGET_REPO" ]; then

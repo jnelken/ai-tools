@@ -43,7 +43,8 @@ args = sys.argv[1:]
 prompt = args[args.index("-p") + 1] if name == "claude" and "-p" in args else (args[-1] if args else "")
 role = "worker" if "WORKER.md" in prompt else "orchestrator"
 with open(os.environ["FAKE_CALLS"], "a") as f:
-    f.write(json.dumps({{"bin": name, "role": role}}) + "\n")
+    f.write(json.dumps({{"bin": name, "role": role, "args": args, "prompt": prompt,
+                         "headless": os.environ.get("ADVANCE_ROADMAP_HEADLESS")}}) + "\n")
 mode = os.environ.get(f"FAKE_{{name.upper()}}_{{role.upper()}}") or os.environ.get("FAKE_" + name.upper(), "plan")
 fence = "```ORCHESTRATOR_RESULT_JSON\n" + os.environ.get("FAKE_PLAN", "{{}}") + "\n```"
 # What Codex echoes while it reads ORCHESTRATOR.md / WORKER.md: their examples, which are valid JSON.
@@ -52,7 +53,11 @@ echo = "```" + label + "\n" + json.dumps({{**json.loads({no_work!r}), "outcome":
                                           "summary": "ECHOED EXAMPLE"}}) + "\n```"
 final = fence if role == "orchestrator" else "```WORKER_RESULT_JSON\n" + json.dumps(
     {{"outcome": "failed", "provider": "codex", "repo": "demo", "summary": "FINAL ANSWER"}}) + "\n```"
-if name == "agent":
+if name == "agent" and "You are reviewing a change" in prompt:
+    # Cursor's review round under the default cursor-then-codex strategy: clean, so Codex gets the final pass.
+    print(json.dumps({{"type": "result", "result": "No findings.\nVERDICT: clean",
+                       "usage": {{"inputTokens": 1, "outputTokens": 1}}}}))
+elif name == "agent":
     path = next(l.split(": ", 1)[1] for l in prompt.splitlines() if l.startswith("(raw JSON, no fence) to: "))
     json.dump({{"outcome": "bookkeeping", "provider": "cursor", "repo": "demo", "summary": "bookkeeping done"}},
               open(path, "w"))
@@ -103,7 +108,12 @@ elif name == "claude":
         json.dump({{"outcome": "limit_hit", "provider": "claude", "repo": "demo",
                     "limit_text": os.environ["FAKE_RESULT_LIMIT"]}}, open(path, "w"))
     result = fence if mode == "plan" else "I looked around and decided nothing."
-    print(json.dumps({{"type": "result", "subtype": "success", "is_error": False, "result": result, "modelUsage": {{}}}}))
+    reply = {{"type": "result", "subtype": "success", "is_error": False, "result": result, "modelUsage": {{}}}}
+    if os.environ.get("FAKE_SESSION_ID"):
+        reply["session_id"] = os.environ["FAKE_SESSION_ID"]
+    if os.environ.get("FAKE_FINAL"):  # what the final answer says when it holds no fence (a sign-off turn)
+        reply["result"] = os.environ["FAKE_FINAL"]
+    print(json.dumps(reply))
 '''
 
 
@@ -118,7 +128,7 @@ class QuotaReplayTest(unittest.TestCase):
         for f in ("run.sh", "worker.sh"):
             (self.root / f).symlink_to(HERE / f)
         for f in ("models.sh", "usage.py", "runrecord.py", "tokens.py", "verdict.py", "pendingplan.py",
-                  "deploysnap.py"):
+                  "deploysnap.py", "linearscope.py", "lastfence.py", "runmemory.py"):
             (self.root / "lib" / f).symlink_to(HERE / "lib" / f)
         (self.root / "lib" / "linearsnap.py").write_text(
             "import json, sys\na = sys.argv\njson.dump({'ok': True, 'issues': []}, open(a[a.index('--out') + 1], 'w'))\n")
@@ -175,12 +185,16 @@ class QuotaReplayTest(unittest.TestCase):
             "FAKE_CALLS": str(self.dir / "calls.jsonl"), "FAKE_LIMIT_FIXTURE": str(FIXTURES / "claude-planner-limit.json"),
             "FAKE_PLAN": json.dumps(NO_WORK), "PYTHONDONTWRITEBYTECODE": "1",
             "ADVANCE_ROADMAP_GH_BIN": str(self.bin / "gh"),
+            # Ledger rows and planner transcripts stay in the sandbox, never in ~/.claude.
+            "ADVANCE_ROADMAP_RUNS_DIR": str(self.dir / "memory" / "advance-roadmap-runs"),
+            "ADVANCE_ROADMAP_CLAUDE_PROJECTS": str(self.dir / "claude-projects"),
         })
         env.update(fake)
         return env
 
-    def run_lane(self, **fake):
-        """One daily-batch lane: release it at the barrier if it gets there, like daily_batch.py."""
+    def run_lane(self, cancel=False, **fake):
+        """One daily-batch lane: release it at the barrier if it gets there, like daily_batch.py
+        (or cancel it there, as a batch does when no worker has quota)."""
         env = self.env(**fake)
         run = self.root / "runs" / self.stamp
         proc = subprocess.Popen(["/bin/zsh", str(self.root / "run.sh")], env=env,
@@ -190,13 +204,18 @@ class QuotaReplayTest(unittest.TestCase):
         while proc.poll() is None and time.time() < deadline:
             if (run / "batch-ready").exists() and not (run / "batch-release").exists():
                 self.reached_barrier = True
-                (run / "batch-release").touch()
+                (run / ("batch-cancel" if cancel else "batch-release")).write_text("test\n")
             time.sleep(0.05)
         if proc.poll() is None:
             proc.kill()
             self.fail("run.sh did not finish")
         self.log = (self.root / "logs" / f"run-{self.stamp}.log").read_text()
         return run
+
+    def plan_accepted(self, run):
+        """The lane took the planner's plan: it reached the batch barrier, or (a no-work result with
+        nothing to post) skipped the barrier because no worker was waiting on it."""
+        return self.reached_barrier or (run / "bookkeeping-skipped").exists()
 
     def record(self):
         rows = [json.loads(l) for l in (self.root / "runs.jsonl").read_text().splitlines()]
@@ -228,7 +247,7 @@ class QuotaReplayTest(unittest.TestCase):
         before = time.time()
         run = self.run_lane(FAKE_CLAUDE="limit")
         self.assert_nothing_dispatched(run)
-        self.assertEqual(self.calls(), [{"bin": "claude", "role": "orchestrator"}])
+        self.assertEqual([(c["bin"], c["role"]) for c in self.calls()], [("claude", "orchestrator")])
         rec = self.record()
         self.assertEqual(rec["outcome"], "quota-paused", rec)
         self.assertEqual((rec["orchestrator"], rec["quota"]["provider"], rec["quota"]["role"]),
@@ -249,7 +268,7 @@ class QuotaReplayTest(unittest.TestCase):
         self.usage_state()
         run = self.run_lane(FAKE_CODEX="limit", FAKE_CLAUDE="plan")
         self.assertEqual([c["bin"] for c in self.calls() if c["role"] == "orchestrator"], ["codex", "claude"])
-        self.assertTrue(self.reached_barrier)
+        self.assertTrue(self.plan_accepted(run))
         rec = self.record()
         self.assertEqual((rec["orchestrator"], rec["outcome"]), ("claude", "blocked-no-item"))
         self.assertIn("failing over to claude", self.log)
@@ -312,10 +331,10 @@ class QuotaReplayTest(unittest.TestCase):
 
     def test_planner_gated_between_pick_and_launch_is_not_called(self):
         self.usage_state()
-        self.run_lane(FAKE_GATE_ON_SNAPSHOT="codex", FAKE_CLAUDE="plan")
+        run = self.run_lane(FAKE_GATE_ON_SNAPSHOT="codex", FAKE_CLAUDE="plan")
         self.assertEqual([c["bin"] for c in self.calls() if c["role"] == "orchestrator"], ["claude"])
         self.assertIn("planner codex went over its gate before launch — using claude", self.log)
-        self.assertTrue(self.reached_barrier)
+        self.assertTrue(self.plan_accepted(run))
         self.assertEqual(self.record()["orchestrator"], "claude")
 
     def test_every_planner_gated_before_launch_is_a_quota_skip_naming_them(self):
@@ -363,7 +382,7 @@ class QuotaReplayTest(unittest.TestCase):
         # Every provider but the last is over its gate; the last one is tried and hits its limit.
         # Whatever chain the lane was handed, the record and the batch summary name them all.
         over_codex = {"weekly": {"used_pct": 85, "reset_epoch": FUTURE}}
-        over_cursor = {"included": {"auto_pct": 99, "reset_epoch": LATER}}
+        over_cursor = {"included": {"auto_pct": 100, "reset_epoch": LATER}}
         cases = [("orchestrator", dict(codex=over_codex), self.planner_row, {"codex": FUTURE}),
                  ("worker", dict(codex=over_codex, cursor=over_cursor), self.worker_row,
                   {"cursor": LATER, "codex": FUTURE}),
@@ -450,7 +469,7 @@ exec(compile(open(__file__).read(), __file__, "exec"))
         run = self.root / "runs" / self.stamp
         run.mkdir(parents=True)
         batch = daily_batch.Batch.__new__(daily_batch.Batch)
-        batch.state = {"queue": [{"stamp": self.stamp, "status": "ready"}]}
+        batch.state = {"queue": [{"stamp": self.stamp, "status": "ready", "action": "dispatch_worker"}]}
         with mock.patch.object(daily_batch, "ROOT", self.root), \
                 mock.patch.object(daily_batch.shared, "LIB", self.root / "lib"):
             batch.defer_ready("no worker quota available", batch.worker_quota())
@@ -462,7 +481,7 @@ exec(compile(open(__file__).read(), __file__, "exec"))
         # Each path observes a limit (banner, result-only limit_hit, or a gate) and then calls a
         # usage.py helper that fails. The run record must still carry the provider, cause and reset.
         over_codex = {"weekly": {"used_pct": 85, "reset_epoch": FUTURE}}
-        over_cursor = {"included": {"auto_pct": 99, "reset_epoch": LATER}}
+        over_cursor = {"included": {"auto_pct": 100, "reset_epoch": LATER}}
         over_claude = {"five_hour": {"used_pct": 90, "reset_epoch": LATER}}
         def at_1150(reset):
             return datetime.fromtimestamp(reset, NY).strftime("%H:%M") == "11:50"
@@ -492,7 +511,7 @@ exec(compile(open(__file__).read(), __file__, "exec"))
              "claude", BANNER, at_1150, {"record-limit", "quota-record"}),
             # Every worker out with none stopped on: the one that frees up first, the others' reasons too.
             ("daily batch skipped-quota", dict(codex=over_codex, cursor=over_cursor, claude=over_claude),
-             self.batch_skip_row, "codex", "cursor: auto pool 99%", lambda r: r == FUTURE, {"quota-record"}),
+             self.batch_skip_row, "codex", "cursor: auto pool 100%", lambda r: r == FUTURE, {"quota-record"}),
         ]
         for name, gated, row, provider, cause, reset_ok, failed in cases:
             with self.subTest(path=name):
@@ -538,7 +557,7 @@ exec(compile(open(__file__).read(), __file__, "exec"))
         self.usage_state(claude={"five_hour": {"used_pct": 90, "reset_epoch": FUTURE}})
         run = self.run_lane(FAKE_CODEX="echo-limit")
         self.assert_nothing_dispatched(run)
-        self.assertEqual(self.calls(), [{"bin": "codex", "role": "orchestrator"}])
+        self.assertEqual([(c["bin"], c["role"]) for c in self.calls()], [("codex", "orchestrator")])
         self.assertIn("ECHOED EXAMPLE", (run / "orchestrator-stdout.txt").read_text())
         rec = self.record()
         self.assertEqual((rec["outcome"], rec["quota"]["provider"]), ("quota-paused", "codex"), rec)
@@ -555,14 +574,14 @@ exec(compile(open(__file__).read(), __file__, "exec"))
 
     def test_codex_echoing_orchestrator_examples_plans_from_its_final_answer(self):
         self.usage_state(claude={"five_hour": {"used_pct": 90, "reset_epoch": FUTURE}})
-        self.run_lane(FAKE_CODEX="echo-final")
-        self.assertTrue(self.reached_barrier)
+        run = self.run_lane(FAKE_CODEX="echo-final")
+        self.assertTrue(self.plan_accepted(run))
         self.assertEqual(self.record()["outcome"], "blocked-no-item")
         self.assertEqual(json.loads(self.verdict.read_text())["summary"], NO_WORK["summary"])
 
     def test_codex_worker_result_comes_only_from_its_final_answer(self):
         # Cursor is over its gate, so Codex works. Its transcript echoes WORKER.md's shipped example.
-        over_cursor = {"included": {"auto_pct": 99, "reset_epoch": LATER}}
+        over_cursor = {"included": {"auto_pct": 100, "reset_epoch": LATER}}
         for mode, source, summary in (("echo-silent", None, None), ("echo-final", "stdout-fence", "FINAL ANSWER")):
             with self.subTest(mode=mode):
                 self.tearDown()
@@ -581,13 +600,162 @@ exec(compile(open(__file__).read(), __file__, "exec"))
 
     # ── a real no-work plan keeps its bookkeeping ────────────────────────────
 
-    def test_valid_no_work_plan_runs_bookkeeping_and_saves_its_verdict(self):
+    def test_no_work_plan_with_a_new_blocker_runs_bookkeeping_and_saves_its_verdict(self):
         self.usage_state(codex={"weekly": {"used_pct": 85, "reset_epoch": FUTURE}})
-        self.run_lane(FAKE_CLAUDE="plan")
+        plan = {**NO_WORK, "blockers": [{"repo": "demo", "linear_id": "DEV-7", "detail": "needs a decision"}]}
+        self.run_lane(FAKE_CLAUDE="plan", FAKE_PLAN=json.dumps(plan))
         self.assertTrue(self.reached_barrier)
         self.assertEqual([c["bin"] for c in self.calls() if c["role"] == "worker"], ["agent"])
         self.assertEqual(self.record()["outcome"], "blocked-no-item")
         self.assertEqual(json.loads(self.verdict.read_text())["summary"], NO_WORK["summary"])
+        self.assertFalse((self.root / "memory").exists(), "the worker owns the ledger row, not run.sh")
+
+    def ledger(self):
+        return (self.root.parent / "memory" / "advance-roadmap-runs" / "demo.md")
+
+    def test_noop_no_work_plan_skips_the_worker_writes_the_ledger_row_and_saves_the_verdict(self):
+        self.usage_state(codex={"weekly": {"used_pct": 85, "reset_epoch": FUTURE}})
+        run = self.run_lane(FAKE_CLAUDE="plan")
+        self.assertFalse(self.reached_barrier, "nothing waits on a worker, so nothing waits at the barrier")
+        self.assertEqual([c["role"] for c in self.calls()], ["orchestrator"])
+        rec = self.record()
+        self.assertEqual((rec["outcome"], rec["status"]), ("blocked-no-item", "ran"), rec)
+        # Step 8's row, in the worker's own format, so "did the previous run finish?" finds it.
+        row = [l for l in self.ledger().read_text().splitlines() if self.stamp in l]
+        self.assertEqual(len(row), 1, self.ledger().read_text())
+        self.assertRegex(row[0], rf"^\| `{self.stamp}` \| \d{{4}}-\d\d-\d\d \| demo \(no-op[^|]*\) \| blocked-no-item \|$")
+        has = subprocess.run([sys.executable, str(self.root / "lib/runmemory.py"), "has-stamp", "--stamp", self.stamp],
+                             env=self.env(), capture_output=True, text=True)
+        self.assertEqual((has.returncode, has.stdout.strip()), (0, "demo"))
+        self.assertEqual(json.loads(self.verdict.read_text())["summary"], NO_WORK["summary"])
+        self.assertNotIn("bookkeeping_pending", json.loads(self.verdict.read_text()))
+        self.assertTrue((run / "bookkeeping-skipped").exists())
+        # The next lane finds nothing moved and skips planning altogether.
+        self.run_lane(FAKE_CLAUDE="plan")
+        self.assertEqual(self.record()["outcome"], "skipped-unchanged", self.record())
+        self.assertEqual([c["role"] for c in self.calls()], ["orchestrator"])
+
+    def test_a_canceled_no_work_plan_keeps_its_verdict_and_tomorrow_skips_it(self):
+        self.usage_state(codex={"weekly": {"used_pct": 85, "reset_epoch": FUTURE}})
+        plan = {**NO_WORK, "blockers": [{"repo": "demo", "linear_id": "DEV-7", "detail": "needs a decision"}]}
+        self.run_lane(cancel=True, FAKE_CLAUDE="plan", FAKE_PLAN=json.dumps(plan))
+        self.assertTrue(self.reached_barrier)
+        self.assertEqual([c["role"] for c in self.calls()], ["orchestrator"])
+        self.assertEqual(self.record()["outcome"], "skipped-quota")
+        kept = json.loads(self.verdict.read_text())
+        self.assertTrue(kept["bookkeeping_pending"])
+        self.assertEqual(kept["blockers"][0]["linear_id"], "DEV-7")
+        # Its blockers were never posted: the next run re-plans (cheaply) rather than skipping them.
+        self.run_lane(FAKE_CLAUDE="plan", FAKE_PLAN=json.dumps(plan))
+        self.assertNotEqual(self.record()["outcome"], "skipped-unchanged")
+        self.assertIn("never ran", self.log)
+        self.assertEqual([c["role"] for c in self.calls()], ["orchestrator", "orchestrator", "worker"])
+        self.assertNotIn("bookkeeping_pending", json.loads(self.verdict.read_text()))
+
+    def test_a_canceled_dispatch_plan_saves_no_verdict(self):
+        self.usage_state(codex={"weekly": {"used_pct": 85, "reset_epoch": FUTURE}})
+        self.verdict.write_text(json.dumps({"stamp": "20261012-103001", "decided_at": "2026-10-28T10:00:00",
+                                            "outcome_token": "blocked-no-item", "fingerprint": {}}))
+        before = self.verdict.read_text()
+        self.run_lane(cancel=True, FAKE_CLAUDE="plan", FAKE_PLAN=self.worker_plan())
+        self.assertEqual(self.record()["outcome"], "skipped-quota")
+        self.assertEqual(self.verdict.read_text(), before)
+
+    # ── headless planners ────────────────────────────────────────────────────
+
+    def test_headless_marker_reaches_every_model_call_and_planners_default_to_sonnet_medium(self):
+        self.usage_state(codex={"weekly": {"used_pct": 85, "reset_epoch": FUTURE}})
+        self.run_lane(FAKE_CLAUDE="plan")
+        planner = self.calls()[0]
+        self.assertEqual(planner["headless"], "1")
+        args = planner["args"]
+        self.assertEqual(args[args.index("--model") + 1], "claude-sonnet-5-5")
+        self.assertEqual(args[args.index("--effort") + 1], "medium")
+        self.assertNotIn("advisor", " ".join(args), "--disallowedTools advisor does not stop the advisor server tool")
+
+    def test_planner_model_and_effort_overrides_still_win(self):
+        self.usage_state(codex={"weekly": {"used_pct": 85, "reset_epoch": FUTURE}})
+        self.run_lane(FAKE_CLAUDE="plan", ADVANCE_ROADMAP_ORCH_CLAUDE_MODEL="claude-opus-5",
+                      ADVANCE_ROADMAP_ORCH_CLAUDE_EFFORT="high")
+        args = self.calls()[0]["args"]
+        self.assertEqual((args[args.index("--model") + 1], args[args.index("--effort") + 1]), ("claude-opus-5", "high"))
+
+    def test_planner_reads_its_repos_snapshot_while_the_fingerprint_keeps_the_whole_queue(self):
+        self.usage_state(codex={"weekly": {"used_pct": 85, "reset_epoch": FUTURE}})
+        def issue(id_, labels, state_type="unstarted"):
+            return {"id": id_, "title": id_, "description": "", "state": "Todo", "state_type": state_type,
+                    "priority": 2, "labels": labels, "blocked_by": [], "human_comments_sha": "-"}
+        self.snapshot.write_text(json.dumps({"ok": True, "issues": [
+            issue("DEV-1", ["repo/demo"]), issue("DEV-2", ["repo/other"]), issue("DEV-3", []),
+            issue("DEV-4", ["repo/demo"], "completed")]}))
+        run = self.run_lane(FAKE_CLAUDE="plan")
+        planner_snap = json.loads((run / "linear-snapshot-planner.json").read_text())
+        self.assertEqual([i["id"] for i in planner_snap["issues"]], ["DEV-1", "DEV-3"])
+        self.assertIn(str(run / "linear-snapshot-planner.json"), self.calls()[0]["prompt"])
+        self.assertEqual(len(json.loads((run / "linear-snapshot.json").read_text())["issues"]), 4)
+        self.assertEqual(sorted(json.loads((run / "fingerprint.json").read_text())["issues"]),
+                         ["DEV-1", "DEV-3", "DEV-4"])
+
+    # ── a pending plan only disables its own repo's verdict check ───────────
+
+    def test_pending_plans_of_other_repos_do_not_disable_this_repos_verdict(self):
+        self.usage_state(codex={"weekly": {"used_pct": 85, "reset_epoch": FUTURE}})
+        self.run_lane(FAKE_CLAUDE="plan")  # carries a no-op verdict for demo
+        pending = self.root / "pending"
+        pending.mkdir(exist_ok=True)
+        for other in ("pending-plan-other.json", "pending-plan-demo2.json", "pending-plan-other.t2.json"):
+            (pending / other).write_text("{}")
+        self.run_lane(FAKE_CLAUDE="plan")
+        self.assertEqual(self.record()["outcome"], "skipped-unchanged", self.record())
+        (pending / "pending-plan-demo.t2.json").write_text("{}")  # this repo's second thread: work, not a verdict
+        self.run_lane(FAKE_CLAUDE="plan")
+        self.assertNotEqual(self.record()["outcome"], "skipped-unchanged")
+        (pending / "pending-plan-demo.t2.json").unlink()
+        (pending / "pending-plan-demo.json").write_text("{}")
+        self.run_lane(FAKE_CLAUDE="plan")
+        self.assertNotEqual(self.record()["outcome"], "skipped-unchanged")
+
+    def test_another_repos_commit_leaves_this_repos_carried_verdict_valid(self):
+        self.usage_state(codex={"weekly": {"used_pct": 85, "reset_epoch": FUTURE}})
+        for name in ("demo2",):
+            subprocess.run(["git", "init", "-q", str(self.code / name)], check=True)
+            subprocess.run(["git", "-C", str(self.code / name), "remote", "add", "origin",
+                            f"git@github.com:jnelken/{name}.git"], check=True)
+        self.run_lane(FAKE_CLAUDE="plan")
+        hermetic = {**os.environ, "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"}
+        subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", "-C", str(self.code / "demo2"),
+                        "commit", "-q", "--allow-empty", "-m", "elsewhere"], env=hermetic, check=True)
+        self.run_lane(FAKE_CLAUDE="plan")
+        self.assertEqual(self.record()["outcome"], "skipped-unchanged", self.record())
+
+    # ── Oct 27: a finished triage must survive the sign-off turn ─────────────
+
+    def write_oct27_transcript(self, sid="oct27-session"):
+        projects = self.dir / "claude-projects" / "-tmp-code"
+        projects.mkdir(parents=True, exist_ok=True)
+        (projects / f"{sid}.jsonl").write_text((FIXTURES.parent / "oct27" / "claude-planner-transcript.jsonl").read_text())
+        return sid
+
+    def test_oct27_a_signoff_turn_after_the_fence_keeps_the_planners_triage(self):
+        self.usage_state(codex={"weekly": {"used_pct": 85, "reset_epoch": FUTURE}})
+        sid = self.write_oct27_transcript()
+        self.run_lane(FAKE_CLAUDE="plan", FAKE_SESSION_ID=sid, FAKE_FINAL="💬 No item for demo",
+                      FAKE_PLAN=json.dumps({**NO_WORK, "repo": "demo", "considered": ["WRONG: the live fence"]}))
+        self.assertIn("plan recovered from the planner's transcript", self.log)
+        rec = self.record()
+        self.assertEqual(rec["outcome"], "blocked-no-item", rec)
+        saved = json.loads(self.verdict.read_text())
+        # The transcript's real fence, not the prompt echo's dispatch example nor the sidechain's.
+        self.assertEqual(saved["considered"], ["DEV-7 needs a decision"])
+        self.assertEqual(saved["summary"], "No work qualified for demo.")
+        self.assertEqual([c["role"] for c in self.calls()], ["orchestrator"], "a no-op needs no worker")
+
+    def test_oct27_without_a_transcript_the_sign_off_is_still_an_error(self):
+        self.usage_state(codex={"weekly": {"used_pct": 85, "reset_epoch": FUTURE}})
+        self.run_lane(FAKE_CLAUDE="plan", FAKE_SESSION_ID="no-such-session", FAKE_FINAL="💬 No item")
+        rec = self.record()
+        self.assertEqual(rec["outcome"], "error", rec)
+        self.assertFalse(self.verdict.exists())
 
     def test_offline_deploy_snapshot_is_unknown_and_never_blocks_planning(self):
         self.usage_state(codex={"weekly": {"used_pct": 85, "reset_epoch": FUTURE}})
@@ -596,7 +764,7 @@ exec(compile(open(__file__).read(), __file__, "exec"))
         self.assertEqual(snap["repos"]["demo"]["status"], "unknown")
         self.assertIn("gh: offline in tests", snap["repos"]["demo"]["error"])
         self.assertNotIn("deploy snapshot failed", self.log)
-        self.assertTrue(self.reached_barrier)
+        self.assertEqual([c["role"] for c in self.calls()], ["orchestrator"])  # planned, with no deploy status
         self.assertEqual(self.record()["outcome"], "blocked-no-item")
 
     def test_contaminated_verdict_on_disk_is_discarded_and_the_repo_replanned(self):

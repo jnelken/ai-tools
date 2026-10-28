@@ -102,5 +102,19 @@ msgtext=$(sched_msg 2026-10-15T18:00:00 "$CC"$'\n'"$CR")
 [[ "$msgtext" == *"c0882707"* && "$msgtext" == *"one-shot"* && "$msgtext" == *"lost if this session closes"* ]] \
   && pass=$((pass+1)) || { fail=$((fail+1)); echo "FAIL: sched message text — got: $msgtext"; }
 
+# Headless advance-roadmap runs are exempt: no forced sign-off turn, no schedule warning.
+headless() { # headless <value|-> <message> — hook run with ADVANCE_ROADMAP_HEADLESS set (or unset for -)
+  local out
+  if [[ "$1" == "-" ]]; then
+    out=$(jq -n --arg m "$2" '{last_assistant_message:$m, stop_hook_active:false}' | bash "$HOOK")
+  else
+    out=$(jq -n --arg m "$2" '{last_assistant_message:$m, stop_hook_active:false}' | ADVANCE_ROADMAP_HEADLESS="$1" bash "$HOOK")
+  fi
+  classify "$out" $?
+}
+expect PASS  "headless: no glyph is fine"        "$(headless 1 $'planner answer\n```ORCHESTRATOR_RESULT_JSON\n{}\n```')"
+expect BLOCK "headless: unset still blocks"      "$(headless - 'planner answer, no glyph')"
+expect BLOCK "headless: only 1 exempts"          "$(headless 0 'planner answer, no glyph')"
+
 echo "status-glyph-check: $pass passed, $fail failed"
 (( fail == 0 ))

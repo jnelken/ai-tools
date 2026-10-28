@@ -7,7 +7,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parents[1]
@@ -128,6 +128,198 @@ class VerdictTest(unittest.TestCase):
         (self.root / "runs.jsonl").write_text(json.dumps({"stamp": STAMP, "outcome": "blocked-no-item"}) + "\n")
         self.assertEqual(self.check().returncode, 0)
         self.assertTrue(self.verdict.exists())
+
+
+def issue(id_, labels=(), state="Todo", state_type="unstarted", blocked_by=(), description="", title=None):
+    return {"id": id_, "title": title or id_, "description": description, "state": state, "state_type": state_type,
+            "priority": 2, "labels": list(labels), "blocked_by": list(blocked_by), "human_comments_sha": "-"}
+
+
+class ScopedVerdictTest(unittest.TestCase):
+    """A daily batch's verdict depends on its own repo and the issues that concern it, nothing more."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.dir = Path(self.tmp.name)
+        self.root = self.dir / "root"
+        (self.root / "runs").mkdir(parents=True)
+        self.code = self.dir / "code"
+        for name in ("a", "b"):
+            self.git_repo(name)
+        self.issues = [issue("DEV-1", ["repo/a"]), issue("DEV-2", ["repo/b"]), issue("DEV-3")]
+        self.deploys = {"a": "success", "b": "success"}
+        self.verdict = self.root / "last-verdict-a.json"
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def git_repo(self, name):
+        repo = self.code / name
+        hermetic = {**os.environ, "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"}
+        subprocess.run(["git", "init", "-q", "-b", "main", str(repo)], env=hermetic, check=True)
+        subprocess.run(["git", "-C", str(repo), "remote", "add", "origin", f"git@github.com:jnelken/{name}.git"],
+                       env=hermetic, check=True)
+        self.commit(name, "init")
+
+    def commit(self, name, message):
+        hermetic = {**os.environ, "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"}
+        subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", "-C", str(self.code / name), "commit",
+                        "-q", "--allow-empty", "-m", message], env=hermetic, check=True)
+
+    def run_verdict(self, *args):
+        env = dict(os.environ, PERSONAL_CODE_DIR=str(self.code), ADVANCE_ROADMAP_ROOT=str(self.root))
+        return subprocess.run([sys.executable, str(SCRIPT), *args], env=env, capture_output=True, text=True)
+
+    def fingerprint(self, out="fp.json", repo="a"):
+        snap, deploys = self.dir / "snap.json", self.dir / "deploys.json"
+        snap.write_text(json.dumps({"ok": True, "issues": self.issues}))
+        deploys.write_text(json.dumps({"repos": {k: {"status": v} for k, v in self.deploys.items()}}))
+        args = ["fingerprint", "--snapshot", str(snap), "--deploys", str(deploys), "--out", str(self.dir / out)]
+        p = self.run_verdict(*args, *(["--repo", repo] if repo else []))
+        self.assertEqual(p.returncode, 0, p.stderr)
+        return json.loads((self.dir / out).read_text())
+
+    def save(self, orch, worker=None, pending=False, fp="fp.json"):
+        o, w = self.dir / "orch.json", self.dir / "worker.json"
+        o.write_text(json.dumps(orch))
+        w.write_text(json.dumps({"outcome": "bookkeeping"} if worker is None else worker))
+        return self.run_verdict("save", "--file", str(self.verdict), "--fingerprint", str(self.dir / fp),
+                                "--orch-result", str(o), "--worker-result", str(w), "--stamp", "20261014-103004",
+                                *(["--bookkeeping-pending"] if pending else []))
+
+    def check(self, fp="fp2.json", *extra):
+        return self.run_verdict("check", "--file", str(self.verdict), "--fingerprint", str(self.dir / fp),
+                                "--changes", str(self.dir / "changes.json"), "--root", str(self.root), *extra)
+
+    NO_WORK = {"action": "blocked_no_item", "outcome_token": "blocked-no-item", "summary": "nothing"}
+
+    def carried(self):
+        self.fingerprint("fp.json")
+        self.assertEqual(self.save(self.NO_WORK).returncode, 0)
+        self.assertTrue(self.verdict.exists())
+
+    def test_a_commit_in_repo_b_leaves_repo_a_valid(self):
+        self.carried()
+        self.commit("b", "work in b")
+        self.fingerprint("fp2.json")
+        p = self.check()
+        self.assertEqual(p.returncode, 0, p.stdout)
+        self.commit("a", "work in a")
+        self.fingerprint("fp2.json")
+        p = self.check()
+        self.assertEqual(p.returncode, 1)
+        self.assertIn("repo:a", p.stdout)
+
+    def test_ticket_edits_in_other_repos_leave_it_valid_but_this_repos_and_unlabeled_ones_do_not(self):
+        self.carried()
+        self.issues[1] = issue("DEV-2", ["repo/b"], title="renamed")
+        self.fingerprint("fp2.json")
+        self.assertEqual(self.check().returncode, 0)
+        for edited in (issue("DEV-1", ["repo/a"], title="renamed"), issue("DEV-3", title="renamed")):
+            with self.subTest(issue=edited["id"]):
+                self.issues = [issue("DEV-1", ["repo/a"]), issue("DEV-2", ["repo/b"]), issue("DEV-3")]
+                self.issues = [edited if i["id"] == edited["id"] else i for i in self.issues]
+                self.fingerprint("fp2.json")
+                p = self.check()
+                self.assertEqual(p.returncode, 1)
+                self.assertIn(f"issue:{edited['id']}", p.stdout)
+
+    def test_a_blocker_finishing_in_another_repo_reopens_triage(self):
+        self.issues[0] = issue("DEV-1", ["repo/a"], blocked_by=["DEV-2"])
+        self.carried()
+        self.issues[1] = issue("DEV-2", ["repo/b"], state="Done", state_type="completed")
+        self.fingerprint("fp2.json")
+        p = self.check()
+        self.assertEqual(p.returncode, 1)
+        self.assertIn("issue:DEV-2", p.stdout)
+
+    def test_deploys_are_in_both_fingerprints_so_the_saved_verdict_can_pass_its_check(self):
+        # The fingerprint saved after the worker once omitted --deploys: `deploy:<repo>` then read as
+        # changed against every check-time fingerprint, so a repo with a deploy never skipped.
+        self.carried()
+        self.assertEqual(json.loads(self.verdict.read_text())["fingerprint"]["deploys"], {"a": "success"})
+        self.fingerprint("fp2.json")
+        self.assertEqual(self.check().returncode, 0)
+        self.deploys["b"] = "failure"  # another repo's deploy is not this verdict's business
+        self.fingerprint("fp2.json")
+        self.assertEqual(self.check().returncode, 0)
+        self.deploys["a"] = "failure"
+        self.fingerprint("fp2.json")
+        p = self.check()
+        self.assertEqual(p.returncode, 1)
+        self.assertIn("deploy:a", p.stdout)
+
+    def test_unscoped_fingerprint_still_covers_everything(self):
+        self.carried()
+        fp = self.fingerprint("fp-all.json", repo=None)
+        self.assertEqual(sorted(fp["repos"]), ["a", "b"])
+        self.assertEqual(sorted(fp["issues"]), ["DEV-1", "DEV-2", "DEV-3"])
+
+    def test_batch_runs_carry_a_verdict_for_72_hours(self):
+        self.carried()
+        v = json.loads(self.verdict.read_text())
+        v["decided_at"] = (datetime.now() - timedelta(hours=30)).isoformat(timespec="seconds")
+        self.verdict.write_text(json.dumps(v))
+        self.fingerprint("fp2.json")
+        self.assertEqual(self.check().returncode, 1)  # a lone tick re-derives it after 24h
+        self.assertEqual(self.check("fp2.json", "--max-age-hours", "72").returncode, 0)
+        v["decided_at"] = (datetime.now() - timedelta(hours=80)).isoformat(timespec="seconds")
+        self.verdict.write_text(json.dumps(v))
+        self.assertEqual(self.check("fp2.json", "--max-age-hours", "72").returncode, 1)
+
+    # ── a bookkeeping worker is skipped only when it has nothing to do ────────
+
+    def noop(self, orch):
+        o = self.dir / "noop-orch.json"
+        o.write_text(json.dumps({**self.NO_WORK, **orch}))
+        return self.run_verdict("noop-check", "--file", str(self.verdict), "--orch-result", str(o)).returncode
+
+    def test_noop_needs_a_clean_no_work_result(self):
+        self.assertEqual(self.noop({}), 0, "no blockers, no previous verdict: nothing to post")
+        for over in ({"archives": ["a/docs/plans/x.md"]}, {"closeouts": [{"repo": "a", "linear_id": "DEV-1", "evidence": "e"}]},
+                     {"directive_ticket": "DEV-1"}, {"worker_brief": "close out the recovered deploy ticket"},
+                     {"action": "dispatch_worker"}, {"planner_error": {"kind": "quota"}}):
+            with self.subTest(over=over):
+                self.assertEqual(self.noop(over), 1)
+
+    def test_noop_only_when_every_blocker_is_already_in_the_previous_verdict(self):
+        self.carried()
+        v = json.loads(self.verdict.read_text())
+        v["blockers"] = [{"repo": "a", "linear_id": "DEV-1", "detail": "needs a decision"}]
+        self.verdict.write_text(json.dumps(v))
+        self.assertEqual(self.noop({"blockers": [{"repo": "a", "linear_id": "DEV-1", "detail": "reworded"}]}), 0)
+        self.assertEqual(self.noop({"blockers": [{"repo": "a", "linear_id": "DEV-1", "detail": "x"},
+                                                 {"repo": "a", "linear_id": "DEV-9", "detail": "new"}]}), 1)
+        self.assertEqual(self.noop({"blockers": [{"repo": "a", "detail": "no ticket, no previous"}]}), 1)
+
+    def test_a_deferred_verdict_is_marked_and_its_blockers_are_not_taken_as_posted(self):
+        blocker = {"repo": "a", "linear_id": "DEV-1", "detail": "needs a decision"}
+        self.fingerprint("fp.json")
+        # The batch deferred the bookkeeping worker: no worker result exists at all.
+        p = self.save({**self.NO_WORK, "blockers": [blocker]}, worker={}, pending=True)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertTrue(json.loads(self.verdict.read_text())["bookkeeping_pending"])
+        self.assertEqual(self.noop({"blockers": [blocker]}), 1)
+        # Without the flag an unsettled worker still means "not carried forward".
+        p = self.save({**self.NO_WORK, "blockers": [blocker]}, worker={})
+        self.assertIn("not carried forward", p.stdout)
+        self.assertFalse(self.verdict.exists())
+
+    def test_a_deferred_verdict_is_never_skipped_unchanged(self):
+        self.fingerprint("fp.json")
+        self.save({**self.NO_WORK, "blockers": [{"repo": "a", "linear_id": "DEV-1", "detail": "d"}]},
+                  worker={}, pending=True)
+        self.fingerprint("fp2.json")
+        p = self.check()
+        self.assertEqual(p.returncode, 1)
+        self.assertIn("bookkeeping", p.stdout)
+        self.assertTrue((self.dir / "changes.json").exists(), "the planner still gets the previous verdict to carry forward")
+
+    def test_pending_verdict_cannot_be_saved_for_dispatched_work(self):
+        self.carried()
+        p = self.save({"action": "dispatch_worker", "outcome_token": None, "summary": "x"}, worker={}, pending=True)
+        self.assertIn("not carried forward", p.stdout)
+        self.assertFalse(self.verdict.exists())
 
 
 if __name__ == "__main__":

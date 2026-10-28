@@ -127,8 +127,14 @@ class DailyBatchTest(unittest.TestCase):
             "         'reset_epoch': 1792000000, 'reset_at': '2026-10-24T00:00:00-04:00'},\n"
             "        {'provider': 'codex', 'state': 'ok', 'cause': None, 'reset_epoch': None, 'reset_at': None}]}))\n"
             "    raise SystemExit(0)\n"
-            "print('' if os.environ.get('FAKE_NO_QUOTA') else "
-            "{'pick-worker-chain': 'cursor', 'pick-orchestrator': 'codex'}.get(sys.argv[-1], ''))\n")
+            "if 'gates' in sys.argv:\n"
+            "    print(os.environ.get('FAKE_REVIEWER_GATES', ''))\n"
+            "    raise SystemExit(0)\n"
+            "# FAKE_NO_QUOTA: the worker pool runs dry once planning has started (the headroom check before\n"
+            "# any planner still passes); FAKE_NO_QUOTA_AT_START: it is dry before the batch plans anything.\n"
+            "dry = os.environ.get('FAKE_NO_QUOTA_AT_START') or (\n"
+            "    os.environ.get('FAKE_NO_QUOTA') and os.path.exists(os.path.join(os.environ['ADVANCE_ROADMAP_ROOT'], 'trace.jsonl')))\n"
+            "print('' if dry else {'pick-worker-chain': 'cursor', 'pick-orchestrator': 'codex'}.get(sys.argv[-1], ''))\n")
         (self.root / 'lib/planapproval.py').write_text(FAKE_APPROVER)
         (self.root / 'lib/linearsnap.py').write_text(
             "import json, sys\njson.dump({'ok': True, 'issues': []}, open(sys.argv[-1], 'w'))\n")

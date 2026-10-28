@@ -182,16 +182,22 @@ def combine(request, model):
 
 # ── model calls ───────────────────────────────────────────────────────────────
 
-def default_codex_model():
+def model_default(name):
+    """One NAME=value assignment from models.sh, or None when the file lacks it."""
     models = Path(__file__).with_name("models.sh")
     try:
         contents = models.read_text()
     except OSError as exc:
         raise RuntimeError(f"planapproval: cannot read model defaults: {models}: {exc}") from exc
-    match = re.search(r"^CODEX_MODEL_DEFAULT=([A-Za-z0-9._-]+)[ \t]*$", contents, re.MULTILINE)
-    if not match:
-        raise RuntimeError(f"planapproval: missing CODEX_MODEL_DEFAULT assignment in {models}")
-    return match.group(1)
+    match = re.search(rf"^{name}=([A-Za-z0-9._-]+)[ \t]*$", contents, re.MULTILINE)
+    return match.group(1) if match else None
+
+
+def default_codex_model():
+    model = model_default("CODEX_MODEL_DEFAULT")
+    if not model:
+        raise RuntimeError(f"planapproval: missing CODEX_MODEL_DEFAULT assignment in {Path(__file__).with_name('models.sh')}")
+    return model
 
 
 def run_codex(prompt, code_dir):
@@ -210,12 +216,14 @@ def run_codex(prompt, code_dir):
 
 def run_claude(prompt, code_dir):
     claude = os.environ.get("ADVANCE_ROADMAP_CLAUDE_BIN", "/Users/jake/.local/bin/claude")
-    model = os.environ.get("ADVANCE_ROADMAP_ORCH_CLAUDE_MODEL", "claude-opus-5")
+    model = os.environ.get("ADVANCE_ROADMAP_ORCH_CLAUDE_MODEL") or model_default("CLAUDE_PLANNER_MODEL_DEFAULT") or "claude-sonnet-5-5"
+    effort = os.environ.get("ADVANCE_ROADMAP_ORCH_CLAUDE_EFFORT") or model_default("CLAUDE_PLANNER_EFFORT_DEFAULT") or "medium"
     proc = subprocess.run(
-        [claude, "-p", prompt, "--model", model, "--effort", "high", "--permission-mode", "plan",
+        [claude, "-p", prompt, "--model", model, "--effort", effort, "--permission-mode", "plan",
          "--permission-prompts", "none", "--disallowedTools", "Edit,Write,NotebookEdit",
          "--add-dir", code_dir, "--output-format", "text"],
-        capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=1500)
+        capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=1500,
+        env={**os.environ, "ADVANCE_ROADMAP_HEADLESS": "1"})
     return proc.stdout, proc.stderr
 
 

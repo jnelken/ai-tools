@@ -34,6 +34,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import fcntl
+import importlib.util
 import json
 import os
 import queue
@@ -324,27 +325,99 @@ def provider_available_from_limit(prov: dict[str, Any], now: float) -> bool:
     return True
 
 
-def probe_claude(state: dict[str, Any]) -> None:
-    prov = state["providers"]["claude"]
+# A Claude reading older than this says nothing about the window now: it is stored as unknown (no
+# percentage), never as the 0% an expired statusline file used to read as.
+CLAUDE_READING_MAX_AGE_S = 15 * 60
+
+
+def claude_quota_lib() -> Path:
+    """The ai-tools lib/ that holds claude_quota.py: this file's own checkout (found by walking up
+    from its resolved location, so the deploy clone's symlinked copy resolves too), else AI_TOOLS_HOME."""
+    here = Path(__file__).resolve().parent
+    for parent in (here, *here.parents):
+        if (parent / "lib" / "claude_quota.py").is_file():
+            return parent / "lib"
+    return Path(os.environ.get("AI_TOOLS_HOME", HOME / ".ai-tools")) / "lib"
+
+
+def _epoch(value: Any) -> float | None:
+    """Epoch seconds from a number or an ISO-8601 string (the OAuth usage endpoint sends the latter)."""
+    n = _num(value)
+    if n is not None:
+        return n
+    if isinstance(value, str):
+        try:
+            return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
+        except ValueError:
+            return None
+    return None
+
+
+def live_claude_reading() -> dict[str, Any] | None:
+    """claude_quota.quota(): the OAuth usage endpoint, falling back inside it to the statusline cache.
+    None when probes are off, the module cannot be loaded or it has no windows."""
+    if not probes_enabled():
+        return None
+    try:
+        spec = importlib.util.spec_from_file_location("claude_quota", claude_quota_lib() / "claude_quota.py")
+        module = importlib.util.module_from_spec(spec)  # type: ignore[arg-type]
+        spec.loader.exec_module(module)  # type: ignore[union-attr]
+        quota = module.quota()
+    except Exception:  # noqa: BLE001 — a broken probe must not break routing
+        return None
+    windows = quota.get("windows") if isinstance(quota, dict) else None
+    observed = _num(quota.get("observed_at")) if isinstance(quota, dict) else None
+    if not isinstance(windows, dict) or not windows or observed is None:
+        return None
+    return {"observed_at": observed, "source": "probe",
+            "windows": {key: {"used_pct": (windows.get(key) or {}).get("used_percentage"),
+                              "reset_epoch": _epoch((windows.get(key) or {}).get("resets_at"))}
+                        for key in ("five_hour", "seven_day")}}
+
+
+def statusline_claude_reading() -> dict[str, Any] | None:
+    """The statusline cache file, observed at its own timestamp (the file's mtime without one)."""
     if not CLAUDE_USAGE.is_file():
-        return
+        return None
     try:
         raw = json.loads(CLAUDE_USAGE.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return
+        observed = _num(raw.get("timestamp")) or CLAUDE_USAGE.stat().st_mtime
+    except (OSError, json.JSONDecodeError, AttributeError):
+        return None
+    windows = {}
+    for key in ("five_hour", "seven_day"):
+        block = raw.get(key) or {}
+        windows[key] = {"used_pct": block.get("used_percentage"), "reset_epoch": _num(block.get("reset_epoch")),
+                        "reset_at": block.get("reset_at")}
+    return {"observed_at": observed, "source": "statusline", "windows": windows}
+
+
+def probe_claude(state: dict[str, Any]) -> None:
+    prov = state["providers"]["claude"]
     now = time.time()
-    for key_src, key_dst in (("five_hour", "five_hour"), ("seven_day", "seven_day")):
-        block = raw.get(key_src) or {}
+    reading = live_claude_reading() or statusline_claude_reading()
+    if reading is None:
+        # No source at all. A stored reading we took ourselves survives only while it is still recent;
+        # one with no observation time (a hand-written state, an older usage.py) is left alone.
+        stored = _num(prov.get("observed_epoch"))
+        if stored is None or now - stored <= CLAUDE_READING_MAX_AGE_S:
+            return
+        reading = {"observed_at": stored, "source": "unavailable",
+                   "windows": {k: prov.get(k) or {} for k in ("five_hour", "seven_day")}}
+    fresh = reading["observed_at"] is not None and now - reading["observed_at"] <= CLAUDE_READING_MAX_AGE_S
+    for key in ("five_hour", "seven_day"):
+        block = reading["windows"].get(key) or {}
         reset_epoch = block.get("reset_epoch")
-        used = block.get("used_percentage")
-        if reset_epoch and float(reset_epoch) < now:
-            used = 0
-        prov[key_dst] = {
+        used = block.get("used_pct") if fresh else None
+        if used is not None and reset_epoch and float(reset_epoch) < now:
+            used = 0  # that window has rolled over since the reading
+        prov[key] = {
             "used_pct": used,
-            "reset_at": block.get("reset_at"),
+            "reset_at": block.get("reset_at") or epoch_to_iso(reset_epoch),
             "reset_epoch": reset_epoch,
-            "source": "probe",
+            "source": reading["source"] if fresh else f'{reading["source"]}-stale',
         }
+    prov["observed_epoch"] = reading["observed_at"]
 
 
 def probes_enabled() -> bool:

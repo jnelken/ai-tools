@@ -8,15 +8,28 @@ branches, working tree and session files; the Linear snapshot; each repo's produ
 deploy status; the allowlist and the skill docs — and stores it with the verdict in the provider-neutral
 ``<personal code dir>/.advance-roadmap/last-verdict.json``.
 
-    verdict.py fingerprint --snapshot S --out F
+    verdict.py fingerprint --snapshot S --out F [--deploys D] [--repo R]
     verdict.py check  --file V --fingerprint F --changes OUT [--max-age-hours N] [--root R]
     verdict.py save   --file V --fingerprint F --orch-result R --worker-result W --stamp S
+                      [--bookkeeping-pending]
+    verdict.py noop-check --file V --orch-result R
     verdict.py clear  --file V
     verdict.py ticket-changes --file V --fingerprint F
 
 ``check`` exits 0 only when the last verdict was no-work, is younger than the cap,
 and nothing in the fingerprint moved; otherwise it exits 1 and writes OUT — which
 repos and issues changed — for the planner to narrow its re-triage.
+
+``--repo R`` scopes a fingerprint to one repo: its own print, its deploy, and the issues carrying
+``repo/R`` or no repo label (plus whatever blocks them; see linearscope.py). A commit or ticket edit
+in another repo then leaves this repo's verdict valid. Daily batches fingerprint this way, one
+verdict file per repo.
+
+``save --bookkeeping-pending`` stores a verdict whose bookkeeping worker never ran (the batch
+deferred it). It marks the verdict so ``check`` re-triages instead of skipping, and ``noop-check``
+does not count its blockers as already posted. ``noop-check`` exits 0 when a no-work result
+needs no bookkeeping worker at all: no archives, closeouts, directive or brief, and every blocker
+already in the previous verdict.
 
 Only a real planner's answer is a verdict. ``save`` refuses a planner failure (a limit
 banner, a synthesized fallback, an error outcome), and ``check`` deletes a carried verdict
@@ -35,6 +48,7 @@ from datetime import datetime, timedelta
 
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 from usage import limit_banner  # noqa: E402
+from linearscope import scope_issues  # noqa: E402
 
 def _personal_code_dir_module():
     """ai-tools' lib/personal_code_dir.py is the one place that decides where the
@@ -106,7 +120,7 @@ def cmd_fingerprint(a):
     repos = {
         os.path.basename(d): repo_print(d)
         for d in sorted(glob.glob(os.path.join(CODE_DIR, "*")))
-        if os.path.isdir(os.path.join(d, ".git"))
+        if os.path.isdir(os.path.join(d, ".git")) and (not a.repo or os.path.basename(d) == a.repo)
     }
     snap = {}
     try:
@@ -114,18 +128,20 @@ def cmd_fingerprint(a):
             snap = json.load(f)
     except (OSError, ValueError):
         pass
+    scoped = scope_issues(snap.get("issues", []), a.repo) if a.repo else snap.get("issues", [])
     issues = {
         # Content, not updated_at: this skill's own blocker comments bump updated_at on every run.
         i["id"]: sha(json.dumps([i["title"], i["description"], i["state"], i["priority"], i["labels"],
                                  i["blocked_by"], i.get("human_comments_sha")]))
-        for i in snap.get("issues", [])
+        for i in scoped
     }
     deploys = {}
     if a.deploys:
         try:
             with open(a.deploys, encoding="utf-8") as f:
                 # Status only: a red deploy recovering is what has to reopen triage.
-                deploys = {k: v.get("status") for k, v in json.load(f).get("repos", {}).items()}
+                deploys = {k: v.get("status") for k, v in json.load(f).get("repos", {}).items()
+                           if not a.repo or k == a.repo}
         except (OSError, ValueError):
             pass
     fp = {
@@ -222,6 +238,10 @@ def cmd_check(a):
     changes = diff(last.get("fingerprint", {}), fp)
     with open(a.changes, "w", encoding="utf-8") as f:
         json.dump({"previous": last, "changed": changes}, f, indent=2)
+    if last.get("bookkeeping_pending"):
+        # Its blockers were never commented: skipping would leave them unposted until something moves.
+        print(f"verdict: bookkeeping from {last.get('stamp')} never ran — re-triage and post it")
+        return 1
     if age > timedelta(hours=a.max_age_hours):
         print(f"verdict: carried verdict from {last.get('stamp')} is older than {a.max_age_hours}h — full triage")
         return 1
@@ -249,7 +269,9 @@ def cmd_ticket_changes(a):
 def cmd_save(a):
     orch, worker = load(a.orch_result) or {}, load(a.worker_result) or {}
     why = planner_failure(orch) or (worker.get("limit_text") and "the worker reported a limit")
-    if why or orch.get("action") not in NO_WORK_ACTIONS or worker.get("outcome") not in SETTLED_OUTCOMES:
+    # A deferred batch never ran the bookkeeping worker; the verdict is kept but marked.
+    settled = a.bookkeeping_pending or worker.get("outcome") in SETTLED_OUTCOMES
+    if why or orch.get("action") not in NO_WORK_ACTIONS or not settled:
         # Work was dispatched, bookkeeping didn't land, or the planner never really planned:
         # the next run must look again.
         if os.path.exists(a.file):
@@ -266,11 +288,32 @@ def cmd_save(a):
             "blockers": orch.get("blockers", []),
             "considered": orch.get("considered", []),
             "summary": orch.get("summary"),
+            **({"bookkeeping_pending": True} if a.bookkeeping_pending else {}),
             "fingerprint": load(a.fingerprint) or {},
         }, f, indent=2)
         f.write("\n")
     os.replace(tmp, a.file)
-    print(f"verdict: carried forward from {a.stamp}")
+    print(f"verdict: carried forward from {a.stamp}" + (" (bookkeeping pending)" if a.bookkeeping_pending else ""))
+    return 0
+
+
+def blocker_key(b):
+    return b.get("linear_id") or f'{b.get("repo")}:{b.get("detail")}'
+
+
+def cmd_noop_check(a):
+    """Exit 0 when this no-work result has nothing left for a bookkeeping worker to do."""
+    orch, last = load(a.orch_result) or {}, load(a.file) or {}
+    if orch.get("action") not in NO_WORK_ACTIONS or planner_failure(orch):
+        return 1
+    if orch.get("archives") or orch.get("closeouts") or orch.get("directive_ticket") or orch.get("worker_brief"):
+        return 1
+    # A pending verdict's blockers were never posted.
+    posted = set() if last.get("bookkeeping_pending") else {blocker_key(b) for b in last.get("blockers") or []
+                                                         if isinstance(b, dict)}
+    fresh = [blocker_key(b) for b in orch.get("blockers") or [] if isinstance(b, dict) and blocker_key(b) not in posted]
+    if fresh:
+        return 1
     return 0
 
 
@@ -278,12 +321,14 @@ def main():
     ap = argparse.ArgumentParser()
     sub = ap.add_subparsers(dest="cmd", required=True)
     s = sub.add_parser("fingerprint"); s.add_argument("--snapshot", required=True); s.add_argument("--out", required=True)
-    s.add_argument("--deploys", default="")
+    s.add_argument("--deploys", default=""); s.add_argument("--repo", default="")
     s = sub.add_parser("check"); s.add_argument("--file", required=True); s.add_argument("--fingerprint", required=True)
     s.add_argument("--changes", required=True); s.add_argument("--max-age-hours", type=int, default=24)
     s.add_argument("--root", default=DEFAULT_ROOT, help="advance-roadmap root holding runs/ and runs.jsonl")
     s = sub.add_parser("save"); s.add_argument("--file", required=True); s.add_argument("--fingerprint", required=True)
     s.add_argument("--orch-result", required=True); s.add_argument("--worker-result", required=True); s.add_argument("--stamp", required=True)
+    s.add_argument("--bookkeeping-pending", action="store_true")
+    s = sub.add_parser("noop-check"); s.add_argument("--file", required=True); s.add_argument("--orch-result", required=True)
     s = sub.add_parser("clear"); s.add_argument("--file", required=True)
     s = sub.add_parser("ticket-changes"); s.add_argument("--file", required=True); s.add_argument("--fingerprint", required=True)
     a = ap.parse_args()
@@ -292,7 +337,7 @@ def main():
             os.remove(a.file)
         return 0
     return {"fingerprint": cmd_fingerprint, "check": cmd_check, "save": cmd_save,
-            "ticket-changes": cmd_ticket_changes}[a.cmd](a)
+            "ticket-changes": cmd_ticket_changes, "noop-check": cmd_noop_check}[a.cmd](a)
 
 
 if __name__ == "__main__":
