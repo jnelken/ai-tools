@@ -2,7 +2,7 @@
 
 > **Suggested execution:** Sonnet with high reasoning: well-scoped Python, zsh and Node edits to existing, well-tested code, but they touch concurrency, gate semantics and hooks. Step up to Opus for slice C (shared budget and leases) if lease and wait semantics get subtle. Step down to Haiku for slices A1, A2 and D3 on their own.
 
-**Status (2026-10-28 15:42):** wave 1 is in progress. A+B is running in `quota-roadmap-stop-waste`. Slice D (`usage-model-ledger`) was told to commit work in progress and pause at 15:40, because the Claude 5h window was at 41% and climbing about 2 points per minute (F9). D resumes after the ~20:00 reset (a session cron at 20:07). The wave-2 design waits for headroom. Each slice's agent updates its own section's open threads on its branch.
+**Status (2026-10-28 15:50):** Codex reopened (5h at 3%), so work moved off scarce Claude per the Model Router. A+B is still on Claude Sonnet (`quota-roadmap-stop-waste`). Slice D was handed to Codex Luna at high effort after Claude's WIP commit `efe394e` (`usage-model-ledger`). C's standalone core (agent_budget, agent-budget, fanout, the Agent hook, instructions) started on Codex Sol at high effort in `quota-agent-budget`, without touching A's files. Wiring daily_batch to agent-budget, and E2, wait for A to merge. E1 starts when a slot frees. Each slice's agent updates its own open threads.
 
 Repos:
 - `~/Dropbox/code/ai-tools`: the dev checkout. `~/.ai-tools` is its read-only deploy clone.
