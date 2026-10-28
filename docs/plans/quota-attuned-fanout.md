@@ -96,6 +96,7 @@ Separately:
 - [ ] **O6.** Where are Claude Code subagent transcripts stored (`<session>/` directory next to the `.jsonl`?), for per-subagent-type cost?
 - [x] **O7.** Answered: running docs cover sessions and planners; Superset waits and Agent is denied; web page plus weekly DM.
 - [ ] **O8.** Does slackagent's task scheduler (`src/task-scheduler.js`, the `daily-imessage.js` pattern) support a weekly cadence as it is, or does it need a small extension?
+- [ ] **O10.** `superset agents wait` and `agents explain` reported slice D's agent as "ended its own session" 13 seconds after a hook, while its screen showed it still working. The likely cause is a nested `claude -p` the agent ran, whose SessionStart/End hooks inherit the terminal's Superset hook env and get charged to it. `bin/fanout` (C) can't rely on hook state alone. Either strip the Superset hook env from nested headless runs (`agent-budget run`), or detect completion from a result file or PR. Wave 1 is monitored by polling for the PR plus a screen-spinner check instead.
 - [ ] **O9.** Do the Codex rollout files exist for planners run with `-s read-only` (no `--ephemeral`)? Needed so a killed Codex planner's transcript can be salvaged (E2).
 
 ## Approach (slices; each ships as its own PR from its own Superset workspace)
