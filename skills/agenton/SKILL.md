@@ -11,7 +11,7 @@ The script is `agenton.zsh` in this skill directory. `~/dotfiles/zsh/lib/45-agen
 
 ## Do not run it
 
-`agenton` needs the user's Touch ID/password for `sudo`, blocks its terminal for the whole duration, and changes machine sleep behavior. Tell the user to run it; never invoke `agenton` or `agentoff` from Claude. Reading the log and sourcing the script to test a single function (e.g. `zsh -c 'source agenton.zsh; _agenton_network'`) is fine. To exercise the whole loop safely, stub sudo and point the log at the scratchpad: `AGENTON_LOG=<scratch>/t.log perl -e 'alarm 6; exec @ARGV' zsh -c 'sudo(){ return 0; }; source agenton.zsh; agent_timed 1'`.
+`agenton` needs the user's Touch ID/password for `sudo`, blocks its terminal for the whole duration, and changes machine sleep behavior. Tell the user to run it in a real terminal tab; never invoke `agenton` or `agentoff` from Claude. (Tried 2026-10-28: from Claude's shell `sudo pmset` has no way to authenticate and hangs at the prompt until killed — with `kill -9`, since sudo ignores SIGTERM while waiting. Nothing had changed at that point, but a hung run holds the terminal.) Reading the log and sourcing the script to test a single function (e.g. `zsh -c 'source agenton.zsh; _agenton_network'`) is fine. To exercise the whole loop safely, stub sudo and point the log at the scratchpad: `AGENTON_LOG=<scratch>/t.log perl -e 'alarm 6; exec @ARGV' zsh -c 'sudo(){ return 0; }; source agenton.zsh; agent_timed 1'`.
 
 ## Reading the log
 
