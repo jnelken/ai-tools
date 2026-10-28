@@ -24,7 +24,9 @@ the Superset launch response; completion follows terminal closure, not hook stat
 
 Leases live in `~/.claude/state/agent-budget/leases.json`. All admissions, releases,
 and reads use a separate stable flock file; writes replace the JSON atomically.
-Each read reaps dead owner PIDs and expired TTLs. Only admitted children (fanout
+Each lease stores its owner PID and process start identity (`ps lstart` on macOS;
+`/proc` start ticks on Linux). Reads reap dead/reused PIDs and expired TTLs. Old
+PID-only leases are retired because their owner incarnation cannot be verified. Only admitted children (fanout
 terminals, batch jobs, and gated subagents) hold leases. Open interactive sessions
 are not leased: their consumed usage is in the live reading, and the 30% above
 the five-hour 70% cap is reserved for interactive use. `run` owns its lease, forwards
@@ -35,7 +37,8 @@ This is polling admission; waiting terminals have no guaranteed FIFO ordering.
 Caps come from roadmap `usage.py`: 70% over five hours, 80% weekly, and 100% for
 Cursor's selected pool, including that module's environment overrides. Claude
 uses the live OAuth quota helper. Other providers use fresh saved state or the
-existing probes. Readings older than 15 minutes are unknown; an unknown window
+existing probes. Fresh saved windows whose reset has passed read as zero, using
+roadmap reset semantics. Readings older than 15 minutes are unknown; an unknown window
 permits at most one active lease for fanout/batch admission, subject to any known
 window. The in-process hook allows calls when no usable reading exists.
 Reservations are conservatively charged to every window (and Cursor pool).
@@ -49,11 +52,16 @@ Adjacent metadata preserves agent type while all child types share the subagent 
 
 Conversion factors remain seeded until five positive measurements exist for a
 provider, then use p80 percentage points/token. Paired Claude snapshots match
-launch/session ids to ledger usage, or read the boundary's transcript. Reset-crossing,
+launch/session ids to per-session ledger usage, preserving review-round boundaries.
+They never pair a role's whole-job total with each session. Ambiguous multi-session
+rows are skipped. Transcript calibration counts only assistant messages within the
+start/finish interval, so resuming a session does not charge its earlier history. Reset-crossing,
 stale, zero and negative deltas are excluded. Codex uses cumulative token deltas
 paired with rate-limit deltas within one reset window. Account-wide Claude deltas
 can include concurrent work, so their estimates deliberately err high. Samples
-are deduplicated in `samples.jsonl`; parsed files are cached by size and mtime.
+are deduplicated in `samples.jsonl`; generated samples are rebuilt to repair old
+denominators after an upgrade. Parsed files and bounded transcript intervals are
+cached by parser version, size and mtime.
 Only the five-hour factor is calibrated and is conservatively applied to weekly
 windows too. Cursor remains provisional until measured samples are available.
 

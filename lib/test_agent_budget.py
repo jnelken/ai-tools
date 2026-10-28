@@ -192,6 +192,91 @@ print(bool(b.acquire('codex','planner',pid=int(sys.argv[2]))))
         self.assertEqual(len(b.history()[1]), 1)
         self.assertTrue((b.budget_dir() / 'samples.jsonl').exists())
 
+    def quota_rows(self, session, start, finish, before=10, after=13, path=None):
+        return [dict(event=event, session_id=session, timestamp=at, transcript_path=str(path) if path else None,
+                     quota=dict(age_seconds=0, windows={'five_hour': dict(used_percentage=pct, resets_at=2000000000)}))
+                for event, at, pct in [('start', start, before), ('finish', finish, after)]]
+
+    def test_calibration_uses_each_rounds_session_tokens_and_repairs_saved_samples(self):
+        ch = b.claude_home()
+        self.append(ch / 'automations/advance-roadmap/runs.jsonl', [dict(tokens=dict(calls=[
+            dict(provider='claude', role='reviewer', round=i, total=70000, sessions=[sid])
+            for i, sid in enumerate(('one', 'two'))]))])
+        self.append(ch / 'state/quota-snapshots.jsonl', self.quota_rows('one', 10, 20) + self.quota_rows('two', 30, 40))
+        self.append(b.budget_dir() / 'samples.jsonl', [dict(id='quota:one:10', source='quota_snapshots',
+                    provider='claude', tokens=140000, pct=3)])
+        records, samples = b.history()
+        self.assertEqual(records[0]['total'], 140000)  # whole-job estimate
+        self.assertEqual([s['tokens'] for s in samples], [70000, 70000])
+        self.assertEqual([s['tokens'] for s in b.rows(b.budget_dir() / 'samples.jsonl')], [70000, 70000])
+        self.assertEqual(len(b.history()[1]), 2)
+
+    def test_ambiguous_multi_session_totals_are_not_reused_per_session(self):
+        ch = b.claude_home()
+        self.append(ch / 'automations/advance-roadmap/runs.jsonl', [dict(tokens=dict(calls=[
+            dict(provider='claude', role='reviewer', total=140000, sessions=['one', 'two'])]))])
+        self.append(ch / 'state/quota-snapshots.jsonl', self.quota_rows('one', 10, 20) + self.quota_rows('two', 30, 40))
+        self.assertEqual(b.history()[1], [])
+
+    def test_resumed_transcript_calibration_is_bounded_to_each_snapshot_interval(self):
+        ch = b.claude_home()
+        path = ch / 'projects/project/resumed.jsonl'
+        self.append(path, [dict(type='assistant', timestamp=at, message=dict(id=str(at), usage=dict(input_tokens=tokens)))
+                           for at, tokens in [(5, 100000), (12, 70000), (35, 30000), (50, 200000)]])
+        self.append(ch / 'state/agent-usage.jsonl', [dict(provider='claude', role='interactive', total=400000, session_id='resumed')])
+        self.append(ch / 'state/quota-snapshots.jsonl', self.quota_rows('resumed', 10, 20, path=path)
+                    + self.quota_rows('resumed', 30, 40, path=path))
+        _, samples = b.history()
+        self.assertEqual([s['tokens'] for s in samples], [70000, 30000])
+        self.assertEqual([s['tokens'] for s in b.history()[1]], [70000, 30000])
+
+    def test_codex_cache_writes_match_roadmap_accounting(self):
+        raw = dict(input_tokens=1000, cached_input_tokens=800, cache_write_input_tokens=50,
+                   output_tokens=10, total_tokens=1010)
+        self.assertEqual(b.token_total(raw), 260)
+        self.assertEqual(b.token_total(dict(usage=raw)), 260)
+        path = self.home / 'rollout-writes.jsonl'
+        self.append(path, [dict(payload=dict(info=dict(total_token_usage=dict(input_tokens=1000, cached_input_tokens=800,
+                              cache_write_input_tokens=w, output_tokens=10)),
+                              rate_limits=dict(primary=dict(used_percent=pct, resets_at=2000000000, window_minutes=300))))
+                           for w, pct in [(50, 3), (150, 4)]])
+        self.assertEqual(b.codex_samples(path)[0]['tokens'], 100)
+
+    def test_reused_pid_does_not_keep_the_previous_owners_lease(self):
+        lease = b.acquire('codex', 'planner')
+        self.assertEqual(lease['pid_started_at'], b.process_start(os.getpid()))
+        old = dict(lease, id='reused', pid_started_at='previous incarnation')
+        legacy = {k: v for k, v in dict(lease, id='legacy').items() if k != 'pid_started_at'}
+        b.write_json(b.budget_dir() / 'leases.json', [lease, old, legacy])
+        self.assertTrue(b.alive(old['pid']))
+        self.assertEqual([l['id'] for l in self.leases()], [lease['id']])
+
+    def test_saved_codex_and_cursor_windows_read_zero_after_reset(self):
+        self.readings.stop()
+        state = b.usage.empty_state()
+        state['providers']['codex'].update(observed_epoch=time.time(),
+            five_hour=dict(used_pct=100, reset_epoch=time.time()-1),
+            weekly=dict(used_pct=0, reset_epoch=time.time()+100))
+        state['providers']['cursor']['included'].update(observed_at=time.time(), auto_pct=100,
+            api_pct=100, reset_epoch=time.time()-1)
+        path = b.claude_home() / 'automations/advance-roadmap/providers-usage.json'
+        b.write_json(path, state)
+        self.assertEqual(b.readings('codex')['windows']['five_hour']['live'], 0)
+        self.assertEqual(b.readings('cursor')['windows']['auto']['live'], 0)
+        self.assertEqual(b.readings('cursor')['windows']['api']['live'], 0)
+        self.assertEqual(b.allow('codex', 'planner'), 1)
+        self.assertEqual(b.allow('cursor', 'worker'), 1)
+        state['providers']['codex']['weekly'] = dict(used_pct=100, reset_epoch=time.time()+100)
+        state['providers']['cursor']['included']['reset_epoch'] = time.time()+100
+        b.write_json(path, state)
+        self.assertEqual(b.allow('codex', 'planner'), 0)
+        self.assertEqual(b.allow('cursor', 'worker'), 0)
+        state['providers']['codex']['observed_epoch'] = time.time()-901
+        state['providers']['cursor']['included']['observed_at'] = time.time()-901
+        b.write_json(path, state)
+        self.assertIsNone(b.readings('codex')['windows']['five_hour']['live'])
+        self.assertIsNone(b.readings('cursor')['windows']['auto']['live'])
+
     def test_codex_samples_exclude_cache_and_window_resets(self):
         path = self.home / 'rollout.jsonl'
         self.append(path, [dict(payload=dict(info=dict(total_token_usage=dict(input_tokens=t, cached_input_tokens=100, output_tokens=10)),
@@ -395,7 +480,7 @@ print(bool(b.acquire('codex','planner',pid=int(sys.argv[2]))))
             dict(kind='terminal', sessionId='terminal'),
             dict(sessions=[dict(terminalId='terminal', exited=False)]),
             dict(sessions=[])]
-        with patch.dict(os.environ, AGENT_BUDGET_LEASE_ID=lease['id']), patch.object(f.time, 'sleep'), patch.object(f.subprocess, 'run') as run:
+        with patch.dict(os.environ, AGENT_BUDGET_LEASE_ID=lease['id']), patch.object(b, 'process_start', return_value=lease['pid_started_at']), patch.object(f.time, 'sleep'), patch.object(f.subprocess, 'run') as run:
             run.side_effect = [subprocess.CompletedProcess([], 0, json.dumps(r)) for r in responses]
             self.assertEqual(f.attach(job), 0)
         self.assertEqual(self.leases()[0]['terminal_id'], 'terminal')

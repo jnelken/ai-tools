@@ -37,7 +37,8 @@ SEED_TOKENS = {
 SEED_FACTORS = {'claude': 10 / 251000, 'codex': 3 / 70000, 'cursor': 5 / 59000}
 MAX_AGE = 15 * 60
 ESTIMATE_MAX_AGE = 10 * 60
-ESTIMATE_VERSION = 1
+ESTIMATE_VERSION = 2
+HISTORY_VERSION = 2
 
 
 def claude_home():
@@ -112,23 +113,29 @@ def token_total(row):
     u = row.get('usage') or row.get('tokens') or row
     if number(u.get('total')):
         return max(0, u['total'])
+    if any(number(u.get(k)) for k in ('input_tokens', 'output_tokens', 'cache_write_input_tokens')):
+        return (max(0, (u.get('input_tokens', 0) or 0) - (u.get('cached_input_tokens', 0) or 0))
+                + sum(u.get(k, 0) or 0 for k in ('cache_creation_input_tokens', 'cache_write_input_tokens', 'output_tokens')))
     if number(u.get('total_tokens')):
         return max(0, u['total_tokens'] - u.get('cached_input_tokens', 0))
     if any(k in u for k in ('input', 'cache_write', 'output')):
         return sum(u.get(k, 0) or 0 for k in ('input', 'cache_write', 'output'))
-    return max(0, sum(u.get(k, 0) or 0 for k in ('input_tokens', 'cache_creation_input_tokens', 'output_tokens'))
-               - (u.get('cached_input_tokens', 0) or 0))
+    return 0
 
 
 def role_name(role):
     return {'orchestrator': 'planner', 'approver': 'reviewer', 'review': 'reviewer'}.get(role, role)
 
 
-def transcript_record(path, role='subagent'):
+def transcript_record(path, role='subagent', since=None, until=None):
     # Streaming rows can repeat a message id: count the maximum usage per field,
     # once per API message, rather than summing successive output snapshots.
     messages, stamps = {}, []
     for row in rows(path):
+        stamp = epoch(row.get('timestamp'))
+        if (since is not None or until is not None) and (stamp is None or
+                (since is not None and stamp < since) or (until is not None and stamp > until)):
+            continue
         message = row.get('message') or {}
         if row.get('type') != 'assistant' or not isinstance(message.get('usage'), dict):
             continue
@@ -154,7 +161,7 @@ def codex_samples(path):
         window = (limits or {}).get('five_hour') or {}
         if not total or not number(window.get('used_pct')):
             continue
-        tokens = max(0, total.get('input_tokens', 0) - total.get('cached_input_tokens', 0)) + total.get('output_tokens', 0)
+        tokens = token_total(total)
         current = (tokens, window['used_pct'], window.get('reset_epoch'))
         if previous and current[2] == previous[2]:
             dt, dp = current[0] - previous[0], current[1] - previous[1]
@@ -166,95 +173,111 @@ def codex_samples(path):
 
 
 def history():
-    """Cache file contributions by mtime/size; append only new calibration ids."""
+    """Keep job-cost totals separate from interval/session calibration usage."""
     home = claude_home()
-    records = []
+    records, calibration_records = [], []
     for row in rows(home / 'automations/advance-roadmap/runs.jsonl'):
-        # A job can use several models/review rounds. Reserve the whole role,
-        # not one model's share of its cost.
         grouped = {}
         for call in (row.get('tokens') or {}).get('calls') or []:
+            # Preserve each round's session/token association for calibration.
+            calibration_records.append(call)
             key = (call.get('provider'), role_name(call.get('role')))
-            record = grouped.setdefault(key, dict(provider=key[0], role=key[1], total=0, sessions=[],
+            record = grouped.setdefault(key, dict(provider=key[0], role=key[1], total=0,
                                                    duration=row.get('duration_s')))
             record['total'] += token_total(call)
-            record['sessions'].extend(call.get('sessions') or [])
         records.extend(grouped.values())
-    records.extend(rows(home / 'state/agent-usage.jsonl'))
-    records.extend(rows(budget_dir() / 'completions.jsonl'))
+    for path in (home / 'state/agent-usage.jsonl', budget_dir() / 'completions.jsonl'):
+        source = list(rows(path))
+        records.extend(source)
+        calibration_records.extend(source)
     samples = []
     with lock('samples'):
         cache = read_json(budget_dir() / 'history-cache.json')
-        paths = list((home / 'projects').glob('*/**/subagents/agent-*.jsonl'))
-        paths += list(Path(os.environ.get('ADVANCE_ROADMAP_CODEX_SESSIONS', Path.home() / '.codex/sessions')).glob('*/*/*/rollout-*.jsonl'))
-        for path in paths:
+
+        def cached_transcript(path, role, since=None, until=None):
             try:
                 stat = path.stat()
-            except OSError:
-                continue
-            key, stamp = str(path), [stat.st_mtime_ns, stat.st_size]
+            except FileNotFoundError:
+                return None
+            key = str(path) + (f':interval:{since}:{until}' if since is not None else '')
+            stamp = [HISTORY_VERSION, stat.st_mtime_ns, stat.st_size]
             if cache.get(key, {}).get('stamp') != stamp:
-                cache[key] = {'stamp': stamp,
-                              'records': [transcript_record(path)] if path.name.startswith('agent-') else [],
-                              'samples': codex_samples(path) if path.name.startswith('rollout-') else []}
-            records.extend(cache[key]['records'])
-            samples.extend(cache[key]['samples'])
-        # Associate session/launch ids in the durable ledgers with paired quota boundaries.
+                cache[key] = {'stamp': stamp, 'records': [transcript_record(path, role, since, until)]}
+            return cache[key]['records'][0]
+
+        for path in (home / 'projects').glob('*/**/subagents/agent-*.jsonl'):
+            record = cached_transcript(path, 'subagent')
+            if record:
+                records.append(record)
+        for path in Path(os.environ.get('ADVANCE_ROADMAP_CODEX_SESSIONS', Path.home() / '.codex/sessions')).glob('*/*/*/rollout-*.jsonl'):
+            try:
+                stat = path.stat()
+            except FileNotFoundError:
+                continue
+            stamp = [HISTORY_VERSION, stat.st_mtime_ns, stat.st_size]
+            if cache.get(str(path), {}).get('stamp') != stamp:
+                cache[str(path)] = {'stamp': stamp, 'samples': codex_samples(path)}
+            samples.extend(cache[str(path)]['samples'])
+
         indexed = {}
-        for record in records:
-            for sid in set([record.get('session_id'), record.get('launch_id'), *(record.get('sessions') or [])]):
-                if sid:
-                    indexed.setdefault(sid, []).append(record)
-        starts = {}
+        for record in calibration_records:
+            sessions = set([record.get('session_id'), *(record.get('sessions') or [])]) - {None}
+            # A summarized row with several sessions cannot supply individual
+            # session usage. Prefer a bounded transcript; never guess a split.
+            keys = sessions if len(sessions) == 1 else set()
+            if record.get('launch_id'):
+                keys = keys | {record['launch_id']}
+            for key in keys:
+                indexed.setdefault(key, []).append(record)
+        starts, pairs, counts = {}, [], {}
         for row in rows(home / 'state/quota-snapshots.jsonl'):
             key = row.get('launch_id') or row.get('session_id')
             if not key:
                 continue
             if row.get('event') == 'start':
                 starts[key] = row
-                continue
-            start = starts.pop(key, None) if row.get('event') == 'finish' else None
-            if not start:
-                continue
+            elif row.get('event') == 'finish' and key in starts:
+                pairs.append((key, starts.pop(key), row))
+                counts[key] = counts.get(key, 0) + 1
+        for key, start, finish in pairs:
+            since, until = epoch(start.get('timestamp')), epoch(finish.get('timestamp'))
+            bounded = since is not None and until is not None and since <= until
             matched = [r for r in indexed.get(key, []) if r.get('provider') == 'claude']
+            # Resumed sessions can have multiple snapshot intervals. Untimed
+            # aggregate ledger totals cannot be reused for each interval.
+            if counts[key] > 1:
+                matched = [r for r in matched if bounded and since <= (epoch(r.get('at') or r.get('timestamp')) or -1) <= until]
             tokens = sum(token_total(r) for r in matched)
-            path = row.get('transcript_path') or start.get('transcript_path')
-            if not tokens and path:
-                path = Path(path)
-                try:
-                    stat = path.stat()
-                    stamp = [stat.st_mtime_ns, stat.st_size]
-                    if cache.get(str(path), {}).get('stamp') != stamp:
-                        cache[str(path)] = {'stamp': stamp, 'records': [transcript_record(path, 'interactive')]}
-                    tokens = cache[str(path)]['records'][0]['total']
-                except OSError:
-                    pass
-            for window in ('five_hour',):
-                before = (start.get('quota') or {}).get('windows', {}).get(window, {})
-                after = (row.get('quota') or {}).get('windows', {}).get(window, {})
-                a, b = before.get('used_percentage'), after.get('used_percentage')
-                reset_a, reset_b = epoch(before.get('resets_at')), epoch(after.get('resets_at'))
-                # OAuth reset timestamps can differ by fractions of a second.
-                same_window = reset_a and reset_b and abs(reset_a - reset_b) < 60
-                fresh = all(number((r.get('quota') or {}).get('age_seconds')) and
-                            r['quota']['age_seconds'] <= MAX_AGE for r in (start, row))
-                if tokens > 0 and number(a) and number(b) and b > a and same_window and fresh:
-                    samples.append({'id': f'quota:{key}:{start.get("timestamp")}', 'provider': 'claude',
-                                    'tokens': tokens, 'pct': b - a, 'source': 'quota_snapshots'})
-        existing = list(rows(budget_dir() / 'samples.jsonl'))
-        seen = {r.get('id') for r in existing}
-        additions = []
-        for sample in samples:
-            if sample['id'] not in seen:
-                additions.append(sample)
-                seen.add(sample['id'])
-        if additions:
-            fd = os.open(budget_dir() / 'samples.jsonl', os.O_CREAT | os.O_WRONLY | os.O_APPEND, 0o600)
-            with os.fdopen(fd, 'a') as handle:
-                for sample in additions:
-                    handle.write(json.dumps(sample) + '\n')
+            path = finish.get('transcript_path') or start.get('transcript_path')
+            if path and bounded:
+                record = cached_transcript(Path(path), 'interactive', since, until)
+                if record is not None:
+                    tokens = record['total']
+            before = (start.get('quota') or {}).get('windows', {}).get('five_hour', {})
+            after = (finish.get('quota') or {}).get('windows', {}).get('five_hour', {})
+            a, b = before.get('used_percentage'), after.get('used_percentage')
+            reset_a, reset_b = epoch(before.get('resets_at')), epoch(after.get('resets_at'))
+            same_window = reset_a and reset_b and abs(reset_a - reset_b) < 60
+            fresh = all(number((r.get('quota') or {}).get('age_seconds')) and
+                        r['quota']['age_seconds'] <= MAX_AGE for r in (start, finish))
+            if tokens > 0 and number(a) and number(b) and b > a and same_window and fresh:
+                samples.append({'id': f'quota:{key}:{start.get("timestamp")}', 'provider': 'claude',
+                                'tokens': tokens, 'pct': b - a, 'source': 'quota_snapshots'})
+        # Rebuild generated samples so upgrades also repair previously persisted
+        # bad denominators. Preserve manually supplied/provider-specific samples.
+        existing = {r.get('id'): r for r in rows(budget_dir() / 'samples.jsonl')
+                    if r.get('source') not in ('quota_snapshots', 'rate_limits')}
+        existing.update({r['id']: r for r in samples})
+        combined = list(existing.values())
+        path = budget_dir() / 'samples.jsonl'
+        temporary = path.with_suffix('.tmp')
+        fd = os.open(temporary, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, 'w') as handle:
+            for sample in combined:
+                handle.write(json.dumps(sample) + '\n')
+        os.replace(temporary, path)
         write_json(budget_dir() / 'history-cache.json', cache)
-    return records, existing + additions
+    return records, combined
 
 
 def estimates(records, samples):
@@ -292,6 +315,13 @@ def cached_estimates():
         return models
 
 
+def window_live(window, fresh, now):
+    if not fresh or not number(window.get('used_pct')):
+        return None
+    normalized = dict(window, reset_epoch=epoch(window.get('reset_epoch')))
+    return usage._zero_if_reset(normalized, now)['used_pct']
+
+
 def readings(provider):
     now = time.time()
     if provider == 'claude':
@@ -314,10 +344,10 @@ def readings(provider):
     fresh = observed is not None and now - observed <= MAX_AGE
     if provider == 'cursor':
         inc = prov.get('included') or {}
-        windows = {pool: {'live': inc.get(pool + '_pct') if fresh else None, 'cap': usage.MAX_CURSOR_PCT}
+        windows = {pool: {'live': window_live({'used_pct': inc.get(pool + '_pct'), 'reset_epoch': inc.get('reset_epoch')}, fresh, now), 'cap': usage.MAX_CURSOR_PCT}
                    for pool in ('auto', 'api')}
     else:
-        windows = {key: {'live': (prov.get(key) or {}).get('used_pct') if fresh else None, 'cap': cap}
+        windows = {key: {'live': window_live(prov.get(key) or {}, fresh, now), 'cap': cap}
                    for key, cap in [('five_hour', usage.MAX_FIVE_HOUR_PCT), ('weekly', usage.MAX_SEVEN_DAY_PCT)]}
     return {'source': prov.get('source'), 'observed_at': observed, 'windows': windows}
 
@@ -334,12 +364,37 @@ def alive(pid):
         return False
 
 
+def process_start(pid):
+    """Identify this process incarnation, without a psutil dependency."""
+    if sys.platform.startswith('linux'):
+        try:
+            # comm can contain spaces/parentheses; field 22 is starttime ticks.
+            fields = Path(f'/proc/{int(pid)}/stat').read_text().rsplit(')', 1)[1].split()
+            return 'linux:' + fields[19]
+        except FileNotFoundError:
+            return None
+    result = subprocess.run(['ps', '-o', 'lstart=', '-p', str(pid)],
+                            capture_output=True, text=True, timeout=1)
+    value = result.stdout.strip()
+    return 'ps:' + value if result.returncode == 0 and value else None
+
+
 def reap():
     """Caller holds leases.lock, including reads (which persist the reaping)."""
     leases = read_json(budget_dir() / 'leases.json', [])
     now = time.time()
-    leases = [lease for lease in leases if lease.get('label') != 'session' and alive(lease.get('pid')) and
-              lease.get('created', 0) + lease.get('ttl', 0) > now]
+    identities = {}
+    active = []
+    for lease in leases:
+        pid = lease.get('pid')
+        if (lease.get('label') == 'session' or not lease.get('pid_started_at') or not alive(pid)
+                or lease.get('created', 0) + lease.get('ttl', 0) <= now):
+            continue
+        if pid not in identities:
+            identities[pid] = process_start(pid)
+        if identities[pid] == lease['pid_started_at']:
+            active.append(lease)
+    leases = active
     write_json(budget_dir() / 'leases.json', leases)
     return leases
 
@@ -382,8 +437,12 @@ def acquire(provider, role, pid=None, ttl=None, label=None, reading=None, unknow
         leases = reap()
         if not capacity(reading, leases, provider, role, model['pct'], 1, unknown_limit=unknown_limit):
             return None
+        owner = pid or os.getpid()
+        started = process_start(owner)
+        if started is None:
+            raise ProcessLookupError('lease owner exited')
         lease = dict(id=uuid.uuid4().hex, provider=provider, role=role, pct=model['pct'],
-                     pid=pid or os.getpid(), created=time.time(), ttl=ttl or model['ttl'], label=label, **extra)
+                     pid=owner, pid_started_at=started, created=time.time(), ttl=ttl or model['ttl'], label=label, **extra)
         leases.append(lease)
         write_json(budget_dir() / 'leases.json', leases)
         return lease
