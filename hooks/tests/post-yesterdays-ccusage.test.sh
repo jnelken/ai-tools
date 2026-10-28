@@ -32,6 +32,10 @@ printf '#!/usr/bin/env bash\necho "$NPM_CACHE"\n' > "$STUBS/npm"
 cat > "$STUBS/curl" <<'EOF'
 #!/usr/bin/env bash
 echo x >> "$TEST_DIR/curl-calls"
+while [ $# -gt 0 ]; do
+  [ "$1" = "-d" ] && { printf '%s' "$2" > "$TEST_DIR/curl-payload"; break; }
+  shift
+done
 exit "${CURL_RC:-0}"
 EOF
 printf '#!/usr/bin/env bash\necho x >> "$TEST_DIR/notify-calls"\n' > "$STUBS/osascript"
@@ -44,6 +48,7 @@ run() {
   mkdir -p "$H" "$NPM_CACHE/_npx/stale" "$NPM_CACHE/_npx/other"
   echo '{"_npx":{"packages":["ccusage@latest"]}}' > "$NPM_CACHE/_npx/stale/package.json"
   echo '{"_npx":{"packages":["ccusage@18"]}}'     > "$NPM_CACHE/_npx/other/package.json"
+  [ -n "${SEED_FN:-}" ] && "$SEED_FN"
   HOME="$H" SLACK_CCUSAGE_WEBHOOK_URL=http://hook.invalid PATH="$STUBS:$PATH" bash "$HOOK" 2>/dev/null
 }
 rerun() { HOME="$H" SLACK_CCUSAGE_WEBHOOK_URL=http://hook.invalid PATH="$STUBS:$PATH" bash "$HOOK" 2>/dev/null; }
@@ -90,6 +95,49 @@ expect 1 "stuck native: notified" "$(count notify-calls)"
 run ok 22
 expect none "slack fail: marker not advanced" "$(marker)"
 expect yes "slack fail: logged" "$(grep -q 'slack POST failed' "$H/.claude/.ccusage-state/errors.log" && echo yes || echo no)"
+
+# 6. effort-mix columns: appended after CacheR, cost-weighted per model, only
+#    the levels used that day; first six columns untouched
+EFFORT_JSON_CLAUDE='{"daily":[{"totalCost":20,"inputTokens":10,"outputTokens":5,"cacheCreationTokens":1,"cacheReadTokens":2,"modelBreakdowns":[
+  {"modelName":"claude-opus-5-5","cost":10,"inputTokens":4,"outputTokens":2000,"cacheCreationTokens":0,"cacheReadTokens":0},
+  {"modelName":"claude-sonnet-5-5","cost":10,"inputTokens":6,"outputTokens":1000,"cacheCreationTokens":1,"cacheReadTokens":2}]}]}'
+seed_transcripts() {
+  mkdir -p "$H/.claude/projects/p"
+  python3 - "$H/.claude/projects/p/s.jsonl" "$yesterday" <<'PY'
+import datetime, json, sys
+path, day = sys.argv[1], sys.argv[2]
+ts = datetime.datetime.strptime(day + " 12:00", "%Y-%m-%d %H:%M").astimezone().isoformat()
+def turn(mid, model, effort, out, extra=None):
+    return {"type": "assistant", "timestamp": ts, "requestId": "r-" + mid, "effort": effort, "perTurnEffort": effort,
+            "message": {"id": "m-" + mid, "model": model, "usage": dict({"output_tokens": out}, **(extra or {}))}}
+rows = [
+    turn("a", "claude-opus-5-5", "high", 1000),
+    turn("a", "claude-opus-5-5", "high", 1000),   # same request written twice: counted once
+    turn("b", "claude-opus-5-5", "xhigh", 1000),
+    turn("c", "claude-sonnet-5-5", "medium", 1000),
+    turn("d", "<synthetic>", "high", 9999),        # not a real model: ignored
+]
+open(path, "w").write("\n".join(json.dumps(r) for r in rows) + "\n")
+PY
+}
+SEED_FN=seed_transcripts CLAUDE_JSON="$EFFORT_JSON_CLAUDE" run ok 0
+post=$(jq -r .text < "$TEST_DIR/curl-payload")
+expect yes "effort: header gets Med/High/XHigh after CacheR" "$(grep -q 'CacheR    Med   High  XHigh$' <<<"$post" && echo yes || echo no)"
+expect yes "effort: opus row split 50/50 across high and xhigh" "$(grep -q '^Opus 5.5 .*  0%.* 50%.* 50%$' <<<"$post" && echo yes || echo no)"
+expect yes "effort: sonnet row all medium" "$(grep -q '^Sonnet 5.5 .* 100%.*  0%.*  0%$' <<<"$post" && echo yes || echo no)"
+expect yes "effort: total row is cost-weighted" "$(grep -q '^Claude  .*\$20.00.* 50%.* 25%.* 25%$' <<<"$post" && echo yes || echo no)"
+expect 79 "effort: separator is 58 plus 7 per level (3 levels)" "$(grep -m1 '^─' <<<"$post" | tr -d '\n' | wc -m | tr -d ' ')"
+unset SEED_FN
+
+# 7. no transcripts (or a helper that fails): the post is the plain table, never "0%" cells
+run ok 0
+expect no "no effort data: no percent cells" "$(jq -r .text < "$TEST_DIR/curl-payload" | grep -q '%' && echo yes || echo no)"
+expect 1 "no effort data: still posts" "$(count curl-calls)"
+
+# 8. model names: every family renders as "Family N.M" so the first column stays 12 wide
+FABLE_JSON='{"daily":[{"totalCost":5,"inputTokens":1,"outputTokens":1,"cacheCreationTokens":1,"cacheReadTokens":1,"modelBreakdowns":[{"modelName":"claude-fable-5-1","cost":5,"inputTokens":1,"outputTokens":1,"cacheCreationTokens":1,"cacheReadTokens":1}]}]}'
+CLAUDE_JSON="$FABLE_JSON" run ok 0
+expect yes "fable row is prettified" "$(jq -r .text < "$TEST_DIR/curl-payload" | grep -q '^Fable 5.1 ' && echo yes || echo no)"
 
 echo "post-yesterdays-ccusage: $pass passed, $fail failed"
 (( fail == 0 ))

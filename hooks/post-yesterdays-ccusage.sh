@@ -8,6 +8,13 @@
 #   - `npx`, `jq`, `curl` on PATH
 #   - ccusage >= 20 for Codex data (older versions still post Claude-only)
 #
+# Effort mix: the Claude table gets one trailing column per reasoning-effort
+# level used that day (Low Med High XHigh Max), each row's cost split by effort
+# as a percentage. ccusage has no effort field, so lib/claude-effort-mix.py reads
+# it from Claude Code's transcripts; with no data the table is unchanged.
+# sparky must parse the extra columns first (ccusageLeaderboard.ts,
+# EFFORT_COLUMNS), or a post that carries them is dropped from the leaderboard.
+#
 # State: ~/.claude/.ccusage-state/last-posted holds the most recent
 # YYYY-MM-DD that was successfully posted. Catchup posts every day from
 # last+1 through yesterday, one message per day. The marker advances only
@@ -87,6 +94,20 @@ run_ccusage() {
   return "$rc"
 }
 
+# effort_mix <ccusage claude json> <day> — prints the effort-mix JSON for the
+# day, or {} if it cannot be computed. Tries python3 on PATH first, then the
+# system one: a version-manager shim (mise, pyenv) can exit non-zero depending on
+# the directory or HOME it is run from, and the post must not depend on that.
+effort_mix() {
+  local py out helper
+  helper="$(dirname "$0")/lib/claude-effort-mix.py"
+  for py in python3 /usr/bin/python3; do
+    command -v "$py" >/dev/null 2>&1 || continue
+    out=$(printf '%s' "$1" | "$py" "$helper" "$2" 2>/dev/null) && [ -n "$out" ] && { printf '%s' "$out"; return 0; }
+  done
+  printf '{}'
+}
+
 # report_failure <day> <what> — log it, and notify at most once per calendar day
 # so a persistent failure doesn't re-alert on every session start.
 report_failure() {
@@ -145,9 +166,15 @@ while [[ ! "$current" > "$yesterday" ]]; do
   codex_json=$(run_ccusage codex daily --since "$compact" --until "$compact" --json) || codex_json='{}'
   [ -z "$codex_json" ] && codex_json='{}'
 
+  # Reasoning-effort mix per model row, appended after CacheR (ccusage has no
+  # effort field; Claude Code's transcripts do). Any failure or no data yields
+  # {} and the table is exactly what it was before.
+  effort_json=$(effort_mix "$claude_json" "$current")
+
   summary=$(jq -nr \
     --argjson c "$claude_json" \
     --argjson x "$codex_json" \
+    --argjson e "$effort_json" \
     --arg d "$pretty" --arg who "$who" '
     def fmt:
       if . >= 1000000 then
@@ -167,7 +194,7 @@ while [[ ! "$current" > "$yesterday" ]]; do
       );
     def cap: "\(.[0:1] | ascii_upcase)\(.[1:])";
     def claudeModel:
-      (capture("claude-(?<fam>opus|sonnet|haiku)-(?<v>\\d+-\\d+)") // null) as $m |
+      (capture("claude-(?<fam>opus|sonnet|haiku|fable)-(?<v>\\d+-\\d+)") // null) as $m |
       if $m then "\($m.fam | cap) \($m.v | gsub("-"; "."))" else . end;
     def lpad($n):
       tostring as $s | ($n - ($s | length)) as $p |
@@ -186,15 +213,20 @@ while [[ ! "$current" > "$yesterday" ]]; do
     # apart instead of summing them — ccusage reports them separately, and
     # collapsing them loses the one signal that distinguishes profitable
     # cache reuse from paying the write premium over and over.
-    def rowClaude(model; cost; tin; tout; cachew; cacher):
+    # eff: effort-mix cells appended after CacheR, each two spaces plus 5 wide
+    # (header labels, or "NN%"); empty for a row with no effort data. No
+    # apostrophes in comments: this whole program sits inside shell single quotes.
+    def rowClaude(model; cost; tin; tout; cachew; cacher; eff):
       (model | rpad(12)) + "  " +
       (cost  | lpad(7))  + "  " +
       (tin   | lpad(7))  + "  " +
       (tout  | lpad(7))  + "  " +
       (cachew | lpad(7)) + "  " +
-      (cacher | lpad(7));
+      (cacher | lpad(7)) + eff;
+    def effCells: if . == null then "" else map("  " + (tostring | lpad(5))) | join("") end;
+    def pctCells: if . == null then "" else map("\(.)%") | effCells end;
     def sep: ("─" * 50);
-    def sepClaude: ("─" * 58);
+    def sepClaude($n): ("─" * (58 + 7 * $n));
 
     # Pull the single-day row from each report. ccusage emits {"daily": [...]}
     # for days with data, bare [] for days with none, and we coerce a parse
@@ -219,8 +251,9 @@ while [[ ! "$current" > "$yesterday" ]]; do
       # ── Claude block ───────────────────────────────────────────────
       (if $chas then
         ($cr.modelBreakdowns // []) as $cm |
+        ($e.levels // []) as $lv |
         "Claude\n" +
-        rowClaude("Model"; "Cost"; "Input"; "Output"; "CacheW"; "CacheR") + "\n" +
+        rowClaude("Model"; "Cost"; "Input"; "Output"; "CacheW"; "CacheR"; (if ($lv | length) > 0 then ($lv | effCells) else "" end)) + "\n" +
         (if ($cm | length) > 0
           then ($cm | map(
             rowClaude(.modelName | claudeModel;
@@ -228,15 +261,17 @@ while [[ ! "$current" > "$yesterday" ]]; do
                 .inputTokens // 0 | fmt;
                 .outputTokens // 0 | fmt;
                 .cacheCreationTokens // 0 | fmt;
-                .cacheReadTokens // 0 | fmt)
-          ) | join("\n")) + "\n" + sepClaude + "\n"
+                .cacheReadTokens // 0 | fmt;
+                ($e.rows[.modelName]) | pctCells)
+          ) | join("\n")) + "\n" + sepClaude($lv | length) + "\n"
           else "" end) +
         rowClaude("Claude";
             $ccost | money;
             $cr.inputTokens // 0 | fmt;
             $cr.outputTokens // 0 | fmt;
             $cr.cacheCreationTokens // 0 | fmt;
-            $cr.cacheReadTokens // 0 | fmt)
+            $cr.cacheReadTokens // 0 | fmt;
+            ($e.total) | pctCells)
        else "Claude: no activity" end) +
       "\n\n" +
 
