@@ -264,12 +264,79 @@ print(bool(b.acquire('codex','planner',pid=int(sys.argv[2]))))
         self.assertEqual(collected['exit'], 7)
         self.assertEqual(collected['result'], '{"done":true}')
 
-    def test_hook_denies_at_zero_and_takes_no_lease(self):
-        with patch.object(b, 'allow', return_value=0), patch.object(b, 'acquire') as acquire:
-            result = hook.handle(dict(hook_event_name='PreToolUse', tool_name='Agent', session_id='sid'))
+    def test_hook_denies_at_zero(self):
+        self.reading['windows']['five_hour']['live'] = 70
+        result = hook.handle(dict(hook_event_name='PreToolUse', tool_name='Agent', session_id='sid'))
         self.assertEqual(result['hookSpecificOutput']['permissionDecision'], 'deny')
         self.assertIn('bin/fanout', result['hookSpecificOutput']['permissionDecisionReason'])
-        acquire.assert_not_called()
+        self.assertEqual(self.leases(), [])
+
+    def invoke_hook(self, payload):
+        out, err = io.StringIO(), io.StringIO()
+        with patch.object(sys, 'stdin', io.StringIO(payload)), contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            self.assertEqual(hook.main(), 0)
+        return out.getvalue(), err.getvalue()
+
+    def test_hook_fails_open_on_null_leases_filesystem_error_and_bad_stdin(self):
+        b.write_json(b.budget_dir() / 'leases.json', None)
+        payload = json.dumps(dict(hook_event_name='PreToolUse', tool_name='Agent'))
+        out, err = self.invoke_hook(payload)
+        self.assertEqual(out, '')
+        self.assertIn('allowing tool', err)
+        self.assertEqual(len(err.splitlines()), 1)
+        with patch.object(b, 'acquire', side_effect=PermissionError('fixture')):
+            out, err = self.invoke_hook(payload)
+            self.assertEqual(out, '')
+            self.assertIn('PermissionError', err)
+        for bad_input in ('not json', 'null'):
+            out, err = self.invoke_hook(bad_input)
+            self.assertEqual(out, '')
+            self.assertIn('allowing tool', err)
+
+    def test_hook_timeout_and_sigterm_allow_without_output(self):
+        payload = json.dumps(dict(hook_event_name='PreToolUse', tool_name='Workflow'))
+        with patch.object(hook, 'HOOK_TIMEOUT_SECONDS', .03), patch.object(hook, 'handle', side_effect=lambda data: time.sleep(5)):
+            out, err = self.invoke_hook(payload)
+            self.assertEqual(out, '')
+            self.assertIn('TimeoutError', err)
+        with patch.object(hook, 'handle', side_effect=lambda data: os.kill(os.getpid(), signal.SIGTERM)):
+            out, err = self.invoke_hook(payload)
+            self.assertEqual(out, '')
+            self.assertIn('allowing tool', err)
+
+    def test_estimates_cache_survives_calls_and_expires_after_ten_minutes(self):
+        with patch.object(b, 'history', return_value=([], [])) as history:
+            first = b.cached_estimates()
+            self.assertEqual(b.cached_estimates(), first)
+            self.assertEqual(history.call_count, 1)
+            cache = b.read_json(b.budget_dir() / 'estimates.json')
+            cache['generated_at'] -= 601
+            b.write_json(b.budget_dir() / 'estimates.json', cache)
+            b.cached_estimates()
+            self.assertEqual(history.call_count, 2)
+        script = 'import agent_budget as b; b.history=lambda: 1/0; b.cached_estimates()'
+        result = subprocess.run([sys.executable, '-c', script], env=dict(os.environ, PYTHONPATH=str(b.ROOT / 'lib')),
+                                capture_output=True, text=True, timeout=5)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_hook_reuses_models_and_quota_five_second_cache(self):
+        self.readings.stop()
+        with patch.object(b.claude_quota, 'state_dir', return_value=self.home / 'quota'), patch.object(b.claude_quota, 'token', return_value='fixture'), patch.object(b.claude_quota, 'probe', return_value=({'five_hour': {'used_percentage': 10}, 'seven_day': {'used_percentage': 10}}, None)) as probe, patch.object(b, 'history', return_value=([], [])) as history, patch.object(hook, 'owner_pid', return_value=os.getpid()):
+            started = time.monotonic()
+            for tool in ('Agent', 'Workflow'):
+                self.assertIsNone(hook.handle(dict(hook_event_name='PreToolUse', tool_name=tool, session_id='sid')))
+            self.assertLess(time.monotonic() - started, 1)
+            self.assertEqual(probe.call_count, 1)
+            self.assertEqual(history.call_count, 1)
+
+    def test_hook_unknown_allows_even_with_an_active_child_lease(self):
+        b.acquire('claude', 'subagent')
+        for window in self.reading['windows'].values():
+            window['live'] = None
+        with patch.object(b, 'cached_estimates', side_effect=AssertionError('unknown must be cheap')):
+            for tool in ('Agent', 'Workflow'):
+                self.assertIsNone(hook.handle(dict(hook_event_name='PreToolUse', tool_name=tool)))
+        self.assertEqual(b.allow('claude', 'subagent'), 0)  # fanout/batch retain one lease
 
     def test_hook_releases_exact_subagent_out_of_order(self):
         with patch.object(hook, 'owner_pid', return_value=os.getpid()):
@@ -280,14 +347,15 @@ print(bool(b.acquire('codex','planner',pid=int(sys.argv[2]))))
         hook.handle(dict(hook_event_name='SubagentStop', session_id='sid', agent_transcript_path=str(path)))
         self.assertEqual([l['tool_use_id'] for l in self.leases()], ['first'])
 
-    def test_conducting_session_reservation_and_lifecycle(self):
-        with patch.object(hook, 'owner_pid', return_value=os.getpid()):
-            for _ in range(2):
-                hook.handle(dict(hook_event_name='SessionStart', session_id='sid'))
-        self.assertEqual(len(self.leases()), 1)
-        self.assertAlmostEqual(self.leases()[0]['pct'], 10)
-        hook.handle(dict(hook_event_name='SessionEnd', session_id='sid'))
-        self.assertEqual(self.leases(), [])
+    def test_session_hooks_do_not_read_history_or_create_leases(self):
+        with patch.object(b, 'history', side_effect=AssertionError('no session accounting')):
+            for event in ('SessionStart', 'SessionEnd'):
+                self.assertIsNone(hook.handle(dict(hook_event_name=event, session_id='sid')))
+        self.assertFalse((b.budget_dir() / 'leases.json').exists())
+        # Retire previously installed session leases without affecting children.
+        child = b.acquire('claude', 'subagent')
+        b.write_json(b.budget_dir() / 'leases.json', [child, dict(child, id='legacy', label='session')])
+        self.assertEqual([l['id'] for l in self.leases()], [child['id']])
 
     def test_headless_supervisor_runs_fake_codex_and_collects_nonzero_exit(self):
         cli_dir = self.home / 'bin'
@@ -334,23 +402,6 @@ print(bool(b.acquire('codex','planner',pid=int(sys.argv[2]))))
         self.assertEqual(b.read_json(job / 'meta.json')['terminal_id'], 'terminal')
         self.assertEqual(run.call_count, 3)
 
-    def test_adopted_interactive_session_is_not_double_counted(self):
-        lease = b.acquire('claude', 'interactive', label='fanout')
-        lease['terminal_id'] = 'terminal'
-        b.write_json(b.budget_dir() / 'leases.json', [lease])
-        with patch.dict(os.environ, SUPERSET_TERMINAL_ID='terminal'):
-            hook.handle(dict(hook_event_name='SessionStart', session_id='sid'))
-            hook.handle(dict(hook_event_name='SessionEnd', session_id='sid'))
-        self.assertEqual(len(self.leases()), 1)
-        self.assertEqual(self.leases()[0]['id'], lease['id'])
-
-    def test_headless_session_adopts_wrapper_lease(self):
-        lease = b.acquire('claude', 'planner', label='fanout')
-        with patch.dict(os.environ, AGENT_BUDGET_LEASE_ID=lease['id']):
-            hook.handle(dict(hook_event_name='SessionStart', session_id='sid'))
-            hook.handle(dict(hook_event_name='SessionEnd', session_id='sid'))
-        self.assertEqual([l['id'] for l in self.leases()], [lease['id']])
-
     def test_role_cost_sums_multiple_models_in_one_job(self):
         self.append(b.claude_home() / 'automations/advance-roadmap/runs.jsonl', [
             dict(duration_s=100, tokens=dict(calls=[dict(provider='claude', role='orchestrator', total=v, sessions=['sid']) for v in (10, 20)]))])
@@ -363,7 +414,10 @@ print(bool(b.acquire('codex','planner',pid=int(sys.argv[2]))))
         if not shutil.which('jq'):
             self.skipTest('jq unavailable')
         settings = self.home / 'settings.json'
-        b.write_json(settings, {'keep': 42, 'hooks': {'PreToolUse': [{'matcher': 'Bash', 'hooks': [{'command': 'custom'}]}]}})
+        b.write_json(settings, {'keep': 42, 'hooks': {
+            'PreToolUse': [{'matcher': 'Bash', 'hooks': [{'command': 'custom'}]}],
+            'SessionStart': [{'hooks': [{'command': 'custom'}, {'command': 'python3 agent-budget-gate.py'}]}],
+            'SessionEnd': [{'hooks': [{'command': 'python3 agent-budget-gate.py'}]}, {'hooks': [{'command': 'claude-quota.sh'}]}]}})
         source = (b.ROOT / 'install.sh').read_text()
         function = source[source.index('wire_agent_budget_hooks() {'):source.index('# ── hooks/ ──')]
         script = 'backup_settings_once() { :; }\nsettings_target() { echo "$SETTINGS"; }\n' + function + '\nwire_agent_budget_hooks\nwire_agent_budget_hooks\n'
@@ -374,8 +428,9 @@ print(bool(b.acquire('codex','planner',pid=int(sys.argv[2]))))
         self.assertEqual(data['keep'], 42)
         self.assertEqual(len(data['hooks']['PreToolUse']), 2)
         self.assertEqual(data['hooks']['PreToolUse'][1]['matcher'], '^(Agent|Workflow)$')
-        for event in ('SessionStart', 'SessionEnd', 'SubagentStop'):
-            self.assertEqual(len(data['hooks'][event]), 1)
+        self.assertEqual(data['hooks']['SessionStart'], [{'hooks': [{'command': 'custom'}]}])
+        self.assertEqual(data['hooks']['SessionEnd'], [{'hooks': [{'command': 'claude-quota.sh'}]}])
+        self.assertEqual(len(data['hooks']['SubagentStop']), 1)
 
 
 if __name__ == '__main__':

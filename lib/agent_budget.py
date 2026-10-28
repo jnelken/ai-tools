@@ -36,6 +36,8 @@ SEED_TOKENS = {
 # Cursor has no measured conversion yet: explicitly conservative provisional 5/job.
 SEED_FACTORS = {'claude': 10 / 251000, 'codex': 3 / 70000, 'cursor': 5 / 59000}
 MAX_AGE = 15 * 60
+ESTIMATE_MAX_AGE = 10 * 60
+ESTIMATE_VERSION = 1
 
 
 def claude_home():
@@ -275,6 +277,21 @@ def estimates(records, samples):
     return result
 
 
+def cached_estimates():
+    """Share models across short-lived hooks; scan history at most every 10m."""
+    with lock('estimates'):
+        path = budget_dir() / 'estimates.json'
+        cached = read_json(path)
+        if (isinstance(cached, dict) and cached.get('version') == ESTIMATE_VERSION
+                and number(cached.get('generated_at'))
+                and 0 <= time.time() - cached['generated_at'] < ESTIMATE_MAX_AGE
+                and isinstance(cached.get('models'), dict)):
+            return cached['models']
+        models = estimates(*history())
+        write_json(path, dict(version=ESTIMATE_VERSION, generated_at=time.time(), models=models))
+        return models
+
+
 def readings(provider):
     now = time.time()
     if provider == 'claude':
@@ -321,13 +338,13 @@ def reap():
     """Caller holds leases.lock, including reads (which persist the reaping)."""
     leases = read_json(budget_dir() / 'leases.json', [])
     now = time.time()
-    leases = [lease for lease in leases if alive(lease.get('pid')) and
+    leases = [lease for lease in leases if lease.get('label') != 'session' and alive(lease.get('pid')) and
               lease.get('created', 0) + lease.get('ttl', 0) > now]
     write_json(budget_dir() / 'leases.json', leases)
     return leases
 
 
-def capacity(reading, leases, provider, role, cost, want):
+def capacity(reading, leases, provider, role, cost, want, unknown_limit=True):
     active = [l for l in leases if l['provider'] == provider]
     reserved = sum(l['pct'] for l in active)
     windows = reading['windows']
@@ -337,7 +354,7 @@ def capacity(reading, leases, provider, role, cost, want):
     known = [w['cap'] - w['live'] - reserved for w in windows.values() if number(w.get('live'))]
     unknown = any(not number(w.get('live')) for w in windows.values())
     fit = min(want, max(0, math.floor((min(known) + 1e-9) / cost))) if known else want
-    if unknown:
+    if unknown and unknown_limit:
         fit = min(fit, 0 if active else 1)
     return max(0, fit)
 
@@ -350,7 +367,7 @@ def view(provider, reading, model, leases):
 
 
 def allow(provider, role, want=1):
-    model = estimates(*history())[provider]
+    model = cached_estimates()[provider]
     reading = readings(provider)
     with lock():
         leases = reap()
@@ -358,12 +375,12 @@ def allow(provider, role, want=1):
     return count
 
 
-def acquire(provider, role, pid=None, ttl=None, label=None, **extra):
-    model = estimates(*history())[provider]['roles'][role]
-    reading = readings(provider)
+def acquire(provider, role, pid=None, ttl=None, label=None, reading=None, unknown_limit=True, **extra):
+    model = cached_estimates()[provider]['roles'][role]
+    reading = readings(provider) if reading is None else reading
     with lock():
         leases = reap()
-        if not capacity(reading, leases, provider, role, model['pct'], 1):
+        if not capacity(reading, leases, provider, role, model['pct'], 1, unknown_limit=unknown_limit):
             return None
         lease = dict(id=uuid.uuid4().hex, provider=provider, role=role, pct=model['pct'],
                      pid=pid or os.getpid(), created=time.time(), ttl=ttl or model['ttl'], label=label, **extra)
@@ -459,7 +476,7 @@ def main(argv=None):
     if a.cmd == 'release':
         release(a.id)
     elif a.cmd == 'status':
-        models = estimates(*history())
+        models = cached_estimates()
         live = {p: readings(p) for p in PROVIDERS}
         with lock():
             leases = reap()

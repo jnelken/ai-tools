@@ -634,7 +634,13 @@ wire_agent_budget_hooks() {
   local real; real="$(settings_target)"
   local cmd='python3 "$HOME/.claude/hooks/agent-budget-gate.py"'
   jq --arg cmd "$cmd" '
-    reduce ["PreToolUse", "SubagentStop", "SessionStart", "SessionEnd"][] as $event (. ;
+    # Remove the retired session accounting hooks, preserving other commands
+    # even when a user placed several commands in the same hook entry.
+    reduce ["SessionStart", "SessionEnd"][] as $event (. ;
+      if .hooks[$event] then .hooks[$event] |= map(
+        .hooks |= map(select((.command // "" | contains("agent-budget-gate.py")) | not))
+      ) | .hooks[$event] |= map(select(.hooks | length > 0)) else . end)
+    | reduce ["PreToolUse", "SubagentStop"][] as $event (. ;
       if any((.hooks[$event] // [])[]?.hooks[]?; (.command // "" | contains("agent-budget-gate.py")))
       then . else .hooks[$event] = ((.hooks[$event] // []) + [
         ({hooks:[{type:"command", command:$cmd, timeout:30}]} +

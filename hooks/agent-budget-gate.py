@@ -1,19 +1,21 @@
 #!/usr/bin/env python3
 """Reserve before Agent/Workflow, release the exact child on SubagentStop.
 
-Session lifecycle events also count conducting/interactive sessions. A fanout
-terminal adopts its watcher's reservation instead of being counted twice.
+The hook is advisory: unknown quota, errors, and timeout allow the tool.
+Only admitted children are leased; interactive sessions use the cap reserve.
 """
 import json
 import os
 from pathlib import Path
 import subprocess
 import sys
-import time
-import uuid
+import signal
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'lib'))
 import agent_budget as budget
+
+# Finish before Claude's 30s hook timeout, including a blocked stdin or flock.
+HOOK_TIMEOUT_SECONDS = 25
 
 
 def owner_pid():
@@ -37,14 +39,16 @@ def deny(reason):
 def handle(data):
     event = data.get('hook_event_name')
     session = data.get('session_id')
-    terminal = os.environ.get('SUPERSET_TERMINAL_ID')
     if event == 'PreToolUse':
         if data.get('tool_name') not in ('Agent', 'Workflow'):
             return None
-        if not budget.allow('claude', 'subagent', 1):
-            return deny('Claude shared budget has no headroom for a subagent.')
-        lease = budget.acquire('claude', 'subagent', pid=owner_pid(), label='hook',
-                               session_id=session, tool_use_id=data.get('tool_use_id'))
+        reading = budget.readings('claude')
+        # A missing window must never turn the hook into the fanout queue's
+        # single-unknown-lease gate. Known windows still enforce their caps.
+        if not any(budget.number(w.get('live')) for w in reading['windows'].values()):
+            return None
+        lease = budget.acquire('claude', 'subagent', pid=owner_pid(), label='hook', reading=reading,
+                               session_id=session, tool_use_id=data.get('tool_use_id'), unknown_limit=False)
         if not lease:
             return deny('Claude shared budget was reserved by another session.')
     elif event == 'SubagentStop':
@@ -60,36 +64,28 @@ def handle(data):
                 leases = budget.reap()
                 budget.write_json(budget.budget_dir() / 'leases.json', [l for l in leases if not (
                     l.get('label') == 'hook' and l.get('session_id') == session and l.get('tool_use_id') == tool_id)])
-    elif event in ('SessionStart', 'SessionEnd') and session:
-        model = budget.estimates(*budget.history())['claude']['roles']['interactive'] if event == 'SessionStart' else None
-        with budget.lock():
-            leases = budget.reap()
-            leases = [l for l in leases if not (l.get('label') == 'session' and l.get('session_id') == session)]
-            managed = os.environ.get('AGENT_BUDGET_LEASE_ID')
-            adopted = any(l['provider'] == 'claude' and (l['id'] == managed or
-                          (terminal and l.get('terminal_id') == terminal)) for l in leases)
-            if event == 'SessionStart' and not adopted:
-                # An already-started conducting session must be accounted even
-                # above the cap; admission controls its children, not its launch.
-                leases.append(dict(id=uuid.uuid4().hex, provider='claude', role='interactive', pct=model['pct'],
-                                   pid=owner_pid(), created=time.time(), ttl=model['ttl'], label='session',
-                                   session_id=session, terminal_id=terminal))
-            budget.write_json(budget.budget_dir() / 'leases.json', leases)
     return None
 
 
 def main():
-    data = json.load(sys.stdin)
+    def timeout(_signum, _frame):
+        raise TimeoutError('budget hook deadline')
+
+    previous = {}
     try:
+        for sig in (signal.SIGALRM, signal.SIGTERM):
+            previous[sig] = signal.signal(sig, timeout)
+        signal.setitimer(signal.ITIMER_REAL, HOOK_TIMEOUT_SECONDS)
+        data = json.load(sys.stdin)
         result = handle(data)
+        if result:
+            print(json.dumps(result))
     except Exception as error:
-        if data.get('hook_event_name') == 'PreToolUse':
-            result = deny('Shared budget could not be checked (' + type(error).__name__ + ').')
-        else:
-            print('agent-budget: lifecycle bookkeeping failed', file=sys.stderr)
-            return 0
-    if result:
-        print(json.dumps(result))
+        print('agent-budget: check skipped (' + type(error).__name__ + '); allowing tool', file=sys.stderr)
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        for sig, handler in previous.items():
+            signal.signal(sig, handler)
     return 0
 
 

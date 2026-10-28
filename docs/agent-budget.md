@@ -24,7 +24,10 @@ the Superset launch response; completion follows terminal closure, not hook stat
 
 Leases live in `~/.claude/state/agent-budget/leases.json`. All admissions, releases,
 and reads use a separate stable flock file; writes replace the JSON atomically.
-Each read reaps dead owner PIDs and expired TTLs. `run` owns its lease, forwards
+Each read reaps dead owner PIDs and expired TTLs. Only admitted children (fanout
+terminals, batch jobs, and gated subagents) hold leases. Open interactive sessions
+are not leased: their consumed usage is in the live reading, and the 30% above
+the five-hour 70% cap is reserved for interactive use. `run` owns its lease, forwards
 TERM/INT/HUP to the command's process group, preserves exit status, and releases
 in `finally`. Waiting shells back off to 30 seconds and consume no model tokens.
 This is polling admission; waiting terminals have no guaranteed FIFO ordering.
@@ -33,7 +36,8 @@ Caps come from roadmap `usage.py`: 70% over five hours, 80% weekly, and 100% for
 Cursor's selected pool, including that module's environment overrides. Claude
 uses the live OAuth quota helper. Other providers use fresh saved state or the
 existing probes. Readings older than 15 minutes are unknown; an unknown window
-permits at most one active lease for its provider, subject to any known window.
+permits at most one active lease for fanout/batch admission, subject to any known
+window. The in-process hook allows calls when no usable reading exists.
 Reservations are conservatively charged to every window (and Cursor pool).
 
 Role costs use nearest-rank p80 **newly processed** tokens (input + cache writes +
@@ -58,14 +62,21 @@ Seeds: Codex 3 points per 70k-token planner (10-27); Claude 10 points per
 15-minute session. Cursor provisionally reserves 5 points per 59k tokens.
 TTL defaults to 30 minutes; observed p90 duration gets a 50% margin with a
 one-minute floor. Long sessions may outlive their reservation; this is admission
-control, not a provider-enforced spend limit or cross-machine lease service.
+control, not a provider-enforced spend limit or cross-machine lease service. TTLs
+use wall-clock time across processes; a large clock jump can change expiry timing.
+This known limit is unchanged.
 
-The installer registers `agent-budget-gate.py` for PreToolUse (Agent/Workflow),
-SubagentStop, SessionStart and SessionEnd, preserving existing settings. The
-conducting session is tracked even if already above cap. SubagentStop resolves
+The installer registers `agent-budget-gate.py` for PreToolUse (Agent/Workflow) and
+SubagentStop, preserving existing settings and removing its retired SessionStart/End
+registrations. Unknown readings, exceptions (including malformed input/state and
+filesystem errors), and timeout all fail open with no denial output. Errors emit
+one stderr line. An internal 25-second deadline exits successfully before Claude's
+30-second hook limit; SIGTERM also allows the call. Estimates are persisted under
+the budget directory and rebuilt at most every ten minutes. Each admission reads
+quota once through `claude_quota`'s shared five-second cache. SubagentStop resolves
 `toolUseId` from the child's `.meta.json` and releases that exact reservation;
 missing metadata or a failed spawn leaves a bounded TTL reservation. Interactive
-fanouts adopt the watcher's lease when their terminal id is known.
+fanout reservations are held only by their terminal watcher.
 
 Nested headless children retain workspace/account attribution but drop
 `SUPERSET_AGENT_*`, `SUPERSET_HOST_AGENT_HOOK_URL`, `SUPERSET_TERMINAL_ID` and

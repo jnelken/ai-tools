@@ -4,7 +4,7 @@
 
 **Status (2026-10-28 16:05):**
 - **D:** slackagent#6 is reviewed (three Codex lenses, five findings, all fixed with regression tests and verified by the conducting session; 235/235 tests). Merging was blocked by the auto-mode classifier ("Merge Without Review") and waits for Jake. After merge: pull the live checkout, restart the service, run the backfill with `--dry-run`, then for real.
-- **C:** ai-tools#8 is under three-lens Codex review. The conducting session found the gate hook fails closed (a PreToolUse exception means deny), against the brief.
+- **C:** ai-tools#8 review fixes are in progress: fail-open hooks, child-only leases, cached estimates, corrected calibration and provider readings, and Superset workspace/identity fixes.
 - **A+B:** still running on Claude.
 
 Repos:
@@ -38,10 +38,11 @@ Separately:
 - **Claude batch cap:** keep 70% of the 5-hour window, now counting projected in-flight usage.
 - **Per-session gating (you asked if I agree): yes.**
   - The batch, interactive fan-outs and slackagent all draw on one account-wide 5-hour window. A gate that only the batch respects can't stop the overlap.
+  - Leases cover admitted children only: fanout terminals, batch jobs, and hook-admitted subagents. Do not lease open conducting/interactive sessions. Their consumed usage appears in the live reading; the 30% above the 70% five-hour cap is the interactive reserve.
   - One shared ledger of leases plus a live reading lets each spawner see the others.
   - Caveats: estimates are noisy (p80 plus a live re-read each wave), and usage from other machines only shows up through the live reading.
 - **Running docs** cover both interactive planning sessions and headless roadmap planners. A planner killed by quota leaves partial triage that the next run reuses.
-- **Gate strength:** Superset fan-out terminals wait in a queue on the budget, using no model while waiting. In-process `Agent` / `Workflow` calls over budget are denied, with a reason pointing to `fanout`.
+- **Gate strength:** Superset fan-out terminals wait in a queue on the budget, using no model while waiting; unknown readings allow one fanout/batch lease per provider. In-process `Agent` / `Workflow` calls over a known budget are denied, pointing to `fanout`. Unknown quota, any exception, malformed stdin, or timeout must fail open (exit 0 without a denial, with one stderr note for errors). The hook uses cached estimates (ten minutes) and quota readings (five seconds), and finishes before the 30-second harness deadline.
 - **Slackagent usage surface:** a private web `/usage` page plus a weekly owner Slack DM summary.
 - **Fan-out goes through Superset terminals**, headless or not, so it counts for the leaderboard. Saved as a feedback memory on approval.
   - Memory `project_superset-production-run`, read from v1.30.2 source, says subagent transcripts already count as sessions, and that only merged PRs need a workspace binding.
@@ -57,7 +58,7 @@ Separately:
 - **(e) The verdict lasts 24 hours,** the same as the batch interval (`verdict.py`, `ORCHESTRATOR.md:179`).
 - **(f) The post-worker fingerprint omits `--deploys`** (`run.sh:969`), so every carried verdict shows `deploy:<repo>` as changed on the next check. Found by the A+B agent on 10-28 in runs back to 10-18.
 
-**F9. Burn rate with two interactive Sonnet agents and this conducting session (10-28).** Claude's 5-hour window went from 16% (15:27) to 35% (15:36), about 2 points per minute. At that rate the 70% batch cap is about 18 minutes away and 100% about 30 minutes away. Wave 1 is already the kind of run this plan is meant to prevent. Slice C's admission control must count interactive agents and the conducting session itself, not just batch jobs.
+**F9. Burn rate with two interactive Sonnet agents and this conducting session (10-28).** Claude's 5-hour window went from 16% (15:27) to 35% (15:36), about 2 points per minute. At that rate the 70% batch cap is about 18 minutes away and 100% about 30 minutes away. Wave 1 is already the kind of run this plan is meant to prevent. Review decision: reserve leases for admitted children only; the live reading and 30% interactive reserve cover conducting/open sessions. Do not create SessionStart/End budget leases.
 
 **F2. Planning ignores whether anything can implement.** The only worker check is at release (`daily_batch.py:342-346`), after all planning. No-work bookkeeping also needs a worker.
 
@@ -151,7 +152,7 @@ Separately:
   - **PreToolUse hook on `Agent` / `Workflow`:** denies when `allow` returns 0, saying so and pointing to `fanout`. Otherwise it takes a lease, released by `SubagentStop` or the TTL.
 - **Instructions:** `instructions/providers/claude-development.md` *Parallelize with Subagents* changes to "fan out via `bin/fanout` (Superset terminals), sized by `agent-budget`". The Model Router note stays.
 
-**Standalone C implementation (2026-10-28):** `bin/agent-budget`, `bin/fanout`, the lifecycle gate and installer wiring are implemented; see [operator notes](../agent-budget.md). Headless and interactive Superset launches queue without a model; interactive reservations are held by a detached terminal watcher until closure or TTL. SessionStart/End also account for conducting Claude sessions. Hook registration is owned by `install.sh` here (`settings.json` on this Mac is a regular file), so no dotfiles change is needed. Missing child metadata or a failed pre-tool spawn falls back to TTL release. Local leases cover this machine; other machines enter only through live quota readings. Polling waiters have no FIFO guarantee.
+**Standalone C implementation (2026-10-28):** `bin/agent-budget`, `bin/fanout`, the lifecycle gate and installer wiring are implemented; see [operator notes](../agent-budget.md). Headless and interactive Superset launches queue without a model; interactive reservations are held by a detached terminal watcher until closure or TTL. Open conducting sessions have no budget lease; only admitted children reserve headroom. Hook errors, unknown quota and timeouts allow the call, and estimates are cached for ten minutes. Hook registration is owned by `install.sh` here (`settings.json` on this Mac is a regular file), so no dotfiles change is needed. Missing child metadata or a failed pre-tool spawn falls back to TTL release. Local leases cover this machine; other machines enter only through live quota readings. Polling waiters have no FIFO guarantee.
 
 ### D. Slackagent usage measurement (slackagent)
 
