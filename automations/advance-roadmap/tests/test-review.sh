@@ -138,7 +138,8 @@ done
 
 review() {  # review WORKER ROUND [env...]
   local w="$1" r="$2"; shift 2
-  env ADVANCE_ROADMAP_ROOT="$ROOT" ADVANCE_ROADMAP_CODEX_BIN="$BIN/codex" \
+  # These cases are the cross-provider strategy (the default is cursor-then-codex since b6b5558).
+  env ADVANCE_ROADMAP_ROOT="$ROOT" ADVANCE_ROADMAP_REVIEW_STRATEGY=cross-provider ADVANCE_ROADMAP_CODEX_BIN="$BIN/codex" \
     ADVANCE_ROADMAP_AGENT_BIN="$BIN/agent" ADVANCE_ROADMAP_CLAUDE_BIN="$BIN/claude" "$@" \
     zsh "$ROOT/review.sh" --repo "$REPO" --worker "$w" --round "$r" --log "$LOG" --base main
 }
