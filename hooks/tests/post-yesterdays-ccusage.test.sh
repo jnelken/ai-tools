@@ -24,6 +24,7 @@ case "$NPX_MODE" in
 esac
 case " $* " in
   *" claude "*) printf '%s' "$CLAUDE_JSON" ;;
+  *" codex "*)  empty='{}'; printf '%s' "${CODEX_JSON:-$empty}" ;;
   *)            printf '{}' ;;
 esac
 EOF
@@ -43,7 +44,8 @@ chmod +x "$STUBS"/*
 
 # run <npx mode> [curl rc] — fresh HOME and cache each time; prints nothing, sets $H
 run() {
-  export TEST_DIR="$TMP/case-$((++n))" NPX_MODE="$1" CURL_RC="${2:-0}" CLAUDE_JSON
+  export TEST_DIR="$TMP/case-$((++n))" NPX_MODE="$1" CURL_RC="${2:-0}" CLAUDE_JSON CODEX_JSON
+  unset CODEX_HOME
   H="$TEST_DIR/home"; export NPM_CACHE="$TEST_DIR/npmcache"
   mkdir -p "$H" "$NPM_CACHE/_npx/stale" "$NPM_CACHE/_npx/other"
   echo '{"_npx":{"packages":["ccusage@latest"]}}' > "$NPM_CACHE/_npx/stale/package.json"
@@ -138,6 +140,36 @@ expect 1 "no effort data: still posts" "$(count curl-calls)"
 FABLE_JSON='{"daily":[{"totalCost":5,"inputTokens":1,"outputTokens":1,"cacheCreationTokens":1,"cacheReadTokens":1,"modelBreakdowns":[{"modelName":"claude-fable-5-1","cost":5,"inputTokens":1,"outputTokens":1,"cacheCreationTokens":1,"cacheReadTokens":1}]}]}'
 CLAUDE_JSON="$FABLE_JSON" run ok 0
 expect yes "fable row is prettified" "$(jq -r .text < "$TEST_DIR/curl-payload" | grep -q '^Fable 5.1 ' && echo yes || echo no)"
+
+# 9. Codex effort columns: read from the rollout's turn_context, counted by growth in
+#    the cumulative token total (a repeated token_count adds nothing)
+CODEX_DAY_JSON='{"daily":[{"costUSD":0.3,"inputTokens":3000,"outputTokens":300,"cacheReadTokens":0,"models":{"gpt-6-luna":{"inputTokens":3000,"outputTokens":300,"cacheReadTokens":0}}}]}'
+seed_codex() {
+  mkdir -p "$H/.codex/sessions/2026/01/01"
+  python3 - "$H/.codex/sessions/2026/01/01/rollout-x.jsonl" "$yesterday" <<'PY'
+import datetime, json, sys
+path, day = sys.argv[1], sys.argv[2]
+ts = datetime.datetime.strptime(day + " 12:00", "%Y-%m-%d %H:%M").astimezone().isoformat()
+def ctx(effort):
+    return {"timestamp": ts, "type": "turn_context", "payload": {"model": "gpt-6-luna", "collaboration_mode": {"settings": {"reasoning_effort": effort}}}}
+def count(total):
+    return {"timestamp": ts, "type": "event_msg", "payload": {"type": "token_count", "info": {"total_token_usage": {"input_tokens": total, "cached_input_tokens": 0, "output_tokens": total // 10}}}}
+rows = [ctx("medium"), count(1000), count(1000),   # repeated event: counted once
+        ctx("high"), count(2000), count(3000)]
+open(path, "w").write("\n".join(json.dumps(r) for r in rows) + "\n")
+PY
+}
+SEED_FN=seed_codex CLAUDE_JSON="$FABLE_JSON" CODEX_JSON="$CODEX_DAY_JSON" run ok 0
+post=$(jq -r .text < "$TEST_DIR/curl-payload")
+expect yes "codex effort: header gets Med/High after Cache" "$(grep -q 'Cache    Med   High$' <<<"$post" && echo yes || echo no)"
+expect yes "codex effort: model row split by turn weight" "$(grep -q '^gpt-6-luna .* 33%.* 67%$' <<<"$post" && echo yes || echo no)"
+expect yes "codex effort: total row carries the same split" "$(grep -q '^Codex  .*\$0.30.* 33%.* 67%$' <<<"$post" && echo yes || echo no)"
+expect 64 "codex effort: separator is 50 plus 7 per level" "$(grep '^─' <<<"$post" | tail -1 | tr -d '\n' | wc -m | tr -d ' ')"
+expect no "codex effort: claude block unaffected without transcripts" "$(sed -n '/^Claude/,/^Codex/p' <<<"$post" | grep -q '%' && echo yes || echo no)"
+unset SEED_FN
+CODEX_JSON="$CODEX_DAY_JSON" run ok 0
+expect no "codex without rollouts: no percent cells" "$(jq -r .text < "$TEST_DIR/curl-payload" | grep -q '%' && echo yes || echo no)"
+unset CODEX_JSON
 
 echo "post-yesterdays-ccusage: $pass passed, $fail failed"
 (( fail == 0 ))

@@ -8,10 +8,11 @@
 #   - `npx`, `jq`, `curl` on PATH
 #   - ccusage >= 20 for Codex data (older versions still post Claude-only)
 #
-# Effort mix: the Claude table gets one trailing column per reasoning-effort
-# level used that day (Low Med High XHigh Max), each row's cost split by effort
-# as a percentage. ccusage has no effort field, so lib/claude-effort-mix.py reads
-# it from Claude Code's transcripts; with no data the table is unchanged.
+# Effort mix: the Claude and Codex tables each get one trailing column per
+# reasoning-effort level used that day (Min Low Med High XHigh Max), each row's
+# cost split by effort as a percentage. ccusage has no effort field, so
+# lib/effort-mix.py reads it from Claude Code's transcripts and Codex's
+# rollouts; with no data a table is unchanged.
 # sparky must parse the extra columns first (ccusageLeaderboard.ts,
 # EFFORT_COLUMNS), or a post that carries them is dropped from the leaderboard.
 #
@@ -94,16 +95,16 @@ run_ccusage() {
   return "$rc"
 }
 
-# effort_mix <ccusage claude json> <day> — prints the effort-mix JSON for the
+# effort_mix <ccusage json> <day> [--codex] — prints the effort-mix JSON for the
 # day, or {} if it cannot be computed. Tries python3 on PATH first, then the
 # system one: a version-manager shim (mise, pyenv) can exit non-zero depending on
 # the directory or HOME it is run from, and the post must not depend on that.
 effort_mix() {
   local py out helper
-  helper="$(dirname "$0")/lib/claude-effort-mix.py"
+  helper="$(dirname "$0")/lib/effort-mix.py"
   for py in python3 /usr/bin/python3; do
     command -v "$py" >/dev/null 2>&1 || continue
-    out=$(printf '%s' "$1" | "$py" "$helper" "$2" 2>/dev/null) && [ -n "$out" ] && { printf '%s' "$out"; return 0; }
+    out=$(printf '%s' "$1" | "$py" "$helper" ${3:-} "$2" 2>/dev/null) && [ -n "$out" ] && { printf '%s' "$out"; return 0; }
   done
   printf '{}'
 }
@@ -170,11 +171,13 @@ while [[ ! "$current" > "$yesterday" ]]; do
   # effort field; Claude Code's transcripts do). Any failure or no data yields
   # {} and the table is exactly what it was before.
   effort_json=$(effort_mix "$claude_json" "$current")
+  codex_effort_json=$(effort_mix "$codex_json" "$current" --codex)
 
   summary=$(jq -nr \
     --argjson c "$claude_json" \
     --argjson x "$codex_json" \
     --argjson e "$effort_json" \
+    --argjson xe "$codex_effort_json" \
     --arg d "$pretty" --arg who "$who" '
     def fmt:
       if . >= 1000000 then
@@ -223,9 +226,10 @@ while [[ ! "$current" > "$yesterday" ]]; do
       (tout  | lpad(7))  + "  " +
       (cachew | lpad(7)) + "  " +
       (cacher | lpad(7)) + eff;
+    def rowCodex(model; cost; tin; tout; cache; eff): row(model; cost; tin; tout; cache) + eff;
+    def sepCodex($n): ("─" * (50 + 7 * $n));
     def effCells: if . == null then "" else map("  " + (tostring | lpad(5))) | join("") end;
     def pctCells: if . == null then "" else map("\(.)%") | effCells end;
-    def sep: ("─" * 50);
     def sepClaude($n): ("─" * (58 + 7 * $n));
 
     # Pull the single-day row from each report. ccusage emits {"daily": [...]}
@@ -281,22 +285,25 @@ while [[ ! "$current" > "$yesterday" ]]; do
       # the Cost column blank; the Codex total row carries the dollar figure.
       (if $xhas then
         ($xr.models // {}) as $xm |
+        ($xe.levels // []) as $xl |
         "Codex\n" +
-        row("Model"; "Cost"; "Input"; "Output"; "Cache") + "\n" +
+        rowCodex("Model"; "Cost"; "Input"; "Output"; "Cache"; (if ($xl | length) > 0 then ($xl | effCells) else "" end)) + "\n" +
         (if ($xm | length) > 0
           then ($xm | to_entries | map(
-            row(.key;
+            rowCodex(.key;
                 "";
                 .value.inputTokens // 0 | fmt;
                 .value.outputTokens // 0 | fmt;
-                .value.cacheReadTokens // 0 | fmt)
-          ) | join("\n")) + "\n" + sep + "\n"
+                .value.cacheReadTokens // 0 | fmt;
+                ($xe.rows[.key]) | pctCells)
+          ) | join("\n")) + "\n" + sepCodex($xl | length) + "\n"
           else "" end) +
-        row("Codex";
+        rowCodex("Codex";
             $xcost | money;
             $xr.inputTokens // 0 | fmt;
             $xr.outputTokens // 0 | fmt;
-            $xr.cacheReadTokens // 0 | fmt)
+            $xr.cacheReadTokens // 0 | fmt;
+            ($xe.total) | pctCells)
        else "Codex: no activity" end) +
       "\n```"
     end
