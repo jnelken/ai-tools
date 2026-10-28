@@ -124,11 +124,11 @@ PY
 }
 SEED_FN=seed_transcripts CLAUDE_JSON="$EFFORT_JSON_CLAUDE" run ok 0
 post=$(jq -r .text < "$TEST_DIR/curl-payload")
-expect yes "effort: header gets Med/High/XHigh after CacheR" "$(grep -q 'CacheR    Med   High  XHigh$' <<<"$post" && echo yes || echo no)"
+expect yes "effort: header gets Med/High/XHigh after Output" "$(grep -q 'Output    Med   High  XHigh$' <<<"$post" && echo yes || echo no)"
 expect yes "effort: opus row split 50/50 across high and xhigh" "$(grep -q '^Opus 5.5 .*  0%.* 50%.* 50%$' <<<"$post" && echo yes || echo no)"
 expect yes "effort: sonnet row all medium" "$(grep -q '^Sonnet 5.5 .* 100%.*  0%.*  0%$' <<<"$post" && echo yes || echo no)"
 expect yes "effort: total row is cost-weighted" "$(grep -q '^Claude  .*\$20.00.* 50%.* 25%.* 25%$' <<<"$post" && echo yes || echo no)"
-expect 79 "effort: separator is 58 plus 7 per level (3 levels)" "$(grep -m1 '^─' <<<"$post" | tr -d '\n' | wc -m | tr -d ' ')"
+expect 60 "effort: separator is 39 plus 7 per level (3 levels)" "$(grep -m1 '^─' <<<"$post" | tr -d '\n' | wc -m | tr -d ' ')"
 unset SEED_FN
 
 # 7. no transcripts (or a helper that fails): the post is the plain table, never "0%" cells
@@ -161,14 +161,40 @@ PY
 }
 SEED_FN=seed_codex CLAUDE_JSON="$FABLE_JSON" CODEX_JSON="$CODEX_DAY_JSON" run ok 0
 post=$(jq -r .text < "$TEST_DIR/curl-payload")
-expect yes "codex effort: header gets Med/High after Cache" "$(grep -q 'Cache    Med   High$' <<<"$post" && echo yes || echo no)"
-expect yes "codex effort: model row split by turn weight" "$(grep -q '^gpt-6-luna .* 33%.* 67%$' <<<"$post" && echo yes || echo no)"
+expect yes "codex effort: header gets Med/High after Output" "$(grep -q 'Output    Med   High$' <<<"$post" && echo yes || echo no)"
+expect yes "codex effort: model row split by turn weight" "$(grep -q '^Luna 6 .* 33%.* 67%$' <<<"$post" && echo yes || echo no)"
 expect yes "codex effort: total row carries the same split" "$(grep -q '^Codex  .*\$0.30.* 33%.* 67%$' <<<"$post" && echo yes || echo no)"
-expect 64 "codex effort: separator is 50 plus 7 per level" "$(grep '^─' <<<"$post" | tail -1 | tr -d '\n' | wc -m | tr -d ' ')"
-expect no "codex effort: claude block unaffected without transcripts" "$(sed -n '/^Claude/,/^Codex/p' <<<"$post" | grep -q '%' && echo yes || echo no)"
+expect 53 "codex effort: separator is 39 plus 7 per level" "$(grep '^─' <<<"$post" | tail -1 | tr -d '\n' | wc -m | tr -d ' ')"
+expect no "codex effort: claude rows get no cells without transcripts" "$(grep '^Fable\|^Claude  ' <<<"$post" | grep -q '%' && echo yes || echo no)"
 unset SEED_FN
 CODEX_JSON="$CODEX_DAY_JSON" run ok 0
 expect no "codex without rollouts: no percent cells" "$(jq -r .text < "$TEST_DIR/curl-payload" | grep -q '%' && echo yes || echo no)"
+unset CODEX_JSON
+
+# 10. one table for both providers: models by output tokens, readable names, no cache
+#     columns, a Claude cache line, one total row per provider
+BOTH_CLAUDE='{"daily":[{"totalCost":30,"inputTokens":10,"outputTokens":600,"cacheCreationTokens":5000,"cacheReadTokens":90000,"modelBreakdowns":[
+  {"modelName":"claude-opus-5-5","cost":20,"inputTokens":4,"outputTokens":100,"cacheCreationTokens":2000,"cacheReadTokens":50000},
+  {"modelName":"claude-sonnet-5-5","cost":10,"inputTokens":6,"outputTokens":500,"cacheCreationTokens":3000,"cacheReadTokens":40000}]}]}'
+BOTH_CODEX='{"daily":[{"costUSD":0.5,"inputTokens":3000,"outputTokens":300,"cacheReadTokens":9000,"models":{
+  "gpt-6-luna":{"inputTokens":2000,"outputTokens":200,"cacheReadTokens":6000},
+  "gpt-5.3-codex":{"inputTokens":1000,"outputTokens":100,"cacheReadTokens":3000},
+  "gpt-5.3-codex-spark":{"inputTokens":10,"outputTokens":550,"cacheReadTokens":0}}}]}'
+CLAUDE_JSON="$BOTH_CLAUDE" CODEX_JSON="$BOTH_CODEX" run ok 0
+post=$(jq -r .text < "$TEST_DIR/curl-payload")
+order=$(grep -E '^(Opus|Sonnet|Luna|Codex [0-9]|Codex Spark)' <<<"$post" | grep -v '^Codex  ' | cut -c1-12 | sed 's/ *$//' | tr '\n' ',')
+expect "Codex Spark,Sonnet 5.5,Luna 6,Opus 5.5,Codex 5.3," "all models sorted by output (ties keep Claude first), names cut to 12" "$order"
+expect yes "header is Model Cost Input Output only" "$(grep -q '^Model  *Cost  *Input  *Output$' <<<"$post" && echo yes || echo no)"
+expect no "no cache columns anywhere" "$(grep -q 'CacheW\|CacheR' <<<"$post" && echo yes || echo no)"
+expect yes "claude cache line under the header" "$(grep -q '^_Cache: 5.0K written · 90.0K read_$' <<<"$post" && echo yes || echo no)"
+expect yes "one Claude total row" "$(grep -q '^Claude  *\$30.00 .*600$' <<<"$post" && echo yes || echo no)"
+expect yes "one Codex total row, no cache figure" "$(grep -q '^Codex  *\$0.50 .*3.0K .*300$' <<<"$post" && echo yes || echo no)"
+expect 2 "exactly two total rows" "$(grep -cE '^(Claude|Codex) +\$' <<<"$post")"
+# a Codex-only day has no cache line and no Claude total
+CLAUDE_JSON="{}" CODEX_JSON="$BOTH_CODEX" run ok 0
+post=$(jq -r .text < "$TEST_DIR/curl-payload")
+expect no "codex-only day: no cache line" "$(grep -q '^_Cache' <<<"$post" && echo yes || echo no)"
+expect 1 "codex-only day: one total row" "$(grep -cE '^(Claude|Codex) +\$' <<<"$post")"
 unset CODEX_JSON
 
 echo "post-yesterdays-ccusage: $pass passed, $fail failed"
