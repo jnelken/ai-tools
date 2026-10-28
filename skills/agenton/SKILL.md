@@ -19,11 +19,11 @@ One line per minute:
 
 ```
 Oct 27 - 11:00am     🏢      WiFi ✓  101ms    claude: ⚡1/12  codex: ⚡0/1
-Oct 27 - 11:07am     📱      WiFi ✓  64ms     claude: ⚡1/12  codex: ⚡1/1  🔀 was 🏢
+Oct 27 - 11:07am     📱      WiFi ✓  64ms     claude: ⚡1/12  codex: ⚡1/1
 ```
 
 - **Icon** is the Wi-Fi network, named from the gateway IP via `AGENTON_NETWORKS` (🏢 building, 📱 phone hotspot). An unnamed network shows its raw gateway IP; 🚫 means no Wi-Fi gateway.
-- **🔀 was X** marks the first minute after the network changed. That line is the answer to "did it switch to the hotspot, and when".
+- **A switch shows as the icon changing** between consecutive lines (🏢 → 📱 is the building Wi-Fi falling back to the phone hotspot). That is the answer to "did it switch to the hotspot, and when"; there is no separate marker.
 - **WiFi ✓ 101ms** is a ping to 1.1.1.1; `(http)` means ping was blocked but an HTTP fetch worked; `✗` means neither.
 - **claude / codex `⚡busy/total`**: busy sessions out of live sessions.
 - A **missing minute** means the Mac was asleep or the process was killed. Start/end markers (`▶ agenton start`, `■ agenton finished`, `✖ agenton interrupted`) bracket each run.

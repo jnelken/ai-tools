@@ -12,12 +12,11 @@
 #
 # Log: ~/Library/Logs/agenton.log  — one line per wall-clock minute:
 #   Sep 10 - 2:03pm     🏢      WiFi ✓  83ms     claude: ⚡1/10  codex: ⚡1/2
-#   Sep 10 - 2:04pm     📱      WiFi ✗           claude: ⚡2/10  codex: ⚡0/2  🔀 was 🏢
+#   Sep 10 - 2:04pm     📱      WiFi ✗           claude: ⚡2/10  codex: ⚡0/2
 #
 # Legend:
 #   icon      the Wi-Fi network, named by AGENTON_NETWORKS (gateway-IP globs); an
 #             unnamed network shows its gateway IP, 🚫 means no Wi-Fi
-#   🔀 was X  the network changed since the previous minute
 #   WiFi ✓    ping worked ("(http)" = ping blocked but HTTP worked); ✗ = neither
 #   claude    ⚡busy/total live sessions, from Claude Code's own registry
 #   codex     ⚡busy/total: live `codex` processes, busy from
