@@ -3,7 +3,7 @@
 #
 # Architecture:
 #   1. Refresh providers-usage.json (lib/usage.py — Claude/Codex/Cursor quota probes ∪ prior limits).
-#   2. Read-only orchestrator: Codex Sol (high) default; Claude Opus (high) fallback.
+#   2. Read-only orchestrator: Codex Sol (high) default; Claude Sonnet (medium) fallback.
 #   3. Parse ORCHESTRATOR_RESULT_JSON; dispatch worker.sh (Cursor → Codex → Claude) in the
 #      item's own Superset workspace terminal, so the PR it merges is credited (lib/workspaces.py).
 #   4. Record limit hits for the next tick.

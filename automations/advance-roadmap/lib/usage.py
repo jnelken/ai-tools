@@ -764,7 +764,7 @@ def refresh(root: Path) -> dict[str, Any]:
 
 
 def pick_orchestrators(state: dict[str, Any]) -> list[str]:
-    """Codex Sol, then Claude Opus — each only while under its gate."""
+    """Codex Sol, then Claude Sonnet — each only while under its gate."""
     return [n for n in ROLE_PROVIDERS["orchestrator"]
             if state["providers"][n].get("available_for_orchestrator")]
 

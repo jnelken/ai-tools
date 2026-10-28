@@ -108,7 +108,7 @@ Skipped runs never reach the Slack step, so only completed runs post.
 
 1. Refreshes `providers-usage.json` (`lib/usage.py` — Claude, Codex and Cursor quota probes ∪
    prior limit hits; see [Provider usage sources](#provider-usage-sources)).
-2. Launches a **read-only orchestrator**: **Codex Sol high** by default, Claude Opus high if Sol
+2. Launches a **read-only orchestrator**: **Codex Sol high** by default, Claude Sonnet medium if Sol
    is over its gate. Sandbox / tool deny-list — triage only, no edits. A planner that prints a
    limit banner instead of a plan is recorded and the tick fails over to the next planner still
    under its gate.
