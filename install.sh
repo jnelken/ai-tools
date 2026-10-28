@@ -621,6 +621,28 @@ wire_claude_quota_hooks() {
   ' "$real" > "$real.tmp" && mv "$real.tmp" "$real"
 }
 
+# Shared admission gate and exact-child lifecycle release; preserve custom hooks.
+wire_agent_budget_hooks() {
+  command -v jq >/dev/null 2>&1 || return 0
+  [ -f "$SRC_ROOT/hooks/agent-budget-gate.py" ] || return 0
+  mkdir -p "$CLAUDE_DIR"
+  if [ -f "$SETTINGS" ]; then
+    backup_settings_once
+  else
+    echo '{}' > "$SETTINGS"
+  fi
+  local real; real="$(settings_target)"
+  local cmd='python3 "$HOME/.claude/hooks/agent-budget-gate.py"'
+  jq --arg cmd "$cmd" '
+    reduce ["PreToolUse", "SubagentStop", "SessionStart", "SessionEnd"][] as $event (. ;
+      if any((.hooks[$event] // [])[]?.hooks[]?; (.command // "" | contains("agent-budget-gate.py")))
+      then . else .hooks[$event] = ((.hooks[$event] // []) + [
+        ({hooks:[{type:"command", command:$cmd, timeout:30}]} +
+         if $event == "PreToolUse" then {matcher:"^(Agent|Workflow)$"} else {} end)
+      ]) end)
+  ' "$real" > "$real.tmp" && mv "$real.tmp" "$real"
+}
+
 # ── hooks/ ──
 section_hooks() {
   [ -d "$SRC_ROOT/hooks" ] || return 0
@@ -646,6 +668,13 @@ section_hooks() {
   wire_ai_tools_sync_hook
   wire_ai_tools_deploy_guard_hook
   wire_claude_quota_hooks
+  wire_agent_budget_hooks
+  local entry
+  for entry in agent-budget fanout; do
+    [ -f "$SRC_ROOT/bin/$entry" ] || continue
+    mkdir -p "$HOME/.local/bin"
+    link_one "$SRC_ROOT/bin/$entry" "$HOME/.local/bin/$entry" "budget CLI"
+  done
 
   # Diff symlinked hook scripts against settings.json to flag ones that are
   # present on disk but not actually wired into any hooks.<EVENT> entry.

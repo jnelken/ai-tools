@@ -25,18 +25,17 @@ Once conversation context passes roughly 50% of the window, proactively recommen
 
 ## Parallelize with Subagents
 
-Whenever a task breaks into multiple independent pieces, fan them out to subagents in parallel rather than working through them one at a time — I'd rather trade some extra tokens/cost for wall-clock speed. Independent means: no piece edits a file another piece touches, and no piece needs another's output as input. Research questions, isolated file/codebase lookups, per-repo or per-target checks (e.g. auditing several PRs, checking several services), and non-overlapping edits are the common cases.
+Whenever a task breaks into independent pieces, size the fan-out with `bin/agent-budget allow --provider P --role R --want N`, then launch each piece through `bin/fanout spawn --label L --provider claude|codex --role R --prompt-file F`. Fan-outs run in Superset terminals: headless by default, or `--interactive` for an agent TUI. Each terminal waits on the shared budget without using a model. Read completion through `bin/fanout status` / `collect`; the exit file is authoritative. The in-process Agent / Workflow gate denies over-budget calls and points here.
 
-To actually get concurrency, send **one message containing multiple Agent tool calls** — calling Agent once, waiting for the result, then calling it again is sequential and defeats the point. If some pieces depend on another's output, run those sequentially and only fan out the independent remainder.
+Independent means: no piece edits a file another piece touches, and no piece needs another's output as input. Research questions, isolated file/codebase lookups, per-repo or per-target checks (e.g. auditing several PRs, checking several services), and non-overlapping edits are common cases. Launch the independent remainder concurrently; sequence work with real dependencies.
 
-**Parallel is the default across repos, PRs and workspaces, not just subagents.** Work in different repos or worktrees (`/post-pr` runs, per-repo checks, sswt dispatches, reviews) goes out concurrently unless one piece needs another's output or edits the same files or state. A sequencing hint in my prompt ("run the API one first") is a preference, not a hard dependency, so run in parallel and flag the ordering risk in one line (e.g. "UI PR may be announced before the endpoint merges"); serialize only when I say it's a hard requirement or when the dependency is real (shared dedup file, same branch, output feeding input). Don't ask first; when unsure whether two pieces are independent, fan out and note the assumption.
+**Parallel is the default across repos, PRs and workspaces.** Work in different repos or worktrees (`/post-pr` runs, per-repo checks, sswt dispatches, reviews) goes out concurrently within the shared budget unless one piece needs another's output or edits the same files or state. A sequencing hint ("run the API one first") is a preference; flag any ordering risk, and serialize when explicitly required or when the dependency is real.
 
-An agent given its own worktree (`isolation: "worktree"`) starts with no dependencies installed. Tell it to install them first (`mise exec -- pnpm install --frozen-lockfile` in woodrow/api), and never to symlink another worktree's `node_modules`: pnpm will try to purge the shared copy.
+An agent given its own worktree starts with no dependencies installed. Tell it to install them first (`mise exec -- pnpm install --frozen-lockfile` in woodrow/api), and never symlink another worktree's `node_modules`: pnpm will try to purge the shared copy.
 
-Default to `subagent_type: "fork"` when the sub-work doesn't need a fresh perspective and its raw tool output isn't worth keeping in context — forks inherit full conversation context and share the prompt cache. Use a fresh agent type (or an explicit `model` override) when the task genuinely needs to start clean or needs a different model than the one currently running.
+For suitable in-process sub-work, default to `subagent_type: "fork"` when it does not need a fresh perspective and its raw tool output is not worth keeping in context. Forks inherit full conversation context and share the prompt cache. Use a fresh agent type (or explicit `model` override) when it needs a clean start or a different model.
 
-This is a general default, not conditioned on model — it applies whether the active model is Fable, Sonnet, or Opus. It stacks with (doesn't replace) whatever governs an individual sub-agent's model: the Model Router for `jnelken` repos (a SessionStart hook points at it there), or the Fable-specific Sonnet/Opus split below.
-
+This default applies to Fable, Sonnet and Opus. It stacks with the Model Router for `jnelken` repos (a SessionStart hook points at it there), or the Fable-specific Sonnet/Opus split below.
 
 ## Above-Sonnet Models (Opus, Fable): Prefer Sub-Agents
 
