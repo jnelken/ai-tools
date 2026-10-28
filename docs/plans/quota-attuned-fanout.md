@@ -2,10 +2,10 @@
 
 > **Suggested execution:** Sonnet with high reasoning: well-scoped Python, zsh and Node edits to existing, well-tested code, but they touch concurrency, gate semantics and hooks. Step up to Opus for slice C (shared budget and leases) if lease and wait semantics get subtle. Step down to Haiku for slices A1, A2 and D3 on their own.
 
-**Status (2026-10-28 16:05):**
-- **D:** slackagent#6 is reviewed (three Codex lenses, five findings, all fixed with regression tests and verified by the conducting session; 235/235 tests). Merging was blocked by the auto-mode classifier ("Merge Without Review") and waits for Jake. After merge: pull the live checkout, restart the service, run the backfill with `--dry-run`, then for real.
-- **C:** ai-tools#8 is under three-lens Codex review. The conducting session found the gate hook fails closed (a PreToolUse exception means deny), against the brief.
-- **A+B:** still running on Claude.
+**Status (2026-10-28 16:15):**
+- **D:** slackagent#6 is reviewed, fixed and verified. The merge waits for Jake (auto-mode classifier).
+- **C:** ai-tools#8 got nine review findings, two of them high (the gate fails closed, and an unknown reading blocks the first Agent call). It also gets a design change: no SessionStart leases. The Codex agent is fixing them.
+- **A+B:** ai-tools#9 is open. Its review is deferred to 20:41 because Claude is at 88% and Codex at 71%, both over the 70% cap. Reviewing now would risk cutting off C's fix pass. #9 must merge before the 10:30 batch on 10-29.
 
 Repos:
 - `~/Dropbox/code/ai-tools`: the dev checkout. `~/.ai-tools` is its read-only deploy clone.
