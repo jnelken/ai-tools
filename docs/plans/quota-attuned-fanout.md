@@ -93,12 +93,12 @@ Separately:
 
 - [ ] **O1.** Is `CLAUDE_QUOTA_MANAGED` (set by `claude-session` and `agent-run`) enough to exempt headless runs from the Stop hook, or is a dedicated variable needed? Check that `run.sh`'s Claude call goes through `claude-session`.
 - [ ] **O2.** Does `--disallowedTools advisor` actually suppress the advisor in `claude -p`? Smoke test before relying on it.
-- [ ] **O3.** Does `codex exec --json` give per-turn token usage and per-tool items with `--ephemeral`? Check `codex exec --help` and run a sample.
-- [ ] **O4.** Do slackagent's transcripts land in `-Users-jake-Dropbox-code-slackagent/` when launched under launchd plus `agent-run` runtime profiles? Match a fresh `session_id` from the result JSON.
+- [x] **O3.** `codex exec --help` confirms `--json` emits JSONL and `--ephemeral` is supported together. A tiny ephemeral JSONL prompt emitted `turn.completed.usage` with input, cached input, cache-write input and output counts. Tool items are represented by `item.completed` events; the tiny prompt returned no tool items. A rate-limited run would still produce a call row with null usage.
+- [x] **O4.** Real session `116e6692-a910-42d3-a6bb-f82e695624aa` from the `agent-run` runtime/text profile has a transcript at `~/.claude/projects/-Users-jake-Dropbox-code-slackagent/116e6692-a910-42d3-a6bb-f82e695624aa.jsonl`. The launchd wrapper `cd`s to the Slackagent repo root before starting Node, so it uses the same cwd slug; launchd itself was not run.
 - [ ] **O5.** Can `lib/runmemory.py` write the Step 8 ledger row directly (CLI form) for no-op no-work runs?
 - [ ] **O6.** Where are Claude Code subagent transcripts stored (`<session>/` directory next to the `.jsonl`?), for per-subagent-type cost?
 - [x] **O7.** Answered: running docs cover sessions and planners; Superset waits and Agent is denied; web page plus weekly DM.
-- [ ] **O8.** Does slackagent's task scheduler (`src/task-scheduler.js`, the `daily-imessage.js` pattern) support a weekly cadence as it is, or does it need a small extension?
+- [x] **O8.** The scheduler is a one-minute tick plus daily and per-item checks; it has no weekly cadence. Added a `kv_state` weekly slot claim, default Monday 09:00 America/New_York after the 08:00 morning digest. The DM is built from usage tables without a model call.
 - [ ] **O10.** `superset agents wait` and `agents explain` reported slice D's agent as "ended its own session" 13 seconds after a hook, while its screen showed it still working. The likely cause is a nested `claude -p` the agent ran, whose SessionStart/End hooks inherit the terminal's Superset hook env and get charged to it. `bin/fanout` (C) can't rely on hook state alone. Either strip the Superset hook env from nested headless runs (`agent-budget run`), or detect completion from a result file or PR. Wave 1 is monitored by polling for the PR plus a screen-spinner check instead.
 - [ ] **O9.** Do the Codex rollout files exist for planners run with `-s read-only` (no `--ephemeral`)? Needed so a killed Codex planner's transcript can be salvaged (E2).
 
