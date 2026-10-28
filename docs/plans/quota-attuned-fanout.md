@@ -3,7 +3,7 @@
 > **Suggested execution:** Sonnet with high reasoning: well-scoped Python, zsh and Node edits to existing, well-tested code, but they touch concurrency, gate semantics and hooks. Step up to Opus for slice C (shared budget and leases) if lease and wait semantics get subtle. Step down to Haiku for slices A1, A2 and D3 on their own.
 
 **Status (2026-10-28 16:15):**
-- **D:** slackagent#6 is reviewed, fixed and verified. The merge waits for Jake (auto-mode classifier).
+- **D: done.** slackagent#6 merged at 21:02Z (`ffab00e`) after merging main (DEV-314/315) into the branch. The owner-DM runner keeps main's text-only args plus usage labels. The DEV-314 FeedbackLearner is labeled `feedback`. 260/260 tests. The live service was restarted. The backfill imported 953 slackagent sessions (an idempotent rerun inserts 0) into SQLite and `~/.claude/state/agent-usage.jsonl`, with the DB backed up first. Top sources by cost: history $34.49 (195 runs), imessage-digest $29.35 (644), unknown $13.38 (47), household $12.94 (35). `/usage` is auth-gated (303 to login).
 - **C:** ai-tools#8 got nine review findings, two of them high (the gate fails closed, and an unknown reading blocks the first Agent call). It also gets a design change: no SessionStart leases. The Codex agent is fixing them.
 - **A+B:** ai-tools#9 is open. Its review is deferred to 20:41 because Claude is at 88% and Codex at 71%, both over the 70% cap. Reviewing now would risk cutting off C's fix pass. #9 must merge before the 10:30 batch on 10-29.
 
