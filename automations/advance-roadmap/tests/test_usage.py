@@ -631,6 +631,124 @@ class ProbeTests(unittest.TestCase):
             self.assertNotIn(needle, text)
 
 
+class ClaudeProbeTests(unittest.TestCase):
+    """probe_claude: the live OAuth reading first, the statusline file second, stale means unknown."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.dir = Path(self.temp.name)
+        self.statusline = self.dir / "claude-usage.json"
+        self.state = usage.empty_state()
+        self.patches = [mock.patch.object(usage, "CLAUDE_USAGE", self.statusline),
+                        mock.patch.dict(os.environ, {"ADVANCE_ROADMAP_USAGE_PROBES": "1"})]
+        for p in self.patches:
+            p.start()
+        # Never the real OAuth endpoint or Keychain: by default the live probe has nothing to say.
+        self.default_quota = self.stub_quota("{'observed_at': None, 'windows': {}}")
+        self.default_quota.start()
+        self.patches.append(self.default_quota)
+
+    def tearDown(self):
+        for p in self.patches:
+            p.stop()
+        self.temp.cleanup()
+
+    def stub_quota(self, body):
+        """A claude_quota.py whose quota() returns `body` (a Python expression), as usage.py would import it."""
+        lib = self.dir / f"lib{len(list(self.dir.glob('lib*')))}"
+        lib.mkdir(exist_ok=True)
+        lib.joinpath("claude_quota.py").write_text(f"def quota():\n    return {body}\n")
+        return mock.patch.object(usage, "claude_quota_lib", return_value=lib)
+
+    def write_statusline(self, five, age=60, reset=FUTURE):
+        self.statusline.write_text(json.dumps({
+            "timestamp": time.time() - age,
+            "five_hour": {"used_percentage": five, "reset_epoch": reset},
+            "seven_day": {"used_percentage": 19, "reset_epoch": reset}}))
+
+    def claude(self):
+        usage.probe_claude(self.state)
+        return self.state["providers"]["claude"]
+
+    def test_live_reading_wins_over_a_stale_statusline_file(self):
+        # 10-28: the statusline cache said 0% while the account was at 16%.
+        self.write_statusline(0, age=4 * 86400)
+        iso = datetime.fromtimestamp(FUTURE, ZoneInfo("UTC")).isoformat()
+        with self.stub_quota(f"{{'observed_at': {time.time()}, 'windows': {{'five_hour': "
+                             f"{{'used_percentage': 16.0, 'resets_at': '{iso}'}}, "
+                             f"'seven_day': {{'used_percentage': 19.0, 'resets_at': '{iso}'}}}}}}"):
+            prov = self.claude()
+        self.assertEqual((prov["five_hour"]["used_pct"], prov["seven_day"]["used_pct"]), (16.0, 19.0))
+        self.assertEqual(prov["five_hour"]["source"], "probe")
+        self.assertEqual(prov["five_hour"]["reset_epoch"], int(FUTURE))  # ISO resets_at normalized to epoch
+
+    def test_extra_seven_day_variants_are_ignored(self):
+        with self.stub_quota(f"{{'observed_at': {time.time()}, 'windows': {{"
+                             "'five_hour': {'used_percentage': 10, 'resets_at': None}, "
+                             "'seven_day': {'used_percentage': 20, 'resets_at': None}, "
+                             "'seven_day_opus': {'used_percentage': 99, 'resets_at': None}}}"):
+            prov = self.claude()
+        self.assertEqual(prov["seven_day"]["used_pct"], 20)
+
+    def test_reading_older_than_15_minutes_is_unknown_not_zero(self):
+        with self.stub_quota(f"{{'observed_at': {time.time() - 16 * 60}, 'windows': {{"
+                             "'five_hour': {'used_percentage': 5, 'resets_at': None}, "
+                             "'seven_day': {'used_percentage': 5, 'resets_at': None}}}"):
+            prov = self.claude()
+        self.assertIsNone(prov["five_hour"]["used_pct"])
+        self.assertEqual(usage.claude_gate(prov, time.time())["state"], "unknown")
+
+    def test_a_14_minute_reading_still_counts(self):
+        with self.stub_quota(f"{{'observed_at': {time.time() - 14 * 60}, 'windows': {{"
+                             "'five_hour': {'used_percentage': 71, 'resets_at': None}, "
+                             "'seven_day': {'used_percentage': 5, 'resets_at': None}}}"):
+            prov = self.claude()
+        self.assertEqual(usage.claude_gate(prov, time.time())["state"], "over")
+
+    def test_falls_back_to_the_statusline_file_when_the_live_probe_has_nothing(self):
+        self.write_statusline(42)
+        with self.stub_quota("{'observed_at': None, 'windows': {}}"):
+            prov = self.claude()
+        self.assertEqual((prov["five_hour"]["used_pct"], prov["five_hour"]["source"]), (42, "statusline"))
+
+    def test_a_broken_live_probe_falls_back_too(self):
+        self.write_statusline(33)
+        with self.stub_quota("1 / 0"):
+            self.assertEqual(self.claude()["five_hour"]["used_pct"], 33)
+
+    def test_stale_statusline_file_is_unknown(self):
+        self.write_statusline(0, age=4 * 86400)  # the Oct 24 file: 0% would have been read as headroom
+        prov = self.claude()
+        self.assertIsNone(prov["five_hour"]["used_pct"])
+        self.assertEqual(usage.provider_gate(self.state, "claude", "worker")["state"], "unknown")
+
+    def test_statusline_without_a_timestamp_is_aged_by_its_mtime(self):
+        self.statusline.write_text(json.dumps({"five_hour": {"used_percentage": 50, "reset_epoch": FUTURE}}))
+        os.utime(self.statusline, (time.time() - 3600, time.time() - 3600))
+        self.assertIsNone(self.claude()["five_hour"]["used_pct"])
+
+    def test_probes_off_never_imports_the_live_module(self):
+        self.write_statusline(12)
+        with mock.patch.dict(os.environ, {"ADVANCE_ROADMAP_USAGE_PROBES": "0"}), \
+                mock.patch.object(usage, "claude_quota_lib", side_effect=AssertionError("loaded")):
+            self.assertEqual(self.claude()["five_hour"]["used_pct"], 12)
+
+    def test_no_source_keeps_a_recent_stored_reading_and_ages_out_an_old_one(self):
+        with mock.patch.dict(os.environ, {"ADVANCE_ROADMAP_USAGE_PROBES": "0"}):
+            prov = self.state["providers"]["claude"]
+            prov.update(five_hour={"used_pct": 80, "reset_epoch": FUTURE}, observed_epoch=time.time() - 300)
+            self.assertEqual(self.claude()["five_hour"]["used_pct"], 80)
+            prov["observed_epoch"] = time.time() - 3600
+            self.assertIsNone(self.claude()["five_hour"]["used_pct"])
+
+    def test_the_live_module_resolves_from_this_checkout(self):
+        self.default_quota.stop()
+        self.patches.remove(self.default_quota)
+        lib = usage.claude_quota_lib()
+        self.assertTrue((lib / "claude_quota.py").is_file())
+        self.assertEqual(lib, Path(__file__).resolve().parents[3] / "lib")
+
+
 class CliTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
