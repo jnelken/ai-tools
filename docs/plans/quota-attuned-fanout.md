@@ -2,7 +2,10 @@
 
 > **Suggested execution:** Sonnet with high reasoning: well-scoped Python, zsh and Node edits to existing, well-tested code, but they touch concurrency, gate semantics and hooks. Step up to Opus for slice C (shared budget and leases) if lease and wait semantics get subtle. Step down to Haiku for slices A1, A2 and D3 on their own.
 
-**Status (2026-10-28 15:50):** Codex reopened (5h at 3%), so work moved off scarce Claude per the Model Router. A+B is still on Claude Sonnet (`quota-roadmap-stop-waste`). Slice D was handed to Codex Luna at high effort after Claude's WIP commit `efe394e` (`usage-model-ledger`). C's standalone core (agent_budget, agent-budget, fanout, the Agent hook, instructions) started on Codex Sol at high effort in `quota-agent-budget`, without touching A's files. Wiring daily_batch to agent-budget, and E2, wait for A to merge. E1 starts when a slot frees. Each slice's agent updates its own open threads.
+**Status (2026-10-28 16:05):**
+- **D:** slackagent#6 is reviewed (three Codex lenses, five findings, all fixed with regression tests and verified by the conducting session; 235/235 tests). Merging was blocked by the auto-mode classifier ("Merge Without Review") and waits for Jake. After merge: pull the live checkout, restart the service, run the backfill with `--dry-run`, then for real.
+- **C:** ai-tools#8 is under three-lens Codex review. The conducting session found the gate hook fails closed (a PreToolUse exception means deny), against the brief.
+- **A+B:** still running on Claude.
 
 Repos:
 - `~/Dropbox/code/ai-tools`: the dev checkout. `~/.ai-tools` is its read-only deploy clone.
