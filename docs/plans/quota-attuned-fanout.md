@@ -2,7 +2,7 @@
 
 > **Suggested execution:** Sonnet with high reasoning: well-scoped Python, zsh and Node edits to existing, well-tested code, but they touch concurrency, gate semantics and hooks. Step up to Opus for slice C (shared budget and leases) if lease and wait semantics get subtle. Step down to Haiku for slices A1, A2 and D3 on their own.
 
-**Status (2026-10-28 15:30):** approved. Wave 1 is dispatched to Superset workspaces: A+B in ai-tools and D in slackagent. C and E follow once A merges. This file is the running doc. Each slice's agent updates its own section's open threads on its branch.
+**Status (2026-10-28 15:42):** wave 1 is in progress. A+B is running in `quota-roadmap-stop-waste`. Slice D (`usage-model-ledger`) was told to commit work in progress and pause at 15:40, because the Claude 5h window was at 41% and climbing about 2 points per minute (F9). D resumes after the ~20:00 reset (a session cron at 20:07). The wave-2 design waits for headroom. Each slice's agent updates its own section's open threads on its branch.
 
 Repos:
 - `~/Dropbox/code/ai-tools`: the dev checkout. `~/.ai-tools` is its read-only deploy clone.
@@ -52,6 +52,9 @@ Separately:
 - **(c) Global fingerprint.** `lib/verdict.py:105` hashes every repo and every issue.
 - **(d) Any pending plan disables the check for every repo.** `run.sh:525` uses a global `pending-plan*.json` glob, and mailcrush's plan disabled it for lanes 1–13.
 - **(e) The verdict lasts 24 hours,** the same as the batch interval (`verdict.py`, `ORCHESTRATOR.md:179`).
+- **(f) The post-worker fingerprint omits `--deploys`** (`run.sh:969`), so every carried verdict shows `deploy:<repo>` as changed on the next check. Found by the A+B agent on 10-28 in runs back to 10-18.
+
+**F9. Burn rate with two interactive Sonnet agents and this conducting session (10-28).** Claude's 5-hour window went from 16% (15:27) to 35% (15:36), about 2 points per minute. At that rate the 70% batch cap is about 18 minutes away and 100% about 30 minutes away. Wave 1 is already the kind of run this plan is meant to prevent. Slice C's admission control must count interactive agents and the conducting session itself, not just batch jobs.
 
 **F2. Planning ignores whether anything can implement.** The only worker check is at release (`daily_batch.py:342-346`), after all planning. No-work bookkeeping also needs a worker.
 
