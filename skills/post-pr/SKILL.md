@@ -60,7 +60,13 @@ Serialize only for a real dependency: two targets sharing a worktree or branch, 
 
 ### 1.5. Link the Linear ticket
 
-Linear links a PR to its ticket through a magic word in the PR description, before the ID. This skill uses `Related to`, for personal (`DEV-N`) and work (`CON-N`) tickets alike. `Related to` is one of Linear's relation words: the PR links to the ticket and the ticket's status does not change. Linear's documented magic words do not include `re:`, so `re:` would link nothing. Magic words in PR comments do not link, so the line goes in the description. Do not use a closing word such as `Fixes` here; this skill links and never closes.
+Linear links a PR to a ticket through a magic word in the PR description, placed before the ID. Linear's magic words are a fixed list, but the skill chooses one per PR, for personal (`DEV-N`) and work (`CON-N`) tickets alike. Pick the word that matches what this PR does for the ticket:
+
+- `Fixes` (closing): this PR delivers what remains of the ticket's acceptance criteria. When it merges, the ticket moves to Done under the team's PR-merge rule.
+- `Part of` (non-closing): this PR is one of several for the ticket, or delivers only part of it. The ticket moves through the workflow but is not marked Done.
+- `Related to` (relation): this PR touches or informs the ticket without implementing its acceptance criteria. The ticket's status does not change.
+
+Magic words in PR comments do not link, so the lines go in the description.
 
 1. Collect the ticket IDs. Take them from the branch name (copied Linear branch names carry the ID), the subjects of the branch's own commits, and the PR's current title and body:
 
@@ -73,8 +79,12 @@ Linear links a PR to its ticket through a magic word in the PR description, befo
 
    `<BASE_REF>` is the PR's base branch (`gh pr view --json baseRefName`).
 2. No IDs: skip the rest of this step and report `Linear: no ticket found`. Do not create a ticket here. Filing tickets is a separate decision.
-3. If the description already has a `Related to` line that names every ID, skip the edit.
-4. Otherwise add `Related to DEV-317, DEV-318` (IDs comma-separated) as one line of the description. Extend an existing `Related to` line rather than adding a second one. Write the body through a file, as step 5 does, and append or extend only that line; never regenerate the rest of the body.
+3. For each ID, read its acceptance criteria (`linear issue view <ID>`; for `CON-` tickets add `--workspace concentro`), then pick the word:
+   - Never `Fixes` on an internal-only PR (step 3.5, base is not the default branch). A sub-PR merging into a trunk would close the ticket before main has the work. Use `Part of` or `Related to`.
+   - Use `Fixes` only when this PR covers what remains of the ticket and no other open PR is still needed for it.
+   - When unsure, use `Part of` and say so in the report.
+4. If the description already links an ID with any word, leave that ID alone. Skip the edit when no IDs are left.
+5. Otherwise add the lines to the description, one per word, for example `Fixes DEV-317, DEV-318` and `Related to DEV-319`. Extend an existing line that already uses the same word rather than adding a duplicate. Write the body through a file, as step 5 does, and change only these lines; never regenerate the rest of the body.
 
    ```bash
    gh pr edit <PR_NUMBER> --repo <OWNER/REPO> --body-file /tmp/pr-body.txt
@@ -306,7 +316,7 @@ Concentro-Inc/api#1271
 - Preview: woodrow only — set (or: already set, n/a (not visible in a preview))
 - Slack: posted (or: skipped, already in dedup state)
 - Badge: appended    Draft: cleared
-- Linear: Related to DEV-317 (or: already linked, or: no ticket found)
+- Linear: Fixes DEV-317; Part of DEV-318 (or: already linked, or: no ticket found)
 - Product update: posted (or: declined, n/a (no screenshot), not offered (unattended), failed (<why>))
 ```
 
