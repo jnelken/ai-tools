@@ -35,6 +35,8 @@
 
 **Slice H note (2026-10-29):** Implemented a shared effective-strategy decision in `lib/usage.py`. The default `cursor-then-codex` now resolves to cross-provider while Cursor's reviewer gate is over/limited; explicit `cross-provider` remains unchanged. Batch admission and reviewer execution consume the same decision, and the worker receives its strategy and fallback reason so remediation follows that route. Batch state/summary refresh the reset-based fallback note with each reservation decision. Admission still requires an under-gate reviewer from the worker chain who is not the worker. Automated and zsh suite results are recorded in the PR; deployment/merge remains required before the 10-30 10:30 batch.
 
+**Decision (Jake, 10-29 17:50): remove weekly quota limits entirely, for all providers.** Only the short (5h) windows gate and admit work. Weekly/7d readings stay visible but uncapped. Provider-reported hard limits still apply through limit-hit handling. Cursor's monthly pool is unchanged. Slice X (brief `quota-fanout-slice-X.md`).
+
 **Watch at the 10-29 10:30 batch:** expect `skipped-unchanged` rows only from 10-30 on, once the first carried verdicts exist; no `error` rows from the Stop hook; Claude planners on Sonnet with medium effort; and no planning when no worker or reviewer is available.
 
 Repos:
