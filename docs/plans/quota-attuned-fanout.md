@@ -2,12 +2,13 @@
 
 > **Suggested execution:** Sonnet with high reasoning: well-scoped Python, zsh and Node edits to existing, well-tested code, but they touch concurrency, gate semantics and hooks. Step up to Opus for slice C (shared budget and leases) if lease and wait semantics get subtle. Step down to Haiku for slices A1, A2 and D3 on their own.
 
-**Status (2026-10-29 18:00):**
-- **Merged and deployed:** #8, #9, #10, #12, #13, #15.
-- **Last blocker for the 10-30 10:30 batch:** W, #17 (F11 per-window costs). Round 2 is fixing long-window calibration: Codex weekly had 0 samples because of whole-point deltas, and the 0.1 seed is unsafe for Codex, which is observed at ~0.21.
-- **G1, #16:** the ledger core's three-lens Claude review found 9 issues, including adoption that hijacks the parent lease, an unbounded cumulative watch reservation that stalls the queue, and a heartbeat/TTL race. Fixes are in progress on Claude Sonnet; G1 is not needed for the batch.
-- **DEV-320, slackagent#7 plus the #14 skill docs:** all 10 findings fixed (331 tests). Verification is queued through `bin/fanout`, the first production use: the Agent gate DENIED an in-process Workflow because the one Claude slot was held, and fanout queued a Superset terminal instead.
-- **Open decision for Jake:** DEV-320 channel access. A channel ID now works without a reinstall.
+**Status (2026-10-29 17:35):**
+- **Merged and deployed (`~/.ai-tools` at `823aab6`):** #8, #9, #10, #12, #13, #15 and **#17 (W, per-window costs)**. Codex weekly is now calibrated (88 samples, 0.18× the 5h rate); Claude seven_day is still seeded at 0.1× (3 samples).
+- **Dry run at 17:30:** lanes=0, held 'no worker plus required review fits'. With Cursor gated, review is cross-provider, so a Codex worker needs a **Claude reviewer**, estimated at ~28.5% of the 5h window from only 2 samples, while Claude 5h is at 68%. That's correct at this moment. At 10:30 the batch admits only if Claude 5h is below ~40%; otherwise it holds rather than burning.
+- **Follow-up (O12):** the Claude reviewer estimate rests on 2 samples. Prefer a proxy (worker/subagent p80, scaled) until there are ≥5.
+- **G1 (#16):** fixing 9 review findings, and must adopt per-window costs from #17.
+- **DEV-320 (slackagent#7 plus #14):** fixed; verification queued through fanout.
+- **Open decision for Jake:** DEV-320 channel ID or reinstall.
 
 **Wave 2 (10-29 03:15):**
 - **E2, PR #12:** round 2 is verified by Claude. P1-1, P2-3, P2-4 and P2-5 are FIXED. P1-2 (redaction variants) and P2-6 (the per-attempt bound) are PARTIAL, and there are new findings (over-redaction, the batch-cancel save, an unattributable attempt erasing research). Round 3 is written in `~/.claude/state/fanout/review-ai-tools-12/fix-request-r3.txt` and goes out at 07:21.
