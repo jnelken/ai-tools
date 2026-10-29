@@ -1,8 +1,8 @@
 """Account-wide admission control. Stdlib only; importing never reads account state.
 
-A reservation is a conservative percentage-point estimate, charged to every known
-window. It is not a hard provider limit: other machines and estimation error are
-visible only in subsequent readings. All admissions are serialized under flock.
+Reservations estimate percentage points independently for each quota window. They
+are not hard provider limits: other machines and estimation error are visible only
+in subsequent readings. All admissions are serialized under flock.
 """
 import argparse
 from contextlib import contextmanager, nullcontext
@@ -35,10 +35,15 @@ SEED_TOKENS = {
 # F9: ~2 points/min for three sessions; reserve 15 minutes/session = 10 points.
 # Cursor has no measured conversion yet: explicitly conservative provisional 5/job.
 SEED_FACTORS = {'claude': 10 / 251000, 'codex': 3 / 70000, 'cursor': 5 / 59000}
+# On 10-28, Codex rose about 72 points in five hours and 15 weekly (0.21);
+# round its sparse-data ratio up to 0.25 to keep weekly reservations conservative.
+# Claude remains at 0.1, above the nominal ~0.03 five-hour/7-day capacity ratio.
+LONG_WINDOW_SEED_RATIOS = {'claude': .1, 'codex': .25}
+PROVIDER_WINDOWS = {'claude': ('five_hour', 'seven_day'), 'codex': ('five_hour', 'weekly')}
 MAX_AGE = 15 * 60
 ESTIMATE_MAX_AGE = 10 * 60
-ESTIMATE_VERSION = 3
-HISTORY_VERSION = 3
+ESTIMATE_VERSION = 5
+HISTORY_VERSION = 5
 
 
 def claude_home():
@@ -161,18 +166,22 @@ def codex_observations(path):
     for i, row in enumerate(rows(path)):
         payload = row.get('payload') or {}
         total = (payload.get('info') or {}).get('total_token_usage') or {}
-        window = (usage.parse_codex_rate_limits(payload.get('rate_limits')) or {}).get('five_hour') or {}
-        if not total or not number(window.get('used_pct')) or not window.get('reset_epoch'):
+        parsed = usage.parse_codex_rate_limits(payload.get('rate_limits')) or {}
+        windows = {name: window for name in ('five_hour', 'weekly')
+                   if isinstance((window := parsed.get(name)), dict)
+                   and number(window.get('used_pct')) and window.get('reset_epoch')}
+        if not total or not windows:
             continue
         tokens = token_total(total)
         result.append(dict(id=f'codex:{path}:{i}', at=epoch(row.get('timestamp')),
-                           tokens=max(0, tokens - previous), pct=window['used_pct'],
-                           reset=window['reset_epoch'], sequence=i))
+                           tokens=max(0, tokens - previous),
+                           pcts={name: window['used_pct'] for name, window in windows.items()},
+                           resets={name: window['reset_epoch'] for name, window in windows.items()}, sequence=i))
         previous = tokens
     return result
 
 
-def codex_calibration(observations):
+def codex_calibration(observations, window='five_hour'):
     """Pair one account delta with all local tokens in the same active interval.
 
     Do not drop flat quota intervals: a rounded point belongs to many turns.
@@ -181,31 +190,97 @@ def codex_calibration(observations):
     A 15-minute gap ends an interval so idle/unobserved work is never charged to
     the next tiny turn. The first observation is a baseline, not fresh usage.
     """
+    normalized = [dict(row,
+                       pcts=row.get('pcts', {window: row['pct']} if number(row.get('pct')) else {}),
+                       resets=row.get('resets', {window: row['reset']} if row.get('reset') else {}))
+                  for row in observations]
+    ordered = sorted(normalized, key=lambda r: (r['at'] or 0, r['id'].rsplit(':', 1)[0], r['sequence']))
+    if window == 'weekly':
+        return codex_long_calibration(ordered, window)
+
     result, first, last, tokens, high = [], None, None, 0, 0
 
     def finish():
         if first and tokens > 0 and high > first['pct']:
             result.append(dict(id=first['id'], provider='codex', tokens=tokens,
-                               pct=high - first['pct'], source='rate_limits'))
+                               pct=high - first['pct'], window=window, source='rate_limits'))
 
-    for current in sorted(observations, key=lambda r: (r['at'] or 0, r['id'].rsplit(':', 1)[0], r['sequence'])):
-        if last and (current['reset'] != last['reset'] or
+    for current in ordered:
+        if window not in current['pcts']:
+            if last:
+                finish()
+                first = None
+            last = current
+            continue
+        if last and (current['resets'].get(window) != last['resets'].get(window) or
                      (current['at'] is not None and last['at'] is not None and
                       current['at'] - last['at'] > MAX_AGE)):
             finish()
             first = None
         if first is None:
-            first, tokens, high = current, 0, current['pct']
+            first, tokens, high = dict(current, pct=current['pcts'][window]), 0, current['pcts'][window]
         else:
             tokens += current['tokens']
-            high = max(high, current['pct'])
+            high = max(high, current['pcts'][window])
         last = current
     finish()
     return result
 
 
+def codex_long_calibration(observations, window):
+    """Aggregate weekly rollout deltas until whole-point rounding reaches 2%."""
+    result, first, reset, tokens, high = [], None, None, 0, 0
+
+    def finish():
+        if first and tokens > 0 and high - first['pct'] >= 2:
+            result.append(dict(id=first['id'], provider='codex', tokens=tokens,
+                               pct=high - first['pct'], window=window, source='rate_limits'))
+
+    for current in observations:
+        if window not in current['pcts']:
+            continue
+        current_reset = current['resets'].get(window)
+        if first and current_reset != reset:
+            finish()
+            first, tokens, high = None, 0, 0
+        if first is None:
+            first, reset, tokens, high = dict(current, pct=current['pcts'][window]), current_reset, 0, current['pcts'][window]
+            continue
+        tokens += current['tokens']
+        high = max(high, current['pcts'][window])
+        if high - first['pct'] >= 2:
+            finish()
+            first, reset, tokens, high = dict(current, pct=high), current_reset, 0, high
+    finish()
+    return result
+
+
 def codex_samples(path):
-    return codex_calibration(codex_observations(path))
+    return codex_calibrated_samples(codex_observations(path))
+
+
+def codex_calibrated_samples(observations):
+    merged = {}
+    for window in ('five_hour', 'weekly'):
+        for sample in codex_calibration(observations, window):
+            # Pair deltas only when both windows cover the same token interval.
+            key = (sample['id'], sample['tokens'])
+            row = merged.setdefault(key, dict(id=sample['id'], provider='codex',
+                                                tokens=sample['tokens'], pct=None,
+                                                windows_pct={}, source='rate_limits'))
+            row['windows_pct'][window] = sample['pct']
+            if window == 'five_hour':
+                row['pct'] = sample['pct']
+    result = list(merged.values())
+    ids = {}
+    for row in result:
+        ids.setdefault(row['id'], []).append(row)
+    for original_id, rows_for_id in ids.items():
+        if len(rows_for_id) > 1:
+            for row in rows_for_id:
+                window = next(iter(row['windows_pct']))
+                row['id'] = f'{original_id}:{window}'
+    return result
 
 
 def history(persist=True):
@@ -254,7 +329,7 @@ def history(persist=True):
             if cache.get(str(path), {}).get('stamp') != stamp:
                 cache[str(path)] = {'stamp': stamp, 'observations': codex_observations(path)}
             codex_rows.extend(cache[str(path)]['observations'])
-        samples.extend(codex_calibration(codex_rows))
+        samples.extend(codex_calibrated_samples(codex_rows))
 
         indexed = {}
         for record in calibration_records:
@@ -276,6 +351,7 @@ def history(persist=True):
             elif row.get('event') == 'finish' and key in starts:
                 pairs.append((key, starts.pop(key), row))
                 counts[key] = counts.get(key, 0) + 1
+        long_intervals = []
         for key, start, finish in pairs:
             since, until = epoch(start.get('timestamp')), epoch(finish.get('timestamp'))
             bounded = since is not None and until is not None and since <= until
@@ -290,16 +366,55 @@ def history(persist=True):
                 record = cached_transcript(Path(path), 'interactive', since, until)
                 if record is not None:
                     tokens = record['total']
-            before = (start.get('quota') or {}).get('windows', {}).get('five_hour', {})
-            after = (finish.get('quota') or {}).get('windows', {}).get('five_hour', {})
-            a, b = before.get('used_percentage'), after.get('used_percentage')
-            reset_a, reset_b = epoch(before.get('resets_at')), epoch(after.get('resets_at'))
-            same_window = reset_a and reset_b and abs(reset_a - reset_b) < 60
             fresh = all(number((r.get('quota') or {}).get('age_seconds')) and
                         r['quota']['age_seconds'] <= MAX_AGE for r in (start, finish))
-            if tokens > 0 and number(a) and number(b) and b > a and same_window and fresh:
+            before5 = (start.get('quota') or {}).get('windows', {}).get('five_hour', {})
+            after5 = (finish.get('quota') or {}).get('windows', {}).get('five_hour', {})
+            a5, b5 = before5.get('used_percentage'), after5.get('used_percentage')
+            reset5a, reset5b = epoch(before5.get('resets_at')), epoch(after5.get('resets_at'))
+            if (tokens > 0 and fresh and number(a5) and number(b5) and b5 > a5
+                    and reset5a and reset5b and abs(reset5a - reset5b) < 60):
                 samples.append({'id': f'quota:{key}:{start.get("timestamp")}', 'provider': 'claude',
-                                'tokens': tokens, 'pct': b - a, 'source': 'quota_snapshots'})
+                                'tokens': tokens, 'pct': b5 - a5,
+                                'windows_pct': {'five_hour': b5 - a5}, 'source': 'quota_snapshots'})
+            before7 = (start.get('quota') or {}).get('windows', {}).get('seven_day', {})
+            after7 = (finish.get('quota') or {}).get('windows', {}).get('seven_day', {})
+            a7, b7 = before7.get('used_percentage'), after7.get('used_percentage')
+            reset7a, reset7b = epoch(before7.get('resets_at')), epoch(after7.get('resets_at'))
+            if (tokens > 0 and fresh and number(a7) and number(b7) and b7 >= a7
+                    and reset7a and reset7b and abs(reset7a - reset7b) < 60):
+                long_intervals.append(dict(id=key, at=since, tokens=tokens, delta=b7 - a7,
+                                           reset=reset7a,
+                                           five_reset=(reset5a if reset5a and reset5b and abs(reset5a - reset5b) < 60 else None),
+                                           five_delta=(b5 - a5 if number(a5) and number(b5) and b5 >= a5
+                                                       and reset5a and reset5b and abs(reset5a - reset5b) < 60 else 0)))
+        # The weekly gauge is rounded to whole points. Keep same-reset intervals
+        # together until their accumulated increase is large enough to measure.
+        accumulated, accumulated_tokens, accumulated_five = 0, 0, 0
+        group_reset, group_id, group_five_reset, pairable_five = None, None, None, True
+        for interval in sorted(long_intervals, key=lambda row: row['at'] or 0):
+            if group_reset is not None and interval['reset'] != group_reset:
+                accumulated, accumulated_tokens, accumulated_five = 0, 0, 0
+                group_id, group_five_reset, pairable_five = None, None, True
+            if group_reset != interval['reset']:
+                group_reset = interval['reset']
+            if group_id is None:
+                group_id = interval['id']
+                group_five_reset = interval['five_reset']
+            elif interval['five_reset'] != group_five_reset:
+                pairable_five = False
+            accumulated += interval['delta']
+            accumulated_tokens += interval['tokens']
+            accumulated_five += interval['five_delta']
+            if accumulated >= 2:
+                samples.append({'id': f'quota:weekly:{group_id}:{interval["at"]}', 'provider': 'claude',
+                                'tokens': accumulated_tokens, 'pct': None,
+                                'windows_pct': {'seven_day': accumulated,
+                                                **({'five_hour': accumulated_five}
+                                                   if pairable_five and accumulated_five > 0 else {})},
+                                'source': 'quota_snapshots'})
+                accumulated, accumulated_tokens, accumulated_five = 0, 0, 0
+                group_id, group_five_reset, pairable_five = None, None, True
         # Rebuild generated samples so upgrades also repair previously persisted
         # bad denominators. Preserve manually supplied/provider-specific samples.
         existing = {r.get('id'): r for r in rows(budget_dir() / 'samples.jsonl')
@@ -321,33 +436,60 @@ def history(persist=True):
 def estimates(records, samples):
     result = {}
     for provider in PROVIDERS:
-        ratios = [s['pct'] / s['tokens'] for s in samples if s.get('provider') == provider
-                  and number(s.get('pct')) and s['pct'] > 0 and number(s.get('tokens')) and s['tokens'] > 0]
-        calibrated = len(ratios) >= 5
-        factor = pctl(ratios) if calibrated else SEED_FACTORS[provider]
-        if calibrated and provider == 'codex':
-            # Weight account intervals by exposure, not by how often a tiny
-            # session happened to straddle an integer percentage boundary.
-            weighted = sorted((s['pct'] / s['tokens'], s['tokens']) for s in samples
-                              if s.get('provider') == provider and number(s.get('tokens'))
-                              and s['tokens'] > 0 and number(s.get('pct')) and s['pct'] > 0)
-            threshold, cumulative = .8 * sum(t for _, t in weighted), 0
-            for ratio, tokens in weighted:
-                cumulative += tokens
-                if cumulative >= threshold:
-                    factor = ratio
-                    break
+        windows = PROVIDER_WINDOWS.get(provider, ('auto', 'api'))
+        window_factors, window_sources, window_counts = {}, {}, {}
+        provider_samples = [s for s in samples if s.get('provider') == provider]
+        for window in windows:
+            ratios = [pct / s['tokens'] for s in provider_samples
+                      if (pct := sample_pct(s, window)) is not None and pct > 0
+                      and number(s.get('tokens')) and s['tokens'] > 0]
+            window_counts[window] = len(ratios)
+            calibrated = len(ratios) >= 5
+            factor = pctl(ratios) if calibrated else None
+            if calibrated and provider == 'codex' and window in ('five_hour', 'weekly'):
+                # Weight account intervals by exposure, not tiny rounded intervals.
+                weighted = sorted((sample_pct(s, window) / s['tokens'], s['tokens'])
+                                  for s in provider_samples if number(s.get('tokens'))
+                                  and s['tokens'] > 0 and number(sample_pct(s, window))
+                                  and sample_pct(s, window) > 0)
+                threshold, cumulative = .8 * sum(t for _, t in weighted), 0
+                for ratio, tokens in weighted:
+                    cumulative += tokens
+                    if cumulative >= threshold:
+                        factor = ratio
+                        break
+            if factor is None:
+                if window == 'five_hour' or provider == 'cursor':
+                    factor = SEED_FACTORS[provider]
+                else:
+                    paired = [(sample_pct(s, window) / sample_pct(s, 'five_hour'))
+                              for s in provider_samples
+                              if number(sample_pct(s, window)) and sample_pct(s, window) > 0
+                              and number(sample_pct(s, 'five_hour')) and sample_pct(s, 'five_hour') > 0]
+                    ratio = pctl(paired) if len(paired) >= 5 else LONG_WINDOW_SEED_RATIOS[provider]
+                    factor = window_factors.get('five_hour', SEED_FACTORS[provider]) * ratio
+            window_factors[window] = factor
+            window_sources[window] = 'calibrated' if window_counts[window] >= 5 else 'seed'
         roles = {}
         for role in ROLES:
             matched = [r for r in records if r.get('provider') == provider and role_name(r.get('role')) == role]
             tokens = pctl([token_total(r) for r in matched]) or SEED_TOKENS[provider][role]
             duration = pctl([r.get('duration', (r.get('duration_ms') or 0) / 1000) for r in matched], .9)
-            roles[role] = {'tokens_p80': tokens, 'pct': max(.1, tokens * factor),
+            roles[role] = {'tokens_p80': tokens,
+                           'pct': {window: max(.1, tokens * factor) for window, factor in window_factors.items()},
                            'ttl': max(60, duration * 1.5) if duration else 1800,
                            'observations': len(matched)}
-        result[provider] = {'factor': factor, 'factor_source': 'calibrated' if calibrated else 'seed',
-                            'factor_samples': len(ratios), 'roles': roles}
+        result[provider] = {'factor': window_factors, 'factor_source': window_sources,
+                            'factor_samples': window_counts, 'roles': roles}
     return result
+
+
+def sample_pct(sample, window):
+    values = sample.get('windows_pct')
+    if isinstance(values, dict) and number(values.get(window)):
+        return values[window]
+    # Pre-F11 samples and manually added scalar samples mean five-hour only.
+    return sample.get('pct') if window == 'five_hour' and number(sample.get('pct')) else None
 
 
 def cached_estimates(read_only=False):
@@ -457,25 +599,62 @@ def reap(persist=True):
     return leases
 
 
-def capacity(reading, leases, provider, role, cost, want, unknown_limit=True):
+def lease_pct(lease, window, model=None):
+    pct = lease.get('pct', 0)
+    if isinstance(pct, dict):
+        return pct.get(window, 0) if number(pct.get(window)) else 0
+    if not number(pct):
+        return 0
+    if window in ('five_hour', 'auto', 'api'):
+        return pct
+    factors = (model or {}).get('factor', {})
+    five = factors.get('five_hour') if isinstance(factors, dict) else None
+    long = factors.get(window) if isinstance(factors, dict) else None
+    # Old scalar leases were five-hour costs; scale them by the current model's
+    # window ratio so an old process cannot reserve a full five-hour charge weekly.
+    return pct * (long / five) if number(five) and number(long) and five > 0 else pct * LONG_WINDOW_SEED_RATIO
+
+
+def cost_pct(cost, window, model=None):
+    if isinstance(cost, dict):
+        return cost.get(window, 0) if number(cost.get(window)) else 0
+    if not number(cost):
+        return 0
+    if window == 'five_hour' or window in ('auto', 'api'):
+        return cost
+    factors = (model or {}).get('factor', {})
+    five = factors.get('five_hour') if isinstance(factors, dict) else None
+    long = factors.get(window) if isinstance(factors, dict) else None
+    return cost * (long / five) if number(five) and number(long) and five > 0 else cost * LONG_WINDOW_SEED_RATIO
+
+
+def capacity(reading, leases, provider, role, cost, want, unknown_limit=True, model=None):
     active = [l for l in leases if l['provider'] == provider]
-    reserved = sum(l['pct'] for l in active)
     windows = reading['windows']
     if provider == 'cursor':
-        model = os.environ.get(usage.CURSOR_MODEL_ENV.get(role, usage.CURSOR_MODEL_ENV['worker']), 'auto')
-        windows = {k: v for k, v in windows.items() if k == ('auto' if model == 'auto' else 'api')}
-    known = [w['cap'] - w['live'] - reserved for w in windows.values() if number(w.get('live'))]
+        cursor_model = os.environ.get(usage.CURSOR_MODEL_ENV.get(role, usage.CURSOR_MODEL_ENV['worker']), 'auto')
+        windows = {k: v for k, v in windows.items() if k == ('auto' if cursor_model == 'auto' else 'api')}
+    known = [(name, w['cap'] - w['live'] - sum(lease_pct(lease, name, model) for lease in active))
+             for name, w in windows.items() if number(w.get('live'))]
     unknown = not windows or any(not number(w.get('live')) for w in windows.values())
-    fit = min(want, max(0, math.floor((min(known) + 1e-9) / cost))) if known else want
+    fit_by_window = [math.floor((headroom + 1e-9) / window_cost)
+                     for name, headroom in known
+                     if (window_cost := cost_pct(cost, name, model)) > 0]
+    fit = min(want, max(0, min(fit_by_window))) if fit_by_window else want
     if unknown and unknown_limit:
         fit = min(fit, 0 if active else 1)
     return max(0, fit)
 
 
 def view(provider, reading, model, leases):
-    reserved = sum(l['pct'] for l in leases if l['provider'] == provider)
-    return dict(reading, reserved_pct=reserved, estimates=model,
-                windows={k: dict(v, headroom=v['cap'] - v['live'] - reserved if number(v.get('live')) else None)
+    active = [l for l in leases if l['provider'] == provider]
+    reserved_by_window = {name: sum(lease_pct(lease, name, model) for lease in active)
+                          for name in reading['windows']}
+    return dict(reading, reserved_pct=reserved_by_window.get('five_hour', next(iter(reserved_by_window.values()), 0)),
+                reserved_pct_by_window=reserved_by_window, estimates=model,
+                windows={k: dict(v, reserved_pct=reserved_by_window[k],
+                                 headroom=v['cap'] - v['live'] - reserved_by_window[k]
+                                 if number(v.get('live')) else None)
                          for k, v in reading['windows'].items()})
 
 
@@ -484,16 +663,18 @@ def allow(provider, role, want=1):
     reading = readings(provider)
     with lock():
         leases = reap()
-        count = capacity(reading, leases, provider, role, model['roles'][role]['pct'], want)
+        count = capacity(reading, leases, provider, role, model['roles'][role]['pct'], want, model=model)
     return count
 
 
 def acquire(provider, role, pid=None, ttl=None, label=None, reading=None, unknown_limit=True, **extra):
-    model = cached_estimates()[provider]['roles'][role]
+    estimates = cached_estimates()[provider]
+    model = estimates['roles'][role]
     reading = readings(provider) if reading is None else reading
     with lock():
         leases = reap()
-        if not capacity(reading, leases, provider, role, model['pct'], 1, unknown_limit=unknown_limit):
+        if not capacity(reading, leases, provider, role, model['pct'], 1,
+                        unknown_limit=unknown_limit, model=estimates):
             return None
         owner = pid or os.getpid()
         started = process_start(owner)
@@ -528,21 +709,24 @@ def reserve_bundle(requests, *, replace_ids=(), reading_by_provider=None, models
         if not scale:
             continue
         cost = models[provider]['roles'][role]
-        group = grouped.setdefault(provider, dict(pct=0, ttl=0, roles=[]))
-        group['pct'] += cost['pct'] * scale
+        group = grouped.setdefault(provider, dict(pct={}, ttl=0, roles=[]))
+        for window, value in cost['pct'].items():
+            group['pct'][window] = group['pct'].get(window, 0) + value * scale
         group['ttl'] += cost['ttl']
         group['roles'].append(role)
     with lock() if commit else nullcontext():
         existing = reap(persist=commit) + list(extra_leases)
         remaining = [l for l in existing if l['id'] not in replace_ids]
         for provider, group in grouped.items():
-            prior = sum(l['pct'] for l in existing if l['id'] in replace_ids and l['provider'] == provider)
+            prior = {window: sum(lease_pct(l, window, models[provider]) for l in existing
+                                 if l['id'] in replace_ids and l['provider'] == provider)
+                     for window in reading_by_provider[provider]['windows']}
             if reduce_only:
-                if group['pct'] > prior + 1e-9:
+                if any(group['pct'].get(window, 0) > value + 1e-9 for window, value in prior.items()):
                     raise ValueError('a reduction cannot add reserved cost')
                 continue
             if not all(capacity(reading_by_provider[provider], remaining, provider,
-                                role, group['pct'], 1) for role in group['roles']):
+                                role, group['pct'], 1, model=models[provider]) for role in group['roles']):
                 return None
         owner = pid or os.getpid()
         started = process_start(owner)
@@ -672,10 +856,12 @@ def main(argv=None):
             print(json.dumps(result))
         else:
             for p, v in result.items():
-                print(f'{p}: reserved {v["reserved_pct"]:.2f}% ({v["estimates"]["factor_source"]})')
+                print(f'{p}: reserved ' + ', '.join(f'{w}={pct:.2f}%' for w, pct in v['reserved_pct_by_window'].items()))
                 for w, value in v['windows'].items():
                     print(f'  {w}: live={value["live"]} cap={value["cap"]} headroom={value["headroom"]}')
-                print('  job %: ' + ', '.join(f'{r}={c["pct"]:.2f}' for r, c in models[p]['roles'].items()))
+                print('  job %: ' + ', '.join(f'{r}=' + '/'.join(
+                    f'{w}:{pct:.2f}' for w, pct in c['pct'].items())
+                    for r, c in models[p]['roles'].items()))
     elif a.cmd == 'allow':
         if a.want < 0:
             parser.error('--want must be nonnegative')

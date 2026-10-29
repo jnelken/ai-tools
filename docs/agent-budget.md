@@ -44,7 +44,10 @@ existing probes. Fresh saved windows whose reset has passed read as zero, using
 roadmap reset semantics. Readings older than 15 minutes are unknown; an unknown window
 permits at most one active lease for fanout/batch admission, subject to any known
 window. The in-process hook allows calls when no usable reading exists.
-Reservations are conservatively charged to every window (and Cursor pool).
+Reservations are charged separately to each quota window. Legacy scalar leases
+remain readable as five-hour estimates and are scaled by the current factor ratio
+for long windows. Status JSON reports each role's estimate and each window's
+reserved amount/headroom independently.
 
 Role costs use nearest-rank p80 **newly processed** tokens (input + cache writes +
 output, excluding cache reads), matching the roadmap ledger. Multiple models in
@@ -53,8 +56,15 @@ subagent transcripts, and completed headless fanouts. Streaming transcript rows
 are deduplicated by API message id; per-field maxima retain the final usage.
 Adjacent metadata preserves agent type while all child types share the subagent role.
 
-Conversion factors remain seeded until five positive measurements exist for a
-provider, then use p80 percentage points/token (token-weighted account intervals for Codex). Paired Claude snapshots match
+Each window's conversion factor remains seeded until five positive measurements
+exist for that window, then uses p80 percentage points/token (token-weighted
+account intervals for Codex). Long-window seeds use the paired observed
+long/five-hour delta ratio once five such pairs exist. Until then Codex uses 25%
+of its five-hour factor: the 10-28 observation was about 15 weekly points per 72
+five-hour points (~21%), rounded up. Claude uses 10%, above its nominal ~3%
+weekly-to-five-hour capacity ratio. Long-window samples accumulate across
+same-reset intervals until their rounded delta reaches two points.
+Paired Claude snapshots match
 launch/session ids to per-session ledger usage, preserving review-round boundaries.
 They never pair a role's whole-job total with each session. Ambiguous multi-session
 rows are skipped. Transcript calibration counts only assistant messages within the
@@ -71,8 +81,9 @@ Sonnet, Opus and advisor work cannot be attributed from quota boundaries alone. 
 can include concurrent work, so their estimates deliberately err high. Samples
 are deduplicated in `samples.jsonl`; generated samples are rebuilt to repair old
 denominators after an upgrade. Parsed files and bounded transcript intervals are
-cached by parser version, size and mtime. Only the five-hour factor is calibrated and is conservatively applied to weekly
-windows too. Cursor remains provisional until measured samples are available.
+cached by parser version, size and mtime. Codex rollout and Claude snapshot samples
+retain both quota-window deltas; Cursor remains provisional until measured samples
+are available.
 
 Seeds: Codex 3 points per 70k-token planner (10-27); Claude 10 points per
 251k tokens, from F9's 2 points/minute across three sessions, assuming a
