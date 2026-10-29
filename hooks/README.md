@@ -53,7 +53,7 @@ If you already have a `hooks.SessionStart` array, append the new entry rather th
 
 Three independent checks, each best-effort and non-blocking:
 
-1. **Dirty deploy clone.** If `$AI_TOOLS_HOME` has uncommitted changes (`git status --porcelain`), it was edited in place — that's a mistake, since `install.sh` treats it as disposable and it isn't the source of truth. Nudges to move the edit to `~/code/ai-tools`, commit, and push there instead, and explicitly does **not** fetch/merge while dirty (so it never clobbers the local edit). Cooldown: 24h, keyed by a hash of the dirty status so a *changed* dirty state re-nudges immediately even mid-cooldown.
+1. **Dirty deploy clone.** If `$AI_TOOLS_HOME` has uncommitted changes (`git status --porcelain`), it was edited in place — that's a mistake, since `install.sh` treats it as disposable and it isn't the source of truth. Nudges to move the edit to `~/code/ai-tools`, commit, and push there instead, and explicitly does **not** fetch/merge while dirty (so it never clobbers the local edit). Checked only when the 24h sync cooldown is due, so edits made mid-cooldown are noticed within 24h. Nudges have their own 24h cooldown keyed by a hash of the dirty status; a changed dirty state re-nudges on the next due check.
 2. **Sync (only when clean).** With a 24h cooldown, runs a `timeout`-guarded `git fetch` + `git merge --ff-only` against `origin/$AI_TOOLS_REF` (default `main`). If HEAD moved, re-runs `install.sh --no-update --quiet` so newly added skills/commands/hooks/agents get linked immediately, and emits a short context line (`ai-tools deployed: <old>..<new>, N files`). If the fast-forward fails (local history diverged), emits a warning instead. A plain fetch failure (offline, etc.) is silent — never worth nudging about.
 3. **Dev mode left on / stale link.** Scans every symlink under `~/.claude/{skills,commands,hooks,agents,automations}/` and `~/.claude/awesome-statusline.sh`, ignoring any link that resolves inside `$AI_TOOLS_HOME`. What's left is bucketed:
    - A target that resolves into some *other* ai-tools checkout — detected by the checkout's shape (a parent directory containing both `install.sh` and `skills/`, so a Superset worktree of the repo counts even though its path never contains the literal string "ai-tools") — is **dev mode left on**: nudges to run `~/.ai-tools/install.sh` to flip back.
@@ -171,6 +171,7 @@ If you already have a `hooks.SessionStart` array, append the new entry rather th
 ### Behavior
 
 - Reads `~/.claude/.ccusage-state/last-posted` (one line, `YYYY-MM-DD`) to track the last successfully-posted day.
+- When already posted through yesterday, exits after one `date` on macOS (GNU date uses a fallback), with no state-directory, lock, or git work.
 - Posts one Slack message per missed day, from `last+1` through yesterday.
 - Marker advances only after a successful POST, so transient Slack failures resume cleanly on the next session.
 - Skips silently if any dependency (`npx` / `jq` / `curl`) is missing, or if the webhook env var is unset — never blocks a session.
@@ -216,7 +217,7 @@ It also runs the **weekly sweep**: when open items exist but the file's `_Last u
 
 ### Requirements
 
-- `git`, `jq` on `PATH`
+- Nothing beyond bash and `date` (`git` is only a fallback for finding the repo root; no `jq`)
 
 ### settings.json wiring
 
@@ -239,7 +240,7 @@ Add to `~/.claude/settings.json` (alongside any existing `SessionStart` entries 
 ### Behavior
 
 - Looks for `.claude/IN_PROGRESS.md` first, then repo-root `IN_PROGRESS.md` — same order `pick-up` uses.
-- Bails silently outside a git repo, if neither file exists, or if `jq` is missing.
+- Bails silently outside a git repo or if neither file exists. Cheap by construction (every fork costs ~16 ms on the work Mac): the repo root comes from a walk up for `.git`, the file is scanned in one bash read loop, the JSON is printed by bash, and the only processes are the (at most two) `date` calls for the ISO-week comparison.
 - Counts open (`- [ ]`) checklist lines and `## Urgent` pointer lines. With neither, it resets the file to the empty template (once; an already-empty file stays silent). With only urgent pointers, it stays silent and leaves the file alone.
 - With open items reconciled this ISO week, emits via `hookSpecificOutput.additionalContext` telling the assistant to mention the open-item count and offer `/pick-up` — explicitly instructed not to read the file or act on its items itself, since `pick-up` owns that flow (plan-mode read, verification against current state, then user approval).
 - With open items last reconciled before this ISO week (or never dated), asks instead for a background `/pick-up sweep` and a relay of its result. `PICK_UP_NUDGE_TODAY=YYYY-MM-DD` overrides today's date for testing.
@@ -254,7 +255,7 @@ Remove the entry from `settings.json`.
 
 A **SessionStart hook** (runs at the top of every Claude Code session) that nudges about unsymlinked files in `~/.claude/` before they become a blocker.
 
-When it detects new regular files in `~/.claude/{hooks,commands,agents}/`, it emits a friendly message explaining they should be symlinks into the deploy clone (`~/.ai-tools/`, kept in sync with `origin/main`) and pointing to the fix: add/edit the file in `~/code/ai-tools` (the dev checkout) and never edit `~/.ai-tools` directly, commit and push from `~/code/ai-tools` — that *is* the deploy step — then run `~/.ai-tools/install.sh` (or wait for the next session's `ai-tools-sync`) to symlink it into place. Uses a 24-hour cooldown per file-set so it only nudges once a day even if you open the same repo multiple times.
+When it detects new regular files in `~/.claude/{hooks,commands,agents}/`, it emits a friendly message explaining they should be symlinks into the deploy clone (`~/.ai-tools/`, kept in sync with `origin/main`) and pointing to the fix: add/edit the file in `~/code/ai-tools` (the dev checkout) and never edit `~/.ai-tools` directly, commit and push from `~/code/ai-tools` — that *is* the deploy step — then run `~/.ai-tools/install.sh` (or wait for the next session's `ai-tools-sync`) to symlink it into place. Uses a 24-hour cooldown per file-set so it only nudges once a day even if you open the same repo multiple times (state in `~/.claude/state/claude-symlink-nudge.txt`: the offender list and the time it was last shown). It checks the three directories with plain bash globs, so a session with nothing out of place spawns no processes at all.
 
 ### settings.json wiring
 
@@ -296,7 +297,7 @@ Nudges repo conventions at session start, inside any directory with git history.
 
 ### Requirements
 
-- `jq`, `shasum` on `PATH` (both standard on macOS)
+- `jq` on `PATH` (standard on macOS)
 
 ### settings.json wiring
 
@@ -323,9 +324,11 @@ If you already have a `hooks.SessionStart` array, append the new entry rather th
 
 ### Behavior
 
-- Bails silently (no output) outside a git repo, or if `jq`/`shasum` are missing.
+- Bails silently (no output) outside a git repo, or if `jq` is missing.
+- Cheap by construction (every fork costs ~16 ms on the work Mac): it reads stdin, finds the repo root (walks up for `.git`), and reads `origin`'s owner from the repo config with bash builtins, so a Concentro-Inc repo exits having spawned nothing. Only a personal repo pays for git (`fsck`, upstream track, `ls-files`), one `date`, and `jq` when there is something to say. Anything the config reader can't take at face value (`include`, `url.*.insteadOf`, `GIT_CONFIG_*`, a quoted URL, no origin) falls back to `git remote get-url`.
+- The live check mirrors `dotfiles/bin/git-safe-to-autocommit` (mid-rebase/merge/cherry-pick/revert/bisect, detached HEAD) with file tests, and runs `git fsck --connectivity-only` with `core.commitGraph` and `core.multiPackIndex` off so git doesn't spawn `commit-graph verify` / `multi-pack-index verify` children; a clean fsck is not captured, only a failing one is re-run to read its messages.
 - Findings are emitted via `hookSpecificOutput.additionalContext`, so they land as session-start context rather than a blocking prompt.
-- State: `~/.claude/state/hygiene-nudges/<repo-hash>.json` tracks the last nudge time per repo. Re-nudges at most once every `HYGIENE_NUDGE_COOLDOWN_HOURS` (default `24`) so a repo you open repeatedly in a day isn't renudged every session.
+- State: `~/.claude/state/hygiene-nudges/<repo-path-slug>.json` (the repo path with every character outside `[A-Za-z0-9._-]` turned into `_`) tracks the last nudge time per repo. Re-nudges at most once every `HYGIENE_NUDGE_COOLDOWN_HOURS` (default `24`) so a repo you open repeatedly in a day isn't renudged every session.
 
 ### Disabling
 
@@ -337,7 +340,10 @@ Gives every Claude Code session running inside a git worktree a small, live "wha
 
 To survive that, every write to the local doc is mirrored to a second, durable copy outside any worktree: `~/.claude/state/repo-sessions/<repo_key>/<session_id>.md`, where `repo_key` is derived from the repo's git-common-dir (`basename` + an 8-char sha256 of the full path) — the same value from any linked worktree of the repo or the main checkout. Same frontmatter/body as the local doc, plus `main_repo_root`, `worktree_path` (mirrors `cwd`, kept for clarity once read outside the worktree that wrote it), and `ended_cleanly`.
 
+Origin ownership is read directly from the common git config when possible (including linked worktrees), with git as a fallback for complex config. The fast path checks the literal origin URL; `url.<base>.insteadOf` rewrites are not applied.
+
 - **`session-doc-start.sh`** (`SessionStart`) — creates/refreshes `.claude/.sessions/<session_id>.md` (preserving `started_at` and the body across a resume) and its global mirror; sweeps every *other* local doc in the same dir whose `updated_at` is older than `SESSION_DOC_STALE_HOURS` (default `6`), and separately sweeps global docs already marked `ended_cleanly: true` whose `updated_at` is older than `SESSION_DOC_GLOBAL_STALE_DAYS` (default `30`) — an unresolved global doc is never swept by age alone. Injects a standing instruction via `additionalContext` telling the assistant to keep the body updated with 2–4 sentences on current work + next steps; if other global docs for this repo look orphaned (not `ended_cleanly`, and either their `worktree_path` no longer exists or they've gone quiet 15+ minutes), the count and path are appended to that same context as a discovery nudge — mention only, doesn't act.
+  Cheap by construction (every fork costs ~16 ms on the work Mac): the stdin JSON, repo root, `origin` owner and branch are read with bash builtins (git is only a fallback), so a Concentro-Inc repo exits having spawned nothing; a personal repo pays for one `date`, one `shasum` and the `mkdir`s.
 - **`session-doc-stop.sh`** (`Stop`, fires after every assistant turn) — mechanical-only refresh (no LLM call, since this fires every turn): bumps `updated_at` and records a one-line `git diff --stat` summary, on both the local doc and its global mirror. Keeps the staleness signal accurate between narrative updates.
 - **`session-doc-end.sh`** (`SessionEnd`) — deletes this session's own local doc on clean exit. The global mirror is **not** deleted — it's rewritten with `ended_cleanly: true` instead, so retention depends on how the session actually ended rather than on an unverified assumption about whether `SessionEnd` fires cleanly when a workspace's terminals are killed out from under it.
 
@@ -400,6 +406,8 @@ Remove all three entries from `settings.json`.
 ## model-router-pointer.sh
 
 A **SessionStart hook** that, when the session's cwd is inside the personal code dir (`personal-code-dir`; `~/Dropbox/code` on the personal machines), injects a one-line pointer to `~/.claude/MODEL_ROUTER.md` (the provider/model routing policy, tracked in `jnelken/dotfiles`). Silent everywhere else — Concentro repos, the work laptop, machines with no personal code dir. It points rather than inlining the file so the ~10k-char policy is only read if the agent actually delegates.
+
+On a non-Windows machine with no `$PERSONAL_CODE_DIR` and no `~/Dropbox/code`, it exits before spawning anything (the `personal-code-dir` python helper can only say "none" there); otherwise it reads `cwd` from stdin with a regex (jq only as a fallback) and prints the JSON from bash.
 
 Wire it in `~/.claude/settings.json` under `hooks.SessionStart`:
 

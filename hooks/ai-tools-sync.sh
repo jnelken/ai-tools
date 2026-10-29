@@ -22,9 +22,10 @@ command -v jq >/dev/null 2>&1 || exit 0
 
 # Nothing to do if there's no deploy clone (or it's not a git repo) yet —
 # that's install.sh's job, not this hook's.
-git -C "$AI_TOOLS_HOME" rev-parse --git-dir >/dev/null 2>&1 || exit 0
+[[ -e "$AI_TOOLS_HOME/.git" ]] || exit 0
 
-mkdir -p "$STATE_DIR" 2>/dev/null || true
+[[ -d "$STATE_DIR" ]] || mkdir -p "$STATE_DIR" 2>/dev/null || true
+now_epoch=$(date +%s)
 
 # timeout-guard network calls: prefer GNU `timeout`, fall back to `gtimeout`
 # (Homebrew coreutils on macOS). Stock macOS has neither, so the fetch ALSO
@@ -81,47 +82,47 @@ $1"
 # re-nudges immediately even mid-cooldown (same pattern as
 # claude-symlink-hygiene.sh).
 cooldown_ok() {
-  local file="$1" secs="$2" hash="$3" last_hash="" last_time=0 now
+  local file="$1" secs="$2" hash="$3" last_hash="" last_time=0
   if [ -f "$file" ]; then
     read -r last_hash last_time < "$file" 2>/dev/null || true
   fi
   case "$last_time" in ''|*[!0-9]*) last_time=0 ;; esac
-  now=$(date +%s)
-  if [ "$hash" = "$last_hash" ] && [ $((now - last_time)) -lt "$secs" ]; then
+  if [ "$hash" = "$last_hash" ] && [ $((now_epoch - last_time)) -lt "$secs" ]; then
     return 1
   fi
   return 0
 }
 record_cooldown() {
   local file="$1" hash="$2"
-  printf '%s %s\n' "$hash" "$(date +%s)" > "$file" 2>/dev/null || true
+  printf '%s %s\n' "$hash" "$now_epoch" > "$file" 2>/dev/null || true
 }
 
 # ── 1. dirty deploy clone vs. clean-clone sync (mutually exclusive) ──
-DIRTY_STATUS="$(git -C "$AI_TOOLS_HOME" status --porcelain 2>/dev/null || true)"
+sync_state_file="$STATE_DIR/ai-tools-sync.txt"
+last_sync=0
+if [ -f "$sync_state_file" ]; then
+  IFS= read -r last_sync < "$sync_state_file" 2>/dev/null || true
+fi
+case "$last_sync" in ''|*[!0-9]*) last_sync=0 ;; esac
 
-if [ -n "$DIRTY_STATUS" ]; then
-  dirty_state_file="$STATE_DIR/ai-tools-dirty-nudge.txt"
-  dirty_hash="$(printf '%s' "$DIRTY_STATUS" | hash_of 2>/dev/null)"
-  if [ -n "$dirty_hash" ] && cooldown_ok "$dirty_state_file" 86400 "$dirty_hash"; then
-    record_cooldown "$dirty_state_file" "$dirty_hash"
-    append_msg "⚠️ The ai-tools DEPLOYED copy ($AI_TOOLS_HOME) has uncommitted edits.
+# Deliberately check dirty state only when sync is due: edits made during
+# the cooldown are noticed within 24h rather than at the next session.
+if [ $((now_epoch - last_sync)) -ge 86400 ]; then
+  DIRTY_STATUS="$(git -C "$AI_TOOLS_HOME" status --porcelain 2>/dev/null || true)"
+  if [ -n "$DIRTY_STATUS" ]; then
+    dirty_state_file="$STATE_DIR/ai-tools-dirty-nudge.txt"
+    dirty_hash="$(printf '%s' "$DIRTY_STATUS" | hash_of 2>/dev/null)"
+    if [ -n "$dirty_hash" ] && cooldown_ok "$dirty_state_file" 86400 "$dirty_hash"; then
+      record_cooldown "$dirty_state_file" "$dirty_hash"
+      append_msg "⚠️ The ai-tools DEPLOYED copy ($AI_TOOLS_HOME) has uncommitted edits.
 
 That's the deploy clone install.sh manages — it isn't the source of truth and
 gets overwritten on the next clean update. Move the edit to ~/code/ai-tools,
 commit, and push there instead. Do NOT pull/sync this deploy clone while
 it's dirty — that would clobber the local edit."
-  fi
-else
-  sync_state_file="$STATE_DIR/ai-tools-sync.txt"
-  last_sync=0
-  [ -f "$sync_state_file" ] && last_sync="$(cat "$sync_state_file" 2>/dev/null || echo 0)"
-  case "$last_sync" in ''|*[!0-9]*) last_sync=0 ;; esac
-  now_epoch=$(date +%s)
-
-  if [ $((now_epoch - last_sync)) -ge 86400 ]; then
-    record_cooldown_simple() { printf '%s\n' "$now_epoch" > "$sync_state_file" 2>/dev/null || true; }
-    record_cooldown_simple
+    fi
+  else
+    printf '%s\n' "$now_epoch" > "$sync_state_file" 2>/dev/null || true
 
     old_head="$(git -C "$AI_TOOLS_HOME" rev-parse --short HEAD 2>/dev/null || true)"
 
@@ -168,7 +169,6 @@ fi
 #            $AI_TOOLS_HOME or a path containing "ai-tools"). Left behind by a
 #            rename/removal upstream; install.sh prunes these.
 #   other  — third-party (e.g. ~/.agents/skills/*) or unrelated. Ignored.
-resolved_home="$(resolve_path "$AI_TOOLS_HOME")"
 
 # is_ai_tools_checkout <dir>: does <dir> look like a checkout of this repo?
 is_ai_tools_checkout() {
@@ -217,11 +217,14 @@ classify_link() {
 # at most once a day. The nudges below keep their own 24h cooldown.
 links_state_file="$STATE_DIR/ai-tools-links-scan.txt"
 last_links_scan=0
-[ -f "$links_state_file" ] && last_links_scan="$(cat "$links_state_file" 2>/dev/null || echo 0)"
+if [ -f "$links_state_file" ]; then
+  IFS= read -r last_links_scan < "$links_state_file" 2>/dev/null || true
+fi
 case "$last_links_scan" in ''|*[!0-9]*) last_links_scan=0 ;; esac
-links_scan_now=$(date +%s)
+links_scan_now=$now_epoch
 
 if [ $((links_scan_now - last_links_scan)) -ge 86400 ]; then
+  resolved_home="$(resolve_path "$AI_TOOLS_HOME")"
   printf '%s\n' "$links_scan_now" > "$links_state_file" 2>/dev/null || true
   for sub in skills commands hooks agents automations; do
     d="$CLAUDE_DIR/$sub"
