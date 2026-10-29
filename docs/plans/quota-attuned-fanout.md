@@ -113,6 +113,7 @@ Separately:
 
 - [ ] **O11 (C follow-up).** Wire `daily_batch.py` to `agent-budget` after `quota/roadmap-stop-waste` merges. Replace A4's standalone worker/reviewer headroom preflight stub with shared role reservations, including expected implementation cost; derive lanes and release waves from the shared ledger. This PR deliberately leaves `daily_batch.py`, `run.sh` and `lib/usage.py` untouched.
 - [ ] **O12 (calibration).** Accumulate five measured samples/provider before replacing seeds; Cursor currently has no measured token-to-window factor (provisional 5 points/59k tokens). Claude starts at 10 points/251k tokens: F9's ~2 points/min across three sessions × 15 minutes/session. The five-hour factor is conservatively charged to weekly windows too. Connect runtime ledger launch/session ids to quota boundaries wherever callers currently omit them; unmatched boundaries remain uncalibrated rather than guessed.
+- [x] **E1.** Added the running planning-doc rule, taught pick-up and close-out to account for plan threads, and added both skills to the README table.
 
 ## Approach (slices; each ships as its own PR from its own Superset workspace)
 
@@ -183,7 +184,7 @@ Separately:
 
 ### E. Running planning docs (ai-tools instructions and skills)
 
-- **E1. Rule** in `instructions/development/shared.md` *Plan Files*:
+- **E1. Rule — done.** Added to `instructions/development/shared.md` under *Plan Files*; pick-up and close-out now sweep plan threads, and the README lists both updated skills:
   - Any planning or investigation session opens a running doc right after orientation: `docs/plans/<slug>.md` in the target repo, or the harness plan file while in plan mode, copied to `docs/plans` on exit.
   - Sections: Status, Decisions, Findings (with evidence), Open threads, Approach.
   - Update it after each finding or agent result.

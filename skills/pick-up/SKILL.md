@@ -1,6 +1,6 @@
 ---
 name: pick-up
-description: Resume where a previous session left off — read this repo's IN_PROGRESS.md in Plan mode, present a plan to finish the work it lists, and reconcile the file with anything found already done or stale. With the argument `sweep`, runs unattended instead: verifies each item and deletes only the ones with hard evidence they're done or now tracked, starting no work (the weekly sweep the pick-up-nudge hook requests).
+description: Resume where a previous session left off — read this repo's IN_PROGRESS.md and running plan docs in Plan mode, present their open items in a plan, and reconcile IN_PROGRESS.md with anything found already done or stale. With the argument `sweep`, runs unattended instead: verifies items and removes only IN_PROGRESS.md items with hard evidence they're done or now tracked, while flagging plan threads only when hard evidence shows they're done or tracked; starts no work (the weekly sweep the pick-up-nudge hook requests).
 ---
 
 # pick-up
@@ -31,16 +31,23 @@ Planning starts before the read so that everything discovered in step 2 lands in
 mode that can't act on it by reflex. A picked-up item is often mid-flight work with a
 live blast radius; the user approves the resumption, not this skill.
 
-## 2. Read the handoff file
+## 2. Read the handoff file and running plan docs
 
 Look in this order, take the first that exists:
 
 1. `.claude/IN_PROGRESS.md` — close-out's convention, the normal case.
 2. `IN_PROGRESS.md` at the repo root.
 
-If neither exists, say so plainly and stop. Do not reconstruct a to-do list from
-`git log` either. No file means no handoff; offer to survey the repo instead, and let the
-user decide.
+If neither exists, check for running plan docs before stopping. Do not reconstruct a to-do
+list from `git log` either. If neither source has open items, say so plainly and offer to
+survey the repo instead, and let the user decide.
+
+Also inspect `docs/plans/*.md` (top-level Markdown files only; exclude `archive/`). Read each
+file's `## Open threads` section and collect its unchecked `- [ ]` items. Present these beside
+the `IN_PROGRESS.md` items in the interactive plan, with the source plan path for each. If
+there is no `IN_PROGRESS.md`, these plan threads still form a valid pickup list. Keep the plan
+docs as their own source of truth; reconcile them when an item is answered or moved, rather
+than copying them into `IN_PROGRESS.md`.
 
 Both [[close-out]] and [[wrapup-repos]] write this file. Items under `## Ticket candidates`
 are work to *file* in Linear, not to execute — offer to file them rather than planning
@@ -54,11 +61,13 @@ hard-won DOM/API quirks it re-walks a dead end the file explicitly warns about.
 
 ## 3. Verify each open item against current state
 
-The file is a snapshot from a previous session and items go stale — someone may have
-finished, abandoned, or invalidated one since it was written. For each unchecked item,
-confirm cheaply that it's still real: does the file it names still exist, does
-`git log` since the file's `_Last updated:_` date already contain the work, is the
-stated blocker still a blocker.
+The handoff file is a snapshot from a previous session and items go stale — someone may
+have finished, abandoned, or invalidated one since it was written. For each unchecked
+handoff item and collected plan thread, confirm cheaply that it's still real: does the
+file it names still exist, does `git log` since the handoff's `_Last updated:_` date
+already contain the work, is the stated blocker still a blocker. Plan threads remain in
+their source docs; step 5 reconciles only the handoff file. When approved work answers or
+moves a plan thread, update that thread in its source doc with the answer or destination.
 
 Classify every item as **still open**, **already done**, or **stale/invalid**, with the
 evidence for anything not still open. Don't silently drop an item — an item you
@@ -86,10 +95,10 @@ already be on disk. Step 5 applies them once the plan is approved.
 - Flags anything with real-world side effects (live account mutations, prod changes,
   outbound messages) before the step that causes it.
 
-Completion criterion: every unchecked item in the file appears in the plan — as a step,
-as a decision for the user, or as an explicit "already done / no longer applies" with
-evidence. An item that exists in the file and nowhere in the plan is the failure mode
-this skill exists to prevent.
+Completion criterion: every unchecked handoff item and every collected plan thread appears
+in the plan — as a step, as a decision for the user, or as an explicit "already done / no
+longer applies" with evidence. An item that exists in either source and nowhere in the plan
+is the failure mode this skill exists to prevent.
 
 ## 5. Reconcile the handoff file
 
@@ -135,8 +144,8 @@ Then start the work. What this skill owns is reconciling the file with reality;
 ## Sweep mode (`/pick-up sweep`)
 
 The weekly, unattended version of this skill. The `pick-up-nudge` SessionStart hook asks for it
-(in a background agent) when a repo's file has open items and its `_Last updated:_` date isn't
-in the current ISO week. The job is to keep the file honest, not to resume work, so:
+(in a background agent) when a repo's handoff file has open items and its `_Last updated:_` date
+isn't in the current ISO week. The job is to keep the file honest, not to resume work, so:
 
 - **No plan mode, no approval, no work.** Skip steps 1 and 4. Never start, edit, or run any item;
   the only write is the handoff file.
@@ -150,6 +159,10 @@ in the current ISO week. The job is to keep the file honest, not to resume work,
   urgent-pointer exception). Anything that takes judgment stays exactly as written. That includes
   every `## Decisions needed` item, unless the evidence shows the decision was made and acted on,
   because only the human resolves a decision. Leave `## Ticket candidates` for close-out to file.
+- **Plan threads are report-only.** Inspect unchecked items under `## Open threads` in top-level
+  `docs/plans/*.md` files, excluding `archive/`. Flag only threads with hard evidence that they
+  are done or tracked (for example, a merged commit or linked ticket/open PR); include the
+  evidence. Do not edit or remove plan threads and do not flag items based on inference.
 - **Write per step 5**, with one difference: set `_Last updated: <date +%F> (pick-up sweep)_` and
   append `- <date> — $CLAUDE_CODE_SESSION_ID (pick-up sweep)` to `## Close-out sessions` **even
   when nothing was removed**. That date is how the hook knows this week's sweep ran. If nothing
