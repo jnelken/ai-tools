@@ -22,6 +22,8 @@
 - **Open questions:** does `@Linear` act on bot-authored messages; the `repo/*` label requirement; permissions.
 - **Status:** In Progress. The analysis can run unattended, but live Slack tests need Jake's OK.
 
+**10-29 09:10 dispatch (run by hand: the 07:21 session task never fired, because session-only crons only fire while the REPL is idle):** #12 round 3 went to the E2 Codex agent; a Codex verifier is checking #13's three fixes; DEV-320 is building in the `dev-320-slack-unblock` workspace (Codex Sol high) and is In Progress. All of it is on Codex, which had just reset to 0%; Claude was at 73%, over its cap. The batch will have less Codex headroom today, and the #9 gate turns that into skipped-quota rather than waste.
+
 **Watch at the 10-29 10:30 batch:** expect `skipped-unchanged` rows only from 10-30 on, once the first carried verdicts exist; no `error` rows from the Stop hook; Claude planners on Sonnet with medium effort; and no planning when no worker or reviewer is available.
 
 Repos:
