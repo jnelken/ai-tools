@@ -17,18 +17,48 @@ CODEX_SESSIONS = os.environ.get("ADVANCE_ROADMAP_CODEX_SESSIONS") or os.path.exp
 
 SECRET_PATTERNS = [
     re.compile(r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]+"),
-    re.compile(r"\b([A-Z][A-Z0-9_]{1,})\s*=\s*(\"[^\"]*\"|'[^']*'|[^\s,;]+)"),
-    re.compile(r"\b((?:api[_-]?key|access[_-]?token|refresh[_-]?token|client[_-]?secret|password|passwd))\s*[:=]\s*(\"[^\"]*\"|'[^']*'|[^\s,;]+)", re.I),
+    re.compile(r"(?i)\bBasic\s+[A-Za-z0-9+/=_-]+"),
+    re.compile(r"\b(?:sk-[A-Za-z0-9_-]{8,}|gh[pousr]_[A-Za-z0-9_]{8,}|github_pat_[A-Za-z0-9_]{8,}|xox[abpr]-[A-Za-z0-9-]{8,})\b"),
+    re.compile(r"(?is)-----BEGIN [^-\n]*PRIVATE KEY-----.*?-----END [^-\n]*PRIVATE KEY-----"),
+    re.compile(r'(?i)\b([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*?)(?:\\"|")'),
+    re.compile(r"(?i)\b([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(\"[^\"]*\"|'[^']*'|[^\s,;]+)"),
+    re.compile(r"(?i)\b((?:api[_-]?key|access[_-]?token|refresh[_-]?token|client[_-]?secret|password|passwd))\s*[:=]\s*(\"[^\"]*\"|'[^']*'|[^\s,;]+)"),
 ]
+SECRET_FIELD_RE = re.compile(r"(?i)(?:key|token|secret|password|passwd|credential|authorization|cookie)")
 TICKET_RE = re.compile(r"\b[A-Z][A-Z0-9]{1,9}-\d+\b")
 FILE_RE = re.compile(r"(?<![\w.-])((?:\.{1,2}/)?[\w.@+-]+(?:/[\w.@+-]+)*\.(?:md|py|sh|json|jsonl|ya?ml|toml|ini|txt|js|ts|tsx|jsx|css|html|sql|rb|go|rs|c|h|swift|kt|java|xml|plist))\b", re.I)
 
 
 def redact(text):
     text = str(text)
-    text = SECRET_PATTERNS[0].sub("Bearer [REDACTED]", text)
-    text = SECRET_PATTERNS[1].sub(r"\1=[REDACTED]", text)
-    return SECRET_PATTERNS[2].sub(r"\1=[REDACTED]", text)
+    replacements = ("Bearer [REDACTED]", "Basic [REDACTED]", "[REDACTED TOKEN]",
+                    "[REDACTED PRIVATE KEY]", r"\1=[REDACTED]", r"\1=[REDACTED]",
+                    r"\1=[REDACTED]")
+    for pattern, replacement in zip(SECRET_PATTERNS, replacements):
+        text = pattern.sub(replacement, text)
+    return text
+
+
+def redact_tree(value):
+    """Redact JSON leaves before parsing tool inputs into display text or metadata."""
+    if isinstance(value, dict):
+        result = {}
+        for key, item in value.items():
+            clean_key = redact(key) if isinstance(key, str) else key
+            result[clean_key] = "[REDACTED]" if isinstance(key, str) and SECRET_FIELD_RE.search(key) else redact_tree(item)
+        return result
+    if isinstance(value, list):
+        return [redact_tree(item) for item in value]
+    if isinstance(value, str):
+        if value.lstrip().startswith(("{", "[")):
+            try:
+                nested = json.loads(value)
+            except ValueError:
+                pass
+            else:
+                return json.dumps(redact_tree(nested), sort_keys=True)
+        return redact(value)
+    return value
 
 
 def clipped(value, limit=OUTPUT_CHARS):
@@ -54,7 +84,7 @@ def claude_records(path):
                 except ValueError:
                     continue
                 if isinstance(row, dict) and not row.get("isSidechain"):
-                    records.append(row)
+                    records.append(redact_tree(row))
     except OSError:
         pass
     return records
@@ -70,7 +100,7 @@ def codex_records(path):
                 except ValueError:
                     continue
                 if isinstance(row, dict):
-                    records.append(row)
+                    records.append(redact_tree(row))
     except OSError:
         pass
     return records
@@ -135,6 +165,7 @@ def summarize_codex(records):
                 args = json.loads(raw) if isinstance(raw, str) else raw
             except ValueError:
                 args = raw
+            args = redact_tree(args)
             if isinstance(args, dict):
                 detail = args.get("cmd") or args.get("command") or args.get("file_path") or args.get("path") or json.dumps(args, sort_keys=True)
                 for key in ("file_path", "path", "file"):
@@ -177,25 +208,37 @@ def session_id(result_json):
     return None
 
 
-def transcript_for(provider, result_json, started):
-    sid = session_id(result_json) if result_json else None
+def codex_session_id(session_file="", stdout_file=""):
+    if session_file:
+        try:
+            sid = Path(session_file).read_text(encoding="utf-8", errors="replace").strip().splitlines()[0]
+            if re.fullmatch(r"[A-Za-z0-9_-]+", sid):
+                return sid
+        except (OSError, IndexError):
+            pass
+    if stdout_file:
+        try:
+            text = Path(stdout_file).read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            text = ""
+        match = re.search(r"^session id: ([A-Za-z0-9_-]+)\s*$", text, re.M | re.I)
+        if match:
+            return match.group(1)
+    return None
+
+
+def transcript_for(provider, result_json="", session_file="", stdout_file=""):
+    sid = (session_id(result_json) if provider == "claude" and result_json
+           else codex_session_id(session_file, stdout_file) if provider == "codex" else None)
+    if not sid:
+        return None, None
     if provider == "claude":
-        if sid:
-            matches = glob.glob(os.path.join(CLAUDE_PROJECTS, "*", sid + ".jsonl"))
-            if matches:
-                return max(matches, key=os.path.getmtime)
-        pattern = os.path.join(CLAUDE_PROJECTS, "*", "*.jsonl")
+        matches = glob.glob(os.path.join(CLAUDE_PROJECTS, "*", sid + ".jsonl"))
     elif provider == "codex":
-        if sid:
-            matches = glob.glob(os.path.join(CODEX_SESSIONS, "**", f"*{sid}*.jsonl"), recursive=True)
-            if matches:
-                return max(matches, key=os.path.getmtime)
-        pattern = os.path.join(CODEX_SESSIONS, "**", "rollout-*.jsonl")
+        matches = glob.glob(os.path.join(CODEX_SESSIONS, "**", f"rollout-*{sid}.jsonl"), recursive=True)
     else:
-        return None
-    candidates = [p for p in glob.glob(pattern, recursive=True)
-                  if os.path.isfile(p) and os.path.getmtime(p) >= float(started or 0)]
-    return max(candidates, key=os.path.getmtime) if candidates else None
+        return None, None
+    return (sorted(matches)[0], sid) if matches else (None, sid)
 
 
 def encode_bounded(text):
@@ -214,13 +257,15 @@ def encode_bounded(text):
 def capture(args):
     if not SAFE_REPO.fullmatch(args.repo):
         return 2
-    source = transcript_for(args.provider, args.result_json, args.started)
+    source, sid = transcript_for(args.provider, getattr(args, "result_json", ""),
+                                 getattr(args, "session_file", ""), getattr(args, "stdout", ""))
     records = (claude_records(source) if args.provider == "claude" else codex_records(source)) if source else []
     commands, reads, outputs, interim, files, tickets = (summarize_claude(records) if args.provider == "claude"
                                                           else summarize_codex(records))
     lines = [f"# Partial triage: {args.repo}", "", f"- Stamp: {args.stamp}", f"- Repo: {args.repo}",
              f"- Provider: {args.provider}", f"- Ended: {args.ended}", "",
-             f"Source: `{os.path.basename(source)}`" if source else "Source: no transcript found", ""]
+             f"- Session ID: {sid or 'unavailable'}", f"- Started: {getattr(args, 'started', '') or 'unknown'}", "",
+             f"Source: `{os.path.basename(source)}`" if source else "Source: no transcript attributable", ""]
     if commands:
         lines += ["## Commands", ""] + [f"- `{clipped(x, 1000)}`" for x in commands] + [""]
     if reads:
@@ -232,6 +277,42 @@ def capture(args):
     lines += ["## Files and tickets touched", ""]
     lines += [f"- Files: {', '.join(f'`{redact(x)}`' for x in sorted(files)) or 'none recorded'}",
               f"- Tickets: {', '.join(sorted(tickets, key=str.lower)) or 'none recorded'}", ""]
+    output = encode_bounded(redact("\n".join(lines)))
+    path = Path(args.out)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(output, encoding="utf-8")
+    return 0
+
+
+def combine(args):
+    if not SAFE_REPO.fullmatch(args.repo):
+        return 2
+    attempts = []
+    for path in sorted(Path(args.attempt_dir).glob("partial-triage-attempt-*.md")):
+        text = path.read_text(encoding="utf-8", errors="replace")
+        provider = re.search(r"^- Provider: (.+)$", text, re.M)
+        ended = re.search(r"^- Ended: (.+)$", text, re.M)
+        session = re.search(r"^- Session ID: (.+)$", text, re.M)
+        started = re.search(r"^- Started: (.+)$", text, re.M)
+        lines = text.splitlines()
+        try:
+            source_line = next(i for i, line in enumerate(lines) if line.startswith("Source:"))
+            body = "\n".join(lines[source_line:]).strip()
+        except StopIteration:
+            body = "Source: no transcript attributable"
+        attempts.append({"provider": provider.group(1) if provider else "unknown",
+                         "ended": ended.group(1) if ended else "error",
+                         "session": session.group(1) if session else "unavailable",
+                         "started": started.group(1) if started else "unknown", "body": body})
+    if not attempts:
+        return 1
+    providers = list(dict.fromkeys(attempt["provider"] for attempt in attempts))
+    lines = [f"# Partial triage: {args.repo}", "", f"- Stamp: {args.stamp}", f"- Repo: {args.repo}",
+             f"- Provider: {', '.join(providers)}", f"- Ended: {args.ended}", ""]
+    for index, attempt in enumerate(attempts, 1):
+        lines.extend([f"## Attempt {index}: {attempt['provider']} (ended {attempt['ended']})",
+                      f"- Session ID: {attempt['session']}", f"- Started: {attempt['started']}", "",
+                      attempt["body"], ""])
     output = encode_bounded(redact("\n".join(lines)))
     path = Path(args.out)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -284,8 +365,17 @@ def main():
     for name in ("repo", "provider", "ended", "stamp", "out"):
         c.add_argument("--" + name, required=True)
     c.add_argument("--result-json", default="")
+    c.add_argument("--session-file", default="")
+    c.add_argument("--stdout", default="")
     c.add_argument("--started", default="0")
     c.set_defaults(func=capture)
+    co = sub.add_parser("combine")
+    co.add_argument("--repo", required=True)
+    co.add_argument("--stamp", required=True)
+    co.add_argument("--ended", required=True)
+    co.add_argument("--attempt-dir", required=True)
+    co.add_argument("--out", required=True)
+    co.set_defaults(func=combine)
     e = sub.add_parser("expire")
     e.add_argument("--code-dir", required=True)
     e.add_argument("--repo", required=True)

@@ -1,5 +1,6 @@
 import json
 import os
+import shutil
 import sys
 import tempfile
 import time
@@ -63,6 +64,82 @@ class PartialTriageTests(unittest.TestCase):
         self.assertNotIn("topsecret", digest)
         self.assertNotIn("abc.def", digest)
         self.assertLessEqual(out.stat().st_size, triage.MAX_BYTES)
+
+    def test_transcripts_are_attributed_only_by_exact_session_id(self):
+        projects = self.dir / "projects"
+        (projects / "a").mkdir(parents=True)
+        (projects / "b").mkdir(parents=True)
+        (projects / "a" / "wanted.jsonl").write_text('{"type":"assistant","message":{"content":"REPO_A_FINDING"}}\n')
+        (projects / "b" / "unrelated.jsonl").write_text('{"type":"assistant","message":{"content":"REPO_B_UNRELATED_FINDING"}}\n')
+        triage.CLAUDE_PROJECTS = str(projects)
+        result = self.dir / "result.json"
+        result.write_text(json.dumps({"session_id": "wanted"}))
+        out = self.dir / "triage.md"
+        args = type("Args", (), {"repo": "demo", "provider": "claude", "ended": "error", "stamp": "s1",
+                                  "result_json": str(result), "started": "0", "out": str(out)})
+        self.assertEqual(triage.capture(args), 0)
+        self.assertIn("REPO_A_FINDING", out.read_text())
+        self.assertNotIn("REPO_B_UNRELATED_FINDING", out.read_text())
+
+        result.write_text("{}")
+        args = type("Args", (), {"repo": "demo", "provider": "claude", "ended": "error", "stamp": "s2",
+                                  "result_json": str(result), "started": "0", "out": str(out)})
+        self.assertEqual(triage.capture(args), 0)
+        self.assertIn("no transcript attributable", out.read_text())
+        self.assertNotIn("REPO_A_FINDING", out.read_text())
+        self.assertNotIn("REPO_B_UNRELATED_FINDING", out.read_text())
+
+    def test_codex_rollout_requires_stdout_session_id(self):
+        sessions = self.dir / "sessions"
+        sessions.mkdir()
+        (sessions / "rollout-wanted.jsonl").write_text(
+            '{"type":"event_msg","payload":{"type":"agent_message","message":"CODEX_WANTED"}}\n')
+        (sessions / "rollout-unrelated.jsonl").write_text(
+            '{"type":"event_msg","payload":{"type":"agent_message","message":"CODEX_UNRELATED"}}\n')
+        triage.CODEX_SESSIONS = str(sessions)
+        stdout = self.dir / "planner.out"
+        stdout.write_text("session id: wanted\n")
+        out = self.dir / "triage.md"
+        args = type("Args", (), {"repo": "demo", "provider": "codex", "ended": "quota-paused", "stamp": "s1",
+                                  "stdout": str(stdout), "session_file": "", "out": str(out)})
+        self.assertEqual(triage.capture(args), 0)
+        self.assertIn("CODEX_WANTED", out.read_text())
+        self.assertNotIn("CODEX_UNRELATED", out.read_text())
+        stdout.write_text("codex exited without a session header\n")
+        self.assertEqual(triage.capture(args), 0)
+        self.assertIn("no transcript attributable", out.read_text())
+        self.assertNotIn("CODEX_WANTED", out.read_text())
+
+    def test_adversarial_secret_forms_are_absent_from_entire_digest(self):
+        transcript = self.dir / "rollout-adversarial.jsonl"
+        raw_args = {
+            "arguments": json.dumps({"note": "API_KEY=synthetic-secret.txt words\\\""}),
+            "command": "curl -H 'Authorization: Basic dXNlcjpzZWNyZXQ=' "
+                       "sk-liveSecretToken123456 ghp_ghpSecretToken123456 "
+                       "gho_ghoSecretToken123456 github_pat_githubPatSecret123456 "
+                       "xoxb-xoxSecretToken123456 api_key=lowercaseSecret123 "
+                       "-----BEGIN RSA PRIVATE KEY-----\nprivateKeySecret123\n-----END RSA PRIVATE KEY-----",
+        }
+        record = {"type": "response_item", "payload": {"type": "function_call", "name": "exec_command",
+                                                            "arguments": json.dumps(raw_args)}}
+        transcript.write_text(json.dumps(record) + "\n")
+        sessions = self.dir / "sessions"
+        sessions.mkdir()
+        rollout = sessions / "rollout-adversarial-id.jsonl"
+        shutil.copyfile(transcript, rollout)
+        triage.CODEX_SESSIONS = str(sessions)
+        stdout = self.dir / "planner.out"
+        stdout.write_text("session id: adversarial-id\n")
+        out = self.dir / "partial-triage-demo.md"
+        args = type("Args", (), {"repo": "demo", "provider": "codex", "ended": "error", "stamp": "s1",
+                                  "stdout": str(stdout), "session_file": "", "out": str(out)})
+        self.assertEqual(triage.capture(args), 0)
+        digest = out.read_text()
+        for secret in ("dXNlcjpzZWNyZXQ=", "sk-liveSecretToken123456", "ghp_ghpSecretToken123456",
+                       "gho_ghoSecretToken123456", "github_pat_githubPatSecret123456", "xoxb-xoxSecretToken123456",
+                       "lowercaseSecret123", "privateKeySecret123", "synthetic-secret.txt", "words"):
+            self.assertNotIn(secret, digest)
+        self.assertNotIn("synthetic-secret.txt", digest.split("## Files and tickets touched", 1)[-1])
 
     def test_each_output_is_truncated_to_about_400_characters(self):
         output = "x" * 1000
