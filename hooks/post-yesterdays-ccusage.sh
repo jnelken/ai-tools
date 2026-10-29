@@ -8,6 +8,17 @@
 #   - `npx`, `jq`, `curl` on PATH
 #   - ccusage >= 20 for Codex data (older versions still post Claude-only)
 #
+# Table: one table for both providers, every model sorted by output tokens (most
+# first), columns Model Cost Input Output, then one column per reasoning-effort
+# level used that day (Min Low Med High XHigh Max), each row's cost split by
+# effort as a percentage. Then one total row per provider (Claude, Codex). There
+# are no cache columns: the Claude cache is the line "_Cache: 7.2M written ·
+# 209.7M read_" under the header, which sparky reads for its cache rankings.
+# ccusage has no effort field, so lib/effort-mix.py reads it from Claude Code's
+# transcripts and Codex's rollouts; with no data the effort columns are left out.
+# sparky must parse the extra columns first (ccusageLeaderboard.ts,
+# EFFORT_COLUMNS), or a post that carries them is dropped from the leaderboard.
+#
 # State: ~/.claude/.ccusage-state/last-posted holds the most recent
 # YYYY-MM-DD that was successfully posted. Catchup posts every day from
 # last+1 through yesterday, one message per day. The marker advances only
@@ -87,6 +98,20 @@ run_ccusage() {
   return "$rc"
 }
 
+# effort_mix <ccusage json> <day> [--codex] — prints the effort-mix JSON for the
+# day, or {} if it cannot be computed. Tries python3 on PATH first, then the
+# system one: a version-manager shim (mise, pyenv) can exit non-zero depending on
+# the directory or HOME it is run from, and the post must not depend on that.
+effort_mix() {
+  local py out helper
+  helper="$(dirname "$0")/lib/effort-mix.py"
+  for py in python3 /usr/bin/python3; do
+    command -v "$py" >/dev/null 2>&1 || continue
+    out=$(printf '%s' "$1" | "$py" "$helper" ${3:-} "$2" 2>/dev/null) && [ -n "$out" ] && { printf '%s' "$out"; return 0; }
+  done
+  printf '{}'
+}
+
 # report_failure <day> <what> — log it, and notify at most once per calendar day
 # so a persistent failure doesn't re-alert on every session start.
 report_failure() {
@@ -145,9 +170,17 @@ while [[ ! "$current" > "$yesterday" ]]; do
   codex_json=$(run_ccusage codex daily --since "$compact" --until "$compact" --json) || codex_json='{}'
   [ -z "$codex_json" ] && codex_json='{}'
 
+  # Reasoning-effort mix per model row, appended after Output (ccusage has no
+  # effort field; Claude Code's transcripts do). Any failure or no data yields
+  # {} and the table is exactly what it was before.
+  effort_json=$(effort_mix "$claude_json" "$current")
+  codex_effort_json=$(effort_mix "$codex_json" "$current" --codex)
+
   summary=$(jq -nr \
     --argjson c "$claude_json" \
     --argjson x "$codex_json" \
+    --argjson e "$effort_json" \
+    --argjson xe "$codex_effort_json" \
     --arg d "$pretty" --arg who "$who" '
     def fmt:
       if . >= 1000000 then
@@ -167,7 +200,7 @@ while [[ ! "$current" > "$yesterday" ]]; do
       );
     def cap: "\(.[0:1] | ascii_upcase)\(.[1:])";
     def claudeModel:
-      (capture("claude-(?<fam>opus|sonnet|haiku)-(?<v>\\d+-\\d+)") // null) as $m |
+      (capture("claude-(?<fam>opus|sonnet|haiku|fable)-(?<v>\\d+-\\d+)") // null) as $m |
       if $m then "\($m.fam | cap) \($m.v | gsub("-"; "."))" else . end;
     def lpad($n):
       tostring as $s | ($n - ($s | length)) as $p |
@@ -175,26 +208,32 @@ while [[ ! "$current" > "$yesterday" ]]; do
     def rpad($n):
       tostring as $s | ($n - ($s | length)) as $p |
       $s + (if $p > 0 then (" " * $p) else "" end);
-    # Row builder: model(12, left)  cost(7, right)  in(7, right)  out(7, right)  cache(7, right)
-    def row(model; cost; tin; tout; cache):
-      (model | rpad(12)) + "  " +
+    # One row layout for every provider: model(12, left, cut to fit)  cost  in  out,
+    # each 7 wide and right-aligned, then effort cells. A cell with no value (Codex
+    # cost per model) is blank, which keeps the columns aligned. Cache is not a
+    # column: the Claude cache goes on its own line under the header.
+    # eff: effort-mix cells appended after Output, each two spaces plus 5 wide
+    # (header labels, or "NN%"); empty for a row with no effort data. No
+    # apostrophes in comments: this whole program sits inside shell single quotes.
+    def rowAll(model; cost; tin; tout; eff):
+      (model | tostring | .[0:12] | rpad(12)) + "  " +
       (cost  | lpad(7))  + "  " +
       (tin   | lpad(7))  + "  " +
-      (tout  | lpad(7))  + "  " +
-      (cache | lpad(7));
-    # Claude-only variant that keeps cache creation (write) and cache read
-    # apart instead of summing them — ccusage reports them separately, and
-    # collapsing them loses the one signal that distinguishes profitable
-    # cache reuse from paying the write premium over and over.
-    def rowClaude(model; cost; tin; tout; cachew; cacher):
-      (model | rpad(12)) + "  " +
-      (cost  | lpad(7))  + "  " +
-      (tin   | lpad(7))  + "  " +
-      (tout  | lpad(7))  + "  " +
-      (cachew | lpad(7)) + "  " +
-      (cacher | lpad(7));
-    def sep: ("─" * 50);
-    def sepClaude: ("─" * 58);
+      (tout  | lpad(7))  + eff;
+    # gpt-6-luna -> "Luna 6", gpt-5.3-codex -> "Codex 5.3", gpt-5.5 -> "GPT 5.5"
+    def codexModel:
+      (capture("^gpt-(?<v>[0-9][0-9.]*)(?:-(?<n>.+))?$") // null) as $m |
+      if $m then ((if $m.n == null then "GPT" else ($m.n | split("-") | map(cap) | join(" ")) end) + " " + $m.v) else . end;
+    def lvOrder: ["Min","Low","Med","High","XHigh","Max"];
+    # Re-lay a row percentages (laid out over its own level list) onto the shared
+    # columns; a level the row never used is 0%.
+    def remap($own; $lv):
+      if . == null or ($own | length) == 0 then null
+      else . as $p | [ $lv[] as $l | ($own | index($l)) as $i | if $i == null then 0 else $p[$i] end ]
+      end;
+    def effCells: if . == null then "" else map("  " + (tostring | lpad(5))) | join("") end;
+    def pctCells: if . == null then "" else map("\(.)%") | effCells end;
+    def sepAll($n): ("─" * (39 + 7 * $n));
 
     # Pull the single-day row from each report. ccusage emits {"daily": [...]}
     # for days with data, bare [] for days with none, and we coerce a parse
@@ -207,6 +246,22 @@ while [[ ! "$current" > "$yesterday" ]]; do
     ($cr.totalCost // 0) as $ccost |
     ($xr.costUSD   // 0) as $xcost |
 
+    # Effort columns shared by both providers: the levels either one used that day.
+    (($e.levels // []) + ($xe.levels // [])) | unique as $used |
+    ([lvOrder[] | select(. as $l | $used | index($l))] + [$used[] | select(. as $l | lvOrder | index($l) | not)]) as $lv |
+
+    # One table of every model from both providers, most output tokens first.
+    ((($cr.modelBreakdowns // []) | map({
+        name: (.modelName | claudeModel), cost: (.cost // 0 | money),
+        tin: (.inputTokens // 0), tout: (.outputTokens // 0),
+        pct: ($e.rows[.modelName] | remap($e.levels // []; $lv)) }))
+      +
+      (($xr.models // {}) | to_entries | map({
+        name: (.key | codexModel), cost: "",
+        tin: (.value.inputTokens // 0), tout: (.value.outputTokens // 0),
+        pct: ($xe.rows[.key] | remap($xe.levels // []; $lv)) }))
+    | sort_by(-.tout)) as $rows |
+
     if ($chas | not) and ($xhas | not) then
       "_\($d) — \($who): no activity_"
     else
@@ -214,55 +269,22 @@ while [[ ! "$current" > "$yesterday" ]]; do
       "*\($d) — \($who): \(($ccost + $xcost) | money)*\n" +
       "_Claude " + (if $chas then ($ccost | money) else "none" end) +
       " · Codex "  + (if $xhas then ($xcost | money) else "none" end) + "_\n" +
+      (if $chas then "_Cache: \($cr.cacheCreationTokens // 0 | fmt) written · \($cr.cacheReadTokens // 0 | fmt) read_\n" else "" end) +
       "```\n" +
-
-      # ── Claude block ───────────────────────────────────────────────
-      (if $chas then
-        ($cr.modelBreakdowns // []) as $cm |
-        "Claude\n" +
-        rowClaude("Model"; "Cost"; "Input"; "Output"; "CacheW"; "CacheR") + "\n" +
-        (if ($cm | length) > 0
-          then ($cm | map(
-            rowClaude(.modelName | claudeModel;
-                .cost // 0 | money;
-                .inputTokens // 0 | fmt;
-                .outputTokens // 0 | fmt;
-                .cacheCreationTokens // 0 | fmt;
-                .cacheReadTokens // 0 | fmt)
-          ) | join("\n")) + "\n" + sepClaude + "\n"
-          else "" end) +
-        rowClaude("Claude";
-            $ccost | money;
-            $cr.inputTokens // 0 | fmt;
-            $cr.outputTokens // 0 | fmt;
-            $cr.cacheCreationTokens // 0 | fmt;
-            $cr.cacheReadTokens // 0 | fmt)
-       else "Claude: no activity" end) +
-      "\n\n" +
-
-      # ── Codex block ────────────────────────────────────────────────
-      # Per-model cost is not exposed in `ccusage codex --json` (the Rust
-      # adapter aggregates cost at the day level only). Per-model rows leave
-      # the Cost column blank; the Codex total row carries the dollar figure.
-      (if $xhas then
-        ($xr.models // {}) as $xm |
-        "Codex\n" +
-        row("Model"; "Cost"; "Input"; "Output"; "Cache") + "\n" +
-        (if ($xm | length) > 0
-          then ($xm | to_entries | map(
-            row(.key;
-                "";
-                .value.inputTokens // 0 | fmt;
-                .value.outputTokens // 0 | fmt;
-                .value.cacheReadTokens // 0 | fmt)
-          ) | join("\n")) + "\n" + sep + "\n"
-          else "" end) +
-        row("Codex";
-            $xcost | money;
-            $xr.inputTokens // 0 | fmt;
-            $xr.outputTokens // 0 | fmt;
-            $xr.cacheReadTokens // 0 | fmt)
-       else "Codex: no activity" end) +
+      rowAll("Model"; "Cost"; "Input"; "Output"; (if ($lv | length) > 0 then ($lv | effCells) else "" end)) + "\n" +
+      (if ($rows | length) > 0
+        then ($rows | map(rowAll(.name; .cost; .tin | fmt; .tout | fmt; .pct | pctCells)) | join("\n"))
+             + "\n" + sepAll($lv | length) + "\n"
+        else "" end) +
+      # One total row per provider that had activity.
+      ([ (if $chas then
+            rowAll("Claude"; $ccost | money; $cr.inputTokens // 0 | fmt; $cr.outputTokens // 0 | fmt;
+                   ($e.total | remap($e.levels // []; $lv) | pctCells))
+          else empty end),
+         (if $xhas then
+            rowAll("Codex"; $xcost | money; $xr.inputTokens // 0 | fmt; $xr.outputTokens // 0 | fmt;
+                   ($xe.total | remap($xe.levels // []; $lv) | pctCells))
+          else empty end) ] | join("\n")) +
       "\n```"
     end
   ' 2>/dev/null) || summary="$pretty — $who: (parse error)"
