@@ -933,6 +933,8 @@ PY
     if [ -n "${ADVANCE_ROADMAP_BUDGET_PLANNER:-}" ]; then
       WORKERS="$(jq -r '.worker // empty' "$RUN_DIR/batch-budget.json")"
       export ADVANCE_ROADMAP_BUDGET_REVIEWERS="$(jq -r '.reviewers | join(" ")' "$RUN_DIR/batch-budget.json")"
+      export ADVANCE_ROADMAP_BUDGET_REVIEW_STRATEGY="$(jq -r '.review_strategy // empty' "$RUN_DIR/batch-budget.json")"
+      export ADVANCE_ROADMAP_BUDGET_REVIEW_FALLBACK_REASON="$(jq -r '.review_fallback_reason // empty' "$RUN_DIR/batch-budget.json")"
       if [ -z "$WORKERS" ]; then
         record skipped-quota "batch release has no worker reservation"; exit 0
       fi

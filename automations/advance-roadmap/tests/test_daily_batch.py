@@ -264,6 +264,40 @@ class DailyBatchTest(unittest.TestCase):
         self.assertFalse(self.trace_exists())
         self.assertIn('required codex reviewer is gated (5h 100% >= 70%)', self.state()['skipped_reason'])
 
+    def test_cursor_gate_automatically_admits_codex_with_claude_review(self):
+        self.repo('a')
+        self.env.update(FAKE_WORKER_CHAIN='codex', FAKE_REVIEWER_GATES=json.dumps({'gates': [
+            {'provider': 'cursor', 'state': 'over', 'reason': 'auto pool 100%',
+             'reset_at': '2026-11-03T10:30:00-05:00'},
+            {'provider': 'codex', 'state': 'ok'}, {'provider': 'claude', 'state': 'ok'}]}))
+        self.run_batch()
+        state = self.state()
+        self.assertTrue(self.trace_exists(), 'Codex work can be reviewed by Claude')
+        self.assertEqual(state['review_fallback'],
+                         'review fallback: cross-provider (cursor gated until 2026-11-03T10:30:00-05:00)')
+
+    def test_cursor_gate_does_not_admit_claude_when_it_is_its_only_reviewer(self):
+        self.repo('a')
+        self.env.update(FAKE_WORKER_CHAIN='claude', FAKE_REVIEWER_GATES=json.dumps({'gates': [
+            {'provider': 'cursor', 'state': 'over', 'reason': 'auto pool 100%',
+             'reset_at': '2026-11-03T10:30:00-05:00'},
+            {'provider': 'codex', 'state': 'over'}, {'provider': 'claude', 'state': 'ok'}]}))
+        self.run_batch()
+        state = self.state()
+        self.assertFalse(self.trace_exists(), 'Claude cannot review its own work')
+        self.assertEqual(state['phase'], 'skipped')
+        self.assertIn('cross-provider reviewer', state['skipped_reason'])
+
+    def test_cursor_available_keeps_default_two_stage_admission(self):
+        self.repo('a')
+        self.env['FAKE_REVIEWER_GATES'] = json.dumps({'gates': [
+            {'provider': 'cursor', 'state': 'ok'}, {'provider': 'codex', 'state': 'ok'},
+            {'provider': 'claude', 'state': 'ok'}]})
+        self.run_batch()
+        state = self.state()
+        self.assertTrue(self.trace_exists())
+        self.assertNotIn('review_fallback', state)
+
     def test_reviewer_admission_skip_records_the_reviewer_gate(self):
         self.repo('a')
         self.env.update(FAKE_REVIEWER_GATES=json.dumps({'gates': [
@@ -920,7 +954,8 @@ export const postBatchSummary = ({client, channel, state, records}) =>
 """)
         directory = self.root / 'summary'
         directory.mkdir()
-        (directory / 'batch.json').write_text(json.dumps({'queue': [], 'budget': {
+        (directory / 'batch.json').write_text(json.dumps({'queue': [],
+            'review_fallback': 'review fallback: cross-provider (cursor gated until reset)', 'budget': {
             'held': [{'repo':'a', 'reason':'shared headroom'}]}}))
         with self.budget_context(), patch.object(daily_batch, 'ROOT', self.root), patch.object(
                 daily_batch, 'slackagent_script', return_value=slack / 'scripts/post-roadmap-summary.mjs'), patch.dict(
@@ -928,7 +963,11 @@ export const postBatchSummary = ({client, channel, state, records}) =>
             self.assertTrue(daily_batch.post_slack_summary(directory))
         records = [json.loads(line) for line in posts.read_text().splitlines()]
         self.assertEqual(len(records), 1)
-        self.assertEqual(records[0]['text'], 'Batch summary\nBudget hold: a: shared headroom.')
+        self.assertEqual(records[0]['text'],
+                         'Batch summary\nreview fallback: cross-provider (cursor gated until reset)'
+                         '\nBudget hold: a: shared headroom.')
+        self.assertIn('review fallback: cross-provider (cursor gated until reset)',
+                      daily_batch.quota_line(json.loads((directory / 'batch.json').read_text())))
 
     def test_failed_summary_never_fails_the_batch(self):
         if not shutil.which('node'):
