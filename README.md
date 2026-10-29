@@ -23,6 +23,7 @@ Personal AI coding tools — Claude Code and Cursor skills, slash commands, hook
 | [`kosha-triage`](skills/kosha-triage) | Migrate stale ClickUp captures into the markdown vault, then delete the originals |
 | [`jnelken-linear`](skills/jnelken-linear) | File or relabel a personal-workspace (DEV-*) Linear issue — refuses to create one without the `repo/<directory>` label advance-roadmap routes on |
 | [`linear-cli`](skills/linear-cli) | Read/write Linear from the shell with the `linear` CLI — the fallback when MCP is logged out or expired, plus the default filters that make `issue list` hide issues that exist |
+| [`lunchmoney-hygiene`](skills/lunchmoney-hygiene) | Audit Lunch Money integrity and grouping opportunities; verify cache coverage, compare runs, and surface actionable changes without live financial edits |
 | [`monthly-retro`](skills/monthly-retro) | Generate a stakeholder-readable monthly retrospective from commit history |
 | [`monthly-retro-commits`](skills/monthly-retro-commits) | Export commit-level effort data (TSV, lines-changed sorted) for the retro skill |
 | [`move-diff`](skills/move-diff) | Relocate uncommitted changes to a different branch/worktree |

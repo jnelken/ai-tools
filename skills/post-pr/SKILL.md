@@ -58,6 +58,38 @@ If several targets were given, run them **in parallel**. Targets in different wo
 
 Serialize only for a real dependency: two targets sharing a worktree or branch, a sub-PR whose trunk another target is still merging into, or the user stating a hard ordering requirement. A soft ordering hint ("API first so the endpoint exists") is not a hard requirement: run in parallel and flag the risk in the report (e.g. "UI PR announced before the API PR merged").
 
+### 1.5. Link the Linear ticket
+
+Linear links a PR to a ticket through a magic word in the PR description, placed before the ID. Linear's magic words are a fixed list, but the skill chooses one per PR, for personal (`DEV-N`) and work (`CON-N`) tickets alike. Pick the word that matches what this PR does for the ticket:
+
+- `Fixes` (closing): this PR delivers what remains of the ticket's acceptance criteria. When it merges, the ticket moves to Done under the team's PR-merge rule.
+- `Part of` (non-closing): this PR is one of several for the ticket, or delivers only part of it. The ticket moves through the workflow but is not marked Done.
+- `Related to` (relation): this PR touches or informs the ticket without implementing its acceptance criteria. The ticket's status does not change.
+
+Magic words in PR comments do not link, so the lines go in the description.
+
+1. Collect the ticket IDs. Take them from the branch name (copied Linear branch names carry the ID), the subjects of the branch's own commits, and the PR's current title and body:
+
+   ```bash
+   { git -C <WORKTREE> rev-parse --abbrev-ref HEAD
+     git -C <WORKTREE> log origin/<BASE_REF>..HEAD --format=%s
+     gh pr view <PR_NUMBER> --repo <OWNER/REPO> --json title,body -q '.title + "\n" + .body'
+   } | grep -oiE '\b(dev|con)-[0-9]+\b' | tr a-z A-Z | sort -u
+   ```
+
+   `<BASE_REF>` is the PR's base branch (`gh pr view --json baseRefName`).
+2. No IDs: skip the rest of this step and report `Linear: no ticket found`. Do not create a ticket here. Filing tickets is a separate decision.
+3. For each ID, read its acceptance criteria (`linear issue view <ID>`; for `CON-` tickets add `--workspace concentro`), then pick the word:
+   - Never `Fixes` on an internal-only PR (step 3.5, base is not the default branch). A sub-PR merging into a trunk would close the ticket before main has the work. Use `Part of` or `Related to`.
+   - Use `Fixes` only when this PR covers what remains of the ticket and no other open PR is still needed for it.
+   - When unsure, use `Part of` and say so in the report.
+4. If the description already links an ID with any word, leave that ID alone. Skip the edit when no IDs are left.
+5. Otherwise add the lines to the description, one per word, for example `Fixes DEV-317, DEV-318` and `Related to DEV-319`. Extend an existing line that already uses the same word rather than adding a duplicate. Write the body through a file, as step 5 does, and change only these lines; never regenerate the rest of the body.
+
+   ```bash
+   gh pr edit <PR_NUMBER> --repo <OWNER/REPO> --body-file /tmp/pr-body.txt
+   ```
+
 ### 2. Review until clean
 
 ```
@@ -284,6 +316,7 @@ Concentro-Inc/api#1271
 - Preview: woodrow only — set (or: already set, n/a (not visible in a preview))
 - Slack: posted (or: skipped, already in dedup state)
 - Badge: appended    Draft: cleared
+- Linear: Fixes DEV-317; Part of DEV-318 (or: already linked, or: no ticket found)
 - Product update: posted (or: declined, n/a (no screenshot), not offered (unattended), failed (<why>))
 ```
 
