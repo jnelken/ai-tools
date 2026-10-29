@@ -191,6 +191,31 @@ class DailyBatchTest(unittest.TestCase):
         self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
         return p
 
+    def test_review_fallback_note_tracks_each_reservation_refresh_in_both_directions(self):
+        class ChangingBudget:
+            def __init__(self):
+                self.decisions = [
+                    {'strategy': 'cursor-then-codex', 'reason': None},
+                    {'strategy': 'cross-provider', 'reason': 'cursor gated until reset'},
+                    {'strategy': 'cursor-then-codex', 'reason': None},
+                ]
+                self.review_strategy = None
+
+            def refresh(self):
+                self.review_strategy = self.decisions.pop(0)
+
+        batch = daily_batch.Batch.__new__(daily_batch.Batch)
+        batch.budget = ChangingBudget()
+        batch.state = {'review_fallback': 'review fallback: cross-provider (stale)'}
+
+        batch.refresh_budget()
+        self.assertNotIn('review_fallback', batch.state, 'Cursor reset clears the stale note')
+        batch.refresh_budget()
+        self.assertEqual(batch.state['review_fallback'],
+                         'review fallback: cross-provider (cursor gated until reset)')
+        batch.refresh_budget()
+        self.assertNotIn('review_fallback', batch.state, 'a later reset clears it again')
+
     def events(self):
         return [json.loads(line) for line in (self.root / 'trace.jsonl').read_text().splitlines()]
 

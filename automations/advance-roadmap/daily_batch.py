@@ -597,11 +597,23 @@ class Batch:
         except (OSError, ValueError, TypeError, KeyError):
             return None
 
+    def sync_review_fallback(self):
+        """Keep the visible batch note aligned with the latest reservation decision."""
+        decision = self.budget.review_strategy
+        reason = decision.get("reason")
+        if reason:
+            self.state["review_fallback"] = f"review fallback: cross-provider ({reason})"
+        else:
+            self.state.pop("review_fallback", None)
+        return decision
+
+    def refresh_budget(self):
+        self.budget.refresh()
+        return self.sync_review_fallback()
+
     def run(self):
         self.budget = RoadmapBudget()
-        decision = self.budget.review_strategy
-        if decision.get("reason"):
-            self.state["review_fallback"] = f'review fallback: cross-provider ({decision["reason"]})'
+        self.sync_review_fallback()
         for item in self.state["queue"]:
             item["verdict_check"] = repo_priority(item["repo"], self.directory / "linear-snapshot.json")
         self.state["queue"].sort(key=lambda i: i["verdict_check"]["priority"])
@@ -621,7 +633,7 @@ class Batch:
         while any(i["status"] in {"queued", "planning"} for i in self.state["queue"]):
             self.poll()
             self.spawn_threads()
-            self.budget.refresh()
+            self.refresh_budget()
             slots = self.limit - sum(i["status"] == "planning" for i in self.state["queue"])
             launched = 0
             for item in sorted((i for i in self.state["queue"] if i["status"] == "queued"),
@@ -641,7 +653,7 @@ class Batch:
             time.sleep(POLL_S)
         self.state["phase"] = "approving"
         self.write()
-        self.budget.refresh()
+        self.refresh_budget()
         self.approve_threads()
         self.state["phase"] = "implementing"
         self.write()
@@ -659,7 +671,7 @@ class Batch:
             if chosen:
                 # Convert expected costs to full costs atomically against a fresh
                 # reading. Other jobs' and interactive reservations remain charged.
-                self.budget.refresh()
+                self.refresh_budget()
                 held = []
                 for item in chosen:
                     allocation = self.budget.choose(item=item)
