@@ -354,8 +354,8 @@ def _epoch(value: Any) -> float | None:
 
 
 def live_claude_reading() -> dict[str, Any] | None:
-    """claude_quota.quota(): the OAuth usage endpoint, falling back inside it to the statusline cache.
-    None when probes are off, the module cannot be loaded or it has no windows."""
+    """Only OAuth observations from claude_quota.quota(); validate statusline fallback separately.
+    None when probes are off, the module cannot be loaded or it has no OAuth windows."""
     if not probes_enabled():
         return None
     try:
@@ -367,7 +367,8 @@ def live_claude_reading() -> dict[str, Any] | None:
         return None
     windows = quota.get("windows") if isinstance(quota, dict) else None
     observed = _num(quota.get("observed_at")) if isinstance(quota, dict) else None
-    if not isinstance(windows, dict) or not windows or observed is None:
+    if (not isinstance(windows, dict) or not windows or observed is None
+            or quota.get("source") != "oauth_usage"):
         return None
     return {"observed_at": observed, "source": "probe",
             "windows": {key: {"used_pct": (windows.get(key) or {}).get("used_percentage"),
@@ -376,11 +377,13 @@ def live_claude_reading() -> dict[str, Any] | None:
 
 
 def statusline_claude_reading() -> dict[str, Any] | None:
-    """The statusline cache file, observed at its own timestamp (the file's mtime without one)."""
+    """Marked rate_limits data only; older unmarked files and loading placeholders are untrusted."""
     if not CLAUDE_USAGE.is_file():
         return None
     try:
         raw = json.loads(CLAUDE_USAGE.read_text(encoding="utf-8"))
+        if raw.get("source") != "rate_limits":
+            return None
         observed = _num(raw.get("timestamp")) or CLAUDE_USAGE.stat().st_mtime
     except (OSError, json.JSONDecodeError, AttributeError):
         return None
@@ -395,10 +398,11 @@ def statusline_claude_reading() -> dict[str, Any] | None:
 def probe_claude(state: dict[str, Any]) -> None:
     prov = state["providers"]["claude"]
     now = time.time()
-    # OAuth failures can retain old cached windows; compare observation times rather than
-    # letting any cached live result suppress a newer statusline reading.
-    readings = [r for r in (live_claude_reading(), statusline_claude_reading()) if r is not None]
-    reading = max(readings, key=lambda r: r["observed_at"]) if readings else None
+    # Fresh OAuth wins even over a newer statusline. After a failed probe the OAuth cache
+    # can be stale; only then fall back to a statusline observation with known provenance.
+    reading = live_claude_reading()
+    if reading is None or now - reading["observed_at"] > CLAUDE_READING_MAX_AGE_S:
+        reading = statusline_claude_reading() or reading
     if reading is None:
         # No source at all. A stored reading we took ourselves survives only while it is still recent;
         # one with no observation time (a hand-written state, an older usage.py) is left alone.

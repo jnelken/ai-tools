@@ -657,12 +657,12 @@ class ClaudeProbeTests(unittest.TestCase):
         """A claude_quota.py whose quota() returns `body` (a Python expression), as usage.py would import it."""
         lib = self.dir / f"lib{len(list(self.dir.glob('lib*')))}"
         lib.mkdir(exist_ok=True)
-        lib.joinpath("claude_quota.py").write_text(f"def quota():\n    return {body}\n")
+        lib.joinpath("claude_quota.py").write_text(f"def quota():\n    return {{'source': 'oauth_usage', **({body})}}\n")
         return mock.patch.object(usage, "claude_quota_lib", return_value=lib)
 
     def write_statusline(self, five, age=60, reset=FUTURE):
         self.statusline.write_text(json.dumps({
-            "timestamp": time.time() - age,
+            "timestamp": time.time() - age, "source": "rate_limits",
             "five_hour": {"used_percentage": five, "reset_epoch": reset},
             "seven_day": {"used_percentage": 19, "reset_epoch": reset}}))
 
@@ -682,9 +682,9 @@ class ClaudeProbeTests(unittest.TestCase):
         self.assertEqual(prov["five_hour"]["source"], "probe")
         self.assertEqual(prov["five_hour"]["reset_epoch"], int(FUTURE))  # ISO resets_at normalized to epoch
 
-    def test_newer_statusline_enforces_the_gate_when_oauth_keeps_cached_windows(self):
+    def test_trusted_statusline_enforces_the_gate_when_oauth_keeps_stale_windows(self):
         self.write_statusline(99, age=30)
-        for age in (16 * 60, 5 * 60):
+        for age in (16 * 60, 60 * 60):
             with self.subTest(live_age=age), self.stub_quota(
                     f"{{'observed_at': {time.time() - age}, 'windows': {{"
                     "'five_hour': {'used_percentage': 10, 'resets_at': None}, "
@@ -694,6 +694,66 @@ class ClaudeProbeTests(unittest.TestCase):
                 gate = usage.provider_gate(self.state, 'claude', 'worker')
                 self.assertEqual(gate['state'], 'over')
                 self.assertFalse(gate['available'])
+
+    def render_statusline(self, rate_limits=None):
+        script = SCRIPT.parents[3] / "statusline" / "awesome-statusline.sh"
+        payload = {"workspace": {"current_dir": str(self.dir)}}
+        if rate_limits is not None:
+            payload["rate_limits"] = rate_limits
+        result = subprocess.run(["bash", str(script)], input=json.dumps(payload),
+                                cwd=self.dir, env={**os.environ, "HOME": str(self.dir)},
+                                capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        cache = self.dir / ".claude/state/claude-usage.json"
+        self.statusline.write_text(cache.read_text())
+        return json.loads(self.statusline.read_text())
+
+    def test_real_statusline_placeholder_cannot_override_fresh_oauth(self):
+        self.render_statusline()  # actual writer, temp HOME, missing rate_limits
+        with self.stub_quota(f"{{'observed_at': {time.time() - 30}, 'windows': {{"
+                             "'five_hour': {'used_percentage': 99, 'resets_at': None}}}"):
+            prov = self.claude()
+        self.assertEqual((prov["five_hour"]["used_pct"], prov["five_hour"]["source"]), (99, "probe"))
+        gate = usage.provider_gate(self.state, "claude", "worker")
+        self.assertEqual(gate["state"], "over")
+        self.assertFalse(gate["available"])
+
+    def test_fresh_oauth_beats_a_newer_real_statusline_reading(self):
+        self.write_statusline(0, age=0)
+        with self.stub_quota(f"{{'observed_at': {time.time() - 30}, 'windows': {{"
+                             "'five_hour': {'used_percentage': 99, 'resets_at': None}}}"):
+            prov = self.claude()
+        self.assertEqual((prov["five_hour"]["used_pct"], prov["five_hour"]["source"]), (99, "probe"))
+        self.assertFalse(usage.provider_gate(self.state, "claude", "worker")["available"])
+
+    def test_unmarked_and_placeholder_statusline_files_are_untrusted(self):
+        for source in (None, "placeholder"):
+            with self.subTest(source=source):
+                self.state = usage.empty_state()
+                self.write_statusline(0, age=0)
+                raw = json.loads(self.statusline.read_text())
+                raw.pop("source")
+                if source is not None:
+                    raw["source"] = source
+                self.statusline.write_text(json.dumps(raw))
+                self.assertIsNone(usage.statusline_claude_reading())
+                self.assertIsNone(self.claude()["five_hour"]["used_pct"])
+
+    def test_statusline_fallback_from_quota_lib_is_not_an_oauth_reading(self):
+        self.render_statusline()
+        # quota() can wrap the same untrusted statusline file after an OAuth probe failure.
+        with self.stub_quota(f"{{'source': 'statusline_cache', 'observed_at': {time.time()}, 'windows': {{"
+                             "'five_hour': {'used_percentage': 0, 'resets_at': None}}}"):
+            self.assertIsNone(self.claude()["five_hour"]["used_pct"])
+
+    def test_real_statusline_marks_real_zero_and_preserves_missing_windows_as_unknown(self):
+        self.render_statusline()
+        self.assertIsNone(usage.statusline_claude_reading())
+        raw = self.render_statusline({"five_hour": {"used_percentage": 0, "resets_at": FUTURE}})
+        self.assertEqual(raw["source"], "rate_limits")
+        prov = self.claude()
+        self.assertEqual(prov["five_hour"]["used_pct"], 0, "a real 0% reading is usable")
+        self.assertIsNone(prov["seven_day"]["used_pct"], "a missing window is not a real 0% reading")
 
     def test_extra_seven_day_variants_are_ignored(self):
         with self.stub_quota(f"{{'observed_at': {time.time()}, 'windows': {{"
@@ -736,7 +796,7 @@ class ClaudeProbeTests(unittest.TestCase):
         self.assertEqual(usage.provider_gate(self.state, "claude", "worker")["state"], "unknown")
 
     def test_statusline_without_a_timestamp_is_aged_by_its_mtime(self):
-        self.statusline.write_text(json.dumps({"five_hour": {"used_percentage": 50, "reset_epoch": FUTURE}}))
+        self.statusline.write_text(json.dumps({"source": "rate_limits", "five_hour": {"used_percentage": 50, "reset_epoch": FUTURE}}))
         os.utime(self.statusline, (time.time() - 3600, time.time() - 3600))
         self.assertIsNone(self.claude()["five_hour"]["used_pct"])
 
