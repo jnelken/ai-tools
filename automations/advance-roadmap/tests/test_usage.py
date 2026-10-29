@@ -130,8 +130,12 @@ class RoutingTests(unittest.TestCase):
         usage.apply_codex(self.state, probed(usage.parse_codex_rate_limits(app_server_result()), "app_server"))
         self.assertTrue(self.flags()["codex"]["available_for_orchestrator"])
 
-    def test_codex_weekly_over_threshold_is_gated(self):
-        usage.apply_codex(self.state, probed(usage.parse_codex_rate_limits(app_server_result(weekly=85)), "app_server"))
+    def test_codex_weekly_85_percent_is_available(self):
+        usage.apply_codex(self.state, probed(usage.parse_codex_rate_limits(app_server_result(five=10, weekly=85)), "app_server"))
+        self.assertTrue(self.flags()["codex"]["available_for_orchestrator"])
+
+    def test_codex_weekly_exhaustion_is_gated(self):
+        usage.apply_codex(self.state, probed(usage.parse_codex_rate_limits(app_server_result(weekly=90)), "app_server"))
         self.assertFalse(self.flags()["codex"]["available_for_orchestrator"])
         self.assertEqual(usage.pick_orchestrator(self.state), "claude")
 
@@ -213,11 +217,11 @@ class RoutingTests(unittest.TestCase):
         usage.apply_codex(self.state, probed(usage.parse_codex_rate_limits(app_server_result(weekly=85)), "app_server"))
         self.assertFalse(usage.apply_codex(self.state, None))
         self.assertEqual(self.state["providers"]["codex"]["weekly"]["used_pct"], 85)
-        self.assertFalse(self.flags()["codex"]["available_for_worker"])
+        self.assertTrue(self.flags()["codex"]["available_for_worker"])
 
 
 class GateMatrixTests(unittest.TestCase):
-    """70% five-hour / 80% weekly for Claude and Codex, 100% of the role's Cursor pool — in every role."""
+    """70% five-hour / 90% weekly for Claude and Codex, 100% of Cursor's monthly pool."""
 
     def gate(self, provider, role, prov=None, env=None):
         state = usage.empty_state()
@@ -231,7 +235,7 @@ class GateMatrixTests(unittest.TestCase):
                 key: {"used_pct": weekly, "reset_epoch": reset}}
 
     def test_window_boundaries_for_claude_and_codex_in_every_role(self):
-        cases = [((69.9, None), True), ((70, None), False), ((None, 79.9), True), ((None, 80), False),
+        cases = [((69.9, None), True), ((70, None), False), ((10, 85), True), ((None, 90), False),
                  ((69, 79), True), ((100, 100), False)]
         for provider in ("claude", "codex"):
             for role in ("orchestrator", "worker", "reviewer"):
@@ -240,6 +244,12 @@ class GateMatrixTests(unittest.TestCase):
                         got = self.gate(provider, role, self.windows(provider, five, weekly))
                         self.assertEqual(got["available"], available, got)
                         self.assertEqual(got["state"], "ok" if available else "over")
+
+    def test_weekly_89_percent_does_not_gate_with_healthy_five_hour(self):
+        for provider in ("claude", "codex"):
+            with self.subTest(provider=provider):
+                got = self.gate(provider, "worker", self.windows(provider, five=10, weekly=89))
+                self.assertTrue(got["available"], got)
 
     def test_cursor_pool_boundary_per_role(self):
         for role, env_key in (("worker", "ADVANCE_ROADMAP_CURSOR_WORKER_MODEL"),
@@ -454,11 +464,11 @@ class QuotaRecordTests(unittest.TestCase):
         self.assertEqual((rec["provider"], rec["reset_epoch"], rec["cause"]), ("claude", FUTURE + 60, "usage limit"))
 
     def test_without_a_primary_the_first_reset_leads_and_every_reason_is_joined(self):
-        state = self.state(codex={"weekly": {"used_pct": 85, "reset_epoch": FUTURE + 60}},
+        state = self.state(codex={"weekly": {"used_pct": 90, "reset_epoch": FUTURE + 60}},
                            claude={"five_hour": {"used_pct": 90, "reset_epoch": FUTURE}})
         rec = usage.quota_record(state, "orchestrator")
         self.assertEqual((rec["provider"], rec["reset_epoch"]), ("claude", FUTURE))
-        self.assertEqual(rec["cause"], "codex: weekly 85% >= 80%; claude: 5h 90% >= 70%")
+        self.assertEqual(rec["cause"], "codex: weekly 90% >= 90%; claude: 5h 90% >= 70%")
 
     def test_the_live_gate_fills_a_reset_the_attempt_lacks(self):
         state = self.state(claude={"last_limit_hit": {"reset_epoch": FUTURE, "observed_at": usage.now_iso()}})

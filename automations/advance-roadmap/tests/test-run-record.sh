@@ -22,9 +22,9 @@ import json, os, sys
 cmd = sys.argv[-1]
 if "quota-record" in sys.argv:
     print(json.dumps({"role": "orchestrator", "provider": "claude", "reset_epoch": 1791906600,
-                      "reset_at": "2026-10-13T11:50:00-04:00", "cause": "codex: weekly 85%; claude: session limit",
+                      "reset_at": "2026-10-13T11:50:00-04:00", "cause": "codex: weekly 90%; claude: session limit",
                       "providers": [
-        {"provider": "codex", "state": "over", "cause": "weekly 85%", "reset_epoch": None, "reset_at": None},
+        {"provider": "codex", "state": "over", "cause": "weekly 90%", "reset_epoch": None, "reset_at": None},
         {"provider": "claude", "state": "limited", "cause": "session limit",
          "reset_epoch": 1791906600, "reset_at": "2026-10-13T11:50:00-04:00"}]}))
     sys.exit(0)
