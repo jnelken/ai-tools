@@ -8,7 +8,7 @@
 - **Follow-up (O12):** the Claude reviewer estimate rests on 2 samples. Prefer a proxy (worker/subagent p80, scaled) until there are ≥5.
 - **G1 (#16):** fixing 9 review findings, and must adopt per-window costs from #17.
 - **DEV-320 (slackagent#7 plus #14):** fixed; verification queued through fanout.
-- **Open decision for Jake:** DEV-320 channel ID or reinstall.
+- **DEV-320 channel:** #agent-blockers is `C0CD946GNMP` (Jake, 10-29 17:45). It's set as UNBLOCK_ROADMAP_CHANNEL at deploy; no reinstall is needed. The Claude verifier queued via fanout sat waiting on Claude 5h headroom (correct behavior), so it was replaced with a Codex verifier, which now costs under 1 weekly point.
 
 **Wave 2 (10-29 03:15):**
 - **E2, PR #12:** round 2 is verified by Claude. P1-1, P2-3, P2-4 and P2-5 are FIXED. P1-2 (redaction variants) and P2-6 (the per-attempt bound) are PARTIAL, and there are new findings (over-redaction, the batch-cancel save, an unattributable attempt erasing research). Round 3 is written in `~/.claude/state/fanout/review-ai-tools-12/fix-request-r3.txt` and goes out at 07:21.
