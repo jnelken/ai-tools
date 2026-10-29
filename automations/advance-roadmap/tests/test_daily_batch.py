@@ -416,6 +416,69 @@ else:
         self.assertTrue(any(i.get('outcome') == 'skipped-quota' for r, i in by_repo.items() if r != 'a'))
         self.assertTrue(all(i['status'] == 'finished' for i in by_repo.values()))
 
+    def test_controller_failure_keeps_live_planner_leases_until_process_exit(self):
+        self.repo('a')
+        (self.root / 'run.sh').write_text(r'''#!/bin/zsh
+exec "$FAKE_PYTHON" - <<'PYTHON'
+import os,time
+from pathlib import Path
+root = Path(os.environ['ADVANCE_ROADMAP_ROOT'])
+(root / 'planner-alive').touch()
+while not (root / 'planner-exit').exists():
+    time.sleep(.01)
+PYTHON
+''')
+        launched = {}
+        original_launch = daily_batch.Batch.launch
+        original_refresh = daily_batch.RoadmapBudget.refresh
+
+        def launch(batch, item):
+            original_launch(batch, item)
+            launched['proc'] = batch.procs[item['stamp']]
+            launched['leases'] = set(item['budget_leases'])
+            deadline = time.monotonic() + 5
+            while not (self.root / 'planner-alive').exists() and time.monotonic() < deadline:
+                time.sleep(.01)
+            self.assertTrue((self.root / 'planner-alive').exists())
+
+        def refresh(budget):
+            if launched:
+                raise subprocess.TimeoutExpired('usage.py budget-input', 120)
+            return original_refresh(budget)
+
+        b = daily_batch.agent_budget
+        with self.budget_context(), patch.object(daily_batch, 'ROOT', self.root), patch.object(
+                daily_batch.shared, 'ROOT', self.root), patch.object(
+                daily_batch.shared, 'LIB', self.root / 'lib'), patch.object(
+                daily_batch.shared, 'RUN_SH', self.root / 'run.sh'), patch.object(
+                daily_batch.shared, 'LOG', None), patch.object(
+                daily_batch, 'POLL_S', .01), patch.object(
+                daily_batch.shutil, 'which', return_value=None), patch.object(
+                daily_batch.Batch, 'launch', launch), patch.object(
+                daily_batch.RoadmapBudget, 'refresh', refresh), patch.object(
+                sys, 'argv', ['daily_batch.py', '--lanes', '1', '--threads', '1']):
+            try:
+                self.assertEqual(daily_batch.main(), 1)
+                proc = launched['proc']
+                self.assertIsNone(proc.poll(), 'the planner is still making its fake model call')
+                self.assertEqual(self.state()['queue'][0]['status'], 'planning')
+                with b.lock():
+                    leases = b.reap()
+                self.assertTrue(launched['leases'])
+                self.assertEqual({lease['id'] for lease in leases}, launched['leases'])
+                self.assertTrue(all(lease['pid'] == proc.pid for lease in leases))
+            finally:
+                (self.root / 'planner-exit').touch()
+                if launched:
+                    proc = launched['proc']
+                    try:
+                        proc.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        proc.kill()
+                        proc.wait()
+            with b.lock():
+                self.assertEqual(b.reap(), [], 'the dead lane PID must free its reservations')
+
     def test_expected_cost_and_conversion_follow_the_first_fitting_worker(self):
         with self.budget_context(), patch.object(daily_batch, 'ROOT', self.root), patch.object(daily_batch, 'dispatch_rates', return_value={'a': .6}):
             budget = daily_batch.RoadmapBudget(dry_run=True)

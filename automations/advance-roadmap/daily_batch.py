@@ -890,7 +890,10 @@ def main():
         finally:
             if batch.budget:
                 for item in batch.state["queue"]:
-                    if item["status"] not in {"running", "canceling"}:
+                    # Model calls in detached lane processes can outlive this
+                    # controller. Their PID-bound leases must follow those calls
+                    # until process death or TTL, including unfinished planners.
+                    if item["status"] not in {"planning", "running", "canceling"}:
                         batch.budget.release(item)
             shutil.rmtree(marker_dir, ignore_errors=True)
 
