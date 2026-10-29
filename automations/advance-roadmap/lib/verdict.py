@@ -11,7 +11,7 @@ deploy status; the allowlist and the skill docs — and stores it with the verdi
     verdict.py fingerprint --snapshot S --out F [--deploys D] [--repo R]
     verdict.py check  --file V --fingerprint F --changes OUT [--max-age-hours N] [--root R]
     verdict.py save   --file V --fingerprint F --orch-result R --worker-result W --stamp S
-                      [--bookkeeping-pending]
+                      [--bookkeeping-pending] [--post-fingerprint F] [--repo R]
     verdict.py noop-check --file V --orch-result R
     verdict.py clear  --file V
     verdict.py ticket-changes --file V --fingerprint F
@@ -266,6 +266,30 @@ def cmd_ticket_changes(a):
     return 0
 
 
+def settled_fingerprint(a, orch, worker):
+    """Start from the planner's inputs; adopt only changes this bookkeeping run owns."""
+    fp = load(a.fingerprint) or {}
+    post = load(a.post_fingerprint) if a.post_fingerprint else None
+    if not isinstance(post, dict) or a.bookkeeping_pending:
+        return fp
+    if post.get("linear_ok") is True:
+        touched = {item.get("linear_id") for key in ("blockers", "closeouts")
+                   for item in orch.get(key) or [] if isinstance(item, dict)}
+        touched.add(orch.get("directive_ticket"))
+        old_issues, new_issues = fp.setdefault("issues", {}), post.get("issues") or {}
+        for issue_id in touched - {None}:
+            if issue_id in new_issues:
+                old_issues[issue_id] = new_issues[issue_id]
+            else:
+                old_issues.pop(issue_id, None)
+    repo = a.repo or orch.get("repo") or worker.get("repo")
+    if (repo and worker.get("merge_commit")
+            and any(isinstance(path, str) and path.startswith(repo + "/") for path in orch.get("archives") or [])
+            and repo in (post.get("repos") or {})):
+        fp.setdefault("repos", {})[repo] = post["repos"][repo]
+    return fp
+
+
 def cmd_save(a):
     orch, worker = load(a.orch_result) or {}, load(a.worker_result) or {}
     why = planner_failure(orch) or (worker.get("limit_text") and "the worker reported a limit")
@@ -289,7 +313,7 @@ def cmd_save(a):
             "considered": orch.get("considered", []),
             "summary": orch.get("summary"),
             **({"bookkeeping_pending": True} if a.bookkeeping_pending else {}),
-            "fingerprint": load(a.fingerprint) or {},
+            "fingerprint": settled_fingerprint(a, orch, worker),
         }, f, indent=2)
         f.write("\n")
     os.replace(tmp, a.file)
@@ -328,6 +352,7 @@ def main():
     s = sub.add_parser("save"); s.add_argument("--file", required=True); s.add_argument("--fingerprint", required=True)
     s.add_argument("--orch-result", required=True); s.add_argument("--worker-result", required=True); s.add_argument("--stamp", required=True)
     s.add_argument("--bookkeeping-pending", action="store_true")
+    s.add_argument("--post-fingerprint", default=""); s.add_argument("--repo", default="")
     s = sub.add_parser("noop-check"); s.add_argument("--file", required=True); s.add_argument("--orch-result", required=True)
     s = sub.add_parser("clear"); s.add_argument("--file", required=True)
     s = sub.add_parser("ticket-changes"); s.add_argument("--file", required=True); s.add_argument("--fingerprint", required=True)

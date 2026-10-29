@@ -201,6 +201,7 @@ PY
 
 run_required_review() {
   local who="$1" phase="$2" rc=0 verdict text gate
+  rm -f "$out.last" "$out.json" "$out.session"
   gate="$(python3 "$USAGE_PY" --root "$ROOT" gate --role reviewer --provider "$who" 2>/dev/null)"
   if [ "$?" -eq 3 ]; then
     record_review "$who" unavailable "$phase"
@@ -208,7 +209,6 @@ run_required_review() {
     echo "VERDICT: unavailable"
     return 3
   fi
-  rm -f "$out.last" "$out.json" "$out.session"
   run_reviewer "$who" "$out" || rc=$?
   if text="$(review_limit_text "$rc")" && [ -n "$text" ]; then
     # Into this round's log line first, so a failed shared-state update can't lose it.

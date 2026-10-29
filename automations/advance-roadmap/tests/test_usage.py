@@ -682,6 +682,19 @@ class ClaudeProbeTests(unittest.TestCase):
         self.assertEqual(prov["five_hour"]["source"], "probe")
         self.assertEqual(prov["five_hour"]["reset_epoch"], int(FUTURE))  # ISO resets_at normalized to epoch
 
+    def test_newer_statusline_enforces_the_gate_when_oauth_keeps_cached_windows(self):
+        self.write_statusline(99, age=30)
+        for age in (16 * 60, 5 * 60):
+            with self.subTest(live_age=age), self.stub_quota(
+                    f"{{'observed_at': {time.time() - age}, 'windows': {{"
+                    "'five_hour': {'used_percentage': 10, 'resets_at': None}, "
+                    "'seven_day': {'used_percentage': 10, 'resets_at': None}}}"):
+                prov = self.claude()
+                self.assertEqual((prov['five_hour']['used_pct'], prov['five_hour']['source']), (99, 'statusline'))
+                gate = usage.provider_gate(self.state, 'claude', 'worker')
+                self.assertEqual(gate['state'], 'over')
+                self.assertFalse(gate['available'])
+
     def test_extra_seven_day_variants_are_ignored(self):
         with self.stub_quota(f"{{'observed_at': {time.time()}, 'windows': {{"
                              "'five_hour': {'used_percentage': 10, 'resets_at': None}, "

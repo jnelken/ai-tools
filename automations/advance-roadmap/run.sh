@@ -691,6 +691,7 @@ Previous no-work verdict and what changed since (carry unchanged verdicts forwar
       # session transcript still has the assistant message that carried it: take the newest one, never
       # the prompt echo, which is a user entry.
       if [ "$ORCH" = claude ] && [ -s "$orch_out.json" ] \
+         && ! python3 "$USAGE_PY" is-error --result-json "$orch_out.json" \
          && python3 "$FENCE_PY" --result-json "$orch_out.json" --label ORCHESTRATOR_RESULT_JSON --out "$orch_out.fence" \
          && extract_json_fence ORCHESTRATOR_RESULT_JSON "$orch_out.fence" "$result"; then
         echo "(plan recovered from the planner's transcript: its final answer held no fence)"
@@ -1019,10 +1020,8 @@ PY
   else
   echo "=== worker exit=$worker_rc ==="
   [ -n "$PENDING_PLAN" ] && python3 "$PLAN_PY" --file "$PENDING_PLAN" settle --worker-result "$WORKER_RESULT" --worker-rc "$worker_rc"
-  # Re-fingerprint after the worker, not before: a bookkeeping worker's own Step 2b can flip a
-  # ticket to Needs Input or Paused, and saving the pre-worker $FINGERPRINT would make the next
-  # tick's backoff peek see that as "Jake changed something" and bypass the backoff for no reason. Never
-  # overwrites $LINEAR_SNAPSHOT — that's the record of what the orchestrator actually triaged.
+  # Keep the planner's view of the world. The post-worker snapshot is used only to settle
+  # this run's own bookkeeping changes; unrelated changes must reopen triage next time.
   POST_SNAPSHOT="$RUN_DIR/linear-snapshot-post.json"
   POST_FINGERPRINT="$RUN_DIR/fingerprint-post.json"
   if [ -f "$RUN_DIR/bookkeeping-skipped" ]; then
@@ -1036,7 +1035,8 @@ PY
   # one the next run may carry forward.
   if [ -z "$BUSY_REPOS" ] || [ -n "$TARGET_REPO" ]; then
     # Daily batches use a distinct verdict file for each target repo.
-    python3 "$VERDICT_PY" save --file "$LAST_VERDICT" --fingerprint "$POST_FINGERPRINT" \
+    python3 "$VERDICT_PY" save --file "$LAST_VERDICT" --fingerprint "$FINGERPRINT" \
+      --post-fingerprint "$POST_FINGERPRINT" --repo "$TARGET_REPO" \
       --orch-result "$ORCH_RESULT" --worker-result "$WORKER_RESULT" --stamp "$STAMP"
   fi
 

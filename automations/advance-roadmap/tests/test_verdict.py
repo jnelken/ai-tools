@@ -179,13 +179,14 @@ class ScopedVerdictTest(unittest.TestCase):
         self.assertEqual(p.returncode, 0, p.stderr)
         return json.loads((self.dir / out).read_text())
 
-    def save(self, orch, worker=None, pending=False, fp="fp.json"):
+    def save(self, orch, worker=None, pending=False, fp="fp.json", post=None):
         o, w = self.dir / "orch.json", self.dir / "worker.json"
         o.write_text(json.dumps(orch))
         w.write_text(json.dumps({"outcome": "bookkeeping"} if worker is None else worker))
         return self.run_verdict("save", "--file", str(self.verdict), "--fingerprint", str(self.dir / fp),
                                 "--orch-result", str(o), "--worker-result", str(w), "--stamp", "20261014-103004",
-                                *(["--bookkeeping-pending"] if pending else []))
+                                *(["--bookkeeping-pending"] if pending else []),
+                                *(["--post-fingerprint", str(self.dir / post), "--repo", "a"] if post else []))
 
     def check(self, fp="fp2.json", *extra):
         return self.run_verdict("check", "--file", str(self.verdict), "--fingerprint", str(self.dir / fp),
@@ -197,6 +198,41 @@ class ScopedVerdictTest(unittest.TestCase):
         self.fingerprint("fp.json")
         self.assertEqual(self.save(self.NO_WORK).returncode, 0)
         self.assertTrue(self.verdict.exists())
+
+    def test_post_worker_updates_only_bookkeeping_issue_ids(self):
+        # Even changed metadata and newly added issues stay visible on the next check.
+        self.issues += [issue('DEV-4', ['repo/a']), issue('DEV-5', ['repo/a'])]
+        self.fingerprint()  # these existed at planning time too
+        orch = {**self.NO_WORK, 'blockers': [{'linear_id': 'DEV-1'}],
+                'closeouts': [{'linear_id': 'DEV-3'}], 'directive_ticket': 'DEV-4'}
+        self.issues = [{**i, 'title': 'updated'} for i in self.issues]
+        self.issues.append(issue('DEV-6', ['repo/a']))
+        self.fingerprint('fp2.json')
+        self.save(orch, post='fp2.json')
+        p = self.check()
+        self.assertEqual(p.returncode, 1, p.stdout)
+        changes = json.loads((self.dir / 'changes.json').read_text())['changed']
+        self.assertEqual(changes, ['issue:DEV-5', 'issue:DEV-6'])
+
+    def test_post_worker_repo_changes_are_adopted_only_for_committed_target_archives(self):
+        for archives, merge, adopted in (([], 'abc', False), (['a/docs/plan.md'], None, False),
+                                          (['b/docs/plan.md'], 'abc', False),
+                                          (['a/docs/plan.md'], 'abc', True)):
+            with self.subTest(archives=archives, merge=merge):
+                self.fingerprint()
+                self.commit('a', 'outside or archive commit')
+                self.fingerprint('fp2.json')
+                self.save({**self.NO_WORK, 'repo': 'a', 'archives': archives},
+                          worker={'outcome': 'bookkeeping', 'merge_commit': merge}, post='fp2.json')
+                self.assertEqual(self.check().returncode, 0 if adopted else 1)
+
+    def test_failed_post_snapshot_does_not_erase_the_bookkeeping_issues(self):
+        self.fingerprint()
+        post = self.dir / 'post.json'
+        fp = json.loads((self.dir / 'fp.json').read_text())
+        post.write_text(json.dumps({**fp, 'linear_ok': False, 'issues': {}}))
+        self.save({**self.NO_WORK, 'blockers': [{'linear_id': 'DEV-1'}]}, post='post.json')
+        self.assertEqual(json.loads(self.verdict.read_text())['fingerprint'], fp)
 
     def test_a_commit_in_repo_b_leaves_repo_a_valid(self):
         self.carried()

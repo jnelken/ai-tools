@@ -219,7 +219,7 @@ def cmd_append(a):
         "worker_exit": (wstatus or {}).get("exit"),
         "worker_session": (wstatus or {}).get("session_id"),
         "worker_result_source": w.get("_source") or ("agent" if wresult else None),
-        "repo": w.get("repo") or o.get("repo"),
+        "repo": w.get("repo") or o.get("repo") or a.repo or None,
         "item": w.get("item") or o.get("item"),
         "work_kind": o.get("work_kind") or "feature",
         "branch": w.get("branch") or o.get("branch"),
@@ -318,6 +318,7 @@ def main(argv=None):
     ap.add_argument("--usage-log", default="")
     ap.add_argument("--quota-gates", default="",
                     help="usage.py quota-record output saved when the run skipped for quota")
+    ap.add_argument("--repo", default="", help="target repo, including skips before planning")
     ap.add_argument("--lane", type=int, default=None)
     ap.add_argument("--expect-pr", action="store_true",
                     help="the worker ran in a Superset workspace, so a ship must name its PR")

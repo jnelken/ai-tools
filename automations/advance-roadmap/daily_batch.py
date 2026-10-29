@@ -72,7 +72,7 @@ def candidates(code):
 
 
 def implementation_headroom():
-    """(ok, reason): whether anything could implement a plan today. Slice C's agent-budget replaces
+    """(ok, reason, blocking_role): whether anything could implement a plan today. Slice C's agent-budget replaces
     this with a real budget; until then planning waits for a worker provider under its gate and the
     reviewers the default strategy requires (review.sh: Cursor's cycle, then a final Codex pass,
     with no fallback). Planning that cannot be carried to a merge only spends quota. A usage.py that
@@ -80,23 +80,26 @@ def implementation_headroom():
     try:
         chain = shared.py("usage.py", "--root", str(ROOT), "pick-worker-chain", timeout=120)
         if chain.returncode or chain.stdout.strip() in {"", "none"}:
-            return False, "no worker provider is under its quota gate"
+            return False, "no worker provider is under its quota gate", "worker"
         gates = shared.py("usage.py", "--root", str(ROOT), "gates", "--role", "reviewer", timeout=120)
         by_provider = {g.get("provider"): g for g in json.loads(gates.stdout).get("gates") or []
                        if isinstance(g, dict)}
     except (OSError, ValueError, AttributeError, subprocess.TimeoutExpired):
-        return True, ""
+        return True, "", None
     if os.environ.get("ADVANCE_ROADMAP_REVIEW_STRATEGY", "cursor-then-codex") == "cross-provider":
-        required, any_of = [], list(by_provider)
+        workers = chain.stdout.split()
+        reviewers = [name for name, gate in by_provider.items() if gate.get("state") not in OUT_STATES]
+        if by_provider and not any(r != w for w in workers for r in reviewers):
+            reason = "every reviewer is gated" if not reviewers else "no cross-provider reviewer is under its quota gate"
+            return False, reason, "reviewer"
+        return True, "", None
     else:
-        required, any_of = ["cursor", "codex"], []
+        required = ["cursor", "codex"]
     for name in required:
         g = by_provider.get(name) or {}
         if g.get("state") in OUT_STATES:
-            return False, f'the required {name} reviewer is gated ({g.get("reason") or g["state"]})'
-    if any_of and all((by_provider[n].get("state") in OUT_STATES) for n in any_of):
-        return False, "every reviewer is gated"
-    return True, ""
+            return False, f'the required {name} reviewer is gated ({g.get("reason") or g["state"]})', "reviewer"
+    return True, "", None
 
 
 def plan_of(result, item):
@@ -338,10 +341,10 @@ class Batch:
                     (ROOT / "runs" / item["stamp"] / "quota-gates.json").write_text(quota)
                 self.cancel(item, reason)
 
-    def skip_planning(self, reason):
+    def skip_planning(self, reason, role="worker"):
         """Plan nothing. Every repo gets a skipped-quota row saying why; carried verdicts and
         pending plans stay as they are, so the next batch that has headroom starts from them."""
-        quota = self.worker_quota()
+        quota = self.quota_record(role)
         for item in self.state["queue"]:
             if item["status"] != "queued":
                 continue
@@ -349,7 +352,7 @@ class Batch:
             if quota:
                 gates.write_text(quota)
             shared.py("runrecord.py", "--root", str(ROOT), "append", "--stamp", item["stamp"],
-                      "--status", "skipped-quota", "--detail", f"planning skipped: {reason}",
+                      "--status", "skipped-quota", "--repo", item["repo"], "--detail", f"planning skipped: {reason}",
                       *(["--quota-gates", str(gates)] if quota else []), "--lane", str(item["lane"]))
             row = shared.run_records({item["stamp"]}).get(item["stamp"], {})
             item.update(status="finished", outcome="skipped-quota", detail=row.get("detail") or reason)
@@ -357,26 +360,26 @@ class Batch:
                 item["quota"] = row["quota"]
         shared.log(f"planning skipped: {reason}")
 
-    def worker_quota(self):
+    def quota_record(self, role="worker"):
         try:
-            out = shared.py("usage.py", "--root", str(ROOT), "quota-record", "--role", "worker", timeout=120)
+            out = shared.py("usage.py", "--root", str(ROOT), "quota-record", "--role", role, timeout=120)
             if out.returncode == 0 and isinstance(json.loads(out.stdout), dict):
                 return out.stdout
         except (OSError, ValueError, subprocess.TimeoutExpired):
             pass
         # quota-record refreshes first; the gates the wave just read are still saved.
         try:
-            return json.dumps(usage.saved_quota_record(ROOT, "worker"))
+            return json.dumps(usage.saved_quota_record(ROOT, role))
         except (OSError, ValueError, TypeError, KeyError):
             return None
 
     def run(self):
         self.write()
-        ok, reason = implementation_headroom()
+        ok, reason, blocking_role = implementation_headroom()
         if not ok:
             self.state["phase"] = "skipped"
             self.state["skipped_reason"] = reason
-            self.skip_planning(reason)
+            self.skip_planning(reason, blocking_role)
             self.state["quota_paused"] = quota_paused(self.state)
             self.write()
             self.post_summary()
@@ -414,7 +417,7 @@ class Batch:
                 providers = shared.py("usage.py", "--root", str(ROOT), "pick-worker-chain")
                 if providers.returncode or providers.stdout.strip() in {"", "none"}:
                     reason = "no worker quota available; saved plans wait for the next daily batch"
-                    quota = self.worker_quota()
+                    quota = self.quota_record()
                     self.defer_ready(reason, quota)
                     self.defer_bookkeeping(reason, quota)
                 else:
@@ -640,6 +643,12 @@ def preflight(snapshot):
     result = shared.py("linearsnap.py", "--out", str(snapshot), timeout=180)
     if result.returncode or not snapshot.exists():
         raise RuntimeError("could not create the batch's Linear snapshot")
+    try:
+        snap = json.loads(snapshot.read_text())
+    except (OSError, ValueError) as error:
+        raise RuntimeError("could not read the batch's Linear snapshot") from error
+    if not isinstance(snap, dict) or snap.get("ok") is not True:
+        raise RuntimeError("the batch's Linear snapshot is unavailable")
     if shared.py("usage.py", "--root", str(ROOT), "refresh", timeout=120).returncode:
         raise RuntimeError("could not read provider usage")
 

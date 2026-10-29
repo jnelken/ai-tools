@@ -101,7 +101,10 @@ elif name == "claude":
             prov["available_for_orchestrator"] = True
             prov["available_for_worker"] = True
             json.dump(state, open(path, "w"))
-        print(json.dumps(json.load(open(os.environ["FAKE_LIMIT_FIXTURE"]))))  # one line, as the CLI prints it
+        reply = json.load(open(os.environ["FAKE_LIMIT_FIXTURE"]))
+        if os.environ.get("FAKE_SESSION_ID"):
+            reply["session_id"] = os.environ["FAKE_SESSION_ID"]
+        print(json.dumps(reply))  # one line, as the CLI prints it
         sys.exit(0)
     if mode == "result-limit":  # the limit only in the worker's result file, no banner on stdout
         path = next(l.split(": ", 1)[1] for l in prompt.splitlines() if l.startswith("(raw JSON, no fence) to: "))
@@ -472,7 +475,7 @@ exec(compile(open(__file__).read(), __file__, "exec"))
         batch.state = {"queue": [{"stamp": self.stamp, "status": "ready", "action": "dispatch_worker"}]}
         with mock.patch.object(daily_batch, "ROOT", self.root), \
                 mock.patch.object(daily_batch.shared, "LIB", self.root / "lib"):
-            batch.defer_ready("no worker quota available", batch.worker_quota())
+            batch.defer_ready("no worker quota available", batch.quota_record())
         runrecord.main(["--root", str(self.root), "append", "--stamp", self.stamp, "--status", "skipped-quota",
                         "--detail", "daily batch deferred", "--quota-gates", str(run / "quota-gates.json")])
         return self.record()["quota"]
@@ -749,6 +752,47 @@ exec(compile(open(__file__).read(), __file__, "exec"))
         self.assertEqual(saved["considered"], ["DEV-7 needs a decision"])
         self.assertEqual(saved["summary"], "No work qualified for demo.")
         self.assertEqual([c["role"] for c in self.calls()], ["orchestrator"], "a no-op needs no worker")
+
+    def test_new_repo_issue_during_bookkeeping_still_changes_the_next_verdict_check(self):
+        self.usage_state()
+        issue = lambda id: {'id': id, 'title': id, 'description': '', 'state': 'Todo',
+                            'state_type': 'unstarted', 'priority': 2, 'labels': ['repo/demo'], 'blocked_by': []}
+        before = {'ok': True, 'issues': [issue('DEV-7')]}
+        after = {'ok': True, 'issues': [issue('DEV-7'), issue('DEV-8')]}
+        self.snapshot.write_text(json.dumps(before))
+        # The batch preflight is immutable; the post-worker fetch discovers the outside issue.
+        (self.root / 'lib/linearsnap.py').write_text(
+            "import json, sys\njson.dump(" + repr(after) + ", open(sys.argv[-1], 'w'))\n")
+        plan = {**NO_WORK, 'blockers': [{'repo': 'demo', 'linear_id': 'DEV-7', 'detail': 'needs input'}]}
+        run = self.run_lane(FAKE_PLAN=json.dumps(plan))
+        self.assertTrue(self.reached_barrier, 'bookkeeping must actually run')
+        check = subprocess.run([sys.executable, str(HERE / 'lib/verdict.py'), 'check',
+                                '--file', str(self.verdict), '--fingerprint', str(run / 'fingerprint-post.json'),
+                                '--changes', str(run / 'next-changes.json'), '--root', str(self.root)],
+                               env={**os.environ, 'PERSONAL_CODE_DIR': str(self.code)},
+                               capture_output=True, text=True)
+        self.assertEqual(check.returncode, 1, check.stdout + check.stderr)
+        self.assertIn('issue:DEV-8', check.stdout)
+
+    def test_limit_killed_planner_cannot_recover_a_transcript_fence(self):
+        self.usage_state(codex={"weekly": {"used_pct": 85, "reset_epoch": FUTURE}})
+        sid = self.write_oct27_transcript()
+        run = self.run_lane(FAKE_CLAUDE="limit", FAKE_SESSION_ID=sid)
+        self.assert_nothing_dispatched(run)
+        self.assertEqual(self.record()['outcome'], 'quota-paused')
+        hit = json.loads((self.root / 'providers-usage.json').read_text())['providers']['claude']['last_limit_hit']
+        self.assertIsNotNone(hit)
+        self.run_lane(FAKE_CLAUDE="limit", FAKE_SESSION_ID=sid)
+        self.assertEqual(self.record()['outcome'], 'skipped-quota')
+
+    def test_limit_killed_planner_with_a_fence_still_fails_over(self):
+        self.usage_state(codex={"weekly": {"used_pct": 85, "reset_epoch": FUTURE}})
+        sid = self.write_oct27_transcript()
+        run = self.run_lane(FAKE_CLAUDE="limit", FAKE_SESSION_ID=sid, FAKE_UNGATE="codex", FAKE_CODEX="plan")
+        self.assertTrue(self.plan_accepted(run))
+        self.assertEqual([c['bin'] for c in self.calls() if c['role'] == 'orchestrator'], ['claude', 'codex'])
+        self.assertTrue((run / 'orchestrator-limit-claude.json').exists())
+        self.assertEqual(self.record()['orchestrator'], 'codex')
 
     def test_oct27_without_a_transcript_the_sign_off_is_still_an_error(self):
         self.usage_state(codex={"weekly": {"used_pct": 85, "reset_epoch": FUTURE}})

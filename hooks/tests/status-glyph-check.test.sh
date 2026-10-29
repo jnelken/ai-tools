@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Behaviour matrix for status-glyph-check.sh. Run: bash tests/status-glyph-check.test.sh
+# Behaviour matrix for status-glyph-check.sh. Run: bash (or zsh) hooks/tests/status-glyph-check.test.sh
 HOOK="${1:-$(cd "$(dirname "$0")/.." && pwd -P)/status-glyph-check.sh}"
 pass=0; fail=0
 TMP=$(mktemp -d "${TMPDIR:-/tmp}/status-glyph-test-$$-XXXXXX")
@@ -8,10 +8,10 @@ trap 'rm -rf "$TMP"' EXIT
 # BLOCK only on exit 0 with a block decision; PASS only on exit 0 with empty
 # stdout; anything else is ERROR so a crash never counts as a pass.
 classify() {
-  local out="$1" status="$2"
-  if (( status == 0 )) && [[ -z "$out" ]]; then echo PASS
-  elif (( status == 0 )) && printf '%s' "$out" | jq -e '.decision == "block"' >/dev/null 2>&1; then echo BLOCK
-  else echo "ERROR(status=$status)"; fi
+  local out="$1" hook_rc="$2"
+  if (( hook_rc == 0 )) && [[ -z "$out" ]]; then echo PASS
+  elif (( hook_rc == 0 )) && printf '%s' "$out" | jq -e '.decision == "block"' >/dev/null 2>&1; then echo BLOCK
+  else echo "ERROR(status=$hook_rc)"; fi
 }
 
 msg() { # msg <text> — input carrying last_assistant_message
@@ -61,9 +61,9 @@ out=$(jq -n '{transcript_path:"/nonexistent/x.jsonl"}' | bash "$HOOK"); expect P
 # Session-only schedule warning (CronCreate / ScheduleWakeup still pending).
 # WARN = exit 0, a systemMessage, and no block decision.
 warn_class() {
-  local out="$1" status="$2"
-  if (( status == 0 )) && printf '%s' "$out" | jq -e 'has("systemMessage") and (has("decision") | not)' >/dev/null 2>&1; then echo WARN
-  else classify "$out" "$status"; fi
+  local out="$1" hook_rc="$2"
+  if (( hook_rc == 0 )) && printf '%s' "$out" | jq -e 'has("systemMessage") and (has("decision") | not)' >/dev/null 2>&1; then echo WARN
+  else classify "$out" "$hook_rc"; fi
 }
 E() { date -u -j -f "%Y-%m-%dT%H:%M:%S" "$1" +%s 2>/dev/null || date -u -d "$1Z" +%s; }
 sched() { # sched <now ISO UTC> <jsonl> [message] [stop_hook_active] — hook run with TZ=UTC

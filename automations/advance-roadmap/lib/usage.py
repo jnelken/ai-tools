@@ -395,7 +395,10 @@ def statusline_claude_reading() -> dict[str, Any] | None:
 def probe_claude(state: dict[str, Any]) -> None:
     prov = state["providers"]["claude"]
     now = time.time()
-    reading = live_claude_reading() or statusline_claude_reading()
+    # OAuth failures can retain old cached windows; compare observation times rather than
+    # letting any cached live result suppress a newer statusline reading.
+    readings = [r for r in (live_claude_reading(), statusline_claude_reading()) if r is not None]
+    reading = max(readings, key=lambda r: r["observed_at"]) if readings else None
     if reading is None:
         # No source at all. A stored reading we took ourselves survives only while it is still recent;
         # one with no observation time (a hand-written state, an older usage.py) is left alone.

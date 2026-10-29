@@ -5,13 +5,7 @@
 **Status (2026-10-28 16:15):**
 - **D: done.** slackagent#6 merged at 21:02Z (`ffab00e`) after merging main (DEV-314/315) into the branch. The owner-DM runner keeps main's text-only args plus usage labels. The DEV-314 FeedbackLearner is labeled `feedback`. 260/260 tests. The live service was restarted. The backfill imported 953 slackagent sessions (an idempotent rerun inserts 0) into SQLite and `~/.claude/state/agent-usage.jsonl`, with the DB backed up first. Top sources by cost: history $34.49 (195 runs), imessage-digest $29.35 (644), unknown $13.38 (47), household $12.94 (35). `/usage` is auth-gated (303 to login).
 - **C (20:50):** ai-tools#8's nine fixes were verified item by item by Codex: 7 FIXED and 2 PARTIAL, both from one new high finding (the hook's deadline TimeoutError is swallowed by claude_quota.probe's broad except, so it can still deny). The conducting session confirmed fail-open and the removed session leases.
-- **A+B (20:50):** ai-tools#9 went through three Codex lenses after the reset (Codex 0%, Claude 15%). Findings:
-  - 3 high: fence recovery after `is_error`; the post-worker fingerprint hides changes the planner never evaluated; a Linear `ok:false` passes preflight.
-  - 3 medium: cross-provider self-review admission; a stale OAuth reading suppresses the statusline fallback; skip rows record worker gates.
-  - 2 low.
-  
-  A four-agent Claude adversarial-verify workflow is checking the highs before the fixes go out. Both PRs must merge before the 10:30 batch on 10-29.
-
+- **A+B:** PR #9 review remediation fixes all eight findings below, with regressions reproduced before the fixes. Latest main is merged into the branch. Required validation passed (284 pytest tests, 104 subtests; all four advance-roadmap shell suites; 38 status-glyph cases under zsh); the PR remains open for the conducting session to merge before the 10:30 batch on 10-29.
 
 Repos:
 - `~/Dropbox/code/ai-tools`: the dev checkout. `~/.ai-tools` is its read-only deploy clone.
@@ -111,12 +105,23 @@ Separately:
 - [ ] **O10.** `superset agents wait` and `agents explain` reported slice D's agent as "ended its own session" 13 seconds after a hook, while its screen showed it still working. The likely cause is a nested `claude -p` the agent ran, whose SessionStart/End hooks inherit the terminal's Superset hook env and get charged to it. `bin/fanout` (C) can't rely on hook state alone. Either strip the Superset hook env from nested headless runs (`agent-budget run`), or detect completion from a result file or PR. Wave 1 is monitored by polling for the PR plus a screen-spinner check instead.
 - [x] **O9.** Answered: yes. All 329 orchestrator Codex usage rows in the live `runs/*/model-usage.jsonl` have source `codex-rollout`, none `codex-total`, and 162 of the 219 planner session ids in `runs.jsonl` still have a `~/.codex/sessions/*/*/*/rollout-*<id>.jsonl` (the other 57 are probably pruned; not verified). So planners run with `-s read-only` and no `--ephemeral` do leave a rollout to salvage for E2.
 
-- [ ] **OA1.** (A+B) `review.sh` lost its limit, session, gated and capacity log fields and its final-answer-only verdict when review strategies were made selectable (b6b5558, 10-17), and `test-review.sh` plus four replay tests had been red on main since. Restored in the A+B PR with the tests unchanged except for pinning the cross-provider strategy where they test it. Unchecked: whether the dashboards that read `review_limits` look right.
+- [ ] **OA1.** (A+B) `review.sh` lost its limit, session, gated and capacity log fields and its final-answer-only verdict when review strategies were made selectable (b6b5558, 10-17), and `test-review.sh` plus four replay tests had been red on main since. Restored in the A+B PR; strategy tests pin cross-provider, and OA14 adds a required-stage session regression. Unchecked: whether the dashboards that read `review_limits` look right.
 - [ ] **OA2.** (A+B) The advisor still runs in headless planners (O2). Untested options: a prompt line telling the planner not to call it, or a settings overlay for headless runs that unsets `advisorModel`. Measure the saving first (F4: about 708k uncached Opus tokens over 8 planners), and note Sonnet at medium makes it less likely to be called at all.
 - [ ] **OA3.** (A+B) Deploying this changes `ORCHESTRATOR.md`, which is in the `skill` fingerprint input, so every carried verdict is invalid once: the first batch afterwards re-triages every repo. A4 bounds the cost (no headroom, no planners). Per-repo fingerprints from then on are not comparable with the old global ones, and nothing migrates them.
 - [ ] **OA4.** (A+B) A deferred batch (no worker for bookkeeping) saves its no-work verdict marked `bookkeeping_pending`. The next run re-plans that repo with a `verdict-changes.json` instead of skipping it, so one cheap planner pass buys the blocker comments. A bookkeeping-only worker run from the saved verdict would avoid the planner call; not built.
 - [ ] **OA5.** (A+B) `daily_batch.py` is launched once a day (10:30, no retry), so A5 only helps a manual or catch-up run after an outage. Whether the plist should retry on a preflight failure is Jake's call.
 - [ ] **OA6.** (A+B) `python3 -m pytest` is not installed for the system Python; the suites were run from a scratchpad venv with pytest 9.2.
+
+- [x] **OA7.** (A+B review #1) Transcript-fence recovery now rejects structured provider errors through the same `usage.py is-error` check as reviews. Limit-killed planners record their live limit and fail over; subsequent lanes see the gate. Evidence: `test_quota_replay.py::test_limit_killed_planner_cannot_recover_a_transcript_fence` and `test_limit_killed_planner_with_a_fence_still_fails_over`.
+- [x] **OA8.** (A+B review #2) Saved verdicts retain the planning-time fingerprint. Only blocker, closeout and directive issue ids receive post-worker values after settled bookkeeping; only the target repo receives its post-worker print when archives and a reported commit are present. A failed post snapshot leaves issue hashes alone. Evidence: the new-issue replay reports `issue:DEV-8` changed on the next check, plus selective issue/repo and failed-snapshot cases in `test_verdict.py`.
+- [x] **OA9.** (A+B review #3) Preflight parses the Linear snapshot and requires `ok is True` before claiming the date. The outage stub now matches real `linearsnap.py`: writes `ok:false` and exits zero. Evidence: `test_daily_batch.py::test_a_linear_outage_also_leaves_the_day_unclaimed`.
+- [x] **OA10.** (A+B review #4) Claude quota selection compares both sources' observation times. A stale OAuth cache cannot suppress a newer statusline reading. Evidence: the 10% OAuth / 99% statusline regression enforces `over` and `available:false` with both stale and recent-but-older OAuth readings in `test_usage.py`.
+- [x] **OA11.** (A+B review #5) Cross-provider admission requires an available worker/reviewer pair with different providers. Evidence: `test_daily_batch.py::test_cross_provider_cannot_admit_a_worker_as_its_own_only_reviewer` rejects Cursor alone and accepts a chain including Claude with Cursor reviewing.
+- [x] **OA12.** (A+B review #6) Admission returns the blocking role, which selects both the live quota record and its cached fallback. Evidence: a healthy worker pool with gated Codex review records reviewer/Codex, cause and reset in `test_reviewer_admission_skip_records_the_reviewer_gate`.
+- [x] **OA13.** (A+B review #7) Pre-plan skip records pass the target repo explicitly. Evidence: the no-worker-headroom regression asserts repos `a` and `b` in `runs.jsonl`.
+- [x] **OA14.** (A+B review #8) Required review stages clear their session artifacts before checking the gate. Evidence: `test-review.sh` runs a clean Cursor stage followed by gated Codex and asserts Codex's session is null.
+
+- [x] **OA15.** (A+B verification) Running the required status-glyph suite under zsh exposed its pre-existing use of the read-only `status` variable in two test helpers. Renamed the test-local variable to `hook_rc`; the hook behavior is unchanged.
 
 ## Approach (slices; each ships as its own PR from its own Superset workspace)
 
@@ -141,7 +146,7 @@ Separately:
 
 ### B. Live headroom (ai-tools)
 
-- `lib/usage.py probe_claude` uses `claude_quota.quota()`, falling back to the statusline file.
+- `lib/usage.py probe_claude` reads `claude_quota.quota()` and the statusline file, choosing the newer observation.
 - A reading older than 15 minutes is stored as `used_pct: None`, so the gate reports `unknown` rather than 0%.
 
 ### C. Shared budget and per-session gate (ai-tools)
