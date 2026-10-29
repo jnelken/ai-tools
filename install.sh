@@ -519,6 +519,18 @@ section_commands() {
   done
 }
 
+# ── output-styles/ (custom output styles, selected via settings.json outputStyle) ──
+section_output_styles() {
+  [ -d "$SRC_ROOT/output-styles" ] || return 0
+  mkdir -p "$CLAUDE_DIR/output-styles"
+  local style name
+  for style in "$SRC_ROOT/output-styles"/*.md; do
+    [ -e "$style" ] || continue
+    name="$(basename "$style")"
+    link_one "$SRC_ROOT/output-styles/$name" "$CLAUDE_DIR/output-styles/$name" "output style file"
+  done
+}
+
 # ── agents/ ──
 section_agents() {
   [ -d "$SRC_ROOT/agents" ] || return 0
@@ -847,6 +859,7 @@ section_prune() {
 run_section "── prune stale links ──" section_prune
 run_section "── skills ──" section_skills
 run_section "── commands ──" section_commands
+run_section "── output-styles ──" section_output_styles
 run_section "── agents ──" section_agents
 run_section "── hooks ──" section_hooks
 run_section "── automations ──" section_automations

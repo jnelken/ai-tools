@@ -166,6 +166,7 @@ Flags: `--dev` (link from the checkout you're running instead of `~/.ai-tools` �
 The installer creates symlinks at:
 - `~/.claude/skills/<name>` → `~/.ai-tools/skills/<name>` (per skill)
 - `~/.claude/commands/<name>.md` → `~/.ai-tools/commands/<name>.md` (per slash command)
+- `~/.claude/output-styles/<name>.md` → `~/.ai-tools/output-styles/<name>.md` (per output style; select with `outputStyle` in settings.json)
 - `~/.claude/agents/<name>.md` → `~/.ai-tools/agents/<name>.md` (per agent)
 - `~/.claude/hooks/<name>` → `~/.ai-tools/hooks/<name>` (per hook)
 - `~/.claude/automations/<name>/<script>` → `~/.ai-tools/automations/<name>/<script>` (per automation script; scheduling itself is separate, see [`automations/README.md`](automations/README.md))
