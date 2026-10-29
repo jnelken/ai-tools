@@ -2,7 +2,12 @@
 
 > **Suggested execution:** Sonnet with high reasoning: well-scoped Python, zsh and Node edits to existing, well-tested code, but they touch concurrency, gate semantics and hooks. Step up to Opus for slice C (shared budget and leases) if lease and wait semantics get subtle. Step down to Haiku for slices A1, A2 and D3 on their own.
 
-**Status (2026-10-29 17:20):** #15 (H, the Cursor-gated cross-provider review fallback, 2 rounds) is merged and deployed (`01af84e`). The dry run no longer holds on the Cursor reviewer, but it still shows lanes=0 with 'no worker plus required review fits shared headroom'. That's **F11**: `agent_budget.capacity()` charges the 7d/weekly windows at the 5-hour-calibrated rate, with Codex weekly at 71% and Claude 7d at 53%. **Slice W (per-window factors) is now the last blocker for the 10-30 10:30 batch.** In flight: W (Codex Luna), the #16 G1 review (Claude workflow), and slackagent#7 fixes. The open decision for Jake: DEV-320 channel access (reinstall or channel ID).
+**Status (2026-10-29 18:00):**
+- **Merged and deployed:** #8, #9, #10, #12, #13, #15.
+- **Last blocker for the 10-30 10:30 batch:** W, #17 (F11 per-window costs). Round 2 is fixing long-window calibration: Codex weekly had 0 samples because of whole-point deltas, and the 0.1 seed is unsafe for Codex, which is observed at ~0.21.
+- **G1, #16:** the ledger core's three-lens Claude review found 9 issues, including adoption that hijacks the parent lease, an unbounded cumulative watch reservation that stalls the queue, and a heartbeat/TTL race. Fixes are in progress on Claude Sonnet; G1 is not needed for the batch.
+- **DEV-320, slackagent#7 plus the #14 skill docs:** all 10 findings fixed (331 tests). Verification is queued through `bin/fanout`, the first production use: the Agent gate DENIED an in-process Workflow because the one Claude slot was held, and fanout queued a Superset terminal instead.
+- **Open decision for Jake:** DEV-320 channel access. A channel ID now works without a reinstall.
 
 **Wave 2 (10-29 03:15):**
 - **E2, PR #12:** round 2 is verified by Claude. P1-1, P2-3, P2-4 and P2-5 are FIXED. P1-2 (redaction variants) and P2-6 (the per-attempt bound) are PARTIAL, and there are new findings (over-redaction, the batch-cancel save, an unattributable attempt erasing research). Round 3 is written in `~/.claude/state/fanout/review-ai-tools-12/fix-request-r3.txt` and goes out at 07:21.
