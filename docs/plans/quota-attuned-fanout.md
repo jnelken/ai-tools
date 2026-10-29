@@ -2,11 +2,7 @@
 
 > **Suggested execution:** Sonnet with high reasoning: well-scoped Python, zsh and Node edits to existing, well-tested code, but they touch concurrency, gate semantics and hooks. Step up to Opus for slice C (shared budget and leases) if lease and wait semantics get subtle. Step down to Haiku for slices A1, A2 and D3 on their own.
 
-**Status (2026-10-28 21:40):** wave 1 and E1 are merged and deployed on this machine (`~/.ai-tools` at `87b02bc`).
-- **D:** slackagent#6, `ffab00e`. Live, with 953 sessions backfilled.
-- **C:** ai-tools#8, `3fb534a`. agent-budget, fanout and the Agent/Workflow gate (fail-open, 6s deadline) are installed.
-- **E1:** ai-tools#10, `c02350c`. The running-docs rule plus pick-up/close-out sweeps.
-- **A+B:** ai-tools#9, `87b02bc`. Three review rounds; 289 pytest tests, the shell suites and the glyph-hook tests are green. The batch's Claude gate now reads live OAuth (56% at 21:35, against the old stale 0%). `daily_batch.py --dry-run` is OK.
+**Status (2026-10-29 11:50):** wave 1 and E1 are live. Today's batch skipped all planning (F10: Cursor is required as reviewer and gated until 11-03). #12 (E2, 3 rounds) and #13 (C2, 3 rounds) are both clean: 311 and 402 tests green. Next: merge them now that the batch check is recorded. DEV-320 (slackagent#7) is under two-lens Codex review; its manifest adds the channels:read and groups:read scopes, so deploying needs either a Slack app reinstall or a channel ID in config. Proposed next: **slice G**, a universal token-reservation ledger for every agent launch (Jake, 10-29).
 
 **Wave 2 (10-29 03:15):**
 - **E2, PR #12:** round 2 is verified by Claude. P1-1, P2-3, P2-4 and P2-5 are FIXED. P1-2 (redaction variants) and P2-6 (the per-attempt bound) are PARTIAL, and there are new findings (over-redaction, the batch-cancel save, an unattributable attempt erasing research). Round 3 is written in `~/.claude/state/fanout/review-ai-tools-12/fix-request-r3.txt` and goes out at 07:21.
@@ -111,6 +107,12 @@ Separately:
 - No fan-out helper exists in `~/.ai-tools/bin`.
 - Superset terminals are created with `superset terminals create --workspace "$SUPERSET_WORKSPACE_ID" --local --cwd <dir> --command '…' --json` and read with `superset terminals read` (see `skills/handoff/SKILL.md:102-131`).
 - The CLI lives at `/Applications/Superset.app/Contents/Resources/resources/bin/superset` (`lib/workspaces.py:33`).
+
+**F10. The 10-29 10:30 batch (the first with #8/#9/#10) planned nothing, correctly.**
+- **Outcome:** `phase: skipped`, 24/24 `skipped-quota`, 0 model calls, 0 tokens, with the reason "the required cursor reviewer is gated (auto pool 100% >= 100%)". For comparison: 10-27 had 16 skipped-quota, 5 quota-paused and 3 error rows (~898k new and 12.2M cached Claude planner tokens for 8 planners); 10-28 had 11 skipped-quota, 5 quota-paused, 4 blocked-no-item, 4 blocked and 1 archive-only.
+- **Why:** the default `cursor-then-codex` review strategy hard-requires a Cursor review cycle (`review.sh`: `run_required_review cursor cursor-cycle || exit $?`), and Cursor's auto pool is at 100% until 11-03. The #9 pre-plan gate saw that nothing could finish review and skipped planning, so nothing was wasted. Claude was also at 93% of its 5h window at 10:30, and quota_paused lists cursor and claude.
+- **Not exercised today:** missing-fence `error` rows, the Sonnet-medium planner and verdict saving, because no planner ran.
+- **Consequence:** carried verdicts can't start until a day that actually plans, and **the batch will skip every day until Cursor resets on 11-03** unless the review strategy falls back (cross-provider, or Codex-only final review when Cursor is gated). That's a decision for Jake.
 
 ## Open threads
 
