@@ -1,6 +1,6 @@
 ---
 name: pick-up
-description: Resume where a previous session left off — read this repo's IN_PROGRESS.md and running plan docs in Plan mode, present their open items in a plan, and reconcile IN_PROGRESS.md with anything found already done or stale. With the argument `sweep`, runs unattended instead: verifies items and removes only IN_PROGRESS.md items with hard evidence they're done or now tracked, while flagging plan threads only when hard evidence shows they're done or tracked; starts no work (the weekly sweep the pick-up-nudge hook requests).
+description: Resume where a previous session left off — read this repo's IN_PROGRESS.md, running plan docs, and recent harness plans in Plan mode, present their open items in a plan, and reconcile IN_PROGRESS.md with anything found already done or stale. Offer to copy recent harness plans into the repo. With the argument `sweep`, runs unattended instead: verifies items and removes only IN_PROGRESS.md items with hard evidence they're done or now tracked, while flagging plan threads only when hard evidence shows they're done or tracked; starts no work (the weekly sweep the pick-up-nudge hook requests).
 ---
 
 # pick-up
@@ -10,8 +10,9 @@ The other end of [[close-out]]. Close-out writes what still needs a human into
 the repo's current state, and turns it into a plan the user approves before anything
 runs.
 
-The only thing this skill writes is the handoff file itself, and only to reconcile it
-with what it finds (step 5). It touches no other state before the plan is approved.
+The only automatic write this skill makes is reconciling the handoff file (step 5). It
+touches no other state before the plan is approved. Copy a harness plan into the repo only
+if the user accepts the offer in step 2.
 
 **Invoked with `sweep`?** Jump to [Sweep mode](#sweep-mode-pick-up-sweep). It skips plan mode and
 approval because it only reconciles the file and never resumes work.
@@ -48,6 +49,13 @@ the `IN_PROGRESS.md` items in the interactive plan, with the source plan path fo
 there is no `IN_PROGRESS.md`, these plan threads still form a valid pickup list. Keep the plan
 docs as their own source of truth; reconcile them when an item is answered or moved, rather
 than copying them into `IN_PROGRESS.md`.
+
+Also inspect top-level `~/.claude/plans/*.md` files whose modification time is within the last
+7 days. Read their `## Open threads` sections and collect unchecked `- [ ]` items alongside
+the repo items, with each source path. Offer in the plan to copy a relevant harness plan into
+the target repo's `docs/plans/` so it survives outside the harness. If accepted, make that
+copy the first action after exiting plan mode, before resuming work. Do not include older
+harness plan files.
 
 Both [[close-out]] and [[wrapup-repos]] write this file. Items under `## Ticket candidates`
 are work to *file* in Linear, not to execute — offer to file them rather than planning
@@ -95,17 +103,20 @@ already be on disk. Step 5 applies them once the plan is approved.
 - Flags anything with real-world side effects (live account mutations, prod changes,
   outbound messages) before the step that causes it.
 
-Completion criterion: every unchecked handoff item and every collected plan thread appears
-in the plan — as a step, as a decision for the user, or as an explicit "already done / no
-longer applies" with evidence. An item that exists in either source and nowhere in the plan
-is the failure mode this skill exists to prevent.
+Completion criterion: every unchecked handoff item and every collected repo or recent harness
+plan thread appears in the plan — as a step, as a decision for the user, or as an explicit
+"already done / no longer applies" with evidence. An item that exists in either source and
+nowhere in the plan is the failure mode this skill exists to prevent.
 
 ## 5. Reconcile the handoff file
+
+Once the plan is approved, copy any accepted recent harness plan into `docs/plans/` as the
+first action after exiting plan mode. Do this even if no handoff reconciliation is needed.
 
 If step 3 found nothing stale, skip this — rewriting a file that was already accurate is
 churn, and it costs the `_Last updated:_` date its meaning.
 
-Otherwise, once the plan is approved, edit the handoff file **before starting the work**.
+Otherwise, edit the handoff file **before starting the work**.
 A session that dies mid-task should still leave the file more accurate than it found it,
 and that only holds if the reconciliation is the first thing that lands. Apply the
 verdicts the user approved, not the ones you arrived at — if they corrected one, theirs
@@ -163,6 +174,9 @@ isn't in the current ISO week. The job is to keep the file honest, not to resume
   `docs/plans/*.md` files, excluding `archive/`. Flag only threads with hard evidence that they
   are done or tracked (for example, a merged commit or linked ticket/open PR); include the
   evidence. Do not edit or remove plan threads and do not flag items based on inference.
+- **Recent harness plans:** inspect top-level `~/.claude/plans/*.md` files modified in the last
+  7 days for unchecked `## Open threads`. This unattended mode cannot offer or copy them; only
+  flag a thread when hard evidence shows it's done or tracked, and include that evidence.
 - **Write per step 5**, with one difference: set `_Last updated: <date +%F> (pick-up sweep)_` and
   append `- <date> — $CLAUDE_CODE_SESSION_ID (pick-up sweep)` to `## Close-out sessions` **even
   when nothing was removed**. That date is how the hook knows this week's sweep ran. If nothing

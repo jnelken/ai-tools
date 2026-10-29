@@ -12,7 +12,7 @@ Personal AI coding tools — Claude Code and Cursor skills, slash commands, hook
 | [`agenton`](skills/agenton) | zsh `agenton`/`agentoff`: keep the Mac awake with the lid closed for N minutes and log one line per minute — Wi-Fi network (named by gateway IP; 📱 marks a phone hotspot), ping latency, and Claude/Codex busy/total session counts. Sourced from `~/dotfiles/zsh/lib/45-agenton.zsh`; the skill teaches Claude to read the log and edit the script, never to run it |
 | [`conductor`](skills/conductor) | Human-driven "ship one item" that never implements in-process: the Claude session conducts Cursor (`agent`) as builder and Codex (`codex exec`, read-only) as reviewer via `worker.sh` / `review.sh`; owns the shared triage doc `ORCHESTRATOR.md` that `advance-roadmap`'s scheduler also reads |
 | [`babysit-pr`](skills/babysit-pr) | Iteratively address automated reviewer threads (Codex, CodeRabbit, etc.) on the current PR |
-| [`close-out`](skills/close-out) | Sweep the conversation and machine for orphaned work, account for touched running-plan threads, and durably capture anything still open before closing |
+| [`close-out`](skills/close-out) | Sweep the conversation and machine for orphaned work, account for touched running-plan threads, and offer to copy recent harness plans into the repo |
 | [`logo-gestalt`](skills/logo-gestalt) | Gestalt logo design: symbol inventory, shared-vector matching, SVG + raster preview board, vision critique |
 | [`cleanup-local-branches`](skills/cleanup-local-branches) | Phased cross-repo cleanup of stale branches + worktrees with reflog-recovery log |
 | [`datadog-tool-selection`](skills/datadog-tool-selection) | Guide for picking the right Datadog tool for an observability question |
@@ -28,7 +28,7 @@ Personal AI coding tools — Claude Code and Cursor skills, slash commands, hook
 | [`move-diff`](skills/move-diff) | Relocate uncommitted changes to a different branch/worktree |
 | [`fix-stale-docs`](skills/fix-stale-docs) | Scan for dead doc references, fix or delete them, push to an open (preferably approved) branch |
 | [`peer-review`](skills/peer-review) | Review with Claude for Codex-authored changes, Codex otherwise |
-| [`pick-up`](skills/pick-up) | Resume open work from `IN_PROGRESS.md` and running plan docs; `sweep` removes only proven done/tracked handoff items and flags plan threads with hard evidence |
+| [`pick-up`](skills/pick-up) | Resume open work from `IN_PROGRESS.md`, running plan docs, and recent harness plans; offer to copy harness plans into the repo; `sweep` flags only evidence-backed done/tracked plan threads |
 | [`post-pr`](skills/post-pr) | Take a finished PR the rest of the way: review until clean, watch CI, post to `#pr-review`, badge + undraft |
 | [`pr-review-gaps`](skills/pr-review-gaps) | Find sswt PRs never posted to `#pr-review`, with a hold-list for deliberately parked ones |
 | [`prod-query`](skills/prod-query) | Read-only production customer-tenant data questions via the api repo's audited `query:prod-readonly` script — CLI contract, RUM id → tenant mapping, safe query cookbook, PII rules |
