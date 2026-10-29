@@ -8,7 +8,7 @@
 - **E1:** ai-tools#10, `c02350c`. The running-docs rule plus pick-up/close-out sweeps.
 - **A+B:** ai-tools#9, `87b02bc`. Three review rounds; 289 pytest tests, the shell suites and the glyph-hook tests are green. The batch's Claude gate now reads live OAuth (56% at 21:35, against the old stale 0%). `daily_batch.py --dry-run` is OK.
 
-**Next (wave 2):** E2 (partial triage) and C2 (the O11 Codex calibration fix, then wiring daily_batch to agent-budget). The briefs are in `docs/plans/quota-attuned-fanout-briefs/` (C2.md, E2.md). They were deferred at 21:40 because Codex was over its 70% cap until ~01:42 and Claude had only 14 points of headroom. Check first with `agent-budget allow --provider codex --role worker --want 2`, though that reads 0 for Codex until O11 is fixed, so use the live percentage directly. Each launches as its own Superset workspace on Codex (Sol for C2, Luna for E2).
+**Wave 2 (10-29 02:15):** launched on fresh windows (Codex 5h 0%, weekly 47%; Claude 0%). C2 (O11 calibration plus daily_batch→agent-budget wiring) is running in `budget-batch-wiring` on Codex Sol high, and E2 (partial triage) in `partial-triage` on Codex Luna high. A monitor watches for their PRs; each gets Codex review lenses plus a small Claude verify, then merge, install and a dry run.
 
 **Watch at the 10-29 10:30 batch:** expect `skipped-unchanged` rows only from 10-30 on, once the first carried verdicts exist; no `error` rows from the Stop hook; Claude planners on Sonnet with medium effort; and no planning when no worker or reviewer is available.
 
