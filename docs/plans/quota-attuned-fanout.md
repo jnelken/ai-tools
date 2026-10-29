@@ -16,6 +16,8 @@
 
 **Slice F, DEV-320 (added 10-29 03:25 at Jake's request):** run unblock-roadmap through Slackagent in **#agent-blockers** (Jake, 10-29). It uses a weekday 8:45 durable SQLite question queue in a designated channel, asks one multiple-choice question at a time and takes number-emoji reaction answers. When the queue empties it re-sweeps, until nothing is blocked. At 8:45 with a non-empty queue, it skips the sweep and resumes. The brief is `docs/plans/quota-attuned-fanout-briefs/quota-fanout-slice-F.md`; v1 records Linear directives only, with no repo markdown edits. Dispatch is queued for 07:21 with the #12 round 3, after the Codex reset.
 
+**DEV-321 (subtask of DEV-320, blocked by it; Jake 10-29):** a spike on whether Slackagent should use Linear's in-Slack `@Linear` agent wherever it's cheaper than Slackagent's own model calls. The working hypothesis: directive writes stay on the direct API (zero tokens, exact, idempotent), and `@Linear` is a candidate only for free-text→directive/issue, breakdowns and ad-hoc search, if it acts on bot-authored messages. It runs after DEV-320 is live in #agent-blockers.
+
 **Watch at the 10-29 10:30 batch:** expect `skipped-unchanged` rows only from 10-30 on, once the first carried verdicts exist; no `error` rows from the Stop hook; Claude planners on Sonnet with medium effort; and no planning when no worker or reviewer is available.
 
 Repos:
