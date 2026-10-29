@@ -1,6 +1,6 @@
 ---
 name: close-out
-description: Use at the end of a long working session to confirm nothing was left orphaned before closing the thread — sweeps the conversation for unanswered questions, unfiled findings, retracted claims and "I'll do that later" promises, sweeps the machine for stray background processes, temp scripts, uncommitted/unpushed worktrees, un-announced PRs and stale sswt workspaces, files every real follow-up into Linear assigned to the user, writes anything only a human can decide into a running IN_PROGRESS.md so a future session can pick it up, then prints a large ASCII confirmation banner once the machine is genuinely clean (open decisions no longer block the close — they just have to be durably captured first). Trigger phrases include "wrap up this session", "can I close this thread", "close out", "close this out", "file the follow-ups", "am I safe to close this", "session wrap-up", "anything left hanging", "did we leave anything unfinished", "safe to end the session".
+description: Use at the end of a long working session to confirm nothing was left orphaned before closing the thread — sweeps the conversation for unanswered questions, unfiled findings, retracted claims and "I'll do that later" promises, checks this session's open threads in running plan docs and recent harness plans, offers to copy harness plans into the repo, sweeps the machine for stray background processes, temp scripts, uncommitted/unpushed worktrees, un-announced PRs and stale sswt workspaces, files every real follow-up into Linear assigned to the user, writes anything only a human can decide into a running IN_PROGRESS.md so a future session can pick it up, then prints a large ASCII confirmation banner once the machine is genuinely clean (open decisions no longer block the close — they just have to be durably captured first). Trigger phrases include "wrap up this session", "can I close this thread", "close out", "close this out", "file the follow-ups", "am I safe to close this", "session wrap-up", "anything left hanging", "did we leave anything unfinished", "safe to end the session".
 ---
 
 # Close Out
@@ -48,6 +48,20 @@ Re-read the **whole** session, start to finish — not the last few exchanges. B
 | **Retracted claim** | Anything you asserted in a *durable artifact* (Linear comment, PR body, ticket description, commit message, doc) that you later corrected or walked back. | Fixed in place — verified, not filed |
 | **Blocked work** | Something you started and stopped. Record *what* it's blocked on, by name. | `IN_PROGRESS.md` (step 4) |
 | **Deferred promise** | Any "I'll do that after…", "worth doing later", "next step is…" you wrote and never came back to. | `IN_PROGRESS.md` (step 4) |
+| **Running plan thread** | An unchecked item in `## Open threads` of a top-level repo or recent harness plan file that this session touched. | Answer and tick with an annotation, move to a ticket or `IN_PROGRESS.md` (noting where), or explicitly leave open with a reason |
+
+Inspect top-level `docs/plans/*.md` files, excluding `archive/`. Only threads touched in this
+session are in this close-out sweep. Before the session counts as closed, account for each one:
+record its answer and tick it with an annotation, move it to a ticket or `IN_PROGRESS.md` and
+note where, or leave it unchecked with a specific reason it remains open. Never silently remove
+a touched thread.
+
+Also inspect top-level `~/.claude/plans/*.md` files modified in the last 7 days for unchecked
+items under `## Open threads`. Include threads touched this session in the same close-out
+accounting. Offer to copy a relevant harness plan into the target repo's `docs/plans/` so its
+open threads are durable there; copy only if the user accepts. Mention eligible recent plans
+that were not touched as copy candidates, without treating them as this session's unfinished
+work. If a plan is copied, account for its unchecked threads as touched in this session.
 
 A **pending decision**, **blocked work**, or **deferred promise** is not an item you keep holding until step 5 — hand it straight to step 4's `IN_PROGRESS.md` write. An **unfiled finding** is concrete, actionable work with no decision attached; it goes to Linear, same as before. The distinction is "does closing this out require someone's judgment?" — if yes, `IN_PROGRESS.md`; if no, file it and move on.
 
@@ -217,7 +231,7 @@ In the chat, do **not** reprint this list — point at it: *"N open items in `.c
 
 **The gate is now about danger and mechanics, not decisions.** Print the success banner only if **every one** of these is true:
 
-1. Every item from step 1 is accounted for: filed in Linear, fixed in place (retracted claims), or written into `IN_PROGRESS.md`. None exists **only** in this transcript.
+1. Every item from step 1, including each touched running-plan thread, is accounted for: filed in Linear, fixed in place (retracted claims), moved to `IN_PROGRESS.md`, or explicitly left open with a reason. None exists **only** in this transcript.
 2. Every retracted claim's correction was **verified in the durable artifact**, not just in chat.
 3. Step 2 found nothing **this session** left behind that it could have resolved itself: no background process it started and should have stopped, no temp script it wrote into a repo, no uncommitted or unpushed work in a worktree it touched, no PR it opened that's missing its review/announcement, no state entry it made stale. Pre-existing debris the session never touched is reported, not gated on.
 4. Every follow-up from step 3 is actually filed or commented — you have the identifiers.

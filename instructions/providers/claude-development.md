@@ -60,4 +60,4 @@ Every plan file you write (under `docs/plans/` in a project repo, or anywhere el
 
 Pick a tier: Opus, Sonnet or Haiku. Name the tier, not a version: it means the latest model of that tier, so the header doesn't go stale when a new version ships. Reasoning effort: low / medium (auto) / high. Base the recommendation on the task's code volume, design/visual judgment needs, algorithmic complexity, and how ambiguous the plan itself is (a detailed plan lets a cheaper model execute fine; a vague brief needs a smarter model to fill gaps).
 
-Write the real plan to `docs/plans/` in the project repo (for team visibility and version control), even when the harness also creates its own plan file elsewhere.
+Outside harness plan mode, write the running plan directly to `docs/plans/<slug>.md` in the project repo (for team visibility and version control). During harness plan mode, the harness plan file **is** the running plan; do not also write `docs/plans/` while plan mode is active. As the first action after exiting plan mode, copy that plan file to `docs/plans/<slug>.md` in the target repo, then continue the work.

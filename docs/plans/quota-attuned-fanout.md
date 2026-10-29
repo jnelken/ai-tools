@@ -127,6 +127,7 @@ Separately:
 
 - [ ] **O11 (C follow-up).** Wire `daily_batch.py` to `agent-budget` after `quota/roadmap-stop-waste` merges. Replace A4's standalone worker/reviewer headroom preflight stub with shared role reservations, including expected implementation cost; derive lanes and release waves from the shared ledger. This PR deliberately leaves `daily_batch.py`, `run.sh` and `lib/usage.py` untouched.
 - [ ] **O12 (calibration).** Accumulate five measured samples/provider before replacing seeds; Cursor currently has no measured token-to-window factor (provisional 5 points/59k tokens). Claude starts at 10 points/251k tokens: F9's ~2 points/min across three sessions × 15 minutes/session. The five-hour factor is conservatively charged to weekly windows too. Connect runtime ledger launch/session ids to quota boundaries wherever callers currently omit them; unmatched boundaries remain uncalibrated rather than guessed.
+- [x] **E1.** Added the running planning-doc rule, aligned Claude plan-mode guidance, taught pick-up and close-out to account for repo and recent harness plan threads, and added both skills to the README table.
 
 - [x] **OA16.** (A+B round 3) Statusline loading displays used to write freshly timestamped 0% values, which displaced a fresh OAuth observation. Fresh OAuth now wins for 15 minutes. Only statusline files marked `source: rate_limits` can be fallback readings; unmarked legacy files, placeholders and `quota()`'s wrapped statusline fallback are untrusted. The writer marks real inputs and stores missing windows as null. Evidence: real-writer tests with a temporary HOME reproduce missing `rate_limits`, retain the 30-second-old 99% OAuth gate, accept real 0%, and leave missing windows unknown; a separate regression makes fresh OAuth beat a newer marked statusline. All cases are in `test_usage.py`.
 
@@ -199,7 +200,7 @@ Separately:
 
 ### E. Running planning docs (ai-tools instructions and skills)
 
-- **E1. Rule** in `instructions/development/shared.md` *Plan Files*:
+- **E1. Rule — done.** Added to `instructions/development/shared.md` under *Plan Files*; Claude plan-mode guidance now copies the harness plan after exit, and pick-up/close-out sweep repo and recent harness plan threads. Both skills are listed in the README:
   - Any planning or investigation session opens a running doc right after orientation: `docs/plans/<slug>.md` in the target repo, or the harness plan file while in plan mode, copied to `docs/plans` on exit.
   - Sections: Status, Decisions, Findings (with evidence), Open threads, Approach.
   - Update it after each finding or agent result.
