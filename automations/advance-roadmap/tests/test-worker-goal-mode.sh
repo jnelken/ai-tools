@@ -71,4 +71,24 @@ run_case cursor "$TMP_ROOT/goal.json" "/goal Read and follow $SKILL_DIR/WORKER.m
 run_case codex "$TMP_ROOT/goal.json" '$goal Read and follow '"$SKILL_DIR"'/WORKER.md and '"$SKILL_DIR"'/SAFETY.md exactly.'
 run_case claude "$TMP_ROOT/goal.json" "/goal Read and follow $SKILL_DIR/WORKER.md and $SKILL_DIR/SAFETY.md exactly."
 
+fallback_capture="$TMP_ROOT/fallback.prompt"
+CAPTURE="$fallback_capture" \
+PERSONAL_CODE_DIR="$TMP_ROOT" \
+ADVANCE_ROADMAP_ROOT="$TMP_ROOT/root" \
+ADVANCE_ROADMAP_SKILL_DIR="$SKILL_DIR" \
+ADVANCE_ROADMAP_AGENT_BIN="$TMP_ROOT/bin/agent" \
+ADVANCE_ROADMAP_CODEX_BIN="$TMP_ROOT/bin/codex" \
+ADVANCE_ROADMAP_CLAUDE_BIN="$TMP_ROOT/bin/claude" \
+ADVANCE_ROADMAP_BUDGET_REVIEW_STRATEGY=cross-provider \
+ADVANCE_ROADMAP_BUDGET_REVIEW_FALLBACK_REASON="cursor gated until 2026-11-03T10:30:00-05:00" \
+  "$TEST_DIR/worker.sh" --stamp fallback --request-file "$TMP_ROOT/standard.json" --provider codex >/dev/null
+grep -Fq 'Effective review strategy for this run: cross-provider.' "$fallback_capture"
+grep -Fq 'Fallback reason: cursor gated until 2026-11-03T10:30:00-05:00.' "$fallback_capture"
+grep -Fq 'address them' "$fallback_capture"
+grep -Fq 'another under-gate provider' "$fallback_capture"
+if grep -Fq 'agent -p --force --trust --model auto' "$fallback_capture"; then
+  print -u2 -- 'fallback worker brief still contains a Cursor dispatch instruction'
+  exit 1
+fi
+
 print -- "worker goal-mode routing: ok"

@@ -144,12 +144,19 @@ def cmd_fingerprint(a):
                            if not a.repo or k == a.repo}
         except (OSError, ValueError):
             pass
+    triage_dir = os.path.join(CODE_DIR, ".advance-roadmap")
+    partial_triage = {
+        os.path.basename(path)[len("partial-triage-"):-len(".md")]: file_sha(path)
+        for path in sorted(glob.glob(os.path.join(triage_dir, "partial-triage-*.md")))
+        if not a.repo or os.path.basename(path) == f"partial-triage-{a.repo}.md"
+    }
     fp = {
         "repos": repos,
         "deploys": deploys,
         # A failed fetch is its own state: the verdict it produced may not survive Linear's return.
         "linear_ok": bool(snap.get("ok")),
         "issues": issues,
+        "partial_triage": partial_triage,
         "allowlist": file_sha(ALLOWLIST),
         "skill": sha("".join(file_sha(p) or "-" for p in sorted(glob.glob(os.path.join(SKILL_DIR, "*.md")) + glob.glob(os.path.join(CONDUCTOR_DIR, "*.md"))))),
     }
@@ -174,6 +181,9 @@ def diff(old, new):
     for kind in ("repos", "issues", "deploys"):
         o, n = old.get(kind, {}), new.get(kind, {})
         changes += [f"{kind[:-1]}:{k}" for k in sorted(set(o) | set(n)) if o.get(k) != n.get(k)]
+    old_triage, new_triage = old.get("partial_triage", {}), new.get("partial_triage", {})
+    changes += [f"partial_triage:{k}" for k in sorted(set(old_triage) | set(new_triage))
+                if old_triage.get(k) != new_triage.get(k)]
     return changes
 
 
@@ -270,6 +280,9 @@ def settled_fingerprint(a, orch, worker):
     """Start from the planner's inputs; adopt only changes this bookkeeping run owns."""
     fp = load(a.fingerprint) or {}
     post = load(a.post_fingerprint) if a.post_fingerprint else None
+    # The planner consumed and removed this repo's digest, so carry forward its settled absence.
+    if getattr(a, "partial_triage_consumed", False):
+        fp.setdefault("partial_triage", {}).pop(a.repo, None)
     if not isinstance(post, dict) or a.bookkeeping_pending:
         return fp
     if post.get("linear_ok") is True:
@@ -353,6 +366,7 @@ def main():
     s.add_argument("--orch-result", required=True); s.add_argument("--worker-result", required=True); s.add_argument("--stamp", required=True)
     s.add_argument("--bookkeeping-pending", action="store_true")
     s.add_argument("--post-fingerprint", default=""); s.add_argument("--repo", default="")
+    s.add_argument("--partial-triage-consumed", action="store_true")
     s = sub.add_parser("noop-check"); s.add_argument("--file", required=True); s.add_argument("--orch-result", required=True)
     s = sub.add_parser("clear"); s.add_argument("--file", required=True)
     s = sub.add_parser("ticket-changes"); s.add_argument("--file", required=True); s.add_argument("--fingerprint", required=True)

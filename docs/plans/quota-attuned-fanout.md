@@ -2,7 +2,7 @@
 
 > **Suggested execution:** Sonnet with high reasoning: well-scoped Python, zsh and Node edits to existing, well-tested code, but they touch concurrency, gate semantics and hooks. Step up to Opus for slice C (shared budget and leases) if lease and wait semantics get subtle. Step down to Haiku for slices A1, A2 and D3 on their own.
 
-**Status (2026-10-29 11:50):** wave 1 and E1 are live. Today's batch skipped all planning (F10: Cursor is required as reviewer and gated until 11-03). #12 (E2, 3 rounds) and #13 (C2, 3 rounds) are both clean: 311 and 402 tests green. Next: merge them now that the batch check is recorded. DEV-320 (slackagent#7) is under two-lens Codex review; its manifest adds the channels:read and groups:read scopes, so deploying needs either a Slack app reinstall or a channel ID in config. Proposed next: **slice G**, a universal token-reservation ledger for every agent launch (Jake, 10-29).
+**Status (2026-10-29 17:20):** #15 (H, the Cursor-gated cross-provider review fallback, 2 rounds) is merged and deployed (`01af84e`). The dry run no longer holds on the Cursor reviewer, but it still shows lanes=0 with 'no worker plus required review fits shared headroom'. That's **F11**: `agent_budget.capacity()` charges the 7d/weekly windows at the 5-hour-calibrated rate, with Codex weekly at 71% and Claude 7d at 53%. **Slice W (per-window factors) is now the last blocker for the 10-30 10:30 batch.** In flight: W (Codex Luna), the #16 G1 review (Claude workflow), and slackagent#7 fixes. The open decision for Jake: DEV-320 channel access (reinstall or channel ID).
 
 **G1 (10-29, branch `quota/reservation-ledger`):** the ledger core is implemented: token reservations, `reserve`/`update`/`settle`, `run` as reserve → exec → watch → settle, a FIFO wait queue, ledger-backed estimates and nested-lease adoption. No launcher is wired yet; G2 below lists the exact choke points.
 
@@ -28,6 +28,8 @@
 1. **Universal reservation ledger:** every agent launch reserves tokens, updates its estimate, waits if there's no headroom, and settles with actual tokens, ticket, session ids and task. One ledger row per completed output. This is slice G: G1 is the ledger core (brief `quota-fanout-slice-G1.md`, on Claude Sonnet to save Codex's weekly headroom), and G2 wires every launcher to it.
 2. **Hand-started interactive sessions are never blocked:** they reserve and warn.
 3. **Review fallback:** when Cursor is gated, review switches automatically to cross-provider. This is slice H (brief `quota-fanout-slice-H.md`, Codex Luna) and must merge before the 10:30 batch on 10-30.
+
+**Slice H note (2026-10-29):** Implemented a shared effective-strategy decision in `lib/usage.py`. The default `cursor-then-codex` now resolves to cross-provider while Cursor's reviewer gate is over/limited; explicit `cross-provider` remains unchanged. Batch admission and reviewer execution consume the same decision, and the worker receives its strategy and fallback reason so remediation follows that route. Batch state/summary refresh the reset-based fallback note with each reservation decision. Admission still requires an under-gate reviewer from the worker chain who is not the worker. Automated and zsh suite results are recorded in the PR; deployment/merge remains required before the 10-30 10:30 batch.
 
 **Watch at the 10-29 10:30 batch:** expect `skipped-unchanged` rows only from 10-30 on, once the first carried verdicts exist; no `error` rows from the Stop hook; Claude planners on Sonnet with medium effort; and no planning when no worker or reviewer is available.
 
@@ -122,6 +124,8 @@ Separately:
 - **Why:** the default `cursor-then-codex` review strategy hard-requires a Cursor review cycle (`review.sh`: `run_required_review cursor cursor-cycle || exit $?`), and Cursor's auto pool is at 100% until 11-03. The #9 pre-plan gate saw that nothing could finish review and skipped planning, so nothing was wasted. Claude was also at 93% of its 5h window at 10:30, and quota_paused lists cursor and claude.
 - **Not exercised today:** missing-fence `error` rows, the Sonnet-medium planner and verdict saving, because no planner ran.
 - **Consequence:** carried verdicts can't start until a day that actually plans, and **the batch will skip every day until Cursor resets on 11-03** unless the review strategy falls back (cross-provider, or Codex-only final review when Cursor is gated). That's a decision for Jake.
+
+**F11. Long windows charged at the 5-hour rate.** `lib/agent_budget.py capacity()` subtracts the same five_hour-calibrated cost and reservations from every window; calibration only reads five_hour deltas. Live evidence: Claude 5h 0% with 7d 53% gave `allow --want 4` → 1, and the 10-29 17:20 dry run held every repo with 'no worker plus required review fits'. The fix is slice W (per-window factors).
 
 ## Open threads
 
@@ -253,10 +257,10 @@ Separately:
   - Open threads are only closed with an answer, or by moving them to a ticket or `IN_PROGRESS.md`. They are never deleted silently.
   - In personal repos it is committed and pushed, per the existing rule.
 - **Skills:** `pick-up` and `close-out` also sweep `docs/plans/*.md` for unchecked open threads.
-- **E2. Partial triage for headless planners** (ai-tools, `automations/advance-roadmap/`). The planners stay read-only; the digest is built deterministically, with no model.
+- **E2. Partial triage for headless planners — done.** (ai-tools, `automations/advance-roadmap/`). The planners stay read-only; the digest is built deterministically, with no model. Review follow-up hardens session attribution, secret redaction, failover capture and fingerprint settlement.
   - **When:** a planner ends `quota-paused`, `planning-timeout` or `error` without a valid fence.
-  - **What:** run.sh builds `partial-triage-<repo>.md` in `$CODE_DIR/.advance-roadmap/` from its transcript: the Claude session JSONL found by `session_id`, or the Codex rollout (O9). It holds the commands and reads it ran (with truncated outputs), its interim assistant text, and the files and tickets it touched.
-  - **Next run:** the planner prompt names the file: "partial triage from `<stamp>`; reuse these findings and don't redo those reads". A completed planner for that repo deletes it. It ages out after 72h, and it is counted in the repo's fingerprint as "unfinished".
+  - **What:** run.sh builds `partial-triage-<repo>.md` in `$CODE_DIR/.advance-roadmap/` from the exact transcript session id (Claude result JSON or Codex stdout header); without an attributable id it records no research. It redacts transcript strings before rendering or metadata extraction, including truncated PEM blocks, Authorization and URL credentials, AWS credentials, and secret-named assignments. Combined failed attempts share the 20 KB bound evenly so each attempt header and later findings remain visible. Thread 1 alone owns the digest.
+  - **Next run:** the planner prompt names the file: "Partial triage from `<stamp>` (ended `<how>`): reuse these findings; don't redo those reads unless the fingerprint says they changed." A valid completed planner for the targeted repo deletes it, including `blocked_no_item` results whose `repo` is null. Every saved verdict path after consumption, including batch cancellation, settles the digest to absent; its presence counts as a fingerprint change. It ages out after 72h. If later attempts have no attributable research, the existing findings and original age are retained with an unattributable-attempt note.
   - `ORCHESTRATOR.md` asks planners to state interim conclusions in plain text as they go, so the digest carries meaning.
 
 ### G. Universal reservation ledger (ai-tools)

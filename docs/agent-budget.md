@@ -185,10 +185,12 @@ Changed verdicts precede repos with no verdict. Carried verdicts still pass thro
 At the planning barrier the planner portion is released. Before each implementation
 wave, fresh headroom must support an atomic conversion to full worker + review
 leases on the first fitting worker in `pick-worker-chain` order. Cross-provider
-reviews remain on a different provider; the default still requires Cursor then
-Codex. Calls stay on the reserved route; a later gate/limit stops them without
-spending an unleased fallback. Plan approvers reserve planner cost too. Leases
-follow the lane PID and release at completion/cancel/timeout (or normal reaping).
+reviews remain on a different provider. The default uses Cursor then Codex while
+Cursor's reviewer gate is available, and switches to cross-provider while Cursor
+is gated; explicit `cross-provider` remains in effect. Calls stay on the reserved
+route; a later gate/limit stops them without spending an unleased fallback. Plan
+approvers reserve planner cost too. Leases follow the lane PID and release at
+completion/cancel/timeout (or normal reaping).
 
 A ready job held behind running jobs retries after they finish. If fractional
 expectations fill the barrier and nothing can start, the lowest priority held

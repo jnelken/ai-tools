@@ -1141,8 +1141,32 @@ def cmd_pick_orchestrator(args: argparse.Namespace) -> None:
 def cmd_budget_input(args: argparse.Namespace) -> None:
     """One quota refresh for a batch poll's routing and reviewer constraints."""
     state = refresh(Path(args.root))
+    reviewers = role_gates(state, "reviewer")
+    decision = effective_review_strategy(os.environ.get("ADVANCE_ROADMAP_REVIEW_STRATEGY", "cursor-then-codex"),
+                                         reviewers)
     print(json.dumps({"workers": pick_worker_chain(state), "planners": pick_orchestrators(state),
-                      "reviewer_gates": role_gates(state, "reviewer")}))
+                      "reviewer_gates": reviewers, "review_strategy": decision}))
+
+
+def effective_review_strategy(configured: str, reviewer_gates: list[dict[str, Any]]) -> dict[str, Any]:
+    """Resolve configured routing against reviewer gates, shared by batch and review.sh."""
+    if configured not in ("cursor-then-codex", "cross-provider"):
+        raise ValueError(f"unsupported review strategy: {configured}")
+    decision = {"configured": configured, "strategy": configured, "reason": None, "reset_at": None}
+    if configured == "cross-provider":
+        return decision
+    cursor = next((g for g in reviewer_gates if g.get("provider") == "cursor"), {})
+    if cursor.get("state") in OUT_STATES:
+        reset_at = cursor.get("reset_at")
+        reason = f"cursor gated until {reset_at}" if reset_at else (
+            f"cursor gated ({cursor.get('reason') or cursor.get('state')})")
+        decision.update(strategy="cross-provider", reason=reason, reset_at=reset_at)
+    return decision
+
+
+def cmd_effective_review_strategy(args: argparse.Namespace) -> None:
+    state = refresh(Path(args.root))
+    print(json.dumps(effective_review_strategy(args.strategy, role_gates(state, "reviewer"))))
 
 
 def cmd_pick_worker_chain(args: argparse.Namespace) -> None:
@@ -1226,6 +1250,11 @@ def main() -> None:
 
     p = sub.add_parser("budget-input")
     p.set_defaults(func=cmd_budget_input)
+
+    p = sub.add_parser("effective-review-strategy")
+    p.add_argument("--strategy", default=os.environ.get("ADVANCE_ROADMAP_REVIEW_STRATEGY", "cursor-then-codex"),
+                   choices=("cursor-then-codex", "cross-provider"))
+    p.set_defaults(func=cmd_effective_review_strategy)
 
     p = sub.add_parser("pick-worker-chain")
     p.set_defaults(func=cmd_pick_worker_chain)

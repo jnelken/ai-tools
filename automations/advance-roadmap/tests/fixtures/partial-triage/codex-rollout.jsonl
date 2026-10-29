@@ -1,0 +1,4 @@
+{"type":"session_meta","payload":{"id":"codex-session-42"}}
+{"type":"response_item","payload":{"type":"function_call","name":"exec_command","arguments":"{\"cmd\":\"rg -n migration DEV-42 db/schema.sql\"}"}}
+{"type":"response_item","payload":{"type":"function_call_output","output":"DEV-42 is blocked by db/schema.sql\nAPI_TOKEN=codex-secret"}}
+{"type":"event_msg","payload":{"type":"agent_message","message":"So far: DEV-42 is blocked by the missing migration."}}
