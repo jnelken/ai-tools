@@ -37,8 +37,20 @@ SEED_TOKENS = {
 SEED_FACTORS = {'claude': 10 / 251000, 'codex': 3 / 70000, 'cursor': 5 / 59000}
 MAX_AGE = 15 * 60
 ESTIMATE_MAX_AGE = 10 * 60
-ESTIMATE_VERSION = 3
+ESTIMATE_VERSION = 4
 HISTORY_VERSION = 3
+USAGE_FIELDS = ('input', 'cache_write', 'cache_read', 'output')
+OUTCOMES = ('ok', 'error', 'limit', 'timeout', 'cancelled')
+LEDGER_MIN_ROWS = 5        # settled rows a (agent, role) or kind bucket needs before they influence its estimate
+LEDGER_FULL_ROWS = 20      # from here the ledger alone sets it; in between it blends with the older sources
+IDLE_HOLD_FRACTION = .1    # an idle job still holds this share of its initial reservation
+SWEEP_GRACE = 3600         # a ttl-expired lease waits this long for its owner before being settled as a timeout
+MAX_BYPASS = 3             # times smaller waiters may overtake a head that draining leases could admit
+WATCH_FRACTION = .8        # extend a reservation once actual tokens pass this share of it
+WATCH_INTERVAL = 60        # seconds between transcript polls (AGENT_BUDGET_WATCH_INTERVAL overrides)
+REAPED_GRACE = 24 * 3600   # a reaped lease stays settle-able this long
+EXIT_NO_HEADROOM, EXIT_WOULD_EXCEED, EXIT_NO_LEASE, EXIT_NOT_OWNER = 3, 4, 5, 6
+WINDOWS = {'claude': ('five_hour', 'seven_day'), 'codex': ('five_hour', 'weekly'), 'cursor': ('auto', 'api')}
 
 
 def claude_home():
@@ -127,9 +139,12 @@ def role_name(role):
     return {'orchestrator': 'planner', 'approver': 'reviewer', 'review': 'reviewer'}.get(role, role)
 
 
-def transcript_record(path, role='subagent', since=None, until=None):
-    # Streaming rows can repeat a message id: count the maximum usage per field,
-    # once per API message, rather than summing successive output snapshots.
+def transcript_usage(path, since=None, until=None):
+    """Per-field token sums for one Claude transcript, plus message timestamps.
+
+    Streaming rows can repeat a message id: count the maximum usage per field,
+    once per API message, rather than summing successive output snapshots.
+    """
     messages, stamps = {}, []
     for row in rows(path):
         stamp = epoch(row.get('timestamp'))
@@ -143,10 +158,15 @@ def transcript_record(path, role='subagent', since=None, until=None):
         if not key:
             continue
         old = messages.setdefault(key, {})
-        for field in ('input_tokens', 'cache_creation_input_tokens', 'output_tokens'):
+        for field in ('input_tokens', 'cache_creation_input_tokens', 'cache_read_input_tokens', 'output_tokens'):
             old[field] = max(old.get(field, 0), message['usage'].get(field, 0) or 0)
         if epoch(row.get('timestamp')):
             stamps.append(epoch(row['timestamp']))
+    return messages, stamps
+
+
+def transcript_record(path, role='subagent', since=None, until=None):
+    messages, stamps = transcript_usage(path, since, until)
     return {'provider': 'claude', 'role': role, 'agent_type': read_json(path.with_suffix('.meta.json')).get('agentType'), 'total': sum(token_total(m) for m in messages.values()),
             'duration': max(stamps) - min(stamps) if len(stamps) > 1 else None}
 
@@ -226,6 +246,8 @@ def history(persist=True):
         source = list(rows(path))
         records.extend(source)
         calibration_records.extend(source)
+    ledger = list(rows(ledger_path()))
+    records.extend(ledger_records(ledger))
     samples, codex_rows = [], []
     with lock('samples') if persist else nullcontext():
         cache = read_json(budget_dir() / 'history-cache.json')
@@ -300,10 +322,11 @@ def history(persist=True):
             if tokens > 0 and number(a) and number(b) and b > a and same_window and fresh:
                 samples.append({'id': f'quota:{key}:{start.get("timestamp")}', 'provider': 'claude',
                                 'tokens': tokens, 'pct': b - a, 'source': 'quota_snapshots'})
+        samples.extend(ledger_samples(ledger))
         # Rebuild generated samples so upgrades also repair previously persisted
         # bad denominators. Preserve manually supplied/provider-specific samples.
         existing = {r.get('id'): r for r in rows(budget_dir() / 'samples.jsonl')
-                    if r.get('source') not in ('quota_snapshots', 'rate_limits')}
+                    if r.get('source') not in ('quota_snapshots', 'rate_limits', 'ledger')}
         existing.update({r['id']: r for r in samples})
         combined = list(existing.values())
         if persist:
@@ -316,6 +339,42 @@ def history(persist=True):
             os.replace(temporary, path)
             write_json(budget_dir() / 'history-cache.json', cache)
     return records, combined
+
+
+def ledger_path():
+    return budget_dir() / 'ledger.jsonl'
+
+
+def actual_total(actual):
+    """New tokens: what the model processed, with cache reads tracked apart."""
+    return sum(max(0, (actual or {}).get(k, 0) or 0) for k in ('input', 'cache_write', 'output'))
+
+
+def ledger_records(ledger):
+    """Completed, measured rows as cost records. Failed or cut-short runs say nothing about a full job."""
+    result = []
+    for row in ledger:
+        total = actual_total(row.get('actual'))
+        if row.get('outcome') == 'ok' and total > 0 and row.get('agent') in PROVIDERS:
+            result.append(dict(provider=row['agent'], role=row.get('role'), kind=row.get('kind') or row.get('role'),
+                               total=total, duration=row.get('duration_s'), source='ledger'))
+    return result
+
+
+def ledger_samples(ledger):
+    """Pair a settled row's tokens with the window % before and after, when both are fresh readings."""
+    result = []
+    for row in ledger:
+        before, after = row.get('window_before') or {}, row.get('window_after') or {}
+        window = next((w for w in ('five_hour', 'auto') if number(before.get(w)) and number(after.get(w))), None)
+        total = actual_total(row.get('actual'))
+        fresh = all(number(row.get(seen)) and number(row.get(edge)) and abs(row[seen] - row[edge]) <= MAX_AGE
+                    for seen, edge in (('observed_before', 'started_at'), ('observed_after', 'at')))
+        if (window and fresh and total > 0 and after[window] > before[window] and row.get('agent') in PROVIDERS
+                and row.get('lease_id')):
+            result.append(dict(id='ledger:' + row['lease_id'], provider=row['agent'], tokens=total,
+                               pct=after[window] - before[window], source='ledger'))
+    return result
 
 
 def estimates(records, samples):
@@ -339,12 +398,36 @@ def estimates(records, samples):
                     break
         roles = {}
         for role in ROLES:
-            matched = [r for r in records if r.get('provider') == provider and role_name(r.get('role')) == role]
-            tokens = pctl([token_total(r) for r in matched]) or SEED_TOKENS[provider][role]
+            mine = [r for r in records if r.get('provider') == provider and role_name(r.get('role')) == role]
+            settled = [r for r in mine if r.get('source') == 'ledger']
+            others = [r for r in mine if r.get('source') != 'ledger']
+            seed = SEED_TOKENS[provider][role]
+            other_p80 = pctl([token_total(r) for r in others])
+            ledger_p80 = pctl([token_total(r) for r in settled])
+            # Per bucket. The p80 of a handful of rows is just their maximum, so a few rows
+            # never replace the older sources: they count from LEDGER_MIN_ROWS, weighted by
+            # how many there are, and rule alone from LEDGER_FULL_ROWS. With no older source
+            # at all, even a thin ledger beats the seed.
+            if len(settled) >= LEDGER_FULL_ROWS or (settled and not others):
+                matched, source, tokens = settled, 'ledger', ledger_p80
+            elif len(settled) >= LEDGER_MIN_ROWS and other_p80:
+                weight = len(settled) / LEDGER_FULL_ROWS
+                matched, source, tokens = settled + others, 'blend', weight * ledger_p80 + (1 - weight) * other_p80
+            else:
+                matched, source, tokens = others, 'history' if others else 'seed', other_p80
+            tokens = tokens or seed
+            sizes = [token_total(r) for r in matched]
             duration = pctl([r.get('duration', (r.get('duration_ms') or 0) / 1000) for r in matched], .9)
+            kinds = {}
+            for kind in {r.get('kind') for r in settled} - {None}:
+                of_kind = [r for r in settled if r.get('kind') == kind]
+                if len(of_kind) >= LEDGER_MIN_ROWS:
+                    kinds[kind] = {'tokens_p80': pctl([token_total(r) for r in of_kind]), 'observations': len(of_kind)}
             roles[role] = {'tokens_p80': tokens, 'pct': max(.1, tokens * factor),
-                           'ttl': max(60, duration * 1.5) if duration else 1800,
-                           'observations': len(matched)}
+                           'tokens_p95': max(tokens, pctl(sizes, .95) or 0, seed),
+                           # Three heartbeats must fit inside a ttl or a running job's lease can lapse.
+                           'ttl': max(3 * WATCH_INTERVAL, duration * 1.5) if duration else 1800,
+                           'observations': len(matched), 'source': source, 'kinds': kinds}
         result[provider] = {'factor': factor, 'factor_source': 'calibrated' if calibrated else 'seed',
                             'factor_samples': len(ratios), 'roles': roles}
     return result
@@ -436,24 +519,47 @@ def process_start(pid):
     return 'ps:' + value if result.returncode == 0 and value else None
 
 
+def owner_running(lease, identities):
+    """The wrapper or, for a `run` lease, its child is still the process that was recorded."""
+    for pid_key, start_key in (('pid', 'pid_started_at'), ('child_pid', 'child_started_at')):
+        pid = lease.get(pid_key)
+        if pid and lease.get(start_key) and alive(pid):
+            if pid not in identities:
+                identities[pid] = process_start(pid)
+            if identities[pid] == lease[start_key]:
+                return True
+    return False
+
+
 def reap(persist=True):
-    """Caller holds leases.lock, including reads (which persist the reaping)."""
+    """Caller holds leases.lock, including reads (which persist the reaping).
+
+    A lease lives while its owner OR, for `run`, the child it started is alive: a wrapper
+    that dies must not release the reservation of a child that keeps spending. A reaped
+    reservation that carries ledger metadata is archived for REAPED_GRACE, so a late
+    `settle` (or `sweep`) still writes its one row instead of losing it.
+    """
     leases = read_json(budget_dir() / 'leases.json', [])
     now = time.time()
     identities = {}
-    active = []
+    active, dropped = [], []
     for lease in leases:
-        pid = lease.get('pid')
-        if (lease.get('label') == 'session' or not lease.get('pid_started_at') or not alive(pid)
-                or lease.get('created', 0) + lease.get('ttl', 0) <= now):
+        if lease.get('label') == 'session' or not lease.get('pid_started_at'):
             continue
-        if pid not in identities:
-            identities[pid] = process_start(pid)
-        if identities[pid] == lease['pid_started_at']:
+        if not owner_running(lease, identities):
+            dropped.append((lease, 'owner pid reused' if alive(lease.get('pid')) else 'owner exited'))
+        elif max(lease.get('created', 0), lease.get('updated', 0)) + lease.get('ttl', 0) <= now:
+            dropped.append((lease, 'ttl expired'))
+        else:
             active.append(lease)
     leases = active
     if persist:
         write_json(budget_dir() / 'leases.json', leases)
+        saved = read_json(budget_dir() / 'reaped.json', [])
+        archive = [e for e in saved if e.get('reaped_at', 0) + REAPED_GRACE > now]
+        archive += [dict(lease=l, reaped_at=now, reason=why) for l, why in dropped if 'reserved_tokens' in l]
+        if archive != saved:
+            write_json(budget_dir() / 'reaped.json', archive)
     return leases
 
 
@@ -468,15 +574,9 @@ def capacity(reading, leases, provider, role, cost, want, unknown_limit=True):
     unknown = not windows or any(not number(w.get('live')) for w in windows.values())
     fit = min(want, max(0, math.floor((min(known) + 1e-9) / cost))) if known else want
     if unknown and unknown_limit:
-        fit = min(fit, 0 if active else 1)
+        # An open interactive session must not block every headless job for its whole life.
+        fit = min(fit, 0 if [l for l in active if not l.get('interactive')] else 1)
     return max(0, fit)
-
-
-def view(provider, reading, model, leases):
-    reserved = sum(l['pct'] for l in leases if l['provider'] == provider)
-    return dict(reading, reserved_pct=reserved, estimates=model,
-                windows={k: dict(v, headroom=v['cap'] - v['live'] - reserved if number(v.get('live')) else None)
-                         for k, v in reading['windows'].items()})
 
 
 def allow(provider, role, want=1):
@@ -488,22 +588,258 @@ def allow(provider, role, want=1):
     return count
 
 
-def acquire(provider, role, pid=None, ttl=None, label=None, reading=None, unknown_limit=True, **extra):
-    model = cached_estimates()[provider]['roles'][role]
+def resolve_cost(provider, role, tokens=None, kind=None, models=None):
+    """(reserved new tokens, derived % per window, ttl) for one reservation."""
+    models = cached_estimates() if models is None else models
+    cost = models[provider]['roles'][role]
+    if tokens is None:
+        tokens = (cost.get('kinds', {}).get(kind) or {}).get('tokens_p80') or cost['tokens_p80']
+    return tokens, tokens_to_pct(provider, tokens, models), cost['ttl']
+
+
+def tokens_to_pct(provider, tokens, models=None):
+    models = cached_estimates() if models is None else models
+    return max(.1, tokens * models[provider]['factor'])
+
+
+def lease_tokens(lease, models=None):
+    """Reserved tokens; a pct-only lease from before the ledger converts at the provider's factor."""
+    if number(lease.get('reserved_tokens')):
+        return lease['reserved_tokens']
+    provider = lease.get('agent') or lease['provider']
+    models = cached_estimates() if models is None else models
+    return lease.get('pct', 0) / models[provider]['factor']
+
+
+def window_snapshot(reading):
+    windows = {k: v.get('live') for k, v in (reading or {}).get('windows', {}).items()}
+    return windows, (reading or {}).get('observed_at')
+
+
+def waiters_path():
+    return budget_dir() / 'waiters.json'
+
+
+def reap_waiters():
+    """Waiting entries whose process is still the one that queued. Caller holds leases.lock."""
+    kept = []
+    for waiter in read_json(waiters_path(), []):
+        # Liveness alone decides: a job may legitimately wait days for a window to reset.
+        if alive(waiter.get('pid')) and process_start(waiter['pid']) == waiter.get('pid_started_at'):
+            kept.append(waiter)
+    return kept
+
+
+def new_waiter(provider, role, tokens, pct, task=None, request_tokens=None, kind=None):
+    pid = os.getpid()
+    return dict(id=uuid.uuid4().hex, provider=provider, role=role, tokens=tokens, pct=pct, task=task,
+                request_tokens=request_tokens, kind=kind,
+                pid=pid, pid_started_at=process_start(pid), arrived=time.time(), bypassed=0)
+
+
+def dequeue(waiter_id):
+    with lock():
+        queue = reap_waiters()
+        write_json(waiters_path(), [w for w in queue if w['id'] != waiter_id])
+
+
+def queue_may_admit(queue, me, leases, reading, provider):
+    """FIFO with bounded bypass. Caller holds leases.lock and checks its own fit afterwards.
+
+    An earlier waiter that fits goes first. A later one may overtake a head that does
+    not fit, up to MAX_BYPASS times; after that the head is protected, but only while
+    releases could actually admit it. A head blocked by live usage, not by other
+    reservations, protects nothing, so it never starves jobs that fit around it.
+    """
+    mine = [w for w in queue if w['provider'] == provider]
+    ahead = mine[:[w['id'] for w in mine].index(me['id'])]
+    for w in ahead:
+        if capacity(reading, leases, provider, w['role'], w['pct'], 1):
+            return False
+    if ahead:
+        head = ahead[0]
+        if (head.get('bypassed', 0) >= MAX_BYPASS
+                and capacity(reading, [], provider, head['role'], head['pct'], 1)):
+            return False
+    return True
+
+
+def acquire(provider, role, pid=None, ttl=None, label=None, reading=None, unknown_limit=True,
+            tokens=None, kind=None, waiter=None, force=False, models=None, **extra):
+    """Reserve `tokens` (default: the role's p80) or return None when they do not fit.
+
+    `waiter` makes admission queue-aware (FIFO, bounded bypass). Without it the call
+    ignores the queue: batch bundles and the subagent hook do, until G2 routes them.
+    `force` records the reservation even when short (interactive sessions never block)
+    and marks it `over_capacity`.
+    """
+    models = cached_estimates() if models is None else models
+    tokens, pct, default_ttl = resolve_cost(provider, role, tokens, kind, models)
     reading = readings(provider) if reading is None else reading
     with lock():
         leases = reap()
-        if not capacity(reading, leases, provider, role, model['pct'], 1, unknown_limit=unknown_limit):
+        fits = capacity(reading, leases, provider, role, pct, 1, unknown_limit=unknown_limit)
+        if waiter:
+            queue = reap_waiters()
+            if waiter['id'] not in [w['id'] for w in queue]:
+                queue.append(waiter)
+            for queued in queue:    # estimates move while jobs wait; never judge a waiter by a stale cost
+                queued['tokens'], queued['pct'], _ = resolve_cost(queued['provider'], queued['role'],
+                                                                  queued.get('request_tokens'), queued.get('kind'), models)
+            fits = fits and queue_may_admit(queue, waiter, leases, reading, provider)
+        if not fits and not force:
+            if waiter:
+                write_json(waiters_path(), queue)
             return None
         owner = pid or os.getpid()
         started = process_start(owner)
         if started is None:
             raise ProcessLookupError('lease owner exited')
-        lease = dict(id=uuid.uuid4().hex, provider=provider, role=role, pct=model['pct'],
-                     pid=owner, pid_started_at=started, created=time.time(), ttl=ttl or model['ttl'], label=label, **extra)
+        before, observed = window_snapshot(reading)
+        now = time.time()
+        lease = dict(id=uuid.uuid4().hex, provider=provider, agent=provider, role=role, kind=kind or role,
+                     pct=pct, reserved_tokens=tokens, held_tokens=tokens, initial_tokens=tokens,
+                     window_pct={w: pct for w in WINDOWS[provider]},
+                     pid=owner, pid_started_at=started, created=now, updated=now, ttl=ttl or default_ttl,
+                     label=label, session_ids=[], window_before=before, observed_before=observed,
+                     over_capacity=not fits)
+        lease.update(extra)
+        lease.setdefault('interactive', False)
         leases.append(lease)
         write_json(budget_dir() / 'leases.json', leases)
+        if waiter:
+            head = next((w for w in queue if w['provider'] == provider), None)
+            if head and head['id'] != waiter['id']:
+                head['bypassed'] = head.get('bypassed', 0) + 1
+            write_json(waiters_path(), [w for w in queue if w['id'] != waiter['id']])
         return lease
+
+
+def find_lease(leases, lease_id):
+    return next((l for l in leases if l['id'] == lease_id), None)
+
+
+def get_lease(lease_id):
+    with lock():
+        return find_lease(reap(), lease_id)
+
+
+def lease_held(lease, models=None):
+    """Tokens still held against capacity. Equals the reservation until the watch lowers it."""
+    return lease['held_tokens'] if number(lease.get('held_tokens')) else lease_tokens(lease, models)
+
+
+def update_lease(lease_id, tokens=None, add_tokens=None, session_ids=(), force=False, models=None, meta=None,
+                 hold=None, fields=None, watch=None, reading=None):
+    """Revise a reservation. Returns (status, lease): ok | would_exceed | over_run | missing.
+
+    `tokens`/`add_tokens` change the estimate for the whole job (and, unless `hold` says
+    otherwise, what is held against capacity). `hold` sets only the held part: the watch
+    holds the REMAINING expected need, since what a job has already spent shows in the live
+    reading. A rise in the held part that does not fit is refused unless `force`, which applies
+    it anyway and marks `over_run`: the tokens are being spent regardless, and other admitters
+    must see them. Nothing here ever signals the job. Session ids, metadata, `fields` and the
+    heartbeat that keeps the lease from expiring are applied either way.
+    """
+    peek = get_lease(lease_id)
+    if not peek:
+        return 'missing', None
+    provider = peek.get('agent') or peek['provider']
+    wants_tokens = tokens is not None or add_tokens is not None or hold is not None
+    if wants_tokens and models is None:
+        models = cached_estimates()
+    if wants_tokens and reading is None:
+        reading = readings(provider)
+    with lock():
+        leases = reap()
+        lease = find_lease(leases, lease_id)
+        if not lease:
+            return 'missing', None
+        status = 'ok'
+        if wants_tokens:
+            current = lease_tokens(lease, models)
+            new = tokens if tokens is not None else current + (add_tokens or 0)
+            if new < 0 or (hold is not None and hold < 0):
+                raise ValueError('reservation cannot be negative')
+            new_hold = hold if hold is not None else lease_held(lease, models) + (new - current)
+            pct = tokens_to_pct(provider, max(new_hold, 0), models)
+            if pct > lease.get('pct', 0) + 1e-9:
+                others = [l for l in leases if l['id'] != lease_id]
+                if not capacity(reading, others, provider, lease['role'], pct, 1, unknown_limit=False):
+                    status = 'over_run' if force else 'would_exceed'
+            if status != 'would_exceed':
+                lease.update(reserved_tokens=new, held_tokens=max(new_hold, 0), pct=pct,
+                             window_pct={w: pct for w in WINDOWS[provider]})
+                if status == 'over_run':
+                    lease['over_run'] = True
+        for sid in session_ids:
+            if sid and sid not in lease.setdefault('session_ids', []):
+                lease['session_ids'].append(sid)
+        for key, value in (meta or {}).items():
+            if value is not None and not lease.get(key):
+                lease[key] = value
+        lease.update(fields or {})
+        if watch:
+            lease['watch'] = dict(lease.get('watch') or {}, **watch)
+        lease['updated'] = time.time()
+        write_json(budget_dir() / 'leases.json', leases)
+        return status, dict(lease)
+
+
+def parent_lease(agent, environ=None):
+    """The live lease a nested run is under, or None. Only a lease for the same agent counts:
+    a Cursor job's Codex review spends Codex's windows, so it is no child of it."""
+    ids = inherited_ids(environ)
+    with lock():
+        leases = reap()
+    return next((l for i in ids for l in [find_lease(leases, i)] if l and (l.get('agent') or l['provider']) == agent), None)
+
+
+def inherited_ids(environ=None):
+    environ = os.environ if environ is None else environ
+    ids = [pair.partition('=')[2] or pair for pair in environ.get('AGENT_BUDGET_LEASES', '').split(',') if pair]
+    return ([environ['AGENT_BUDGET_LEASE_ID']] if environ.get('AGENT_BUDGET_LEASE_ID') else []) + ids
+
+
+def adopt(parent, tokens=None, session_ids=(), meta=None, wait=False, received=None, models=None):
+    """Attach to the parent lease itself (an explicit `--adopt`): raise its estimate to
+    `tokens` if larger, through capacity (waiting if asked), add session ids, and fill
+    metadata the parent left empty. Returns the parent lease, or None when the raise does
+    not fit and the caller is not waiting. The owner alone settles it."""
+    received = [] if received is None else received
+    while not received:
+        grow = tokens is not None and tokens > lease_tokens(parent, models)
+        status, lease = update_lease(parent['id'], tokens=tokens if grow else None, session_ids=session_ids,
+                                     meta=meta, models=models)
+        if status == 'missing':
+            return None
+        if status != 'would_exceed':
+            return lease
+        if not wait:
+            return None
+        print(f'agent-budget: raising {parent["id"][:8]} to {tokens} tokens does not fit; waiting', file=sys.stderr)
+        pause(5, received)
+    return None
+
+
+def child_lease_env(lease, environ=None):
+    environ = os.environ if environ is None else environ
+    pairs = [p for p in environ.get('AGENT_BUDGET_LEASES', '').split(',') if p]
+    agent = lease.get('agent') or lease['provider']
+    pairs = [p for p in pairs if not p.startswith(agent + '=')] + [f'{agent}={lease["id"]}']
+    return {'AGENT_BUDGET_LEASE_ID': lease['id'], 'AGENT_BUDGET_LEASES': ','.join(pairs),
+            'AGENT_BUDGET_SESSION_FILE': str(session_file(lease['id']))}
+
+
+def session_file(lease_id):
+    return budget_dir() / 'sessions' / lease_id
+
+
+def read_session_file(path):
+    try:
+        return [l.strip() for l in Path(path).read_text().split() if l.strip()]
+    except OSError:
+        return []
 
 
 def reserve_bundle(requests, *, replace_ids=(), reading_by_provider=None, models=None,
@@ -581,6 +917,338 @@ def release(lease_id):
         write_json(budget_dir() / 'leases.json', [l for l in leases if l['id'] != lease_id])
 
 
+_tokens_module = None
+_usage_memo = {}
+SHELLS = ('sh', 'bash', 'zsh', 'dash')
+
+
+def tokens_lib():
+    """automations/advance-roadmap/lib/tokens.py: the roadmap's result-JSON and Codex rollout parsers."""
+    global _tokens_module
+    if _tokens_module is None:
+        spec = importlib.util.spec_from_file_location('agent_budget_tokens', ROOT / 'automations/advance-roadmap/lib/tokens.py')
+        _tokens_module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(_tokens_module)
+    # tokens.py reads this once at import; callers (and tests) set the env later.
+    _tokens_module.CODEX_SESSIONS = codex_sessions_dir()
+    return _tokens_module
+
+
+def codex_sessions_dir():
+    return os.environ.get('ADVANCE_ROADMAP_CODEX_SESSIONS', str(Path.home() / '.codex/sessions'))
+
+
+def blank_usage():
+    return dict.fromkeys(USAGE_FIELDS, 0)
+
+
+def whole(value):
+    return int(value) if number(value) and value > 0 else 0
+
+
+def usage_from_obj(obj):
+    """{input, cache_write, cache_read, output} from a tokens.py record, a Claude/Cursor result
+    JSON, a Codex usage event, or an explicit actual; None when it holds no usage."""
+    if not isinstance(obj, dict):
+        return None
+    if isinstance(obj.get('actual'), dict):
+        obj = obj['actual']
+    if any(k in obj for k in USAGE_FIELDS):
+        return {k: whole(obj.get(k)) for k in USAGE_FIELDS}
+    if isinstance(obj.get('modelUsage'), dict) and obj['modelUsage']:
+        total = blank_usage()
+        for entry in obj['modelUsage'].values():
+            for field, key in zip(USAGE_FIELDS, ('inputTokens', 'cacheCreationInputTokens', 'cacheReadInputTokens', 'outputTokens')):
+                total[field] += whole((entry or {}).get(key))
+        return total
+    u = obj.get('usage') if isinstance(obj.get('usage'), dict) else obj
+    pick = lambda *names: next((whole(u[n]) for n in names if n in u), 0)
+    cached = pick('cached_input_tokens')
+    found = {'input': max(0, pick('input_tokens', 'inputTokens') - cached),
+             'cache_write': pick('cache_creation_input_tokens', 'cache_write_input_tokens', 'cacheWriteTokens'),
+             'cache_read': pick('cache_read_input_tokens', 'cached_input_tokens', 'cacheReadTokens'),
+             'output': pick('output_tokens', 'outputTokens')}
+    return found if any(found.values()) else None
+
+
+def add_usage(total, part):
+    for field in USAGE_FIELDS:
+        total[field] += part.get(field, 0)
+
+
+def claude_session_usage(session_id, since=None):
+    """New + cache usage of a session's transcript and its subagents' since `since` (a resumed
+    session's earlier history is not this lease's work)."""
+    projects = claude_home() / 'projects'
+    files = list(projects.glob(f'*/{session_id}.jsonl')) + list(projects.glob(f'*/{session_id}/subagents/agent-*.jsonl'))
+    if not files:
+        return None
+    total = blank_usage()
+    for path in files:
+        try:
+            stat = path.stat()
+        except OSError:
+            continue
+        stamp = (stat.st_mtime_ns, stat.st_size)
+        if _usage_memo.get((path, since), (None,))[0] != stamp:
+            messages, _ = transcript_usage(path, since=since)
+            part = blank_usage()
+            for m in messages.values():
+                part['input'] += m.get('input_tokens', 0)
+                part['cache_write'] += m.get('cache_creation_input_tokens', 0)
+                part['cache_read'] += m.get('cache_read_input_tokens', 0)
+                part['output'] += m.get('output_tokens', 0)
+            _usage_memo[(path, since)] = (stamp, part)
+        add_usage(total, _usage_memo[(path, since)][1])
+    return total
+
+
+def codex_session_usage(session_id, since=None):
+    """A rollout's final cumulative usage, less the cumulative total when the lease started."""
+    def convert(total):
+        cached = whole(total.get('cached_input_tokens'))
+        return {'input': max(0, whole(total.get('input_tokens')) - cached), 'cache_write': whole(total.get('cache_write_input_tokens')),
+                'cache_read': cached, 'output': whole(total.get('output_tokens'))}
+
+    for path in Path(codex_sessions_dir()).glob(f'*/*/*/rollout-*{session_id}.jsonl'):
+        final = baseline = None
+        for row in rows(path):
+            total = ((row.get('payload') or {}).get('info') or {}).get('total_token_usage')
+            if not isinstance(total, dict):
+                continue
+            final = total
+            at = epoch(row.get('timestamp'))
+            if since is not None and at is not None and at < since:
+                baseline = total
+        if final:
+            usage, base = convert(final), convert(baseline) if baseline else blank_usage()
+            return {k: max(0, usage[k] - base[k]) for k in USAGE_FIELDS}
+    return None
+
+
+def result_usage(agent, path):
+    """(usage, session id) from a file holding the child's stdout: Claude/Cursor result JSON,
+    Codex --json events, or Codex's plain header and closing total."""
+    import re
+    if agent in ('claude', 'cursor'):
+        data, _ = tokens_lib().load_result(str(path))
+        return (usage_from_obj(data), data.get('session_id')) if data else (None, None)
+    try:
+        text = Path(path).read_text(errors='replace')
+    except OSError:
+        return None, None
+    header = re.search(r'^session id: ([0-9a-f-]{36})\s*$', text, re.M)
+    session_id = header.group(1) if header else None
+    total, seen = blank_usage(), False
+    for row in rows(Path(path)):
+        session_id = session_id or row.get('thread_id')
+        if row.get('type') == 'turn.completed' and usage_from_obj(row.get('usage')):
+            add_usage(total, usage_from_obj(row['usage']))
+            seen = True
+    if not seen:
+        closing = re.findall(r'^tokens used\s*\n\s*([\d,]+)\s*$', text, re.M)
+        if closing:
+            total['output'], seen = int(closing[-1].replace(',', '')), True
+    return (total if seen else None), session_id
+
+
+def usage_for_sessions(agent, session_ids, result_file=None, since=None):
+    """(usage, source, extra session ids). Transcripts and rollouts are the truth; a result
+    file counts only when it names a session they did not already cover.
+
+    For Claude the result JSON's modelUsage also counts advisor and other server-tool models,
+    which never reach the transcript (saved planner runs show input 214,797 vs 60), so where both
+    cover one session the larger figure per field wins. Mid-run only the transcript exists.
+    """
+    part, result_sid = result_usage(agent, result_file) if result_file else (None, None)
+    by_session = {'claude': claude_session_usage, 'codex': codex_session_usage}.get(agent, lambda _sid, _since: None)
+    found = {}
+    for sid in dict.fromkeys([*session_ids, *([result_sid] if result_sid else [])]):
+        usage = by_session(sid, since)
+        if usage:
+            found[sid] = usage
+    sources = ['sessions'] if found else []
+    if part and result_sid in found and agent == 'claude':
+        found[result_sid] = {k: max(found[result_sid][k], part[k]) for k in USAGE_FIELDS}
+    total = blank_usage()
+    for usage in found.values():
+        add_usage(total, usage)
+    if part and result_sid not in found:
+        add_usage(total, part)
+        sources.append('result')
+    return total, '+'.join(sources) or 'none', [result_sid] if result_sid else []
+
+
+def discover_sessions(agent, cwd, since, exclude=()):
+    """Last resort: the one transcript or rollout the child started in its cwd. Ambiguity yields nothing."""
+    import re
+    found = []
+    if agent == 'claude':
+        for path in (claude_home() / 'projects' / re.sub(r'[^A-Za-z0-9]', '-', cwd)).glob('*.jsonl'):
+            first = next((epoch(r.get('timestamp')) for r in rows(path) if r.get('timestamp')), None)
+            if first is not None and first >= since - 1 and path.stem not in exclude:
+                found.append(path.stem)
+    elif agent == 'codex':
+        for path in Path(codex_sessions_dir()).glob('*/*/*/rollout-*.jsonl'):
+            try:
+                if path.stat().st_mtime < since - 1:
+                    continue
+            except OSError:
+                continue
+            meta = next(rows(path), {}).get('payload') or {}
+            if meta.get('cwd') == cwd and (epoch(meta.get('timestamp')) or 0) >= since - 1 and meta.get('id') not in exclude:
+                found.append(meta['id'])
+    return found if len(found) == 1 else []
+
+
+def owner_pid():
+    """The long-lived process a CLI-made reservation belongs to: the caller, past transient shells."""
+    pid = os.getppid()
+    for _ in range(8):
+        result = subprocess.run(['ps', '-o', 'ppid=,comm=', '-p', str(pid)], capture_output=True, text=True, timeout=2)
+        parts = result.stdout.strip().split(None, 1)
+        # Stop at the last shell below launchd/init: pid 1 is always alive, so a lease
+        # bound to it would only ever expire by ttl.
+        if len(parts) != 2 or Path(parts[1]).name not in SHELLS or int(parts[0]) <= 1:
+            break
+        pid = int(parts[0])
+    return pid
+
+
+def ledger_row(lease_id):
+    """The row that settled this lease, including a row that rolled it up as a child."""
+    return next((r for r in rows(ledger_path()) if r.get('lease_id') == lease_id
+                 or any(c.get('lease_id') == lease_id for c in r.get('children') or [])), None)
+
+
+def drop_lease(lease_id):
+    """Caller holds leases.lock."""
+    write_json(budget_dir() / 'leases.json', [l for l in read_json(budget_dir() / 'leases.json', []) if l['id'] != lease_id])
+    archive = read_json(budget_dir() / 'reaped.json', [])
+    if any(e['lease'].get('id') == lease_id for e in archive):
+        write_json(budget_dir() / 'reaped.json', [e for e in archive if e['lease'].get('id') != lease_id])
+
+
+def settle(lease_id, actual=None, session_ids=(), outcome='ok', result_file=None, lease_hint=None,
+           discover_in=None, models=None, ended_at=None, settled_by=None):
+    """Release a reservation and append its ONE completed row to ledger.jsonl.
+
+    Returns (status, row): settled | rolled | already_settled | missing. Idempotent on the
+    ledger, not on the lease, so a lease reaped meanwhile (archived) or lost still yields
+    exactly one row. The row append precedes the lease removal under one flock; a crash between
+    them leaves a lease that the next settle removes without a second row. Actual tokens come
+    from `actual`, else from every session id on the lease (transcripts and rollouts, counted
+    from the lease's start), else from `result_file`.
+
+    A child lease (`child_of`) whose parent is still live writes no row of its own: its actual
+    tokens roll up into the parent's row, which lists it under `children`. An orphaned child
+    (parent already settled or gone) writes its own row.
+    """
+    if outcome not in OUTCOMES:
+        raise ValueError('outcome must be one of ' + ', '.join(OUTCOMES))
+    with lock():
+        leases = reap()
+        row = ledger_row(lease_id)
+        rolled = next((c for l in leases for c in l.get('children', []) if c.get('lease_id') == lease_id), None)
+        if row or rolled:
+            drop_lease(lease_id)
+            return 'already_settled', row or rolled
+        archived = next((e['lease'] for e in read_json(budget_dir() / 'reaped.json', []) if e['lease'].get('id') == lease_id), None)
+        lease = find_lease(leases, lease_id) or archived or lease_hint
+        if not lease:
+            return 'missing', None
+        lease = dict(lease)
+    agent = lease.get('agent') or lease['provider']
+    since = lease.get('created', 0) - 2
+    sids = list(dict.fromkeys([*lease.get('session_ids', []), *session_ids, *read_session_file(session_file(lease_id))]))
+    source = 'explicit'
+    if actual is None:
+        actual, source, found = usage_for_sessions(agent, sids, result_file, since)
+        sids = list(dict.fromkeys(sids + found))
+        if source == 'none' and discover_in:
+            guess = discover_sessions(agent, discover_in, lease.get('created', time.time()), exclude=other_session_ids(lease_id))
+            actual, source, _ = usage_for_sessions(agent, guess, None, since)
+            sids = list(dict.fromkeys(sids + guess))
+            source = 'discovered' if source != 'none' else 'none'
+    else:
+        actual = {k: whole(actual.get(k)) for k in USAGE_FIELDS}
+    try:
+        after, observed_after = window_snapshot(readings(agent) if agent == 'claude' else readings(agent, probe=False))
+    except Exception:
+        after, observed_after = None, None
+    if 'reserved_tokens' not in lease and models is None:
+        models = cached_estimates()
+    with lock():
+        leases = reap()
+        row = ledger_row(lease_id)
+        if row:
+            drop_lease(lease_id)
+            return 'already_settled', row
+        lease = find_lease(leases, lease_id) or lease
+        now = ended_at or time.time()
+        own = dict(actual)
+        children = lease.get('children') or []
+        if source != 'explicit' and lease.get('rolled_actual'):
+            add_usage(actual, lease['rolled_actual'])
+            source += '+children'
+        total, reserved = actual_total(actual), round(lease_tokens(lease, models))
+        row = dict(lease_id=lease_id, at=now, started_at=lease.get('created'), agent=agent, model=lease.get('model'),
+                   role=lease.get('role'), kind=lease.get('kind'), task=lease.get('task') or lease.get('label'),
+                   linear_id=lease.get('linear_id'), repo=lease.get('repo'),
+                   session_ids=list(dict.fromkeys(sids + lease.get('session_ids', []) + lease.get('rolled_sessions', []))),
+                   parent_lease_id=lease.get('parent_lease_id'), interactive=bool(lease.get('interactive')),
+                   reserved_tokens=reserved, initial_tokens=round(lease.get('initial_tokens', reserved)),
+                   actual=actual, actual_total=total, actual_source=source,
+                   window_before=lease.get('window_before'), window_after=after,
+                   observed_before=lease.get('observed_before'), observed_after=observed_after,
+                   duration_s=round(now - lease.get('created', now), 1), outcome=outcome,
+                   over_run=actual_total(own) > reserved or bool(lease.get('over_run')))
+        if children:
+            row['children'] = children
+        if settled_by:
+            row['settled_by'] = settled_by
+        parent = find_lease(leases, lease.get('child_of')) if lease.get('child_of') else None
+        if parent:
+            parent.setdefault('children', []).append({k: row[k] for k in (
+                'lease_id', 'task', 'linear_id', 'outcome', 'actual', 'actual_total', 'session_ids', 'over_run')})
+            roll = parent.setdefault('rolled_actual', blank_usage())
+            add_usage(roll, actual)
+            parent['rolled_sessions'] = list(dict.fromkeys(parent.get('rolled_sessions', []) + row['session_ids']))
+            parent['updated'] = time.time()
+            write_json(budget_dir() / 'leases.json', leases)
+            drop_lease(lease_id)
+            return 'rolled', row
+        fd = os.open(ledger_path(), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        with os.fdopen(fd, 'a') as handle:
+            handle.write(json.dumps(row) + '\n')
+        drop_lease(lease_id)
+        return 'settled', row
+
+
+def sweep_reaped(now=None):
+    """Settle leases whose owner (and child) died without settling, best effort and outside the
+    flock. A dead owner is an `error`; a ttl-expired lease gets SWEEP_GRACE for its owner first,
+    then is a `timeout`. Leases without a task (the subagent hook's) were never ledger work."""
+    now = time.time() if now is None else now
+    settled = 0
+    for entry in read_json(budget_dir() / 'reaped.json', []):
+        lease, why = entry['lease'], entry.get('reason')
+        if not lease.get('task'):
+            continue
+        outcome = 'error' if why != 'ttl expired' else 'timeout' if now - entry['reaped_at'] > SWEEP_GRACE else None
+        if outcome:
+            try:
+                settled += settle(lease['id'], outcome=outcome, ended_at=entry['reaped_at'], settled_by='sweep')[0] in ('settled', 'rolled')
+            except Exception:
+                pass
+    return settled
+
+
+def other_session_ids(lease_id):
+    with lock():
+        return {s for l in reap() if l['id'] != lease_id for s in l.get('session_ids', [])}
+
+
 def child_env():
     # Keep workspace/account attribution for leaderboard binding, but remove the
     # parent agent identity and all hook endpoints. Never print environment values.
@@ -590,50 +1258,317 @@ def child_env():
         'CLAUDECODE', 'CLAUDE_CODE_ENTRYPOINT', 'CLAUDE_CODE_SESSION_ID'))}
 
 
-def run(provider, role, command, wait=False, label=None):
-    child, lease = None, None
+def pause(seconds, received):
+    # Short sleeps make cancellation prompt even during long backoffs.
+    until = time.monotonic() + seconds
+    while not received and time.monotonic() < until:
+        time.sleep(min(.2, max(0, until - time.monotonic())))
+
+
+def admit(provider, role, wait=False, interactive=False, received=None, **kw):
+    """The lease, or None (no headroom without --wait, or cancelled while waiting).
+
+    Interactive reservations record and return at once, never queueing. Waiters queue in
+    arrival order and re-poll with backoff up to 30s, using no model while they wait.
+    """
+    received = [] if received is None else received
+    sweep_reaped()
+    if interactive:
+        return acquire(provider, role, force=True, interactive=True, **kw)
+    waiter = None
+    if wait:
+        tokens, pct, _ = resolve_cost(provider, role, kw.get('tokens'), kw.get('kind'))
+        waiter = new_waiter(provider, role, tokens, pct, kw.get('task'), kw.get('tokens'), kw.get('kind'))
+    try:
+        backoff = 1
+        while not received:
+            lease = acquire(provider, role, waiter=waiter, **kw)
+            if lease or not wait:
+                return lease
+            print(f'agent-budget: {provider}/{role} queued; waiting {backoff}s', file=sys.stderr)
+            pause(backoff, received)
+            backoff = min(30, backoff * 2)
+        return None
+    finally:
+        if waiter:
+            dequeue(waiter['id'])
+
+
+def plan_hold(watch, consumed, initial, cap, live, reserved):
+    """(held tokens, new watch state, new reservation) for one tick. Pure, so it can be tested.
+
+    What a job has already spent shows in the live reading, so the lease holds only the REMAINING
+    expected need of the current window period: the period's estimate less what the job spent
+    in it. The estimate grows by half when 80% is used; the hold never exceeds `cap` (the role's
+    p95), an idle job drops to a quarter of what it held, and a window reset (the live reading
+    falling) starts a fresh period at the initial estimate. The whole-job `reserved` estimate that
+    the ledger row compares against grows on its own so over-runs stay visible.
+    """
+    seen = watch.get('window_seen') or {}
+    reset = any(number(v) and number(seen.get(k)) and v < seen[k] - 1 for k, v in live.items())
+    base = consumed if reset else watch.get('base', 0)
+    expected = initial if reset or not watch.get('period_expected') else watch['period_expected']
+    spent = max(0, consumed - base)
+    if spent > WATCH_FRACTION * expected:
+        expected = max(math.ceil(expected * 1.5), math.ceil(spent * 1.25))
+    idle = watch.get('idle_ticks', 0) + 1 if consumed == watch.get('last_consumed') else 0
+    floor = max(1, round(IDLE_HOLD_FRACTION * initial))
+    hold = min(cap, max(floor, expected - spent))
+    if idle >= 2:
+        hold = max(floor, hold // 4)
+    if consumed > WATCH_FRACTION * reserved:
+        reserved = max(math.ceil(reserved * 1.5), math.ceil(consumed * 1.25))
+    return hold, dict(window_seen=live, base=base, period_expected=expected, last_consumed=consumed, idle_ticks=idle), reserved
+
+
+def watch_tick(lease_id, session_out=None, result_file=None):
+    """Re-read the job's usage and re-plan what it holds. Never touches the child.
+
+    Session ids come from the lease, the session file, `session_out`, and, when none is known,
+    the single transcript or rollout the job started in its cwd (the same discovery settle uses).
+    A rise in the hold that does not fit is applied anyway and flagged over-run: the tokens are
+    being spent, and other admitters must stop counting headroom that is gone.
+    """
+    lease = get_lease(lease_id)
+    if not lease:
+        return
+    agent = lease.get('agent') or lease['provider']
+    known = [*lease.get('session_ids', []), *read_session_file(session_file(lease_id)), *read_session_file(session_out or '')]
+    if not known and lease.get('cwd'):
+        known = discover_sessions(agent, lease['cwd'], lease.get('created', 0), exclude=other_session_ids(lease_id))
+    usage, _, found = usage_for_sessions(agent, known, result_file, lease.get('created', 0) - 2)
+    sessions = [sid for sid in dict.fromkeys(known + found) if sid not in lease.get('session_ids', [])]
+    try:
+        reading = readings(agent) if agent == 'claude' else readings(agent, probe=False)
+    except Exception:
+        reading = None
+    live = {k: v.get('live') for k, v in (reading or {}).get('windows', {}).items()}
+    models = cached_estimates()
+    initial = lease.get('initial_tokens') or lease_tokens(lease, models)
+    cap = max(models[agent]['roles'][lease['role']]['tokens_p95'], initial)
+    consumed = actual_total(usage)
+    hold, watch, reserved = plan_hold(lease.get('watch') or {}, consumed, initial, cap, live, lease_tokens(lease, models))
+    args = dict(tokens=math.ceil(reserved), hold=hold, session_ids=sessions, watch=watch, models=models, reading=reading)
+    status, _ = update_lease(lease_id, **args)
+    if status == 'would_exceed':
+        update_lease(lease_id, force=True, **args)
+        print(f'agent-budget: {agent} job needs {hold} more tokens held and they do not fit; recorded as an '
+              f'over-run, job left running', file=sys.stderr)
+
+
+def run(provider, role, command, wait=False, label=None, *, tokens=None, model=None, task=None, ticket=None,
+        repo=None, kind=None, interactive=False, session_out=None, result_file=None, adopt_parent=False, ttl=None):
+    """reserve -> exec -> watch -> settle.
+
+    Under a live lease of the same agent (AGENT_BUDGET_LEASE_ID) the run takes a CHILD lease of its
+    own, through capacity (waiting if asked); at settle its tokens roll up into the parent's row.
+    Only `adopt_parent` attaches to the parent lease itself, which the owner alone settles. The
+    command's stdout and stdin are untouched: session ids come from --session-out,
+    AGENT_BUDGET_SESSION_FILE, --result-file or the cwd's new transcript, never a pipe.
+    """
+    child, lease, adopted, spawned, unreserved = None, None, False, False, False
     received, previous = [], {}
+    started = time.time()
+    meta = dict(model=model, task=task or label or Path(command[0]).name, linear_id=ticket, repo=repo)
+    interval = float(os.environ.get('AGENT_BUDGET_WATCH_INTERVAL', WATCH_INTERVAL))
 
     def forward(signum, _frame):
+        if interactive and signum == signal.SIGINT:
+            return  # Ctrl-C reaches the child through the terminal; it is not a cancellation
         received.append(signum)
         if child:
             try:
-                os.killpg(child.pid, signum)
+                # An interactive child shares our process group and terminal, so signal only it.
+                child.send_signal(signum) if interactive else os.killpg(child.pid, signum)
             except ProcessLookupError:
                 pass
 
     for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
         previous[sig] = signal.signal(sig, forward)
     try:
-        backoff = 1
-        while not received:
-            lease = acquire(provider, role, label=label)
-            if lease or not wait:
-                break
-            print(f'agent-budget: {provider}/{role} queued; waiting {backoff}s', file=sys.stderr)
-            # Short sleeps make cancellation prompt even during long backoffs.
-            until = time.monotonic() + backoff
-            while not received and time.monotonic() < until:
-                time.sleep(min(.2, max(0, until - time.monotonic())))
-            backoff = min(30, backoff * 2)
+        try:
+            parent = parent_lease(provider)
+            if parent and adopt_parent:
+                lease, adopted = adopt(parent, tokens, meta=meta, wait=wait, received=received), True
+            else:
+                other = os.environ.get('AGENT_BUDGET_LEASE_ID')
+                lineage = dict(child_of=parent['id'], parent_lease_id=parent['id']) if parent else dict(parent_lease_id=other)
+                lease = admit(provider, role, wait=wait, interactive=interactive, received=received, label=label,
+                              tokens=tokens, kind=kind, ttl=ttl, cwd=os.getcwd(), **lineage, **meta)
+        except Exception as error:
+            if not interactive:
+                raise
+            # A broken ledger must never lock Jake out of his own tools.
+            print(f'agent-budget: reservation skipped ({type(error).__name__}); session continues unreserved', file=sys.stderr)
+            lease, unreserved = None, True
         if received:
             return 128 + received[-1]
-        if not lease:
+        if not lease and not unreserved:
             print('agent-budget: no headroom; use bin/fanout to queue a terminal', file=sys.stderr)
             return 3
-        child = subprocess.Popen(command, env=dict(child_env(), AGENT_BUDGET_LEASE_ID=lease['id']), start_new_session=True)
+        if lease and interactive and lease.get('over_capacity'):
+            print(f'agent-budget: {provider} headroom is short for this session; reserved anyway', file=sys.stderr)
+        env = dict(child_env(), **child_lease_env(lease)) if lease else child_env()
+        if lease:
+            session_file(lease['id']).parent.mkdir(parents=True, exist_ok=True)
+        child = subprocess.Popen(command, env=env, start_new_session=not interactive)
+        spawned = True
+        if lease and not adopted:
+            try:  # the reservation must outlive this wrapper for as long as the child it started does
+                update_lease(lease['id'], fields=dict(child_pid=child.pid, child_started_at=process_start(child.pid)))
+            except Exception:
+                pass
         if received:
             forward(received[-1], None)
-        code = child.wait()
+        # Heartbeat at most ttl/3 apart, independent of the (heavier) watch, so a lease never lapses mid-run.
+        beat = min(interval, lease['ttl'] / 3) if lease else interval
+        next_beat, next_watch = time.monotonic() + beat, time.monotonic() + interval
+        while True:
+            try:
+                code = child.wait(timeout=min(.2, beat))
+                break
+            except subprocess.TimeoutExpired:
+                if lease and time.monotonic() >= next_beat:
+                    next_beat = time.monotonic() + beat
+                    try:
+                        update_lease(lease['id'])
+                    except Exception as error:
+                        print(f'agent-budget: heartbeat skipped ({type(error).__name__})', file=sys.stderr)
+                if lease and not adopted and time.monotonic() >= next_watch:
+                    next_watch = time.monotonic() + interval
+                    try:
+                        watch_tick(lease['id'], session_out, result_file)
+                    except Exception as error:  # the watch must never hurt the job
+                        print(f'agent-budget: watch skipped ({type(error).__name__})', file=sys.stderr)
         return code if code >= 0 else 128 - code
     except OSError as error:
         print(f'agent-budget: unable to start command: {error.strerror}', file=sys.stderr)
         return 127
     finally:
         if lease:
-            release(lease['id'])
+            try:
+                finish(lease, adopted, spawned, received, child, started, session_out, result_file)
+            except Exception:
+                pass  # the command's exit status is the answer, whatever happened to the ledger
         for sig, handler in previous.items():
             signal.signal(sig, handler)
+
+
+def finish(lease, adopted, spawned, received, child, started, session_out, result_file):
+    sessions = read_session_file(session_out or '')
+    try:
+        if adopted:
+            _, _, found = usage_for_sessions(lease.get('agent') or lease['provider'], sessions, result_file, lease.get('created', 0) - 2)
+            update_lease(lease['id'], session_ids=[*sessions, *found])
+        elif not spawned:
+            release(lease['id'])  # nothing ran, so there is no completed output to log
+        else:
+            code = child.returncode
+            outcome = 'cancelled' if received else 'ok' if code == 0 else 'error'
+            settle(lease['id'], session_ids=sessions, outcome=outcome, result_file=result_file,
+                   lease_hint=lease, discover_in=os.getcwd())
+    except Exception as error:
+        print(f'agent-budget: settle failed ({type(error).__name__}); the lease is left for sweep', file=sys.stderr)
+        if not adopted:
+            try:
+                release(lease['id'])
+            except Exception:
+                pass
+
+
+def view(provider, reading, model, leases, waiters=()):
+    mine = [l for l in leases if l['provider'] == provider]
+    reserved = sum(l['pct'] for l in mine)
+    now = time.time()
+    return dict(reading, reserved_pct=reserved, estimates=model,
+                reserved_tokens=round(sum(lease_tokens(l, {provider: model}) for l in mine)),
+                leases=[dict(id=l['id'], task=l.get('task') or l.get('label'), role=l.get('role'),
+                             tokens=round(lease_tokens(l, {provider: model})), pct=l['pct'],
+                             interactive=bool(l.get('interactive')), over_run=bool(l.get('over_run')))
+                        for l in mine],
+                waiting=[dict(task=w.get('task'), role=w['role'], tokens=round(w['tokens']), pct=w['pct'],
+                              waited_s=round(now - w['arrived']), bypassed=w.get('bypassed', 0))
+                         for w in waiters if w['provider'] == provider],
+                windows={k: dict(v, headroom=v['cap'] - v['live'] - reserved if number(v.get('live')) else None)
+                         for k, v in reading['windows'].items()})
+
+
+def add_lease_args(p, required_role):
+    p.add_argument('--provider', '--agent', dest='provider', choices=PROVIDERS, required=True)
+    p.add_argument('--role', choices=ROLES, required=required_role)
+    p.add_argument('--tokens', type=int, help='reserve this many new tokens instead of the role estimate')
+    p.add_argument('--model')
+    p.add_argument('--ticket', help='Linear ticket, e.g. DEV-7')
+    p.add_argument('--repo')
+    p.add_argument('--kind', help='task kind for estimates (default: the role)')
+    p.add_argument('--interactive', action='store_true', help='never block: record the reservation and warn if short')
+
+
+def emit(a, value, text):
+    print(json.dumps(value) if a.json else text)
+
+
+def cmd_reserve(a, parser):
+    if a.tokens is not None and a.tokens <= 0:
+        parser.error('--tokens must be positive')
+    try:
+        return reserve_flow(a)
+    except Exception as error:
+        if not a.interactive:
+            raise
+        # An interactive session is never blocked, not even by a broken ledger directory.
+        print(f'agent-budget: reservation skipped ({type(error).__name__}); session continues', file=sys.stderr)
+        return 0
+
+
+def reserve_flow(a):
+    meta = dict(model=a.model, task=a.task, linear_id=a.ticket, repo=a.repo)
+    received, previous = [], {}
+    for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+        previous[sig] = signal.signal(sig, lambda signum, _f: received.append(signum))
+    try:
+        parent = parent_lease(a.provider)
+        if parent and a.adopt:
+            lease = adopt(parent, a.tokens, meta=meta, wait=a.wait, received=received)
+            if lease and not received:
+                emit(a, dict(lease, adopted=True), lease['id'])
+        else:
+            other = os.environ.get('AGENT_BUDGET_LEASE_ID')
+            lineage = dict(child_of=parent['id'], parent_lease_id=parent['id']) if parent else dict(parent_lease_id=other)
+            lease = admit(a.provider, a.role or 'worker', wait=a.wait, interactive=a.interactive, received=received,
+                          tokens=a.tokens, kind=a.kind, pid=a.pid or owner_pid(), ttl=a.ttl, cwd=os.getcwd(), **lineage, **meta)
+            if lease and not received:
+                if a.interactive and lease.get('over_capacity'):
+                    print(f'agent-budget: {a.provider} headroom is short for this session; reserved anyway', file=sys.stderr)
+                emit(a, lease, lease['id'])
+    finally:
+        for sig, handler in previous.items():
+            signal.signal(sig, handler)
+    if received:
+        return 128 + received[-1]
+    if not lease:
+        print('agent-budget: no headroom; retry with --wait', file=sys.stderr)
+        return EXIT_NO_HEADROOM
+    return 0
+
+
+def read_actual_file(path):
+    try:
+        text = Path(path).read_text()
+    except OSError as error:
+        raise ValueError(f'cannot read {path}: {error.strerror}')
+    try:
+        data = json.loads(text)
+    except ValueError:
+        data, _ = tokens_lib().load_result(str(path))
+    parts = [usage_from_obj(d) for d in (data if isinstance(data, list) else [data])]
+    total = blank_usage()
+    for part in parts:
+        if part:
+            add_usage(total, part)
+    if not any(parts):
+        raise ValueError(f'{path} holds no token usage')
+    return total
 
 
 def main(argv=None):
@@ -643,7 +1578,7 @@ def main(argv=None):
     status.add_argument('--json', action='store_true')
     for name in ('allow', 'lease', 'run'):
         p = sub.add_parser(name)
-        p.add_argument('--provider', choices=PROVIDERS, required=True)
+        p.add_argument('--provider', '--agent', dest='provider', choices=PROVIDERS, required=True)
         p.add_argument('--role', choices=ROLES, required=True)
         if name == 'allow':
             p.add_argument('--want', type=int, default=1)
@@ -656,26 +1591,82 @@ def main(argv=None):
             p.add_argument('--ttl', type=float)
         if name == 'run':
             p.add_argument('--wait', action='store_true')
+            p.add_argument('--tokens', type=int, help='reserve this many new tokens instead of the role estimate')
+            p.add_argument('--model')
+            p.add_argument('--task')
+            p.add_argument('--ticket', help='Linear ticket, e.g. DEV-7')
+            p.add_argument('--repo')
+            p.add_argument('--kind', help='task kind for estimates (default: the role)')
+            p.add_argument('--interactive', action='store_true', help='never block: record the reservation and warn if short')
+            p.add_argument('--adopt', action='store_true', help='attach to the parent lease instead of taking a child lease')
+            p.add_argument('--ttl', type=float, help='seconds a lease may go without a heartbeat (default: from history)')
+            p.add_argument('--session-out', help='file the command writes its session id(s) to')
+            p.add_argument('--result-file', help='file holding the command\'s stdout, for its result JSON or Codex events')
             p.add_argument('command', nargs=argparse.REMAINDER)
+    p = sub.add_parser('reserve', help='reserve tokens in the shared ledger; prints the lease id')
+    add_lease_args(p, required_role=False)
+    p.add_argument('--task', required=True)
+    p.add_argument('--wait', action='store_true')
+    p.add_argument('--adopt', action='store_true', help='attach to the live parent lease (AGENT_BUDGET_LEASE_ID) instead of taking a child lease')
+    p.add_argument('--pid', type=int, help='long-lived owner of the reservation (default: the calling process, past transient shells)')
+    p.add_argument('--ttl', type=float)
+    p.add_argument('--json', action='store_true')
+    p = sub.add_parser('update', help='revise a reservation; exits 4 when an increase does not fit')
+    p.add_argument('--lease', required=True)
+    group = p.add_mutually_exclusive_group()
+    group.add_argument('--tokens', type=int)
+    group.add_argument('--add-tokens', type=int)
+    p.add_argument('--session-id', action='append', default=[])
+    p.add_argument('--force', action='store_true', help='apply an increase that does not fit and record an over-run')
+    p.add_argument('--owner', action='store_true', help='act on a lease inherited through AGENT_BUDGET_LEASE_ID (refused otherwise)')
+    p.add_argument('--json', action='store_true')
+    p = sub.add_parser('settle', help='release a reservation and log its one completed ledger row')
+    p.add_argument('--lease', required=True)
+    p.add_argument('--actual-json', help='file with token counts, a Claude/Cursor result JSON or a Codex usage object')
+    for field in ('input', 'cache-write', 'cache-read', 'output'):
+        p.add_argument('--' + field, type=int)
+    p.add_argument('--session-id', action='append', default=[])
+    p.add_argument('--result-file', help='file holding the job\'s stdout, to read usage from when none is given')
+    p.add_argument('--outcome', choices=OUTCOMES, default='ok')
+    p.add_argument('--owner', action='store_true', help='act on a lease inherited through AGENT_BUDGET_LEASE_ID (refused otherwise)')
+    p.add_argument('--json', action='store_true')
     p = sub.add_parser('release')
     p.add_argument('id')
+    p.add_argument('--owner', action='store_true', help='act on a lease inherited through AGENT_BUDGET_LEASE_ID (refused otherwise)')
+    sub.add_parser('sweep', help='settle leases whose owner died without settling')
     a = parser.parse_args(argv)
+    target = {'release': lambda: a.id, 'update': lambda: a.lease, 'settle': lambda: a.lease}.get(a.cmd)
+    if target and not a.owner and target() in inherited_ids():
+        # The lease named in the environment belongs to the process that exported it, which
+        # settles it; a nested job that settled or released it would end the parent's run early.
+        print(f'agent-budget: {target()} belongs to the enclosing run; reserve your own lease '
+              f'(add --adopt to attach to it) or pass --owner if you really own it', file=sys.stderr)
+        return EXIT_NOT_OWNER
     if a.cmd == 'release':
         release(a.id)
+    elif a.cmd == 'sweep':
+        with lock():
+            reap()
+        print(sweep_reaped())
     elif a.cmd == 'status':
+        sweep_reaped()
         models = cached_estimates()
         live = {p: readings(p) for p in PROVIDERS}
         with lock():
             leases = reap()
-            result = {p: view(p, live[p], models[p], leases) for p in PROVIDERS}
+            waiting = reap_waiters()
+            result = {p: view(p, live[p], models[p], leases, waiting) for p in PROVIDERS}
         if a.json:
             print(json.dumps(result))
         else:
             for p, v in result.items():
-                print(f'{p}: reserved {v["reserved_pct"]:.2f}% ({v["estimates"]["factor_source"]})')
+                print(f'{p}: reserved {v["reserved_pct"]:.2f}% / {v["reserved_tokens"]} tokens ({v["estimates"]["factor_source"]})')
                 for w, value in v['windows'].items():
                     print(f'  {w}: live={value["live"]} cap={value["cap"]} headroom={value["headroom"]}')
                 print('  job %: ' + ', '.join(f'{r}={c["pct"]:.2f}' for r, c in models[p]['roles'].items()))
+                for w in v['waiting']:
+                    print(f'  waiting: {w["task"] or w["role"]} needs {w["tokens"]} tokens ({w["pct"]:.2f}%), '
+                          f'queued {w["waited_s"]}s, overtaken {w["bypassed"]}x')
     elif a.cmd == 'allow':
         if a.want < 0:
             parser.error('--want must be nonnegative')
@@ -687,9 +1678,40 @@ def main(argv=None):
         lease = acquire(a.provider, a.role, a.pid, a.ttl, a.label)
         print(json.dumps(lease) if a.json else lease['id'] if lease else '')
         return 0 if lease else 3
+    elif a.cmd == 'reserve':
+        return cmd_reserve(a, parser)
+    elif a.cmd == 'update':
+        if a.tokens is None and a.add_tokens is None and not a.session_id:
+            parser.error('update needs --tokens, --add-tokens or --session-id')
+        status_, lease = update_lease(a.lease, a.tokens, a.add_tokens, a.session_id, a.force)
+        if status_ == 'missing':
+            print(f'agent-budget: no live lease {a.lease}', file=sys.stderr)
+            return EXIT_NO_LEASE
+        emit(a, dict(lease, status=status_), f'{status_}: {round(lease_tokens(lease))} tokens reserved')
+        if status_ == 'would_exceed':
+            print('agent-budget: the increase would exceed headroom; the reservation is unchanged and nothing was stopped', file=sys.stderr)
+            return EXIT_WOULD_EXCEED
+    elif a.cmd == 'settle':
+        flags = {k: getattr(a, k) for k in ('input', 'cache_write', 'cache_read', 'output')}
+        try:
+            if a.actual_json:
+                actual = read_actual_file(a.actual_json)
+            elif any(v is not None for v in flags.values()):
+                actual = {k: v or 0 for k, v in flags.items()}
+            else:
+                actual = None
+        except ValueError as error:
+            parser.error(str(error))
+        status_, row = settle(a.lease, actual, a.session_id, a.outcome, a.result_file)
+        if status_ == 'missing':
+            print(f'agent-budget: no lease or ledger row for {a.lease}', file=sys.stderr)
+            return EXIT_NO_LEASE
+        emit(a, dict(row, status=status_), f'{status_}: {row["actual_total"]} new tokens ({row["outcome"]})')
     else:
         command = a.command[1:] if a.command[:1] == ['--'] else a.command
         if not command:
             parser.error('run requires -- CMD...')
-        return run(a.provider, a.role, command, a.wait, a.label)
+        return run(a.provider, a.role, command, a.wait, a.label, tokens=a.tokens, model=a.model, task=a.task,
+                   ticket=a.ticket, repo=a.repo, kind=a.kind, interactive=a.interactive,
+                   session_out=a.session_out, result_file=a.result_file, adopt_parent=a.adopt, ttl=a.ttl)
     return 0
