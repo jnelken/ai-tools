@@ -4,8 +4,13 @@
 
 **Status (2026-10-28 16:15):**
 - **D: done.** slackagent#6 merged at 21:02Z (`ffab00e`) after merging main (DEV-314/315) into the branch. The owner-DM runner keeps main's text-only args plus usage labels. The DEV-314 FeedbackLearner is labeled `feedback`. 260/260 tests. The live service was restarted. The backfill imported 953 slackagent sessions (an idempotent rerun inserts 0) into SQLite and `~/.claude/state/agent-usage.jsonl`, with the DB backed up first. Top sources by cost: history $34.49 (195 runs), imessage-digest $29.35 (644), unknown $13.38 (47), household $12.94 (35). `/usage` is auth-gated (303 to login).
-- **C:** ai-tools#8 got nine review findings, two of them high (the gate fails closed, and an unknown reading blocks the first Agent call). It also gets a design change: no SessionStart leases. The Codex agent is fixing them.
-- **A+B:** ai-tools#9 is open. Its review is deferred to 20:41 because Claude is at 88% and Codex at 71%, both over the 70% cap. Reviewing now would risk cutting off C's fix pass. #9 must merge before the 10:30 batch on 10-29.
+- **C (20:50):** ai-tools#8's nine fixes were verified item by item by Codex: 7 FIXED and 2 PARTIAL, both from one new high finding (the hook's deadline TimeoutError is swallowed by claude_quota.probe's broad except, so it can still deny). The conducting session confirmed fail-open and the removed session leases.
+- **A+B (20:50):** ai-tools#9 went through three Codex lenses after the reset (Codex 0%, Claude 15%). Findings:
+  - 3 high: fence recovery after `is_error`; the post-worker fingerprint hides changes the planner never evaluated; a Linear `ok:false` passes preflight.
+  - 3 medium: cross-provider self-review admission; a stale OAuth reading suppresses the statusline fallback; skip rows record worker gates.
+  - 2 low.
+  
+  A four-agent Claude adversarial-verify workflow is checking the highs before the fixes go out. Both PRs must merge before the 10:30 batch on 10-29.
 
 Repos:
 - `~/Dropbox/code/ai-tools`: the dev checkout. `~/.ai-tools` is its read-only deploy clone.
