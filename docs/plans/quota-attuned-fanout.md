@@ -3,9 +3,14 @@
 > **Suggested execution:** Sonnet with high reasoning: well-scoped Python, zsh and Node edits to existing, well-tested code, but they touch concurrency, gate semantics and hooks. Step up to Opus for slice C (shared budget and leases) if lease and wait semantics get subtle. Step down to Haiku for slices A1, A2 and D3 on their own.
 
 **Status (2026-10-28 16:15):**
-- **D:** slackagent#6 is reviewed, fixed and verified. The merge waits for Jake (auto-mode classifier).
-- **C:** ai-tools#8's nine review findings are fixed with regression coverage (92 library tests pass): fail-open hooks, child-only leases, cached estimates, per-session/interval calibration, reset readings, Codex cache writes, PID identity, Superset hook isolation, and workspace fallback. Pending re-review; no merge.
-- **A+B:** ai-tools#9 is open. Its review is deferred to 20:41 because Claude is at 88% and Codex at 71%, both over the 70% cap. Reviewing now would risk cutting off C's fix pass. #9 must merge before the 10:30 batch on 10-29.
+- **D: done.** slackagent#6 merged at 21:02Z (`ffab00e`) after merging main (DEV-314/315) into the branch. The owner-DM runner keeps main's text-only args plus usage labels. The DEV-314 FeedbackLearner is labeled `feedback`. 260/260 tests. The live service was restarted. The backfill imported 953 slackagent sessions (an idempotent rerun inserts 0) into SQLite and `~/.claude/state/agent-usage.jsonl`, with the DB backed up first. Top sources by cost: history $34.49 (195 runs), imessage-digest $29.35 (644), unknown $13.38 (47), household $12.94 (35). `/usage` is auth-gated (303 to login).
+- **C (21:00):** ai-tools#8 is clean. The nine fixes were verified (7 FIXED, 2 PARTIAL). The deadline swallow those two depended on was then fixed (`0103947`: the hook calls `os._exit(0)` on its deadline, which drops from 25s to 6s). 50 lib tests pass. Merged by the conducting session after merging main into the branch, with only a plan-doc conflict.
+- **A+B (20:50):** ai-tools#9 went through three Codex lenses after the reset (Codex 0%, Claude 15%). Findings:
+  - 3 high: fence recovery after `is_error`; the post-worker fingerprint hides changes the planner never evaluated; a Linear `ok:false` passes preflight.
+  - 3 medium: cross-provider self-review admission; a stale OAuth reading suppresses the statusline fallback; skip rows record worker gates.
+  - 2 low.
+  
+  A four-agent Claude adversarial-verify workflow is checking the highs before the fixes go out. Both PRs must merge before the 10:30 batch on 10-29.
 
 Repos:
 - `~/Dropbox/code/ai-tools`: the dev checkout. `~/.ai-tools` is its read-only deploy clone.
