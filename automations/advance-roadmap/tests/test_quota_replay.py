@@ -51,7 +51,7 @@ class Oct27BudgetAdmissionTest(unittest.TestCase):
             budget.workers, budget.planners, budget.gates = ['codex', 'claude'], ['codex'], {}
             budget.readings = {p: {'windows': {'auto' if p == 'cursor' else 'five_hour': {'live': live, 'cap': cap}}}
                                for p, live, cap in [('codex', 41, 70), ('claude', 16, 70), ('cursor', 100, 100)]}
-            self.assertLess(budget.models['codex']['roles']['planner']['pct'], 4.4)
+            self.assertLess(budget.models['codex']['roles']['planner']['pct']['five_hour'], 4.4)
             # Actual 10-27 pool: mandatory Cursor review cannot run. A4 must
             # stop before even the now-cheap Codex planners spend anything.
             self.assertIsNone(budget.choose(commit=False))
