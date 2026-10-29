@@ -2,10 +2,15 @@
 
 > **Suggested execution:** Sonnet with high reasoning: well-scoped Python, zsh and Node edits to existing, well-tested code, but they touch concurrency, gate semantics and hooks. Step up to Opus for slice C (shared budget and leases) if lease and wait semantics get subtle. Step down to Haiku for slices A1, A2 and D3 on their own.
 
-**Status (2026-10-28 16:15):**
-- **D: done.** slackagent#6 merged at 21:02Z (`ffab00e`) after merging main (DEV-314/315) into the branch. The owner-DM runner keeps main's text-only args plus usage labels. The DEV-314 FeedbackLearner is labeled `feedback`. 260/260 tests. The live service was restarted. The backfill imported 953 slackagent sessions (an idempotent rerun inserts 0) into SQLite and `~/.claude/state/agent-usage.jsonl`, with the DB backed up first. Top sources by cost: history $34.49 (195 runs), imessage-digest $29.35 (644), unknown $13.38 (47), household $12.94 (35). `/usage` is auth-gated (303 to login).
-- **C (21:00):** ai-tools#8 is clean. The nine fixes were verified (7 FIXED, 2 PARTIAL). The deadline swallow those two depended on was then fixed (`0103947`: the hook calls `os._exit(0)` on its deadline, which drops from 25s to 6s). 50 lib tests pass. Merged by the conducting session after merging main into the branch, with only a plan-doc conflict.
-- **A+B:** PR #9 review remediation fixes all eight findings plus the round-3 statusline-placeholder finding below, with regressions reproduced before the fixes. Latest main is merged into the branch. Required validation passed (289 pytest tests, 106 subtests; all four advance-roadmap shell suites; 38 status-glyph cases under zsh); the PR remains open for the conducting session to merge before the 10:30 batch on 10-29.
+**Status (2026-10-28 21:40):** wave 1 and E1 are merged and deployed on this machine (`~/.ai-tools` at `87b02bc`).
+- **D:** slackagent#6, `ffab00e`. Live, with 953 sessions backfilled.
+- **C:** ai-tools#8, `3fb534a`. agent-budget, fanout and the Agent/Workflow gate (fail-open, 6s deadline) are installed.
+- **E1:** ai-tools#10, `c02350c`. The running-docs rule plus pick-up/close-out sweeps.
+- **A+B:** ai-tools#9, `87b02bc`. Three review rounds; 289 pytest tests, the shell suites and the glyph-hook tests are green. The batch's Claude gate now reads live OAuth (56% at 21:35, against the old stale 0%). `daily_batch.py --dry-run` is OK.
+
+**Next (wave 2):** E2 (partial triage) and C2 (the O11 Codex calibration fix, then wiring daily_batch to agent-budget). The briefs are in `docs/plans/quota-attuned-fanout-briefs/` (C2.md, E2.md). They were deferred at 21:40 because Codex was over its 70% cap until ~01:42 and Claude had only 14 points of headroom. Check first with `agent-budget allow --provider codex --role worker --want 2`, though that reads 0 for Codex until O11 is fixed, so use the live percentage directly. Each launches as its own Superset workspace on Codex (Sol for C2, Luna for E2).
+
+**Watch at the 10-29 10:30 batch:** expect `skipped-unchanged` rows only from 10-30 on, once the first carried verdicts exist; no `error` rows from the Stop hook; Claude planners on Sonnet with medium effort; and no planning when no worker or reviewer is available.
 
 Repos:
 - `~/Dropbox/code/ai-tools`: the dev checkout. `~/.ai-tools` is its read-only deploy clone.
