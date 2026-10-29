@@ -8,7 +8,11 @@
 - **E1:** ai-tools#10, `c02350c`. The running-docs rule plus pick-up/close-out sweeps.
 - **A+B:** ai-tools#9, `87b02bc`. Three review rounds; 289 pytest tests, the shell suites and the glyph-hook tests are green. The batch's Claude gate now reads live OAuth (56% at 21:35, against the old stale 0%). `daily_batch.py --dry-run` is OK.
 
-**Wave 2 (10-29 02:15):** launched on fresh windows (Codex 5h 0%, weekly 47%; Claude 0%). C2 (O11 calibration plus daily_batch→agent-budget wiring) is running in `budget-batch-wiring` on Codex Sol high, and E2 (partial triage) in `partial-triage` on Codex Luna high. A monitor watches for their PRs; each gets Codex review lenses plus a small Claude verify, then merge, install and a dry run.
+**Wave 2 (10-29 03:15):**
+- **E2, PR #12:** round 2 is verified by Claude. P1-1, P2-3, P2-4 and P2-5 are FIXED. P1-2 (redaction variants) and P2-6 (the per-attempt bound) are PARTIAL, and there are new findings (over-redaction, the batch-cancel save, an unattributable attempt erasing research). Round 3 is written in `~/.claude/state/fanout/review-ai-tools-12/fix-request-r3.txt` and goes out at 07:21.
+- **C2, PR #13:** O11 is confirmed fixed on real history (Codex is about 4.6 points per 71k tokens, within 2× of measured). Three verified P2s (pending-plan admission, priority-inverted cancel, error-cleanup lease release) are being fixed. The reset-jitter finding was refuted on real data.
+- **Both providers were over the cap at 03:10** (Codex 81%, Claude 72%), and `agent-budget allow` returned 0, so the gate is doing its job.
+- **Merge plan:** merge #12 and #13 after the 10:30 batch and the 11:47 check, so the first live run measures #9 alone.
 
 **Watch at the 10-29 10:30 batch:** expect `skipped-unchanged` rows only from 10-30 on, once the first carried verdicts exist; no `error` rows from the Stop hook; Claude planners on Sonnet with medium effort; and no planning when no worker or reviewer is available.
 
