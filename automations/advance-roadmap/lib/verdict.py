@@ -144,12 +144,19 @@ def cmd_fingerprint(a):
                            if not a.repo or k == a.repo}
         except (OSError, ValueError):
             pass
+    triage_dir = os.path.join(CODE_DIR, ".advance-roadmap")
+    partial_triage = {
+        os.path.basename(path)[len("partial-triage-"):-len(".md")]: file_sha(path)
+        for path in sorted(glob.glob(os.path.join(triage_dir, "partial-triage-*.md")))
+        if not a.repo or os.path.basename(path) == f"partial-triage-{a.repo}.md"
+    }
     fp = {
         "repos": repos,
         "deploys": deploys,
         # A failed fetch is its own state: the verdict it produced may not survive Linear's return.
         "linear_ok": bool(snap.get("ok")),
         "issues": issues,
+        "partial_triage": partial_triage,
         "allowlist": file_sha(ALLOWLIST),
         "skill": sha("".join(file_sha(p) or "-" for p in sorted(glob.glob(os.path.join(SKILL_DIR, "*.md")) + glob.glob(os.path.join(CONDUCTOR_DIR, "*.md"))))),
     }
@@ -174,6 +181,9 @@ def diff(old, new):
     for kind in ("repos", "issues", "deploys"):
         o, n = old.get(kind, {}), new.get(kind, {})
         changes += [f"{kind[:-1]}:{k}" for k in sorted(set(o) | set(n)) if o.get(k) != n.get(k)]
+    old_triage, new_triage = old.get("partial_triage", {}), new.get("partial_triage", {})
+    changes += [f"partial_triage:{k}" for k in sorted(set(old_triage) | set(new_triage))
+                if old_triage.get(k) != new_triage.get(k)]
     return changes
 
 

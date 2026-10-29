@@ -9,6 +9,8 @@ Providers are fakes that log every call; nothing reaches a live CLI, Linear or t
 """
 import json
 import os
+import signal
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -37,7 +39,7 @@ NO_WORK = {"action": "blocked_no_item", "outcome_token": "blocked-no-item", "rep
            "blockers": [], "archives": [], "considered": [], "summary": "No work qualified for demo."}
 
 FAKE = r'''#!{python}
-import json, os, sys
+import json, os, sys, time
 name = os.path.basename(sys.argv[0])
 args = sys.argv[1:]
 prompt = args[args.index("-p") + 1] if name == "claude" and "-p" in args else (args[-1] if args else "")
@@ -46,6 +48,9 @@ with open(os.environ["FAKE_CALLS"], "a") as f:
     f.write(json.dumps({{"bin": name, "role": role, "args": args, "prompt": prompt,
                          "headless": os.environ.get("ADVANCE_ROADMAP_HEADLESS")}}) + "\n")
 mode = os.environ.get(f"FAKE_{{name.upper()}}_{{role.upper()}}") or os.environ.get("FAKE_" + name.upper(), "plan")
+if mode == "wait":
+    time.sleep(30)
+    sys.exit(1)
 fence = "```ORCHESTRATOR_RESULT_JSON\n" + os.environ.get("FAKE_PLAN", "{{}}") + "\n```"
 # What Codex echoes while it reads ORCHESTRATOR.md / WORKER.md: their examples, which are valid JSON.
 label = "WORKER_RESULT_JSON" if role == "worker" else "ORCHESTRATOR_RESULT_JSON"
@@ -131,7 +136,7 @@ class QuotaReplayTest(unittest.TestCase):
         for f in ("run.sh", "worker.sh"):
             (self.root / f).symlink_to(HERE / f)
         for f in ("models.sh", "usage.py", "runrecord.py", "tokens.py", "verdict.py", "pendingplan.py",
-                  "deploysnap.py", "linearscope.py", "lastfence.py", "runmemory.py"):
+                  "deploysnap.py", "linearscope.py", "lastfence.py", "runmemory.py", "partialtriage.py"):
             (self.root / "lib" / f).symlink_to(HERE / "lib" / f)
         (self.root / "lib" / "linearsnap.py").write_text(
             "import json, sys\na = sys.argv\njson.dump({'ok': True, 'issues': []}, open(a[a.index('--out') + 1], 'w'))\n")
@@ -191,6 +196,7 @@ class QuotaReplayTest(unittest.TestCase):
             # Ledger rows and planner transcripts stay in the sandbox, never in ~/.claude.
             "ADVANCE_ROADMAP_RUNS_DIR": str(self.dir / "memory" / "advance-roadmap-runs"),
             "ADVANCE_ROADMAP_CLAUDE_PROJECTS": str(self.dir / "claude-projects"),
+            "ADVANCE_ROADMAP_CODEX_SESSIONS": str(self.dir / "codex-sessions"),
         })
         env.update(fake)
         return env
@@ -276,6 +282,45 @@ class QuotaReplayTest(unittest.TestCase):
         self.assertEqual((rec["orchestrator"], rec["outcome"]), ("claude", "blocked-no-item"))
         self.assertIn("failing over to claude", self.log)
         self.assertTrue((run / "orchestrator-limit-codex.json").exists())
+
+    def test_quota_failure_leaves_partial_triage_and_next_prompt_reuses_then_deletes_it(self):
+        transcript = self.dir / "claude-projects" / "demo" / "partial-session.jsonl"
+        transcript.parent.mkdir(parents=True)
+        shutil.copyfile(HERE / "tests/fixtures/partial-triage/claude.jsonl", transcript)
+        self.usage_state(codex={"weekly": {"used_pct": 85, "reset_epoch": FUTURE}})
+        self.run_lane(FAKE_CLAUDE="limit", FAKE_SESSION_ID="partial-session")
+        self.assertEqual(self.record()["outcome"], "quota-paused")
+        triage = self.code / ".advance-roadmap" / "partial-triage-demo.md"
+        self.assertTrue(triage.exists())
+        self.assertIn("DEV-42", triage.read_text())
+        self.assertIn("Ended: quota-paused", triage.read_text())
+
+        self.usage_state()
+        self.run_lane(FAKE_CODEX="plan")
+        next_planner = [c for c in self.calls() if c["role"] == "orchestrator"][-1]
+        self.assertIn("Partial triage from", next_planner["prompt"])
+        self.assertIn("ended quota-paused", next_planner["prompt"])
+        self.assertIn("don't redo those reads unless the fingerprint says they changed", next_planner["prompt"])
+        self.assertFalse(triage.exists())
+
+    def test_terminated_planner_leaves_codex_rollout_as_planning_timeout(self):
+        env = self.env(FAKE_CODEX="wait")
+        proc = subprocess.Popen(["/bin/zsh", str(self.root / "run.sh")], env=env,
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+        calls = self.dir / "calls.jsonl"
+        deadline = time.time() + 20
+        while not calls.exists() and time.time() < deadline:
+            time.sleep(0.02)
+        self.assertTrue(calls.exists(), "fake Codex did not start")
+        rollout = self.dir / "codex-sessions" / "2026" / "10" / "rollout-fixture.jsonl"
+        rollout.parent.mkdir(parents=True)
+        shutil.copyfile(HERE / "tests/fixtures/partial-triage/codex-rollout.jsonl", rollout)
+        os.killpg(proc.pid, signal.SIGTERM)
+        proc.wait(timeout=20)
+        triage = self.code / ".advance-roadmap" / "partial-triage-demo.md"
+        self.assertTrue(triage.exists())
+        self.assertIn("Ended: planning-timeout", triage.read_text())
+        self.assertIn("DEV-42", triage.read_text())
 
     def test_claude_json_limit_does_not_poison_failover_codex_via_stale_json(self):
         # Codex gated → Claude plans and hits is_error JSON; FAKE_UNGATE opens Codex for failover.

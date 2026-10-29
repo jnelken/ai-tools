@@ -133,6 +133,14 @@ lane — and drops it when it isn't. If you are running, the log lines `pending 
 say why any were declined; a plan for a busy repo is simply another lane's, so leave it alone.
 Never edit or delete these files — `run.sh` owns them.
 
+### Partial triage exists
+
+`$CODE_DIR/.advance-roadmap/partial-triage-<repo>.md` carries findings from a planner that ended
+quota-paused, planning-timeout or error before a valid result. When the prompt names one, reuse its
+findings and don't repeat its reads unless the fingerprint says they changed. It expires after 72h;
+`run.sh` removes it after a completed plan. State interim conclusions in plain text as you go, such as
+"so far: X is blocked by Y", so partial triage can preserve the useful result.
+
 ### Threads
 
 A daily batch may run up to a few **threads** of work in one repo: separate planners, separate

@@ -59,6 +59,7 @@ PENDING_DIR="${ADVANCE_ROADMAP_PENDING_DIR:-$CODE_DIR/.advance-roadmap}"
 PENDING_PLAN=""
 WORKER_SH="$ROOT/worker.sh"
 WORKSPACES_PY="$ROOT/lib/workspaces.py"
+PARTIAL_TRIAGE_PY="$ROOT/lib/partialtriage.py"
 # 1 = each dispatched item runs in its own Superset workspace and ships as a merged PR
 # (the only output the Production Run leaderboard credits). 0 = run worker.sh in-process,
 # for tests. With 1 and the Superset app down, a dispatch is skipped and its plan kept.
@@ -116,6 +117,26 @@ CHAIN_LINK="${ADVANCE_ROADMAP_CHAIN_LINK:-1}"
 regen_dashboard() {
   [ -f "$ROOT/gen-dashboard.py" ] || return 0
   python3 "$ROOT/gen-dashboard.py" >> "$LOG" 2>&1
+}
+
+PARTIAL_TRIAGE_FILE=""
+[[ "$TARGET_REPO" =~ '^[A-Za-z0-9][A-Za-z0-9._-]*$' ]] && PARTIAL_TRIAGE_FILE="$CODE_DIR/.advance-roadmap/partial-triage-$TARGET_REPO.md"
+PLANNER_ACTIVE=0
+ACTIVE_ORCH_OUT=""
+ACTIVE_ORCH_PROVIDER=""
+ACTIVE_PLANNER_STARTED=""
+capture_partial_triage() {
+  local ended="$1" out="$2" provider="$3" started="$4"
+  [ -n "$PARTIAL_TRIAGE_FILE" ] || return 0
+  python3 "$PARTIAL_TRIAGE_PY" capture --repo "$TARGET_REPO" --provider "$provider" --ended "$ended" \
+    --stamp "$STAMP" --started "$started" --result-json "$out.json" --out "$PARTIAL_TRIAGE_FILE" \
+    >> "$LOG" 2>&1 || echo "(partial triage capture failed for $TARGET_REPO)" >> "$LOG"
+}
+on_planner_term() {
+  if [ "$PLANNER_ACTIVE" -eq 1 ]; then
+    capture_partial_triage planning-timeout "$ACTIVE_ORCH_OUT" "$ACTIVE_ORCH_PROVIDER" "$ACTIVE_PLANNER_STARTED"
+  fi
+  exit 143
 }
 
 mkdir -p "$LOGDIR"
@@ -188,7 +209,8 @@ on_exit() {
   regen_dashboard
 }
 trap on_exit EXIT
-trap 'exit 143' INT TERM
+trap 'exit 130' INT
+trap on_planner_term TERM
 
 # ── Cadence ───────────────────────────────────────────────────────────────────
 # launchd fires once an hour inside two daily sprint windows (10:30–15:30, 16:00–21:00;
@@ -513,6 +535,11 @@ if [ -f "$JLIN_PY" ] && [ -z "$BATCH_PID" ]; then
 fi
 FINGERPRINT="$RUN_DIR/fingerprint.json"
 VERDICT_CHANGES="$RUN_DIR/verdict-changes.json"
+if [ -n "$TARGET_REPO" ]; then
+  python3 "$PARTIAL_TRIAGE_PY" expire --code-dir "$CODE_DIR" --repo "$TARGET_REPO" >> "$LOG" 2>&1 || true
+else
+  python3 "$PARTIAL_TRIAGE_PY" expire-all --code-dir "$CODE_DIR" >> "$LOG" 2>&1 || true
+fi
 if [ -n "$BATCH_SNAPSHOT" ]; then
   cp "$BATCH_SNAPSHOT" "$LINEAR_SNAPSHOT" || exit 1
 else
@@ -648,6 +675,11 @@ Production deploy snapshot (read this; never call GitHub yourself): $DEPLOY_SNAP
       ORCH_PROMPT="$ORCH_PROMPT
 Previous no-work verdict and what changed since (carry unchanged verdicts forward): $VERDICT_CHANGES"
     fi
+    if [ -n "$PARTIAL_TRIAGE_FILE" ] && [ -s "$PARTIAL_TRIAGE_FILE" ]; then
+      partial_prompt="$(python3 "$PARTIAL_TRIAGE_PY" prompt --file "$PARTIAL_TRIAGE_FILE" 2>/dev/null || true)"
+      [ -n "$partial_prompt" ] && ORCH_PROMPT="$ORCH_PROMPT
+$partial_prompt"
+    fi
     # The planner was picked before the snapshots; another lane may have gated it since.
     python3 "$USAGE_PY" --root "$ROOT" gate --role orchestrator --provider "$ORCH" >/dev/null 2>&1
     if [ $? -eq 3 ]; then
@@ -678,7 +710,12 @@ Previous no-work verdict and what changed since (carry unchanged verdicts forwar
       # Per-attempt artifacts: a prior Claude/Cursor .json must not be passed to the next
       # planner's live-limit (Codex writes no .json; stale is_error would gate the wrong provider).
       rm -f "$orch_out.last" "$orch_out.json" "$orch_out.session" "$orch_out.fence"
+      ACTIVE_ORCH_OUT="$orch_out"
+      ACTIVE_ORCH_PROVIDER="$ORCH"
+      ACTIVE_PLANNER_STARTED="$(date +%s)"
+      PLANNER_ACTIVE=1
       run_orchestrator "$ORCH" "$orch_out" "$ORCH_PROMPT" || orch_rc=$?
+      PLANNER_ACTIVE=0
       cat "$orch_out" 2>/dev/null
       echo ""
       echo "=== orchestrator provider=$ORCH exit=$orch_rc ==="
@@ -733,11 +770,19 @@ ok or print("ORCHESTRATOR_RESULT_JSON has no valid action: %r" % (r.get("action"
 sys.exit(0 if ok else 1)' "$result")" || had_json=0
     fi
 
+    if [ "$had_json" -eq 1 ] && [ -n "$PARTIAL_TRIAGE_FILE" ] \
+       && [ "$(jq -r '.repo // empty' "$result" 2>/dev/null)" = "$TARGET_REPO" ]; then
+      rm -f "$PARTIAL_TRIAGE_FILE"
+    fi
+
     if [ "$had_json" -eq 0 ]; then
       # No plan: nothing may act on this run — no worker, no batch-ready, no pending plan, no
       # verdict. A limit banner is a quota pause (provider and reset kept); anything else is an error.
       planner_failed=1
       echo "WARNING: the planner produced no usable ORCHESTRATOR_RESULT_JSON — nothing dispatched"
+      partial_ended=error
+      [ -n "$planner_hit" ] && partial_ended=quota-paused
+      capture_partial_triage "$partial_ended" "$orch_out" "$ORCH" "$ACTIVE_PLANNER_STARTED"
       planner_quota=""
       if [ -n "$planner_hit" ]; then
         # Every planner in the role, with the limits the ones tried here hit and the gates of the rest.

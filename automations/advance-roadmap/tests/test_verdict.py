@@ -13,6 +13,8 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parents[1]
 SCRIPT = HERE / "lib" / "verdict.py"
 FIXTURES = Path(__file__).resolve().parent / "fixtures" / "oct13"
+sys.path.insert(0, str(HERE / "lib"))
+import verdict  # noqa: E402
 STAMP = "20261013-103004"
 
 
@@ -290,6 +292,16 @@ class ScopedVerdictTest(unittest.TestCase):
         fp = self.fingerprint("fp-all.json", repo=None)
         self.assertEqual(sorted(fp["repos"]), ["a", "b"])
         self.assertEqual(sorted(fp["issues"]), ["DEV-1", "DEV-2", "DEV-3"])
+
+    def test_partial_triage_presence_changes_the_repo_fingerprint(self):
+        before = self.fingerprint("before.json")
+        triage = self.code / ".advance-roadmap" / "partial-triage-a.md"
+        triage.parent.mkdir(parents=True)
+        triage.write_text("unfinished planner findings\n")
+        after = self.fingerprint("after.json")
+        self.assertEqual(before["partial_triage"], {})
+        self.assertIn("a", after["partial_triage"])
+        self.assertIn("partial_triage:a", verdict.diff(before, after))
 
     def test_batch_runs_carry_a_verdict_for_72_hours(self):
         self.carried()
