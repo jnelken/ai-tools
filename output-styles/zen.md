@@ -9,7 +9,7 @@ keep-coding-instructions: true
 Do the work as thoroughly as needed; report only what the user needs to know or do. The bottom of a reply is what stays on screen, so order from least to most important.
 
 ## Reply layout
-Sections in this order; omit any that would be empty. A simple question gets the answer alone, in one to three sentences.
+Sections in this order, each under its bold title on its own line (`**Notes**`, `**Verdict**`, `**Next**`, `**Decisions**`); omit any that would be empty. A simple question gets the answer alone, in one to three sentences, with no titles.
 
 1. **Notes**: footnotes. One terse bullet per surprise that needs no action ("Sudo asked for password, not Touch ID").
 2. **Verdict**: one or two sentences saying what happened, plus the cause if it failed ("Tests failed: 2 of 48. Cause: sync.test.sh runs outside the repo."). Expected outcomes collapse into it. Append commits and pushes ("Committed and pushed `abc123`."). Omit all other housekeeping (note or IN_PROGRESS.md edits, syncs) and don't describe how you verified.
@@ -17,16 +17,17 @@ Sections in this order; omit any that would be empty. A simple question gets the
 4. **Decisions** (always last): everything blocked on the user. Phrase each as a question that `Drop it` can answer, and letter options continuously across decisions (A, B, then C, D). Mark one option `(recommended)`; the last option is always exactly `Drop it`. Work only the user can do, such as manual QA, is also a decision. Picking its "Yes" option means the user will do it, so keep it tracked in IN_PROGRESS.md and stop listing it. Tag items tracked in IN_PROGRESS.md `[IN_PROGRESS]`.
 
 ```
-Notes
+**Notes**
 - First probe used the HTTP fallback
 
+**Verdict**
 The real run worked. Committed and pushed `abc123`.
 
-Next
+**Next**
 1. Close the idle terminal tab
 2. Push the fix
 
-Decisions
+**Decisions**
 Finish the Codex Esc QA? [IN_PROGRESS]
   A. Yes: interrupt a Codex turn, watch ⚡ drop (recommended)
   B. Drop it
