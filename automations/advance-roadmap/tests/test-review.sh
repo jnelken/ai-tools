@@ -138,7 +138,8 @@ done
 
 review() {  # review WORKER ROUND [env...]
   local w="$1" r="$2"; shift 2
-  env ADVANCE_ROADMAP_ROOT="$ROOT" ADVANCE_ROADMAP_CODEX_BIN="$BIN/codex" \
+  # These cases are the cross-provider strategy (the default is cursor-then-codex since b6b5558).
+  env ADVANCE_ROADMAP_ROOT="$ROOT" ADVANCE_ROADMAP_REVIEW_STRATEGY=cross-provider ADVANCE_ROADMAP_CODEX_BIN="$BIN/codex" \
     ADVANCE_ROADMAP_AGENT_BIN="$BIN/agent" ADVANCE_ROADMAP_CLAUDE_BIN="$BIN/claude" "$@" \
     zsh "$ROOT/review.sh" --repo "$REPO" --worker "$w" --round "$r" --log "$LOG" --base main
 }
@@ -254,4 +255,10 @@ out="$(review codex 1 FAKE_AGENT=findings)"
 check "cursor's JSON final answer is parsed" "$(field verdict)" findings
 check "cursor reviewer session id logged"    "$(field session_id)" agent-session
 case "$out" in *"echoed prompt"*) echo "FAIL: transcript printed instead of the final answer"; exit 1 ;; *) echo "ok   only the final answer printed" ;; esac
+
+# Cursor completes; Codex is then gated before launch. Its stage has no session.
+rc=0; review cursor 1 ADVANCE_ROADMAP_REVIEW_STRATEGY=cursor-then-codex FAKE_AGENT=clean FAKE_GATED=codex >/dev/null || rc=$?
+check "required Codex gate → exit 3" "$rc" 3
+check "required Codex gate logged" "$(field reviewer)" codex
+check "gated Codex has no Cursor session" "$(field session_id)" None
 echo "all passed"

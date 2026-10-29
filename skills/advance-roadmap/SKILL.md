@@ -74,7 +74,7 @@ windows are the retired scheduler; its helpers are still imported.) The batch ru
 builds, the reviewer is never Claude first, and the scheduling around them is plain shell and
 Python. Claude is only ever a fallback, so the job keeps shipping when Jake's Claude usage is spent.
 Anything added here (a scheduler, a slicer, the plan approver) must keep that true: the approver is
-Codex Sol first, Claude Opus only as the fallback. Code review uses Cursor rounds, then one Codex
+Codex Sol first, Claude Sonnet (medium effort) only as the fallback. Code review uses Cursor rounds, then one Codex
 final pass by default; the selectable `cross-provider` review strategy keeps the earlier Claude
 fallbacks.
 
@@ -97,9 +97,9 @@ only (see `SAFETY.md`) — from [[unblock-roadmap]] (the only dirty-tree excepti
 
 | Role | Default | May mutate? | Doc |
 |---|---|---|---|
-| **Orchestrator** | Codex **Sol** high → Claude Opus high | **No** | [`../conductor/ORCHESTRATOR.md`](../conductor/ORCHESTRATOR.md) |
+| **Orchestrator** | Codex **Sol** high → Claude Sonnet medium | **No** | [`../conductor/ORCHESTRATOR.md`](../conductor/ORCHESTRATOR.md) |
 | **Worker** | Cursor Auto → Codex Sol → Claude Opus | **Yes** | [`WORKER.md`](WORKER.md) |
-| **Plan approver** | Codex **Sol** high → Claude Opus high | **No** | [`PLAN_APPROVAL.md`](PLAN_APPROVAL.md) |
+| **Plan approver** | Codex **Sol** high → Claude Sonnet medium | **No** | [`PLAN_APPROVAL.md`](PLAN_APPROVAL.md) |
 | **Reviewer** | Selected strategy: Cursor rounds, then one Codex final pass by default | **No** | [`WORKER.md`](WORKER.md) Step 5b |
 | **Safety** | — | binds both | [`SAFETY.md`](SAFETY.md) |
 

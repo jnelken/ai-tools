@@ -14,6 +14,8 @@
 set -u
 
 ROOT="${ADVANCE_ROADMAP_ROOT:-/Users/jake/.claude/automations/advance-roadmap}"
+# Unattended: the status-glyph Stop hook must not force a sign-off turn over a result fence.
+export ADVANCE_ROADMAP_HEADLESS=1
 [ -r "$ROOT/lib/models.sh" ] || { echo "review: missing model defaults: $ROOT/lib/models.sh" >&2; exit 1; }
 . "$ROOT/lib/models.sh"
 USAGE_PY="$ROOT/lib/usage.py"
@@ -110,7 +112,7 @@ run_reviewer() {
         -s read-only -C "$REPO" "$PROMPT" >"$out" 2>&1 </dev/null
       local rc=$?
       python3 "$TOKENS_PY" codex "$out" --role reviewer --round "$ROUND" --model "$CODEX_REVIEW_MODEL" \
-        --log "$USAGE_LOG" >/dev/null 2>&1
+        --log "$USAGE_LOG" --session-out "$out.session" >/dev/null 2>&1
       [ -s "$out.last" ] && { cat "$out.last" >> "$out"; }
       return $rc ;;
     cursor)
@@ -118,8 +120,8 @@ run_reviewer() {
       "$AGENT" -p --mode ask --trust --model "$CURSOR_REVIEW_MODEL" --workspace "$REPO" \
         --output-format json "$PROMPT" >"$out.json" 2>&1
       local rc=$?
-      python3 "$TOKENS_PY" cursor-json "$out.json" "$out" --role reviewer --round "$ROUND" \
-        --model "$CURSOR_REVIEW_MODEL" --log "$USAGE_LOG" >/dev/null 2>&1
+      python3 "$TOKENS_PY" cursor-json "$out.json" "$out" --final "$out.last" --role reviewer --round "$ROUND" \
+        --model "$CURSOR_REVIEW_MODEL" --log "$USAGE_LOG" --session-out "$out.session" >/dev/null 2>&1
       [ -s "$out" ] || cp "$out.json" "$out" 2>/dev/null
       return $rc ;;
     claude)
@@ -128,31 +130,78 @@ run_reviewer() {
         --permission-mode plan --disallowedTools "Edit,Write,NotebookEdit" \
         --output-format json ) >"$out.json" 2>&1
       local rc=$?
-      python3 "$TOKENS_PY" claude-json "$out.json" "$out" --role reviewer --round "$ROUND" \
-        --model "$CLAUDE_REVIEW_MODEL" --log "$USAGE_LOG" >/dev/null 2>&1
+      python3 "$TOKENS_PY" claude-json "$out.json" "$out" --final "$out.last" --role reviewer --round "$ROUND" \
+        --model "$CLAUDE_REVIEW_MODEL" --log "$USAGE_LOG" --session-out "$out.session" >/dev/null 2>&1
       [ -s "$out" ] || cp "$out.json" "$out" 2>/dev/null
       return $rc ;;
   esac
 }
 
 out="$(mktemp "${TMPDIR:-/tmp}/advance-roadmap-review.XXXXXX")"
-trap 'rm -f "$out" "$out.last" "$out.json"' EXIT INT TERM
+trap 'rm -f "$out" "$out.last" "$out.json" "$out.session"' EXIT INT TERM
 CAPACITY='selected model is at capacity|model is (currently )?(at capacity|overloaded)|server is overloaded|overloaded_error|\b(503|529)\b.*(unavailable|overloaded|capacity)|(unavailable|overloaded).*\b(503|529)\b'
 
+review_limit_text() {
+  # review_limit_text RC — the limit banner a reviewer that just ran stopped on, if any. A banner counts
+  # only when that reviewer produced no final answer (or Claude/Cursor JSON says is_error): a
+  # successful review that merely quotes one, or Codex echoing its prompt, is not a limit.
+  local live_json=()
+  [ -f "$out.json" ] && live_json=(--result-json "$out.json")
+  python3 "$USAGE_PY" live-limit --transcript-file "$out" --exit "$1" --final-file "$out.last" "${live_json[@]}" 2>/dev/null
+}
+
+review_failed() {
+  # review_failed RC — the invocation failed: a non-zero exit, or Claude/Cursor JSON with is_error:true.
+  [ "$1" -ne 0 ] && return 0
+  [ -f "$out.json" ] && python3 "$USAGE_PY" is-error --result-json "$out.json" 2>/dev/null
+}
+
+verdict_of() {
+  # verdict_of REVIEWER — the VERDICT line of its final answer. Codex's transcript echoes the prompt, which
+  # quotes both verdict lines, so for Codex only its -o file counts; no final answer means unparsed.
+  local src="$out.last"
+  [ -s "$src" ] || { [ "$1" = codex ] && return 1; src="$out"; }
+  rg -o '^VERDICT: (clean|findings)\s*$' -r '$1' "$src" | tail -1
+}
+
+limit_hit() {
+  # limit_hit PROVIDER TEXT — one parse-limit hit as a JSON line (the reviewer a limit banner stopped).
+  python3 "$USAGE_PY" parse-limit --provider "$1" --text "$2" --scope reviewer 2>/dev/null \
+    || python3 -c 'import json, sys; print(json.dumps({"provider": sys.argv[1], "exact_cli_text": sys.argv[2]}))' "$1" "$2"
+}
+
 record_review() {
-  python3 - "$LOG" "$ROUND" "$WORKER" "$1" "$2" "$3" "$REPO" "$REVIEW_STRATEGY" <<'PY'
+  # record_review REVIEWER VERDICT PHASE [HITS] — HITS: limit_hit lines for the reviewers a banner stopped.
+  python3 - "$LOG" "$ROUND" "$WORKER" "$1" "$2" "$3" "$REPO" "$REVIEW_STRATEGY" "${4:-}" "$out.session" "${gated_list:-}" "${capacity_list:-}" <<'PY'
 import json, subprocess, sys, time
-log, rnd, worker, reviewer, verdict, phase, repo, strategy = sys.argv[1:9]
+log, rnd, worker, reviewer, verdict, phase, repo, strategy, hits, session_path, gated, capacity = sys.argv[1:13]
+session = None
+if reviewer:
+    try:
+        session = open(session_path, encoding="utf-8").read().strip() or None
+    except OSError:
+        pass
 head = subprocess.check_output(["git", "-C", repo, "rev-parse", "--short", "HEAD"], text=True).strip()
+limited = []
+for line in hits.splitlines():
+    try:
+        h = json.loads(line)
+    except ValueError:
+        continue
+    if isinstance(h, dict):
+        limited.append({"provider": h.get("provider"), "cause": h.get("exact_cli_text"),
+                        "reset_epoch": h.get("reset_epoch"), "reset_at": h.get("reset_at")})
 with open(log, "a", encoding="utf-8") as f:
     f.write(json.dumps({"round": int(rnd), "worker": worker, "reviewer": reviewer or None,
                         "strategy": strategy, "phase": phase, "verdict": verdict, "head": head,
-                        "at": int(time.time())}) + "\n")
+                        "gated": gated.split(), "capacity": capacity.split(),
+                        "limited": limited, "session_id": session, "at": int(time.time())}) + "\n")
 PY
 }
 
 run_required_review() {
   local who="$1" phase="$2" rc=0 verdict text gate
+  rm -f "$out.last" "$out.json" "$out.session"
   gate="$(python3 "$USAGE_PY" --root "$ROOT" gate --role reviewer --provider "$who" 2>/dev/null)"
   if [ "$?" -eq 3 ]; then
     record_review "$who" unavailable "$phase"
@@ -160,13 +209,12 @@ run_required_review() {
     echo "VERDICT: unavailable"
     return 3
   fi
-  rm -f "$out.last" "$out.json"
   run_reviewer "$who" "$out" || rc=$?
-  if text="$(rg -m1 -i \
-      '^(you.?ve hit your (session |usage )?limit|hit your session limit|rate limit exceeded|quota exceeded|out of (usage|credits|quota)\b)' \
-      "$out" || true)" && [ -n "$text" ]; then
+  if text="$(review_limit_text "$rc")" && [ -n "$text" ]; then
+    # Into this round's log line first, so a failed shared-state update can't lose it.
+    hit="$(limit_hit "$who" "$text")"
     python3 "$USAGE_PY" --root "$ROOT" record-limit --provider "$who" --text "$text" >/dev/null 2>&1 || true
-    record_review "$who" unavailable "$phase"
+    record_review "$who" unavailable "$phase" "$hit"
     echo "REVIEW REQUIRED: $who was limited; do not merge until this review stage succeeds."
     echo "VERDICT: unavailable"
     return 3
@@ -177,14 +225,14 @@ run_required_review() {
     echo "VERDICT: unavailable"
     return 3
   fi
-  if [ "$rc" -ne 0 ] && rg -q -i "$CAPACITY" "$out" "$out.json" 2>/dev/null; then
+  if review_failed "$rc" && rg -q -i "$CAPACITY" "$out" "$out.json" 2>/dev/null; then
     record_review "$who" unavailable "$phase"
     echo "REVIEW REQUIRED: $who's model is at capacity; do not merge until this review stage succeeds."
     echo "VERDICT: unavailable"
     return 3
   fi
   # Codex echoes the prompt (which quotes both verdict lines), so trust the last one.
-  verdict="$(rg -o '^VERDICT: (clean|findings)\s*$' -r '$1' "$out" | tail -1)"
+  verdict="$(verdict_of "$who")"
   [ -n "$verdict" ] || verdict="unparsed"
   record_review "$who" "$verdict" "$phase"
   if [ -s "$out.last" ]; then cat "$out.last"; else cat "$out"; fi
@@ -199,40 +247,43 @@ run_required_review() {
 }
 
 run_cross_provider_review() {
-  local used="" verdict="unavailable" who rc text gate
+  local used="" verdict="unavailable" who rc text gate hits="" hit
+  gated_list="" capacity_list=""   # read by record_review: reviewers skipped over their gate / at capacity
   for who in "${cross_provider_reviewers[@]}"; do
     gate="$(python3 "$USAGE_PY" --root "$ROOT" gate --role reviewer --provider "$who" 2>/dev/null)"
     if [ "$?" -eq 3 ]; then
       echo "(skipping reviewer $who — over its usage gate: $gate)"
+      gated_list="$gated_list $who"
       continue
     fi
-    rm -f "$out.last" "$out.json"
+    rm -f "$out.last" "$out.json" "$out.session"
     rc=0
     run_reviewer "$who" "$out" || rc=$?
     [ "$rc" -eq 127 ] && continue
-    if text="$(rg -m1 -i \
-        '^(you.?ve hit your (session |usage )?limit|hit your session limit|rate limit exceeded|quota exceeded|out of (usage|credits|quota)\b)' \
-        "$out" || true)" && [ -n "$text" ]; then
+    if text="$(review_limit_text "$rc")" && [ -n "$text" ]; then
+      hit="$(limit_hit "$who" "$text")"
+      hits="$hits$hit"$'\n'
       python3 "$USAGE_PY" --root "$ROOT" record-limit --provider "$who" --text "$text" >/dev/null 2>&1 || true
       continue
     fi
-    if [ "$rc" -ne 0 ] && rg -q -i "$CAPACITY" "$out" "$out.json" 2>/dev/null; then
+    if review_failed "$rc" && rg -q -i "$CAPACITY" "$out" "$out.json" 2>/dev/null; then
       echo "(skipping reviewer $who — its model is at capacity)"
+      capacity_list="$capacity_list $who"
       continue
     fi
     used="$who"
-    verdict="$(rg -o '^VERDICT: (clean|findings)\s*$' -r '$1' "$out" | tail -1)"
+    verdict="$(verdict_of "$who")"
     [ -n "$verdict" ] || verdict=unparsed
     break
   done
 
   if [ -z "$used" ]; then
-    record_review "" unavailable cross-provider
+    record_review "" unavailable cross-provider "$hits"
     echo "REVIEW UNAVAILABLE: all cross-provider reviewers (${cross_provider_reviewers[*]}) were limited or missing."
     echo "VERDICT: unavailable"
     return 3
   fi
-  record_review "$used" "$verdict" cross-provider
+  record_review "$used" "$verdict" cross-provider "$hits"
   if [ -s "$out.last" ]; then cat "$out.last"; else cat "$out"; fi
   echo ""
   echo "(reviewer=$used round=$ROUND strategy=cross-provider verdict=$verdict)"

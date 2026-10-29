@@ -53,6 +53,33 @@ class ModelConfiguration(unittest.TestCase):
                 self.codex_model({})
 
 
+class ClaudeApproverConfiguration(unittest.TestCase):
+    def claude_argv(self, env):
+        with mock.patch.dict(os.environ, env, clear=True), \
+                mock.patch.object(pa.subprocess, "run", return_value=mock.Mock(stdout="", stderr="")) as run:
+            pa.run_claude("prompt", "/code")
+        return run.call_args.args[0], run.call_args.kwargs
+
+    def test_defaults_to_sonnet_medium_from_models_sh_and_is_marked_headless(self):
+        argv, kwargs = self.claude_argv({})
+        self.assertEqual((argv[argv.index("--model") + 1], argv[argv.index("--effort") + 1]),
+                         ("claude-sonnet-5-5", "medium"))
+        self.assertEqual(kwargs["env"]["ADVANCE_ROADMAP_HEADLESS"], "1")
+
+    def test_env_overrides_still_win(self):
+        argv, _ = self.claude_argv({"ADVANCE_ROADMAP_ORCH_CLAUDE_MODEL": "claude-opus-5",
+                                    "ADVANCE_ROADMAP_ORCH_CLAUDE_EFFORT": "high"})
+        self.assertEqual((argv[argv.index("--model") + 1], argv[argv.index("--effort") + 1]), ("claude-opus-5", "high"))
+
+    def test_a_models_file_without_claude_defaults_still_falls_back_to_sonnet_medium(self):
+        with tempfile.TemporaryDirectory() as tmp, \
+                mock.patch.object(pa, "__file__", str(Path(tmp) / "planapproval.py")):
+            (Path(tmp) / "models.sh").write_text("CODEX_MODEL_DEFAULT=x\n")
+            argv, _ = self.claude_argv({})
+        self.assertEqual((argv[argv.index("--model") + 1], argv[argv.index("--effort") + 1]),
+                         ("claude-sonnet-5-5", "medium"))
+
+
 class MechanicalChecks(unittest.TestCase):
     def test_overlap_rules(self):
         self.assertTrue(pa.paths_overlap("src/a.ts", "src/a.ts"))

@@ -11,6 +11,8 @@
 set -u
 
 ROOT="${ADVANCE_ROADMAP_ROOT:-/Users/jake/.claude/automations/advance-roadmap}"
+# Unattended: the status-glyph Stop hook must not force a sign-off turn over a result fence.
+export ADVANCE_ROADMAP_HEADLESS=1
 [ -r "$ROOT/lib/models.sh" ] || { echo "worker: missing model defaults: $ROOT/lib/models.sh" >&2; exit 1; }
 . "$ROOT/lib/models.sh"
 # Where the personal repos live differs by machine; ai-tools' personal-code-dir

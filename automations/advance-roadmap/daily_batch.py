@@ -42,6 +42,10 @@ RELEASE_GAP_S = float(os.environ.get("ADVANCE_ROADMAP_THREAD_RELEASE_GAP_S", "20
 APPROVAL_TIMEOUT_S = float(os.environ.get("ADVANCE_ROADMAP_APPROVAL_TIMEOUT_S", "1800"))
 # Outcomes whose row carries a `quota` field: who ran out and when it resets.
 QUOTA_OUTCOMES = {"quota-paused", "skipped-quota"}
+OUT_STATES = ("over", "limited")
+# What a worker's bookkeeping or implementation can be asked to do; anything else a planner returns is
+# a no-work result, whose verdict is worth keeping even when no worker can run today.
+WORK_ACTIONS = {"dispatch_worker", "resume_worker"}
 
 
 def save(path, value):
@@ -65,6 +69,37 @@ def candidates(code):
                 r"jnelken/[^/\s]+(?:\.git)?", origin.stdout.strip()):
             repos.append(repo.name)
     return repos
+
+
+def implementation_headroom():
+    """(ok, reason, blocking_role): whether anything could implement a plan today. Slice C's agent-budget replaces
+    this with a real budget; until then planning waits for a worker provider under its gate and the
+    reviewers the default strategy requires (review.sh: Cursor's cycle, then a final Codex pass,
+    with no fallback). Planning that cannot be carried to a merge only spends quota. A usage.py that
+    fails or prints nothing readable is no reading, which never blocks."""
+    try:
+        chain = shared.py("usage.py", "--root", str(ROOT), "pick-worker-chain", timeout=120)
+        if chain.returncode or chain.stdout.strip() in {"", "none"}:
+            return False, "no worker provider is under its quota gate", "worker"
+        gates = shared.py("usage.py", "--root", str(ROOT), "gates", "--role", "reviewer", timeout=120)
+        by_provider = {g.get("provider"): g for g in json.loads(gates.stdout).get("gates") or []
+                       if isinstance(g, dict)}
+    except (OSError, ValueError, AttributeError, subprocess.TimeoutExpired):
+        return True, "", None
+    if os.environ.get("ADVANCE_ROADMAP_REVIEW_STRATEGY", "cursor-then-codex") == "cross-provider":
+        workers = chain.stdout.split()
+        reviewers = [name for name, gate in by_provider.items() if gate.get("state") not in OUT_STATES]
+        if by_provider and not any(r != w for w in workers for r in reviewers):
+            reason = "every reviewer is gated" if not reviewers else "no cross-provider reviewer is under its quota gate"
+            return False, reason, "reviewer"
+        return True, "", None
+    else:
+        required = ["cursor", "codex"]
+    for name in required:
+        g = by_provider.get(name) or {}
+        if g.get("state") in OUT_STATES:
+            return False, f'the required {name} reviewer is gated ({g.get("reason") or g["state"]})', "reviewer"
+    return True, "", None
 
 
 def plan_of(result, item):
@@ -287,29 +322,68 @@ class Batch:
         return True
 
     def defer_ready(self, reason, quota=None):
-        """Cancel every saved plan; `quota` (usage.py quota-record output) goes beside each one so
-        its skipped-quota record says which provider ran out and when it resets."""
+        """Cancel every saved dispatch and resume plan; `quota` (usage.py quota-record output) goes
+        beside each one so its skipped-quota record says which provider ran out and when it resets.
+        A no-work result is a verdict, not a plan to implement: it is never canceled here
+        (defer_bookkeeping decides what becomes of it)."""
         for item in self.state["queue"]:
-            if item["status"] == "ready":
+            if item["status"] == "ready" and item.get("action") in WORK_ACTIONS:
                 if quota:
                     (ROOT / "runs" / item["stamp"] / "quota-gates.json").write_text(quota)
                 self.cancel(item, reason)
 
-    def worker_quota(self):
+    def defer_bookkeeping(self, reason, quota=None):
+        """No worker can post a no-work result's bookkeeping now. Cancel it so its lane ends, but
+        run.sh keeps the verdict (marked: its blockers were never posted) rather than losing the triage."""
+        for item in self.state["queue"]:
+            if item["status"] == "ready" and item.get("action") not in WORK_ACTIONS:
+                if quota:
+                    (ROOT / "runs" / item["stamp"] / "quota-gates.json").write_text(quota)
+                self.cancel(item, reason)
+
+    def skip_planning(self, reason, role="worker"):
+        """Plan nothing. Every repo gets a skipped-quota row saying why; carried verdicts and
+        pending plans stay as they are, so the next batch that has headroom starts from them."""
+        quota = self.quota_record(role)
+        for item in self.state["queue"]:
+            if item["status"] != "queued":
+                continue
+            gates = ROOT / "runs" / item["stamp"] / "quota-gates.json"
+            if quota:
+                gates.write_text(quota)
+            shared.py("runrecord.py", "--root", str(ROOT), "append", "--stamp", item["stamp"],
+                      "--status", "skipped-quota", "--repo", item["repo"], "--detail", f"planning skipped: {reason}",
+                      *(["--quota-gates", str(gates)] if quota else []), "--lane", str(item["lane"]))
+            row = shared.run_records({item["stamp"]}).get(item["stamp"], {})
+            item.update(status="finished", outcome="skipped-quota", detail=row.get("detail") or reason)
+            if row.get("quota"):
+                item["quota"] = row["quota"]
+        shared.log(f"planning skipped: {reason}")
+
+    def quota_record(self, role="worker"):
         try:
-            out = shared.py("usage.py", "--root", str(ROOT), "quota-record", "--role", "worker", timeout=120)
+            out = shared.py("usage.py", "--root", str(ROOT), "quota-record", "--role", role, timeout=120)
             if out.returncode == 0 and isinstance(json.loads(out.stdout), dict):
                 return out.stdout
         except (OSError, ValueError, subprocess.TimeoutExpired):
             pass
         # quota-record refreshes first; the gates the wave just read are still saved.
         try:
-            return json.dumps(usage.saved_quota_record(ROOT, "worker"))
+            return json.dumps(usage.saved_quota_record(ROOT, role))
         except (OSError, ValueError, TypeError, KeyError):
             return None
 
     def run(self):
         self.write()
+        ok, reason, blocking_role = implementation_headroom()
+        if not ok:
+            self.state["phase"] = "skipped"
+            self.state["skipped_reason"] = reason
+            self.skip_planning(reason, blocking_role)
+            self.state["quota_paused"] = quota_paused(self.state)
+            self.write()
+            self.post_summary()
+            return 0
         self.state["phase"] = "planning"
         # A ready lane is only a shell waiting on disk: free its planning slot so the
         # whole finite queue can reach the barrier even when repos outnumber the cap.
@@ -342,8 +416,10 @@ class Batch:
                 shared.py("usage.py", "--root", str(ROOT), "refresh", timeout=120)
                 providers = shared.py("usage.py", "--root", str(ROOT), "pick-worker-chain")
                 if providers.returncode or providers.stdout.strip() in {"", "none"}:
-                    self.defer_ready("no worker quota available; saved plans wait for the next daily batch",
-                                     self.worker_quota())
+                    reason = "no worker quota available; saved plans wait for the next daily batch"
+                    quota = self.quota_record()
+                    self.defer_ready(reason, quota)
+                    self.defer_bookkeeping(reason, quota)
                 else:
                     for item in chosen:
                         (ROOT / "runs" / item["stamp"] / "batch-release").touch()
@@ -492,17 +568,33 @@ def main():
             shared.log("another roadmap scheduler is running; no second batch")
             return 0
         directory = ROOT / "batches" / datetime.now().date().isoformat()
+        if directory.exists():
+            shared.log("today's batch already started; no automatic repeat")
+            return 0
+        (ROOT / "logs").mkdir(exist_ok=True)
+        shared.LOG = ROOT / "logs" / f"batch-{directory.name}.log"
+        # Preflight first, and the date directory only after it passes: that directory is what says
+        # "today's batch already started", so an outage (Superset down, Linear unreachable) used to
+        # use up the day. Nothing but the snapshot's temp file is written until here.
+        snapshot = ROOT / f"linear-snapshot.preflight.{os.getpid()}.json"
+        try:
+            preflight(snapshot)
+        except (OSError, RuntimeError, subprocess.TimeoutExpired) as error:
+            shared.log(f"preflight failed, no batch started today: {error}")
+            snapshot.unlink(missing_ok=True)
+            notify_preflight_failure(directory.name, str(error))
+            return 1
         directory.parent.mkdir(exist_ok=True)
         try:
             directory.mkdir()
         except FileExistsError:
+            snapshot.unlink(missing_ok=True)
             shared.log("today's batch already started; no automatic repeat")
             return 0
-        (ROOT / "logs").mkdir(exist_ok=True)
+        os.replace(snapshot, directory / "linear-snapshot.json")
         (ROOT / "batch-verdicts").mkdir(exist_ok=True)
         batch = Batch(directory, repos, args.lanes, args.threads)
         batch.write()
-        shared.LOG = ROOT / "logs" / f"batch-{directory.name}.log"
         marker_dir = ROOT / "run.lock"
         shutil.rmtree(marker_dir, ignore_errors=True)  # stale marker; we hold the kernel lock
         marker_dir.mkdir()
@@ -513,23 +605,6 @@ def main():
             if item["repo"] in busy:
                 item.update(status="deferred", reason="previous worker is still running")
         try:
-            if os.environ.get("ADVANCE_ROADMAP_SUPERSET", "1") == "1":
-                if shared.py("workspaces.py", "available", timeout=60).returncode:
-                    raise RuntimeError("Superset is unavailable")
-                shared.py("workspaces.py", "cleanup", timeout=600)
-            # Preserve label inference, once per batch rather than once per concurrent lane.
-            skill = Path(os.environ.get("ADVANCE_ROADMAP_SKILL_DIR",
-                                        str(Path.home() / ".claude/skills/advance-roadmap")))
-            infer = skill.parent / "jnelken-linear/jlin.py"
-            if infer.exists():
-                subprocess.run([sys.executable, str(infer), "infer", "--apply"],
-                               stdout=subprocess.DEVNULL, timeout=180, check=False)
-            # The snapshot is immutable for this batch; each planner gets the same queue.
-            snapshot = directory / "linear-snapshot.json"
-            result = shared.py("linearsnap.py", "--out", str(snapshot), timeout=180)
-            if result.returncode or not snapshot.exists():
-                raise RuntimeError("could not create the batch's Linear snapshot")
-            shared.py("usage.py", "--root", str(ROOT), "refresh", timeout=120)
             caffeinate = None
             if shutil.which("caffeinate"):
                 caffeinate = subprocess.Popen(["caffeinate", "-i", "-w", str(os.getpid())])
@@ -546,6 +621,48 @@ def main():
             return 1
         finally:
             shutil.rmtree(marker_dir, ignore_errors=True)
+
+
+def preflight(snapshot):
+    """Everything the batch needs from the outside world, checked before it claims the day.
+
+    Raises RuntimeError (or a subprocess error) when Superset is down, the Linear snapshot cannot be
+    taken or the usage readings cannot be refreshed. The snapshot lands at `snapshot`; the caller
+    moves it into the batch directory, where it stays immutable for the day's planners."""
+    if os.environ.get("ADVANCE_ROADMAP_SUPERSET", "1") == "1":
+        if shared.py("workspaces.py", "available", timeout=60).returncode:
+            raise RuntimeError("Superset is unavailable")
+        shared.py("workspaces.py", "cleanup", timeout=600)
+    # Preserve label inference, once per batch rather than once per concurrent lane.
+    skill = Path(os.environ.get("ADVANCE_ROADMAP_SKILL_DIR",
+                                str(Path.home() / ".claude/skills/advance-roadmap")))
+    infer = skill.parent / "jnelken-linear/jlin.py"
+    if infer.exists():
+        subprocess.run([sys.executable, str(infer), "infer", "--apply"],
+                       stdout=subprocess.DEVNULL, timeout=180, check=False)
+    result = shared.py("linearsnap.py", "--out", str(snapshot), timeout=180)
+    if result.returncode or not snapshot.exists():
+        raise RuntimeError("could not create the batch's Linear snapshot")
+    try:
+        snap = json.loads(snapshot.read_text())
+    except (OSError, ValueError) as error:
+        raise RuntimeError("could not read the batch's Linear snapshot") from error
+    if not isinstance(snap, dict) or snap.get("ok") is not True:
+        raise RuntimeError("the batch's Linear snapshot is unavailable")
+    if shared.py("usage.py", "--root", str(ROOT), "refresh", timeout=120).returncode:
+        raise RuntimeError("could not read provider usage")
+
+
+def notify_preflight_failure(date, error):
+    """A preflight failure starts no batch, so there is no batch directory to summarize from: write
+    a failed batch.json beside the logs and post the same summary a failed batch would."""
+    if os.environ.get("ADVANCE_ROADMAP_BATCH_SUMMARY", "1") != "1":
+        return False
+    failed = ROOT / "preflight-failures" / f'{date}-{datetime.now():%H%M%S}'
+    failed.mkdir(parents=True, exist_ok=True)
+    save(failed / "batch.json", {"date": date, "phase": "failed", "error": error, "queue": [],
+                                 "started_at": datetime.now().isoformat(timespec="seconds")})
+    return post_slack_summary(failed)
 
 
 if __name__ == "__main__":

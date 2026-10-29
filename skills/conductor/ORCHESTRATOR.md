@@ -176,7 +176,11 @@ fingerprint of everything it was derived from (each repo's HEAD, branches, worki
 these skill docs) in
 `$CODE_DIR/.advance-roadmap/last-verdict.json`. If nothing moved, the run is skipped
 before you start (`skipping — verdict: nothing changed since …`, no run header — a gate skip, not
-an interruption). The verdict is re-derived in full at least every 24h regardless.
+an interruption). The verdict is re-derived in full at least every 24h on a lone tick, and every 72h
+in a daily batch (one planner per repo, once a day). In a batch the fingerprint covers only your
+repo: its checkout and deploy, and the issues labeled `repo/<it>` or for no repo (plus any issue
+that blocks one of those). Your Linear snapshot is cut the same way and drops Done and Canceled
+issues, so another repo's commits and tickets never reopen your triage.
 
 If you are running and your prompt names a `verdict-changes.json`, something moved: its `changed`
 list names each `repo:<dir>`, `issue:DEV-N`, `deploy:<dir>` (production deploy status flipped),

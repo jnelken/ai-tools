@@ -16,6 +16,12 @@
 # ⚠️ and ⛏️ count only in their emoji form (followed by U+FE0F); the bare
 # text-presentation glyphs render monochrome and are rejected on purpose.
 #
+# Headless advance-roadmap runs (ADVANCE_ROADMAP_HEADLESS=1, exported by run.sh, worker.sh,
+# review.sh and planapproval.py) are exempt: a forced glyph turn replaces the planner's final
+# answer, which is where its ORCHESTRATOR_RESULT_JSON fence lives, and no one reads the sign-off.
+# CLAUDE_QUOTA_MANAGED can't stand in for this: planapproval.py calls claude directly, and any
+# interactive claude started inside a managed session would inherit it.
+#
 # Test seam: STATUS_GLYPH_NOW_EPOCH overrides "now" (seconds) for the schedule
 # check.
 
@@ -25,6 +31,7 @@ command -v jq >/dev/null 2>&1 || exit 0
 
 input=$(cat 2>/dev/null || true)
 [ -z "$input" ] && exit 0
+[ "${ADVANCE_ROADMAP_HEADLESS:-}" = "1" ] && exit 0
 
 transcript=$(printf '%s' "$input" | jq -r '.transcript_path // empty' 2>/dev/null || true)
 

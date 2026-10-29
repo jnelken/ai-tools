@@ -53,6 +53,9 @@ if repo == os.environ.get('FAKE_FAILED_REPO'):
 plan = {'action': 'dispatch_worker', 'repo': repo, 'linear_id': f'DEV-{repo}{thread}',
         'item': f'{repo} t{thread}', 'branch': f'roadmap/{repo}-{thread}', 'work_kind': 'feature',
         'touchpoints': [f'src/{repo}{thread}.ts'], 'worker_brief': 'do it', 'summary': 's'}
+if os.environ.get('FAKE_NO_WORK'):  # a no-work verdict whose blocker still needs a bookkeeping worker
+    plan = {'action': 'blocked_no_item', 'outcome_token': 'blocked-no-item', 'repo': repo, 'summary': 'none',
+            'blockers': [{'repo': repo, 'linear_id': 'DEV-9', 'detail': 'needs a decision'}]}
 if thread > 1 and os.environ.get('FAKE_NO_SECOND'):
     plan = {'action': 'blocked_no_item', 'repo': None, 'summary': 'no second thread'}
 (run / 'orchestrator-result.json').write_text(json.dumps(plan))
@@ -121,14 +124,23 @@ class DailyBatchTest(unittest.TestCase):
         (self.root / 'lib/usage.py').write_text(
             "import json, os, sys\n"
             "if 'quota-record' in sys.argv:\n"
-            "    print(json.dumps({'role': 'worker', 'provider': 'cursor', 'reset_epoch': 1792000000,\n"
+            "    role = sys.argv[sys.argv.index('--role') + 1]\n"
+            "    print(os.environ.get('FAKE_QUOTA_' + role.upper()) or json.dumps({'role': 'worker', 'provider': 'cursor', 'reset_epoch': 1792000000,\n"
             "        'reset_at': '2026-10-24T00:00:00-04:00', 'cause': 'cursor: auto pool 96%', 'providers': [\n"
             "        {'provider': 'cursor', 'state': 'over', 'cause': 'auto pool 96%',\n"
             "         'reset_epoch': 1792000000, 'reset_at': '2026-10-24T00:00:00-04:00'},\n"
             "        {'provider': 'codex', 'state': 'ok', 'cause': None, 'reset_epoch': None, 'reset_at': None}]}))\n"
             "    raise SystemExit(0)\n"
-            "print('' if os.environ.get('FAKE_NO_QUOTA') else "
-            "{'pick-worker-chain': 'cursor', 'pick-orchestrator': 'codex'}.get(sys.argv[-1], ''))\n")
+            "if 'gates' in sys.argv:\n"
+            "    print(os.environ.get('FAKE_REVIEWER_GATES', ''))\n"
+            "    raise SystemExit(0)\n"
+            "# FAKE_NO_QUOTA: the worker pool runs dry once planning has started (the headroom check before\n"
+            "# any planner still passes); FAKE_NO_QUOTA_AT_START: it is dry before the batch plans anything.\n"
+            "dry = os.environ.get('FAKE_NO_QUOTA_AT_START') or (\n"
+            "    os.environ.get('FAKE_NO_QUOTA') and os.path.exists(os.path.join(os.environ['ADVANCE_ROADMAP_ROOT'], 'trace.jsonl')))\n"
+            "print('' if dry else {'pick-worker-chain': os.environ.get('FAKE_WORKER_CHAIN', 'cursor'), 'pick-orchestrator': 'codex'}.get(sys.argv[-1], ''))\n")
+        (self.root / 'lib/workspaces.py').write_text(
+            "import os, sys\nsys.exit(1 if os.environ.get('FAKE_SUPERSET_DOWN') and 'available' in sys.argv else 0)\n")
         (self.root / 'lib/planapproval.py').write_text(FAKE_APPROVER)
         (self.root / 'lib/linearsnap.py').write_text(
             "import json, sys\njson.dump({'ok': True, 'issues': []}, open(sys.argv[-1], 'w'))\n")
@@ -161,6 +173,154 @@ class DailyBatchTest(unittest.TestCase):
 
     def state(self):
         return json.loads(next((self.root / 'batches').glob('*/batch.json')).read_text())
+
+    def trace_exists(self):
+        return (self.root / 'trace.jsonl').exists()
+
+    def rows(self):
+        return [json.loads(line) for line in (self.root / 'runs.jsonl').read_text().splitlines()]
+
+    # ── a no-work verdict survives a gated worker pool (F1a) ─────────────────
+
+    def test_no_work_plans_leave_the_barrier_when_the_worker_pool_runs_dry(self):
+        self.repo('a')
+        self.env.update(FAKE_NO_QUOTA='1', FAKE_NO_WORK='1')
+        self.run_batch()  # a lane left `ready` forever would hit this call's 30s timeout
+        self.assertEqual([e['kind'] for e in self.events()], ['plan-start', 'plan-ready', 'deferred'])
+        self.assertEqual([i['outcome'] for i in self.state()['queue']], ['skipped-quota'])
+
+    def test_no_work_plans_are_released_when_a_worker_is_available(self):
+        self.repo('a')
+        self.env['FAKE_NO_WORK'] = '1'
+        self.run_batch()
+        self.assertEqual([e['kind'] for e in self.events()], ['plan-start', 'plan-ready', 'work-start', 'work-end'])
+
+    def test_defer_ready_cancels_only_dispatch_and_resume_plans(self):
+        batch = daily_batch.Batch.__new__(daily_batch.Batch)
+        actions = ['dispatch_worker', 'resume_worker', 'blocked_no_item', 'nothing_qualified']
+        batch.state = {'queue': [{'stamp': f'20261013-10300{n}', 'status': 'ready', 'action': a}
+                                 for n, a in enumerate(actions)]}
+        for item in batch.state['queue']:
+            (self.root / 'runs' / item['stamp']).mkdir(parents=True)
+        with patch.object(daily_batch, 'ROOT', self.root):
+            batch.defer_ready('no worker quota')
+            self.assertEqual([i['status'] for i in batch.state['queue']], ['canceling', 'canceling', 'ready', 'ready'])
+            batch.defer_bookkeeping('no worker quota')
+        self.assertEqual([i['status'] for i in batch.state['queue']], ['canceling'] * 4)
+
+    # ── A4: plan only what can be implemented ────────────────────────────────
+
+    def test_no_worker_headroom_plans_nothing_and_touches_no_carried_state(self):
+        for name in 'ab':
+            self.repo(name)
+        verdicts, pending = self.root / 'batch-verdicts', self.code / '.advance-roadmap'
+        verdicts.mkdir(), pending.mkdir()
+        (verdicts / 'a.json').write_text('{"stamp": "carried"}')
+        (pending / 'pending-plan-b.json').write_text('{"plan": "kept"}')
+        self.env['FAKE_NO_QUOTA_AT_START'] = '1'
+        self.run_batch()
+        self.assertFalse(self.trace_exists(), 'no planner may launch')
+        state = self.state()
+        self.assertEqual((state['phase'], [i['outcome'] for i in state['queue']]), ('skipped', ['skipped-quota'] * 2))
+        self.assertIn('no worker provider is under its quota gate', state['skipped_reason'])
+        self.assertEqual([r['outcome'] for r in self.rows()], ['skipped-quota', 'skipped-quota'])
+        self.assertEqual([r['repo'] for r in self.rows()], ['a', 'b'])
+        self.assertIn('planning skipped', self.rows()[0]['detail'])
+        self.assertEqual(self.rows()[0]['quota']['provider'], 'cursor', 'quota-record names who is out')
+        self.assertEqual((verdicts / 'a.json').read_text(), '{"stamp": "carried"}')
+        self.assertEqual((pending / 'pending-plan-b.json').read_text(), '{"plan": "kept"}')
+        self.assertEqual([q['provider'] for q in state['quota_paused']], ['cursor'])
+
+    def test_a_gated_required_reviewer_plans_nothing(self):
+        self.repo('a')
+        gates = lambda codex: json.dumps({'role': 'reviewer', 'gates': [
+            {'provider': 'codex', 'state': codex, 'reason': '5h 100% >= 70%'},
+            {'provider': 'cursor', 'state': 'ok', 'reason': None}, {'provider': 'claude', 'state': 'ok'}]})
+        self.env['FAKE_REVIEWER_GATES'] = gates('over')
+        self.run_batch()
+        self.assertFalse(self.trace_exists())
+        self.assertIn('required codex reviewer is gated (5h 100% >= 70%)', self.state()['skipped_reason'])
+
+    def test_reviewer_admission_skip_records_the_reviewer_gate(self):
+        self.repo('a')
+        self.env.update(FAKE_REVIEWER_GATES=json.dumps({'gates': [
+            {'provider': 'codex', 'state': 'over', 'reason': '5h 99% >= 70%'},
+            {'provider': 'cursor', 'state': 'ok'}]}))
+        # Healthy worker pool; the reviewer role alone names the exhausted provider.
+        self.env.update(FAKE_QUOTA_WORKER=json.dumps({'role': 'worker', 'provider': None}),
+                        FAKE_QUOTA_REVIEWER=json.dumps({
+            'role': 'reviewer', 'provider': 'codex', 'reset_epoch': 1792000000,
+            'reset_at': 'reset', 'cause': '5h 99% >= 70%'}))
+        self.run_batch()
+        self.assertFalse(self.trace_exists())
+        row = self.rows()[0]
+        self.assertEqual((row['quota']['role'], row['quota']['provider']), ('reviewer', 'codex'))
+        self.assertEqual(row['quota']['reset_at'], 'reset')
+        self.assertIn('5h 99%', row['quota']['cause'])
+
+    def test_cross_provider_cannot_admit_a_worker_as_its_own_only_reviewer(self):
+        self.repo('a')
+        self.env.update(ADVANCE_ROADMAP_REVIEW_STRATEGY='cross-provider',
+                        FAKE_WORKER_CHAIN='cursor', FAKE_REVIEWER_GATES=json.dumps({
+            'gates': [{'provider': 'cursor', 'state': 'ok'}, {'provider': 'codex', 'state': 'over'},
+                      {'provider': 'claude', 'state': 'limited'}]}))
+        self.run_batch()
+        self.assertFalse(self.trace_exists())
+        self.assertIn('cross-provider reviewer', self.state()['skipped_reason'])
+        shutil.rmtree(self.root / 'batches')
+        self.env['FAKE_WORKER_CHAIN'] = 'cursor claude'
+        self.run_batch()
+        self.assertTrue(self.trace_exists(), 'Claude can work while Cursor reviews')
+
+    def test_cross_provider_review_needs_only_one_reviewer(self):
+        self.repo('a')
+        self.env.update(ADVANCE_ROADMAP_REVIEW_STRATEGY='cross-provider', FAKE_REVIEWER_GATES=json.dumps({
+            'gates': [{'provider': 'codex', 'state': 'over'}, {'provider': 'cursor', 'state': 'limited'},
+                      {'provider': 'claude', 'state': 'ok'}]}))
+        self.run_batch()
+        self.assertTrue(self.trace_exists())
+        self.env['FAKE_REVIEWER_GATES'] = json.dumps({'gates': [{'provider': p, 'state': 'over'}
+                                                                for p in ('codex', 'cursor', 'claude')]})
+        (self.root / 'trace.jsonl').unlink()
+        shutil.rmtree(self.root / 'batches')
+        self.run_batch()
+        self.assertFalse(self.trace_exists())
+        self.assertEqual(self.state()['skipped_reason'], 'every reviewer is gated')
+
+    def test_unreadable_reviewer_gates_never_block_planning(self):
+        self.repo('a')  # the fake prints nothing for `gates`
+        self.run_batch()
+        self.assertTrue(self.trace_exists())
+
+    # ── A5: an outage must not use up the day ────────────────────────────────
+
+    def test_a_superset_outage_creates_no_batch_directory_and_a_later_run_proceeds(self):
+        self.repo('a')
+        self.env.update(ADVANCE_ROADMAP_SUPERSET='1', FAKE_SUPERSET_DOWN='1')
+        p = subprocess.run([sys.executable, str(HERE / 'daily_batch.py')], env=self.env,
+                           capture_output=True, text=True, timeout=30)
+        self.assertEqual(p.returncode, 1, p.stdout + p.stderr)
+        self.assertFalse((self.root / 'batches').exists(), "the date directory is what says 'already started'")
+        self.assertFalse(list(self.root.glob('linear-snapshot.preflight.*')))
+        self.assertFalse(list((self.root / 'runs').glob('*')) if (self.root / 'runs').exists() else [])
+        del self.env['FAKE_SUPERSET_DOWN']
+        self.run_batch()
+        self.assertTrue(self.trace_exists())
+
+    def test_a_linear_outage_also_leaves_the_day_unclaimed(self):
+        self.repo('a')
+        (self.root / 'lib/linearsnap.py').write_text(
+            "import json, sys\njson.dump({'ok': False, 'issues': []}, open(sys.argv[-1], 'w'))\n")
+        p = subprocess.run([sys.executable, str(HERE / 'daily_batch.py')], env=self.env,
+                           capture_output=True, text=True, timeout=30)
+        self.assertEqual(p.returncode, 1)
+        self.assertFalse((self.root / 'batches').exists())
+
+    def test_the_snapshot_lands_in_the_batch_directory_after_preflight(self):
+        self.repo('a')
+        self.run_batch()
+        directory = next((self.root / 'batches').iterdir())
+        self.assertTrue((directory / 'linear-snapshot.json').exists())
 
     def test_barrier_and_one_item_per_repo(self):
         for name in 'abc':

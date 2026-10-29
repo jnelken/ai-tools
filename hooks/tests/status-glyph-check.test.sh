@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Behaviour matrix for status-glyph-check.sh. Run: bash tests/status-glyph-check.test.sh
+# Behaviour matrix for status-glyph-check.sh. Run: bash (or zsh) hooks/tests/status-glyph-check.test.sh
 HOOK="${1:-$(cd "$(dirname "$0")/.." && pwd -P)/status-glyph-check.sh}"
 pass=0; fail=0
 TMP=$(mktemp -d "${TMPDIR:-/tmp}/status-glyph-test-$$-XXXXXX")
@@ -8,10 +8,10 @@ trap 'rm -rf "$TMP"' EXIT
 # BLOCK only on exit 0 with a block decision; PASS only on exit 0 with empty
 # stdout; anything else is ERROR so a crash never counts as a pass.
 classify() {
-  local out="$1" status="$2"
-  if (( status == 0 )) && [[ -z "$out" ]]; then echo PASS
-  elif (( status == 0 )) && printf '%s' "$out" | jq -e '.decision == "block"' >/dev/null 2>&1; then echo BLOCK
-  else echo "ERROR(status=$status)"; fi
+  local out="$1" hook_rc="$2"
+  if (( hook_rc == 0 )) && [[ -z "$out" ]]; then echo PASS
+  elif (( hook_rc == 0 )) && printf '%s' "$out" | jq -e '.decision == "block"' >/dev/null 2>&1; then echo BLOCK
+  else echo "ERROR(status=$hook_rc)"; fi
 }
 
 msg() { # msg <text> — input carrying last_assistant_message
@@ -61,9 +61,9 @@ out=$(jq -n '{transcript_path:"/nonexistent/x.jsonl"}' | bash "$HOOK"); expect P
 # Session-only schedule warning (CronCreate / ScheduleWakeup still pending).
 # WARN = exit 0, a systemMessage, and no block decision.
 warn_class() {
-  local out="$1" status="$2"
-  if (( status == 0 )) && printf '%s' "$out" | jq -e 'has("systemMessage") and (has("decision") | not)' >/dev/null 2>&1; then echo WARN
-  else classify "$out" "$status"; fi
+  local out="$1" hook_rc="$2"
+  if (( hook_rc == 0 )) && printf '%s' "$out" | jq -e 'has("systemMessage") and (has("decision") | not)' >/dev/null 2>&1; then echo WARN
+  else classify "$out" "$hook_rc"; fi
 }
 E() { date -u -j -f "%Y-%m-%dT%H:%M:%S" "$1" +%s 2>/dev/null || date -u -d "$1Z" +%s; }
 sched() { # sched <now ISO UTC> <jsonl> [message] [stop_hook_active] — hook run with TZ=UTC
@@ -101,6 +101,20 @@ expect WARN  "sched: warns after the retry pass"  "$(sched 2026-10-15T18:00:00 "
 msgtext=$(sched_msg 2026-10-15T18:00:00 "$CC"$'\n'"$CR")
 [[ "$msgtext" == *"c0882707"* && "$msgtext" == *"one-shot"* && "$msgtext" == *"lost if this session closes"* ]] \
   && pass=$((pass+1)) || { fail=$((fail+1)); echo "FAIL: sched message text — got: $msgtext"; }
+
+# Headless advance-roadmap runs are exempt: no forced sign-off turn, no schedule warning.
+headless() { # headless <value|-> <message> — hook run with ADVANCE_ROADMAP_HEADLESS set (or unset for -)
+  local out
+  if [[ "$1" == "-" ]]; then
+    out=$(jq -n --arg m "$2" '{last_assistant_message:$m, stop_hook_active:false}' | bash "$HOOK")
+  else
+    out=$(jq -n --arg m "$2" '{last_assistant_message:$m, stop_hook_active:false}' | ADVANCE_ROADMAP_HEADLESS="$1" bash "$HOOK")
+  fi
+  classify "$out" $?
+}
+expect PASS  "headless: no glyph is fine"        "$(headless 1 $'planner answer\n```ORCHESTRATOR_RESULT_JSON\n{}\n```')"
+expect BLOCK "headless: unset still blocks"      "$(headless - 'planner answer, no glyph')"
+expect BLOCK "headless: only 1 exempts"          "$(headless 0 'planner answer, no glyph')"
 
 echo "status-glyph-check: $pass passed, $fail failed"
 (( fail == 0 ))

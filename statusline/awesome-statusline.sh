@@ -497,10 +497,13 @@ fi
 USAGE_FILE="$HOME/.claude/state/claude-usage.json"
 mkdir -p "$(dirname "$USAGE_FILE")" 2>/dev/null
 
-# Build usage JSON (includes data even if loading, for agent consumption)
+# Mark actual rate_limits observations so agents never treat the loading display as headroom.
+USAGE_SOURCE=placeholder
+[[ -n "$FIVE_HOUR_PCT" || -n "$SEVEN_DAY_PCT" ]] && USAGE_SOURCE=rate_limits
 USAGE_JSON=$(jq -n \
-  --arg five_pct "${FIVE_HOUR:-0}" \
-  --arg seven_pct "${SEVEN_DAY:-0}" \
+  --arg source "$USAGE_SOURCE" \
+  --arg five_pct "${FIVE_HOUR_PCT:-}" \
+  --arg seven_pct "${SEVEN_DAY_PCT:-}" \
   --arg five_reset "${FIVE_RESET_FMT:-unknown}" \
   --arg seven_reset "${SEVEN_RESET_FMT:-unknown}" \
   --arg five_reset_epoch "${FIVE_HOUR_RESET:-}" \
@@ -509,14 +512,15 @@ USAGE_JSON=$(jq -n \
   --arg seven_momentum "${SEVEN_MOMENTUM:-0}" \
   '{
     timestamp: now,
+    source: $source,
     five_hour: {
-      used_percentage: ($five_pct | tonumber),
+      used_percentage: ($five_pct | tonumber? // null),
       reset_at: $five_reset,
       reset_epoch: ($five_reset_epoch | tonumber? // null),
       momentum: ($five_momentum | tonumber)
     },
     seven_day: {
-      used_percentage: ($seven_pct | tonumber),
+      used_percentage: ($seven_pct | tonumber? // null),
       reset_at: $seven_reset,
       reset_epoch: ($seven_reset_epoch | tonumber? // null),
       momentum: ($seven_momentum | tonumber)
