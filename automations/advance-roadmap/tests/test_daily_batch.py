@@ -388,6 +388,34 @@ class DailyBatchTest(unittest.TestCase):
             finally:
                 budget.release(item)
 
+    def test_single_lane_barrier_preserves_changed_repo_over_all_reservations(self):
+        for repo in 'abcde':
+            self.repo(repo)
+        state_path = self.root / 'providers-usage.json'
+        state = json.loads(state_path.read_text())
+        state['providers']['cursor']['included']['auto_pct'] = 86
+        state_path.write_text(json.dumps(state))
+        verdicts = self.root / 'batch-verdicts'
+        verdicts.mkdir()
+        (verdicts / 'a.json').write_text('{"stamp":"changed"}')
+        (self.root / 'lib/deploysnap.py').write_text('')
+        (self.root / 'lib/verdict.py').write_text("""import json,sys
+from pathlib import Path
+a=sys.argv
+if 'fingerprint' in a:
+    Path(a[a.index('--out')+1]).write_text('{}')
+else:
+    Path(a[a.index('--changes')+1]).write_text(json.dumps({'changed':['repo:a']}))
+    raise SystemExit(1)
+""")
+        self.run_batch(lanes=1)
+        by_repo = {i['repo']: i for i in self.state()['queue']}
+        self.assertEqual(by_repo['a']['verdict_check']['result'], 'changed')
+        self.assertEqual(by_repo['a']['outcome'], 'shipped')
+        self.assertEqual([e['repo'] for e in self.events() if e['kind'] == 'work-start'][0], 'a')
+        self.assertTrue(any(i.get('outcome') == 'skipped-quota' for r, i in by_repo.items() if r != 'a'))
+        self.assertTrue(all(i['status'] == 'finished' for i in by_repo.values()))
+
     def test_expected_cost_and_conversion_follow_the_first_fitting_worker(self):
         with self.budget_context(), patch.object(daily_batch, 'ROOT', self.root), patch.object(daily_batch, 'dispatch_rates', return_value={'a': .6}):
             budget = daily_batch.RoadmapBudget(dry_run=True)

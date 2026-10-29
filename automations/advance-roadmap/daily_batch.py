@@ -656,10 +656,14 @@ class Batch:
                     shared.log(f'released {item["repo"]} thread {item["thread"]} {item.get("linear_id") or ""}')
                 if held and not any(i["status"] in {"running", "canceling"} for i in self.state["queue"]):
                     # Running jobs can free headroom: wait for their completion.
-                    # Otherwise drop the lowest priority expectation and retry
-                    # the higher priority plans next poll. This also breaks a
-                    # barrier filled entirely by fractional expected costs.
-                    item = held[-1]
+                    # Otherwise free the lowest priority reservation across the
+                    # whole barrier, including jobs outside this wave's lane cap.
+                    # A one-lane candidate slice contains the highest priority
+                    # job, whose expectation must not be sacrificed first.
+                    reserved = [i for i in ready if i.get("budget_leases")]
+                    item = reserved[-1] if reserved else held[-1]
+                    item.setdefault("budget_hold", "shared headroom is needed for higher priority plans; "
+                                    "saved plan waits for the next daily batch")
                     quota = self.quota_record()
                     if quota:
                         (ROOT / "runs" / item["stamp"] / "quota-gates.json").write_text(quota)
