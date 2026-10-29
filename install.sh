@@ -835,7 +835,7 @@ prune_one() {
 }
 section_prune() {
   local sub link autodir
-  for sub in skills commands hooks agents; do
+  for sub in skills commands output-styles hooks agents; do
     [ -d "$CLAUDE_DIR/$sub" ] || continue
     for link in "$CLAUDE_DIR/$sub"/* "$CLAUDE_DIR/$sub"/.[!.]*; do
       prune_one "$link"
