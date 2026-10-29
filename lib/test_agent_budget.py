@@ -1102,6 +1102,69 @@ pathlib.Path({str(path)!r}).write_text(json.dumps(dict(type='assistant', uuid='u
             self.cli('settle', '--lease', third['id'], '--actual-json', str(empty))
         self.assertEqual([l['id'] for l in self.leases()], [third['id']], 'a bad usage file settles nothing')
 
+    def test_interactive_run_fails_open_when_the_ledger_is_broken(self):
+        marker = self.home / 'ran'
+        script = f'import pathlib, sys; pathlib.Path({str(marker)!r}).write_text("x"); sys.exit(5)'
+        for error in (OSError('read-only'), PermissionError('lock'), subprocess.TimeoutExpired('ps', 1)):
+            marker.unlink(missing_ok=True)
+            stderr = io.StringIO()
+            with patch.object(b, 'acquire', side_effect=error), contextlib.redirect_stderr(stderr):
+                code = b.run('claude', 'interactive', [sys.executable, '-c', script], interactive=True)
+            self.assertEqual((code, marker.exists()), (5, True), 'the tool still starts and keeps its own exit status')
+            self.assertIn('session continues unreserved', stderr.getvalue())
+        with patch.object(b, 'acquire', side_effect=OSError('read-only')), contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(b.run('claude', 'worker', [sys.executable, '-c', 'pass']), 127, 'headless still reports it')
+
+    def test_interactive_run_keeps_the_terminal_and_ignores_ctrl_c(self):
+        import threading
+        groups = self.home / 'groups'
+        script = f'import os, pathlib, time; pathlib.Path({str(groups)!r}).write_text(str(os.getpgid(0))); time.sleep(.8)'
+        threading.Timer(.4, os.kill, (os.getpid(), signal.SIGINT)).start()
+        self.assertEqual(b.run('claude', 'interactive', [sys.executable, '-c', script], interactive=True), 0)
+        self.assertEqual(int(groups.read_text()), os.getpgid(0), 'a TUI child stays in the terminal\'s process group')
+        row, = self.ledger()
+        self.assertEqual((row['outcome'], row['interactive']), ('ok', True), 'Ctrl-C is not a cancellation')
+        self.assertEqual(self.leases(), [])
+        b.run('claude', 'worker', [sys.executable, '-c', script])
+        self.assertNotEqual(int(groups.read_text()), os.getpgid(0), 'headless children get their own session')
+
+    def test_waiters_keep_their_place_however_long_they_wait(self):
+        old = self.waiter(1000, 'patient')
+        old['arrived'] -= 13 * 3600
+        b.write_json(b.waiters_path(), [old])
+        self.assertEqual([w['task'] for w in b.reap_waiters()], ['patient'])
+        later = self.waiter(self.tokens(.5), 'later')
+        self.reading['windows']['five_hour']['live'] = 70
+        self.assertIsNone(b.acquire('codex', 'worker', tokens=later['tokens'], waiter=later))
+        self.assertEqual([w['task'] for w in b.read_json(b.waiters_path())], ['patient', 'later'])
+
+    def test_owner_pid_walks_past_shells_but_never_returns_init(self):
+        def ps(table):
+            def fake(argv, **_kw):
+                ppid, comm = table[int(argv[-1])]
+                return subprocess.CompletedProcess(argv, 0, stdout=f'{ppid} {comm}\n')
+            return fake
+        # direct parent -> `$(...)` subshell -> script zsh -> the real owner
+        with patch.object(b.os, 'getppid', return_value=300), patch.object(
+                b.subprocess, 'run', ps({300: (200, '/bin/zsh'), 200: (100, 'zsh'), 100: (7, '/usr/bin/claude')})):
+            self.assertEqual(b.owner_pid(), 100)
+        # a script launched by launchd: stop at its shell, never at pid 1
+        with patch.object(b.os, 'getppid', return_value=300), patch.object(
+                b.subprocess, 'run', ps({300: (200, 'zsh'), 200: (1, 'zsh')})):
+            self.assertEqual(b.owner_pid(), 200)
+
+    def test_claude_actual_takes_the_larger_of_transcript_and_result_model_usage(self):
+        self.write_transcript('adv', [100])    # 10 input, 100 cache write, 100 output
+        result = self.home / 'adv.json'
+        result.write_text(json.dumps(dict(result='x', session_id='adv', modelUsage={
+            'sonnet': dict(inputTokens=10, cacheCreationInputTokens=100, cacheReadInputTokens=5, outputTokens=100),
+            'opus-advisor': dict(inputTokens=4000, outputTokens=900)})) + '\n')
+        usage, source, found = b.usage_for_sessions('claude', ['adv'], str(result))
+        self.assertEqual((usage, source, found), (dict(input=4010, cache_write=100, cache_read=500, output=1000), 'sessions', ['adv']))
+        lease = b.acquire('claude', 'worker', tokens=1000, task='t')
+        row = b.settle(lease['id'], session_ids=['adv'], result_file=str(result))[1]
+        self.assertEqual(row['actual_total'], 4010 + 100 + 1000)
+
     def test_hook_and_batch_leases_still_work_and_carry_ledger_fields(self):
         lease = b.acquire('claude', 'subagent', pid=os.getpid(), label='hook', session_id='s', tool_use_id='t', unknown_limit=False)
         self.assertEqual((lease['label'], lease['session_id'], lease['reserved_tokens'] > 0, lease['agent']),

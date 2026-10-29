@@ -98,7 +98,7 @@ the window readings from reservation time. `updated` is a heartbeat: a lease exp
 seconds after `max(created, updated)`.
 
 ```sh
-id=$(agent-budget reserve --agent codex --role worker --task "review PR #12" --ticket DEV-7 --repo ai-tools --wait)
+id=$(agent-budget reserve --agent codex --role worker --task "review PR #12" --ticket DEV-7 --repo ai-tools --wait --pid $$)
 agent-budget update --lease $id --add-tokens 40000 --session-id $SID     # exit 4 if it would not fit
 agent-budget settle --lease $id --outcome ok --session-id $SID           # actual read from the session
 agent-budget run --agent codex --role worker --task "review PR #12" --ticket DEV-7 \
@@ -108,8 +108,9 @@ agent-budget run --agent codex --role worker --task "review PR #12" --ticket DEV
 - **`reserve`** takes `--tokens N` or `--role R` (the ledger-backed estimate), then `--agent`,
   `--model`, `--task` (required), `--ticket`, `--repo`, `--kind`, `--pid`, `--ttl`, `--wait`,
   `--interactive`, `--json`. It prints the lease id (`--json`: the lease). The owner defaults to the
-  calling process, past transient shells, and the lease dies with that owner, so a reservation made
-  from a CLI that exits is not lost. Without `--wait`, no headroom exits 3.
+  calling process, past transient shells (never pid 1), and the lease dies with that owner, so a
+  reservation made from a CLI that exits is not lost. A shell script should pass `--pid $$`: a
+  `$(...)` substitution's parent is a throwaway subshell. Without `--wait`, no headroom exits 3.
 - **`--interactive`** never blocks and never queues. It records the reservation, prints one stderr
   line when headroom is short (the lease is marked `over_capacity`), and returns 0, even if the
   ledger itself fails. Only headless, launchd and fanout agents wait. Nothing heartbeats an
@@ -136,11 +137,17 @@ agent-budget run --agent codex --role worker --task "review PR #12" --ticket DEV
   `AGENT_BUDGET_LEASES` and `AGENT_BUDGET_SESSION_FILE` exported, and watches it. It never touches
   the command's stdout or stdin. Session ids come from `--session-out`, the session file (one id
   per line, for hooks and wrappers), the stdout header or Codex events in `--result-file`, and, last,
-  the only transcript or rollout the command started in its cwd (ambiguity yields nothing). Every
+  the only transcript or rollout the command started in its cwd (ambiguity yields nothing). For
+  Claude, where the result JSON's `modelUsage` and the transcript both cover a session, the larger
+  figure per field wins: `modelUsage` also counts advisor and other server-tool models (saved
+  planner runs show input 214,797 against 60 in the transcript). Every
   `AGENT_BUDGET_WATCH_INTERVAL` seconds (default 60) it heartbeats the lease, re-reads the usage
   and, past 80% of the reservation, extends it to the larger of 1.5x and 1.25x the usage. An
   extension that does not fit is applied and flagged over-run, with one stderr line; the child is
-  never interrupted. A command that never started logs no row.
+  never interrupted. A command that never started logs no row. With `--interactive` the command
+  keeps the terminal's process group (a TUI needs its controlling terminal, resizes and job
+  control), Ctrl-C is the command's own and is not logged as a cancellation, and any failure to
+  reserve prints one stderr line and runs the command unreserved.
 
 **Nested runs adopt their parent's lease.** If `AGENT_BUDGET_LEASE_ID` (or the matching entry of
 `AGENT_BUDGET_LEASES`, `agent=id` pairs) names a live lease for the same agent, a nested `reserve`
@@ -159,7 +166,7 @@ window readings before and after are both fresh and rising contributes a calibra
 they err high, as with the quota-snapshot samples.
 
 **Fair waiting.** `run --wait` and `reserve --wait` queue in `waiters.json` under the same flock
-as admission. A waiter admits only when it fits and no earlier waiter for the provider fits. A
+as admission. A waiter keeps its place for as long as its process lives, and admits only when it fits and no earlier waiter for the provider fits. A
 later job may overtake a head that does not fit, up to 3 times; after that the head is protected
 until releases admit it. A head blocked by live usage rather than by reservations protects nothing,
 so smaller jobs never starve behind it. Dead waiters are dropped by pid and start time.

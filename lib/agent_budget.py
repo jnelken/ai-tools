@@ -46,7 +46,6 @@ MAX_BYPASS = 3             # times smaller waiters may overtake a head that drai
 WATCH_FRACTION = .8        # extend a reservation once actual tokens pass this share of it
 WATCH_INTERVAL = 60        # seconds between transcript polls (AGENT_BUDGET_WATCH_INTERVAL overrides)
 REAPED_GRACE = 24 * 3600   # a reaped lease stays settle-able this long
-WAITER_MAX_AGE = 12 * 3600
 EXIT_NO_HEADROOM, EXIT_WOULD_EXCEED, EXIT_NO_LEASE = 3, 4, 5
 WINDOWS = {'claude': ('five_hour', 'seven_day'), 'codex': ('five_hour', 'weekly'), 'cursor': ('auto', 'api')}
 
@@ -601,11 +600,10 @@ def waiters_path():
 
 def reap_waiters():
     """Waiting entries whose process is still the one that queued. Caller holds leases.lock."""
-    now = time.time()
     kept = []
     for waiter in read_json(waiters_path(), []):
-        if (now - waiter.get('arrived', 0) < WAITER_MAX_AGE and alive(waiter.get('pid'))
-                and process_start(waiter['pid']) == waiter.get('pid_started_at')):
+        # Liveness alone decides: a job may legitimately wait days for a window to reset.
+        if alive(waiter.get('pid')) and process_start(waiter['pid']) == waiter.get('pid_started_at'):
             kept.append(waiter)
     return kept
 
@@ -985,17 +983,26 @@ def result_usage(agent, path):
 
 def usage_for_sessions(agent, session_ids, result_file=None):
     """(usage, source, extra session ids). Transcripts and rollouts are the truth; a result
-    file counts only when it names a session they did not already cover."""
+    file counts only when it names a session they did not already cover.
+
+    For Claude the result JSON's modelUsage also counts advisor and other server-tool models,
+    which never reach the transcript (saved planner runs show input 214,797 vs 60), so where both
+    cover one session the larger figure per field wins. Mid-run only the transcript exists.
+    """
     part, result_sid = result_usage(agent, result_file) if result_file else (None, None)
-    total, covered = blank_usage(), set()
     by_session = {'claude': claude_session_usage, 'codex': codex_session_usage}.get(agent, lambda _sid: None)
+    found = {}
     for sid in dict.fromkeys([*session_ids, *([result_sid] if result_sid else [])]):
-        found = by_session(sid)
-        if found:
-            add_usage(total, found)
-            covered.add(sid)
-    sources = ['sessions'] if covered else []
-    if part and result_sid not in covered:
+        usage = by_session(sid)
+        if usage:
+            found[sid] = usage
+    sources = ['sessions'] if found else []
+    if part and result_sid in found and agent == 'claude':
+        found[result_sid] = {k: max(found[result_sid][k], part[k]) for k in USAGE_FIELDS}
+    total = blank_usage()
+    for usage in found.values():
+        add_usage(total, usage)
+    if part and result_sid not in found:
         add_usage(total, part)
         sources.append('result')
     return total, '+'.join(sources) or 'none', [result_sid] if result_sid else []
@@ -1029,7 +1036,9 @@ def owner_pid():
     for _ in range(8):
         result = subprocess.run(['ps', '-o', 'ppid=,comm=', '-p', str(pid)], capture_output=True, text=True, timeout=2)
         parts = result.stdout.strip().split(None, 1)
-        if len(parts) != 2 or Path(parts[1]).name not in SHELLS:
+        # Stop at the last shell below launchd/init: pid 1 is always alive, so a lease
+        # bound to it would only ever expire by ttl.
+        if len(parts) != 2 or Path(parts[1]).name not in SHELLS or int(parts[0]) <= 1:
             break
         pid = int(parts[0])
     return pid
@@ -1199,39 +1208,51 @@ def run(provider, role, command, wait=False, label=None, *, tokens=None, model=N
     stdin are untouched: session ids come from --session-out, AGENT_BUDGET_SESSION_FILE or
     --result-file, never a pipe.
     """
-    child, lease, adopted, spawned = None, None, False, False
+    child, lease, adopted, spawned, unreserved = None, None, False, False, False
     received, previous = [], {}
     started = time.time()
     meta = dict(model=model, task=task or label or Path(command[0]).name, linear_id=ticket, repo=repo)
     interval = float(os.environ.get('AGENT_BUDGET_WATCH_INTERVAL', WATCH_INTERVAL))
 
     def forward(signum, _frame):
+        if interactive and signum == signal.SIGINT:
+            return  # Ctrl-C reaches the child through the terminal; it is not a cancellation
         received.append(signum)
         if child:
             try:
-                os.killpg(child.pid, signum)
+                # An interactive child shares our process group and terminal, so signal only it.
+                child.send_signal(signum) if interactive else os.killpg(child.pid, signum)
             except ProcessLookupError:
                 pass
 
     for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
         previous[sig] = signal.signal(sig, forward)
     try:
-        parent = parent_lease(provider)
-        if parent:
-            lease, adopted = adopt(parent, tokens, meta=meta), True
-        else:
-            other = os.environ.get('AGENT_BUDGET_LEASE_ID')
-            lease = admit(provider, role, wait=wait, interactive=interactive, received=received, label=label,
-                          tokens=tokens, kind=kind, parent_lease_id=other, **meta)
+        try:
+            parent = parent_lease(provider)
+            if parent:
+                lease, adopted = adopt(parent, tokens, meta=meta), True
+            else:
+                other = os.environ.get('AGENT_BUDGET_LEASE_ID')
+                lease = admit(provider, role, wait=wait, interactive=interactive, received=received, label=label,
+                              tokens=tokens, kind=kind, parent_lease_id=other, **meta)
+        except Exception as error:
+            if not interactive:
+                raise
+            # A broken ledger must never lock Jake out of his own tools.
+            print(f'agent-budget: reservation skipped ({type(error).__name__}); session continues unreserved', file=sys.stderr)
+            lease, unreserved = None, True
         if received:
             return 128 + received[-1]
-        if not lease:
+        if not lease and not unreserved:
             print('agent-budget: no headroom; use bin/fanout to queue a terminal', file=sys.stderr)
             return 3
-        if interactive and lease.get('over_capacity'):
+        if lease and interactive and lease.get('over_capacity'):
             print(f'agent-budget: {provider} headroom is short for this session; reserved anyway', file=sys.stderr)
-        session_file(lease['id']).parent.mkdir(parents=True, exist_ok=True)
-        child = subprocess.Popen(command, env=dict(child_env(), **child_lease_env(lease)), start_new_session=True)
+        env = dict(child_env(), **child_lease_env(lease)) if lease else child_env()
+        if lease:
+            session_file(lease['id']).parent.mkdir(parents=True, exist_ok=True)
+        child = subprocess.Popen(command, env=env, start_new_session=not interactive)
         spawned = True
         if received:
             forward(received[-1], None)
@@ -1241,7 +1262,7 @@ def run(provider, role, command, wait=False, label=None, *, tokens=None, model=N
                 code = child.wait(timeout=min(.2, interval))
                 break
             except subprocess.TimeoutExpired:
-                if time.monotonic() >= next_tick:
+                if lease and time.monotonic() >= next_tick:
                     next_tick = time.monotonic() + interval
                     try:
                         watch_tick(lease['id'], session_out, result_file)
