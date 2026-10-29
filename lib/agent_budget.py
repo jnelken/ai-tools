@@ -1085,6 +1085,11 @@ def discover_sessions(agent, cwd, since, exclude=()):
     found = []
     if agent == 'claude':
         for path in (claude_home() / 'projects' / re.sub(r'[^A-Za-z0-9]', '-', cwd)).glob('*.jsonl'):
+            try:
+                if path.stat().st_mtime < since - 1:
+                    continue  # untouched since before the lease: not worth opening
+            except OSError:
+                continue
             first = next((epoch(r.get('timestamp')) for r in rows(path) if r.get('timestamp')), None)
             if first is not None and first >= since - 1 and path.stem not in exclude:
                 found.append(path.stem)
@@ -1160,12 +1165,14 @@ def settle(lease_id, actual=None, session_ids=(), outcome='ok', result_file=None
         lease = dict(lease)
     agent = lease.get('agent') or lease['provider']
     since = lease.get('created', 0) - 2
-    sids = list(dict.fromkeys([*lease.get('session_ids', []), *session_ids, *read_session_file(session_file(lease_id))]))
+    # A session a child already rolled up is the child's: counting it here too would double it.
+    rolled = set(lease.get('rolled_sessions', []))
+    sids = [x for x in dict.fromkeys([*lease.get('session_ids', []), *session_ids, *read_session_file(session_file(lease_id))]) if x not in rolled]
     source = 'explicit'
     if actual is None:
         actual, source, found = usage_for_sessions(agent, sids, result_file, since)
-        sids = list(dict.fromkeys(sids + found))
-        if source == 'none' and discover_in:
+        sids = [x for x in dict.fromkeys(sids + found) if x not in rolled]
+        if source == 'none' and discover_in and not has_children(lease_id, lease):
             guess = discover_sessions(agent, discover_in, lease.get('created', time.time()), exclude=other_session_ids(lease_id))
             actual, source, _ = usage_for_sessions(agent, guess, None, since)
             sids = list(dict.fromkeys(sids + guess))
@@ -1185,6 +1192,10 @@ def settle(lease_id, actual=None, session_ids=(), outcome='ok', result_file=None
             drop_lease(lease_id)
             return 'already_settled', row
         lease = find_lease(leases, lease_id) or lease
+        overlap = set(lease.get('rolled_sessions', [])) & set(sids)
+        if overlap and source != 'explicit':  # a child rolled one of our sessions up between the two locks
+            sids = [x for x in sids if x not in overlap]
+            actual, source, _ = usage_for_sessions(agent, sids, result_file, since)
         now = ended_at or time.time()
         own = dict(actual)
         children = lease.get('children') or []
@@ -1244,9 +1255,29 @@ def sweep_reaped(now=None):
     return settled
 
 
+def descendants(leases, lease_id):
+    """Ids of every live lease whose `child_of` chain leads to lease_id."""
+    found, frontier = set(), {lease_id}
+    while frontier:
+        frontier = {l['id'] for l in leases if l.get('child_of') in frontier and l['id'] not in found}
+        found |= frontier
+    return found
+
+
 def other_session_ids(lease_id):
+    """Sessions that belong to other work, so cwd discovery never claims them for this lease."""
     with lock():
-        return {s for l in reap() if l['id'] != lease_id for s in l.get('session_ids', [])}
+        leases = reap()
+        mine = find_lease(leases, lease_id) or {}
+        claimed = {s for l in leases if l['id'] != lease_id for s in [*l.get('session_ids', []), *l.get('rolled_sessions', [])]}
+        return claimed | set(mine.get('rolled_sessions', []))
+
+
+def has_children(lease_id, lease=None):
+    """A lease with live or rolled-up children is a supervisor: the work (and its sessions) is theirs."""
+    with lock():
+        leases = reap()
+        return bool((lease or find_lease(leases, lease_id) or {}).get('children')) or bool(descendants(leases, lease_id))
 
 
 def child_env():
@@ -1304,6 +1335,9 @@ def plan_hold(watch, consumed, initial, cap, live, reserved):
     falling) starts a fresh period at the initial estimate. The whole-job `reserved` estimate that
     the ledger row compares against grows on its own so over-runs stay visible.
     """
+    # Only the five-hour window (or Cursor's pool) can mark a period: the weekly window and
+    # rolling ones fall for other reasons. Reset ids from per-window readings (OG3) will replace this.
+    live = {k: v for k, v in live.items() if k in ('five_hour', 'auto')}
     seen = watch.get('window_seen') or {}
     reset = any(number(v) and number(seen.get(k)) and v < seen[k] - 1 for k, v in live.items())
     base = consumed if reset else watch.get('base', 0)
@@ -1334,7 +1368,7 @@ def watch_tick(lease_id, session_out=None, result_file=None):
         return
     agent = lease.get('agent') or lease['provider']
     known = [*lease.get('session_ids', []), *read_session_file(session_file(lease_id)), *read_session_file(session_out or '')]
-    if not known and lease.get('cwd'):
+    if not known and lease.get('cwd') and not has_children(lease_id, lease):
         known = discover_sessions(agent, lease['cwd'], lease.get('created', 0), exclude=other_session_ids(lease_id))
     usage, _, found = usage_for_sessions(agent, known, result_file, lease.get('created', 0) - 2)
     sessions = [sid for sid in dict.fromkeys(known + found) if sid not in lease.get('session_ids', [])]

@@ -738,7 +738,9 @@ class LedgerTests(unittest.TestCase):
         return round(pct / b.cached_estimates()[provider]['factor'])
 
     def waiter(self, tokens, task, provider='codex'):
-        return b.new_waiter(provider, 'worker', tokens, b.tokens_to_pct(provider, tokens), task, request_tokens=tokens)
+        waiter = b.new_waiter(provider, 'worker', tokens, b.tokens_to_pct(provider, tokens), task)
+        waiter['request_tokens'] = tokens
+        return waiter
 
     def write_transcript(self, session_id, outputs, cache_read=500, at=None):
         path = b.claude_home() / 'projects/proj' / f'{session_id}.jsonl'
@@ -1011,6 +1013,10 @@ pathlib.Path({str(path)!r}).write_text(json.dumps(dict(type='assistant', uuid='u
         idle = dict(state, last_consumed=90000, idle_ticks=1)
         hold, _, _ = b.plan_hold(idle, 90000, 100000, 264000, {'five_hour': 55}, 150000)
         self.assertEqual(hold, max(10000, 60000 // 4))
+        # a falling weekly reading is not a reset of the five-hour period
+        steady = dict(state, window_seen={'five_hour': 55, 'weekly': 80})
+        _, kept, _ = b.plan_hold(steady, 90000, 100000, 264000, {'five_hour': 55, 'weekly': 3}, 150000)
+        self.assertEqual(kept['base'], steady['base'])
         # the window reset: a fresh period at the initial estimate
         hold, state, _ = b.plan_hold(dict(state, window_seen={'five_hour': 80}), 50_000_000, 100000, 264000, {'five_hour': 3}, 100000)
         self.assertEqual((hold, state['base']), (100000, 50_000_000))
@@ -1081,6 +1087,38 @@ pathlib.Path({str(path)!r}).write_text(json.dumps(dict(type='assistant', uuid='u
         self.assertEqual(sorted(row['session_ids']), ['child-sid', 'parent-sid'])
         self.assertEqual(b.settle(child['lease_id'])[0], 'already_settled', 'a rolled-up child settles once')
         self.assertEqual(len(self.ledger()), 1)
+
+    def test_a_childs_cwd_transcript_is_counted_once_in_the_parents_row(self):
+        slug = ''.join(c if c.isalnum() else '-' for c in os.getcwd())
+        transcript = b.claude_home() / 'projects' / slug / 'child.jsonl'
+        transcript.parent.mkdir(parents=True)
+        lib = str(b.ROOT / 'lib')
+        child_cmd = (f'import json, time, pathlib; pathlib.Path({str(transcript)!r}).write_text(json.dumps(dict('
+                     f'type="assistant", uuid="u", timestamp=time.time(), message=dict(id="m", usage=dict(input_tokens=5, output_tokens=95)))))')
+        # worker.sh-style: the parent's command runs a nested `run` for the same agent in the same cwd
+        script = f"""import sys
+sys.path.insert(0, {lib!r})
+import agent_budget as b
+b.readings = lambda *a, **kw: {{'windows': {{'five_hour': {{'live': 1, 'cap': 70}}}}}}
+sys.exit(b.run('claude', 'reviewer', [sys.executable, '-c', {child_cmd!r}], tokens=5000, task='nested review'))
+"""
+        self.assertEqual(b.run('claude', 'worker', [sys.executable, '-c', script], tokens=100000, task='parent'), 0)
+        row, = self.ledger()
+        self.assertEqual((row['task'], row['actual_total']), ('parent', 100), 'the child\'s tokens appear once, not twice')
+        self.assertEqual([c['task'] for c in row['children']], ['nested review'])
+        self.assertEqual(row['session_ids'], ['child'])
+
+    def test_the_parents_watch_does_not_claim_a_childs_session(self):
+        slug = ''.join(c if c.isalnum() else '-' for c in os.getcwd())
+        parent = b.acquire('claude', 'worker', tokens=100000, task='parent', cwd=os.getcwd())
+        b.acquire('claude', 'reviewer', tokens=5000, task='child', child_of=parent['id'], cwd=os.getcwd())
+        path = b.claude_home() / 'projects' / slug / 'child.jsonl'
+        path.parent.mkdir(parents=True)
+        path.write_text(json.dumps(dict(type='assistant', uuid='u', timestamp=time.time(),
+                                        message=dict(id='m', usage=dict(input_tokens=5, output_tokens=95000)))) + '\n')
+        b.watch_tick(parent['id'])
+        mine = next(l for l in self.leases() if l['id'] == parent['id'])
+        self.assertEqual((mine['session_ids'], mine['reserved_tokens']), ([], 100000))
 
     def test_plain_reserve_under_a_parent_never_returns_the_parents_id(self):
         parent = b.acquire('codex', 'worker', tokens=1000, task='parent')
@@ -1211,10 +1249,13 @@ pathlib.Path({str(path)!r}).write_text(json.dumps(dict(type='assistant', uuid='u
 
     def test_heartbeat_keeps_a_short_ttl_lease_alive_even_when_the_watch_fails(self):
         probe = self.home / 'alive'
-        script = (f'import json, pathlib, time\ntime.sleep(2.4)\n'
-                  f'pathlib.Path({str(probe)!r}).write_text(str(len(json.load(open({str(b.budget_dir() / "leases.json")!r})))))')
-        with patch.object(b, 'watch_tick', side_effect=RuntimeError('watch broke')), contextlib.redirect_stderr(io.StringIO()):
-            self.assertEqual(b.run('codex', 'worker', [sys.executable, '-c', script], task='long', ttl=1.5), 0)
+        script = (f'import sys\nsys.path.insert(0, {str(b.ROOT / "lib")!r})\nimport pathlib, time, agent_budget as b\n'
+                  f'time.sleep(2.4)\nwith b.lock():\n    pathlib.Path({str(probe)!r}).write_text(str(len(b.reap())))')
+        real = b.resolve_cost
+        short = lambda *a, **kw: (*real(*a, **kw)[:2], 1.5)        # a 1.5s ttl, as a short reservation would have
+        with patch.object(b, 'resolve_cost', short), patch.object(b, 'watch_tick', side_effect=RuntimeError('watch broke')), \
+                contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(b.run('codex', 'worker', [sys.executable, '-c', script], task='long'), 0)
         self.assertEqual(probe.read_text(), '1', 'the lease outlived its ttl because it was renewed every ttl/3')
         self.assertGreaterEqual(b.cached_estimates()['claude']['roles']['worker']['ttl'], 3 * b.WATCH_INTERVAL,
                                 'a ttl always spans three heartbeats')
@@ -1250,8 +1291,8 @@ pathlib.Path({str(path)!r}).write_text(json.dumps(dict(type='assistant', uuid='u
         self.assertEqual(b.allow('claude', 'subagent', 5), 0, 'a second headless job is still held to one')
 
     def test_queued_costs_are_recomputed_from_current_estimates_every_poll(self):
-        head = self.waiter(1, 'stale head')
-        head.update(request_tokens=None, tokens=10**9, pct=60)       # enqueued under an old, huge estimate
+        head = dict(id='stale', provider='codex', role='worker', tokens=10**9, pct=60, task='stale head',   # queued under an old, huge estimate
+                    pid=os.getpid(), pid_started_at=b.process_start(os.getpid()), arrived=time.time(), bypassed=0)
         b.write_json(b.waiters_path(), [head])
         later = self.waiter(self.tokens(.5), 'later')
         self.reading['windows']['five_hour']['live'] = 50           # a worker at today's estimate fits

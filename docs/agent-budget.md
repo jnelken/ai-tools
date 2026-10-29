@@ -140,7 +140,7 @@ agent-budget run --agent codex --role worker --task "review PR #12" --ticket DEV
   the command's stdout or stdin. Session ids come from `--session-out`, the session file (one id
   per line, for hooks and wrappers), the stdout header or Codex events in `--result-file`, and, when
   none of those exists, the only transcript or rollout the command started in its cwd (ambiguity
-  yields nothing; the mid-run watch uses the same discovery as the final settle). Usage is counted
+  yields nothing; the mid-run watch uses the same discovery as the final settle, never claims a session another lease or a rolled-up child already holds, and is skipped for a lease that has children, whose work is theirs). Usage is counted
   from the lease's start, so a resumed session's earlier history is not charged: transcript rows
   before `created`, and the Codex rollout's cumulative total at that moment, are subtracted. For
   Claude, where the result JSON's `modelUsage` and the transcript both cover a session, the larger
@@ -160,8 +160,8 @@ agent-budget run --agent codex --role worker --task "review PR #12" --ticket DEV
     period: the period's estimate less what the job spent in it, never more than the role's p95
     (`tokens_p95` in `status`). The period estimate grows by half when 80% is used; an idle job
     (two ticks without new tokens) drops to a quarter of its hold, floored at 10% of the initial
-    estimate; a window reset (a live reading that fell) starts a fresh period at the initial
-    estimate. The whole-job `reserved_tokens` that the ledger row compares against grows on its own
+    estimate; a window reset (the five-hour window or Cursor pool reading falling) starts a fresh period at the
+    initial estimate. The whole-job `reserved_tokens` that the ledger row compares against grows on its own
     (1.5x or 1.25x the usage), so over-runs stay visible. A rise in the hold that does not fit is
     applied anyway, flagged `over_run`, with one stderr line; the child is never interrupted.
   - A command that never started logs no row. With `--interactive` the command keeps the terminal's
