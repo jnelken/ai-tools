@@ -15,28 +15,38 @@ SAFE_REPO = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 CLAUDE_PROJECTS = os.environ.get("ADVANCE_ROADMAP_CLAUDE_PROJECTS") or os.path.expanduser("~/.claude/projects")
 CODEX_SESSIONS = os.environ.get("ADVANCE_ROADMAP_CODEX_SESSIONS") or os.path.expanduser("~/.codex/sessions")
 
+SECRET_NAME = (r"(?=[A-Z0-9_.-]*(?:KEY|TOKEN|SECRET|PASSWORD|PASSWD|PWD|CREDENTIAL|AUTH|PRIVATE|SESSION|COOKIE))"
+               r"[A-Z_][A-Z0-9_.-]*")
+SECRET_ASSIGNMENT = re.compile(
+    rf"(?i)\b(?P<key>{SECRET_NAME})\s*(?:=|:)\s*(?:"
+    r'"(?:\\.|[^"\\])*(?:"|\Z)|'
+    r"'(?:\\.|[^'\\])*(?:'|\Z)|"
+    r"[^\s,;'\"`]+)"
+)
+SECRET_FIELD_RE = re.compile(r"(?i)(?:key|token|secret|password|passwd|pwd|credential|auth|private|session|cookie)")
 SECRET_PATTERNS = [
-    re.compile(r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]+"),
-    re.compile(r"(?i)\bBasic\s+[A-Za-z0-9+/=_-]+"),
-    re.compile(r"\b(?:sk-[A-Za-z0-9_-]{8,}|gh[pousr]_[A-Za-z0-9_]{8,}|github_pat_[A-Za-z0-9_]{8,}|xox[abpr]-[A-Za-z0-9-]{8,})\b"),
-    re.compile(r"(?is)-----BEGIN [^-\n]*PRIVATE KEY-----.*?-----END [^-\n]*PRIVATE KEY-----"),
-    re.compile(r'(?i)\b([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*?)(?:\\"|")'),
-    re.compile(r"(?i)\b([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(\"[^\"]*\"|'[^']*'|[^\s,;]+)"),
-    re.compile(r"(?i)\b((?:api[_-]?key|access[_-]?token|refresh[_-]?token|client[_-]?secret|password|passwd))\s*[:=]\s*(\"[^\"]*\"|'[^']*'|[^\s,;]+)"),
+    (re.compile(r"(?is)-----BEGIN [^\r\n]*PRIVATE KEY-----.*?(?:-----END [^\r\n]*PRIVATE KEY-----|\Z)"),
+     "[REDACTED PRIVATE KEY]"),
+    (re.compile(r'(?i)(\bAuthorization\s*:\s*)(?:[A-Za-z][A-Za-z0-9_-]*\s+)?(?:"(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\'|[^\s,;\'"`]+)'),
+     r"\1[REDACTED]"),
+    (re.compile(r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]+"), "Bearer [REDACTED]"),
+    (re.compile(r"(?i)\bBasic\s+[A-Za-z0-9+/=_-]+"), "Basic [REDACTED]"),
+    (re.compile(r"\b(?:sk-[A-Za-z0-9_-]{8,}|gh[pousr]_[A-Za-z0-9_]{8,}|github_pat_[A-Za-z0-9_]{8,}|xox[abpr]-[A-Za-z0-9-]{8,})\b"),
+     "[REDACTED TOKEN]"),
+    (re.compile(r"\bAKIA[0-9A-Z]{16}\b"), "[REDACTED AWS ACCESS KEY]"),
+    (re.compile(r"(?i)(?<![\w-])(?:-u|--user)\s+(?:\"(?:\\.|[^\"])*\"|'(?:\\.|[^'])*'|[^\s]+)"),
+     "-u [REDACTED]"),
+    (re.compile(r"(?i)\b(https?://)[^\s/@:]+:[^\s/@]+@"), r"\1[REDACTED]@"),
 ]
-SECRET_FIELD_RE = re.compile(r"(?i)(?:key|token|secret|password|passwd|credential|authorization|cookie)")
 TICKET_RE = re.compile(r"\b[A-Z][A-Z0-9]{1,9}-\d+\b")
 FILE_RE = re.compile(r"(?<![\w.-])((?:\.{1,2}/)?[\w.@+-]+(?:/[\w.@+-]+)*\.(?:md|py|sh|json|jsonl|ya?ml|toml|ini|txt|js|ts|tsx|jsx|css|html|sql|rb|go|rs|c|h|swift|kt|java|xml|plist))\b", re.I)
 
 
 def redact(text):
     text = str(text)
-    replacements = ("Bearer [REDACTED]", "Basic [REDACTED]", "[REDACTED TOKEN]",
-                    "[REDACTED PRIVATE KEY]", r"\1=[REDACTED]", r"\1=[REDACTED]",
-                    r"\1=[REDACTED]")
-    for pattern, replacement in zip(SECRET_PATTERNS, replacements):
+    for pattern, replacement in SECRET_PATTERNS:
         text = pattern.sub(replacement, text)
-    return text
+    return SECRET_ASSIGNMENT.sub(lambda match: f"{match.group('key')}=[REDACTED]", text)
 
 
 def redact_tree(value):
@@ -241,17 +251,21 @@ def transcript_for(provider, result_json="", session_file="", stdout_file=""):
     return (sorted(matches)[0], sid) if matches else (None, sid)
 
 
-def encode_bounded(text):
+def truncate_utf8(text, limit, suffix="\n[Content truncated.]\n"):
     raw = text.encode("utf-8")
-    if len(raw) <= MAX_BYTES:
+    if len(raw) <= limit:
         return text
-    suffix = "\n\n[Digest truncated at 20 KB.]\n"
-    raw = raw[:MAX_BYTES - len(suffix.encode("utf-8"))]
+    suffix_bytes = suffix.encode("utf-8")
+    raw = raw[:max(0, limit - len(suffix_bytes))]
     while True:
         try:
             return raw.decode("utf-8") + suffix
         except UnicodeDecodeError:
             raw = raw[:-1]
+
+
+def encode_bounded(text):
+    return truncate_utf8(text, MAX_BYTES, "\n\n[Digest truncated at 20 KB.]\n")
 
 
 def capture(args):
@@ -306,15 +320,38 @@ def combine(args):
                          "started": started.group(1) if started else "unknown", "body": body})
     if not attempts:
         return 1
-    providers = list(dict.fromkeys(attempt["provider"] for attempt in attempts))
-    lines = [f"# Partial triage: {args.repo}", "", f"- Stamp: {args.stamp}", f"- Repo: {args.repo}",
-             f"- Provider: {', '.join(providers)}", f"- Ended: {args.ended}", ""]
-    for index, attempt in enumerate(attempts, 1):
-        lines.extend([f"## Attempt {index}: {attempt['provider']} (ended {attempt['ended']})",
-                      f"- Session ID: {attempt['session']}", f"- Started: {attempt['started']}", "",
-                      attempt["body"], ""])
-    output = encode_bounded(redact("\n".join(lines)))
+
+    def has_research(text):
+        return bool(re.search(r"^## (?:Commands|Reads|Outputs|Interim assistant text)\s*$", text, re.M)
+                    or re.search(r"^- Files: (?!none recorded\s*$).+", text, re.M)
+                    or re.search(r"^- Tickets: (?!none recorded\s*$).+", text, re.M))
+
     path = Path(args.out)
+    if not any(has_research(attempt["body"]) for attempt in attempts) and path.exists():
+        previous = path.read_text(encoding="utf-8", errors="replace")
+        if has_research(previous):
+            stat = path.stat()
+            notes = [f"- Later attempt {args.stamp} unattributable ({attempt['provider']} ended {attempt['ended']})."
+                     for attempt in attempts]
+            note = "\n\n## Later attempts\n\n" + "\n".join(notes) + "\n"
+            prior_limit = MAX_BYTES - len(note.encode("utf-8"))
+            preserved = truncate_utf8(previous, max(0, prior_limit), "\n\n[Earlier digest shortened.]\n")
+            path.write_text(preserved.rstrip() + note, encoding="utf-8")
+            os.utime(path, ns=(stat.st_atime_ns, stat.st_mtime_ns))
+            return 0
+
+    providers = list(dict.fromkeys(attempt["provider"] for attempt in attempts))
+    top = "\n".join([f"# Partial triage: {args.repo}", "", f"- Stamp: {args.stamp}", f"- Repo: {args.repo}",
+                      f"- Provider: {', '.join(providers)}", f"- Ended: {args.ended}"])
+    headers = ["\n".join([f"## Attempt {index}: {attempt['provider']} (ended {attempt['ended']})",
+                           f"- Session ID: {attempt['session']}", f"- Started: {attempt['started']}"])
+               for index, attempt in enumerate(attempts, 1)]
+    fixed_bytes = len(top.encode("utf-8")) + sum(len(header.encode("utf-8")) for header in headers) + 4 * len(headers)
+    attempt_budget = max(0, (MAX_BYTES - fixed_bytes) // len(attempts))
+    sections = [header + "\n\n" + truncate_utf8(attempt["body"], attempt_budget,
+                                                    "\n[Attempt content truncated.]\n")
+                for header, attempt in zip(headers, attempts)]
+    output = encode_bounded(redact(top + "\n\n" + "\n\n".join(sections)))
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(output, encoding="utf-8")
     return 0
