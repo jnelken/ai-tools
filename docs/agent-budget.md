@@ -54,14 +54,20 @@ are deduplicated by API message id; per-field maxima retain the final usage.
 Adjacent metadata preserves agent type while all child types share the subagent role.
 
 Conversion factors remain seeded until five positive measurements exist for a
-provider, then use p80 percentage points/token. Paired Claude snapshots match
+provider, then use p80 percentage points/token (token-weighted account intervals for Codex). Paired Claude snapshots match
 launch/session ids to per-session ledger usage, preserving review-round boundaries.
 They never pair a role's whole-job total with each session. Ambiguous multi-session
 rows are skipped. Transcript calibration counts only assistant messages within the
 start/finish interval, so resuming a session does not charge its earlier history.
 Reset-crossing,
-stale, zero and negative deltas are excluded. Codex uses cumulative token deltas
-paired with rate-limit deltas within one reset window. Account-wide Claude deltas
+stale, zero and negative deltas are excluded. Codex merges cumulative new-token deltas from concurrent rollouts against one
+account-wide quota delta within a reset window and active interval (15-minute gap
+ends an interval). Flat integer-quota intervals contribute tokens; stale parallel
+readings use a high-water mark. Each interval is weighted by its token exposure
+when taking p80, so short intervals crossing rounded boundaries cannot dominate.
+The sanitized 10-27 rollout fixture yields 29 points/~770k tokens (3.8e-5/token).
+Claude's account-wide samples do not support separate model factors: concurrent
+Sonnet, Opus and advisor work cannot be attributed from quota boundaries alone. Account-wide Claude deltas
 can include concurrent work, so their estimates deliberately err high. Samples
 are deduplicated in `samples.jsonl`; generated samples are rebuilt to repair old
 denominators after an upgrade. Parsed files and bounded transcript intervals are

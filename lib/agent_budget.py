@@ -37,8 +37,8 @@ SEED_TOKENS = {
 SEED_FACTORS = {'claude': 10 / 251000, 'codex': 3 / 70000, 'cursor': 5 / 59000}
 MAX_AGE = 15 * 60
 ESTIMATE_MAX_AGE = 10 * 60
-ESTIMATE_VERSION = 2
-HISTORY_VERSION = 2
+ESTIMATE_VERSION = 3
+HISTORY_VERSION = 3
 
 
 def claude_home():
@@ -151,25 +151,61 @@ def transcript_record(path, role='subagent', since=None, until=None):
             'duration': max(stamps) - min(stamps) if len(stamps) > 1 else None}
 
 
-def codex_samples(path):
-    previous, result = None, []
+def codex_observations(path):
+    """Cumulative *new* tokens and account-wide, integer quota observations.
+
+    Parallel rollouts can carry older quota readings. Keep the raw observation
+    here; only the account merge below may take a percentage delta.
+    """
+    previous, result = 0, []
     for i, row in enumerate(rows(path)):
         payload = row.get('payload') or {}
-        info = payload.get('info') or {}
-        total = info.get('total_token_usage') or {}
-        limits = usage.parse_codex_rate_limits(payload.get('rate_limits'))
-        window = (limits or {}).get('five_hour') or {}
-        if not total or not number(window.get('used_pct')):
+        total = (payload.get('info') or {}).get('total_token_usage') or {}
+        window = (usage.parse_codex_rate_limits(payload.get('rate_limits')) or {}).get('five_hour') or {}
+        if not total or not number(window.get('used_pct')) or not window.get('reset_epoch'):
             continue
         tokens = token_total(total)
-        current = (tokens, window['used_pct'], window.get('reset_epoch'))
-        if previous and current[2] == previous[2]:
-            dt, dp = current[0] - previous[0], current[1] - previous[1]
-            if dt > 0 and dp > 0:
-                result.append({'id': f'codex:{path}:{i}', 'provider': 'codex', 'tokens': dt, 'pct': dp,
-                               'source': 'rate_limits'})
-        previous = current
+        result.append(dict(id=f'codex:{path}:{i}', at=epoch(row.get('timestamp')),
+                           tokens=max(0, tokens - previous), pct=window['used_pct'],
+                           reset=window['reset_epoch'], sequence=i))
+        previous = tokens
     return result
+
+
+def codex_calibration(observations):
+    """Pair one account delta with all local tokens in the same active interval.
+
+    Do not drop flat quota intervals: a rounded point belongs to many turns.
+    Do not count the same account increase once per concurrent rollout. Stale
+    parallel readings may go backwards; take a high-water mark within a reset.
+    A 15-minute gap ends an interval so idle/unobserved work is never charged to
+    the next tiny turn. The first observation is a baseline, not fresh usage.
+    """
+    result, first, last, tokens, high = [], None, None, 0, 0
+
+    def finish():
+        if first and tokens > 0 and high > first['pct']:
+            result.append(dict(id=first['id'], provider='codex', tokens=tokens,
+                               pct=high - first['pct'], source='rate_limits'))
+
+    for current in sorted(observations, key=lambda r: (r['at'] or 0, r['id'].rsplit(':', 1)[0], r['sequence'])):
+        if last and (current['reset'] != last['reset'] or
+                     (current['at'] is not None and last['at'] is not None and
+                      current['at'] - last['at'] > MAX_AGE)):
+            finish()
+            first = None
+        if first is None:
+            first, tokens, high = current, 0, current['pct']
+        else:
+            tokens += current['tokens']
+            high = max(high, current['pct'])
+        last = current
+    finish()
+    return result
+
+
+def codex_samples(path):
+    return codex_calibration(codex_observations(path))
 
 
 def history():
@@ -190,7 +226,7 @@ def history():
         source = list(rows(path))
         records.extend(source)
         calibration_records.extend(source)
-    samples = []
+    samples, codex_rows = [], []
     with lock('samples'):
         cache = read_json(budget_dir() / 'history-cache.json')
 
@@ -216,8 +252,9 @@ def history():
                 continue
             stamp = [HISTORY_VERSION, stat.st_mtime_ns, stat.st_size]
             if cache.get(str(path), {}).get('stamp') != stamp:
-                cache[str(path)] = {'stamp': stamp, 'samples': codex_samples(path)}
-            samples.extend(cache[str(path)]['samples'])
+                cache[str(path)] = {'stamp': stamp, 'observations': codex_observations(path)}
+            codex_rows.extend(cache[str(path)]['observations'])
+        samples.extend(codex_calibration(codex_rows))
 
         indexed = {}
         for record in calibration_records:
@@ -287,6 +324,18 @@ def estimates(records, samples):
                   and number(s.get('pct')) and s['pct'] > 0 and number(s.get('tokens')) and s['tokens'] > 0]
         calibrated = len(ratios) >= 5
         factor = pctl(ratios) if calibrated else SEED_FACTORS[provider]
+        if calibrated and provider == 'codex':
+            # Weight account intervals by exposure, not by how often a tiny
+            # session happened to straddle an integer percentage boundary.
+            weighted = sorted((s['pct'] / s['tokens'], s['tokens']) for s in samples
+                              if s.get('provider') == provider and number(s.get('tokens'))
+                              and s['tokens'] > 0 and number(s.get('pct')) and s['pct'] > 0)
+            threshold, cumulative = .8 * sum(t for _, t in weighted), 0
+            for ratio, tokens in weighted:
+                cumulative += tokens
+                if cumulative >= threshold:
+                    factor = ratio
+                    break
         roles = {}
         for role in ROLES:
             matched = [r for r in records if r.get('provider') == provider and role_name(r.get('role')) == role]

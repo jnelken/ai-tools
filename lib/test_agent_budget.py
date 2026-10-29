@@ -300,6 +300,30 @@ print(bool(b.acquire('codex','planner',pid=int(sys.argv[2]))))
         self.assertIsNone(b.readings('codex')['windows']['five_hour']['live'])
         self.assertIsNone(b.readings('cursor')['windows']['auto']['live'])
 
+    def test_real_shaped_oct27_parallel_rollouts_share_one_account_delta(self):
+        fixture = json.loads((Path(__file__).parent / 'fixtures/codex-oct27-planners.json').read_text())
+        observations = []
+        for i, rollout in enumerate(fixture['rollouts']):
+            path = self.home / f'rollout-{i}.jsonl'
+            self.append(path, rollout)
+            observations.extend(b.codex_observations(path))
+        sample, = b.codex_calibration(observations)
+        self.assertEqual(sample['pct'], 29)
+        self.assertGreater(sample['tokens'], 700000)
+        factor = sample['pct'] / sample['tokens']
+        self.assertTrue(3e-5 < factor < 5e-5, factor)
+        model = b.estimates([dict(provider='codex', role='planner', total=88000)],
+                            [dict(sample, id=str(i)) for i in range(5)])['codex']
+        self.assertLess(model['roles']['planner']['pct'], 4.4)
+
+    def test_codex_flat_intervals_stale_parallel_readings_and_idle_gaps(self):
+        obs = [dict(id=str(i), sequence=i, at=t, tokens=tokens, pct=pct, reset=1)
+               for i, (t, tokens, pct) in enumerate([
+                   (0, 10000, 41), (1, 30000, 41), (2, 30000, 42),
+                   (3, 10000, 41), (4, 30000, 44), (1000, 100, 60), (1001, 10000, 61)])]
+        samples = b.codex_calibration(obs)
+        self.assertEqual([(s['tokens'], s['pct']) for s in samples], [(100000, 3), (10000, 1)])
+
     def test_codex_samples_exclude_cache_and_window_resets(self):
         path = self.home / 'rollout.jsonl'
         self.append(path, [dict(payload=dict(info=dict(total_token_usage=dict(input_tokens=t, cached_input_tokens=100, output_tokens=10)),
