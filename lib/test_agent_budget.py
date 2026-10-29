@@ -674,7 +674,7 @@ sys.exit(hook.main())
             dict(duration_s=100, tokens=dict(calls=[dict(provider='claude', role='orchestrator', total=v, sessions=['sid']) for v in (10, 20)]))])
         records, _ = b.history()
         self.assertEqual(b.estimates(records, [])['claude']['roles']['planner']['tokens_p80'], 30)
-        self.assertEqual(b.estimates(records, [])['claude']['roles']['planner']['ttl'], 150)
+        self.assertEqual(b.estimates(records, [])['claude']['roles']['planner']['ttl'], 180, 'three heartbeats must fit in a ttl')
 
     def test_installer_preserves_and_deduplicates_gate_hooks(self):
         import shutil
@@ -738,12 +738,12 @@ class LedgerTests(unittest.TestCase):
         return round(pct / b.cached_estimates()[provider]['factor'])
 
     def waiter(self, tokens, task, provider='codex'):
-        return b.new_waiter(provider, 'worker', tokens, b.tokens_to_pct(provider, tokens), task)
+        return b.new_waiter(provider, 'worker', tokens, b.tokens_to_pct(provider, tokens), task, request_tokens=tokens)
 
-    def write_transcript(self, session_id, outputs, cache_read=500):
+    def write_transcript(self, session_id, outputs, cache_read=500, at=None):
         path = b.claude_home() / 'projects/proj' / f'{session_id}.jsonl'
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(''.join(json.dumps(dict(type='assistant', uuid=f'u{i}', message=dict(id=f'm{i}', usage={
+        path.write_text(''.join(json.dumps(dict(type='assistant', uuid=f'u{i}', timestamp=at or time.time(), message=dict(id=f'm{i}', usage={
             'input_tokens': 10, 'cache_creation_input_tokens': 100, 'cache_read_input_tokens': cache_read,
             'output_tokens': out}))) + '\n' for i, out in enumerate(outputs)))
 
@@ -989,41 +989,283 @@ pathlib.Path({str(path)!r}).write_text(json.dumps(dict(type='assistant', uuid='u
         code = b.run('claude', 'worker', [sys.executable, '-c', script], tokens=100000, session_out=str(session_out))
         return code, done.exists(), self.ledger()[-1]
 
-    def test_watch_extends_the_reservation_without_interrupting_the_child(self):
+    def test_watch_extends_the_estimate_without_interrupting_the_child(self):
         code, finished, row = self.watch_run(live=50)
         self.assertEqual((code, finished), (0, True))
         self.assertEqual((row['initial_tokens'], row['actual_total']), (100000, 90220))
-        self.assertEqual(row['reserved_tokens'], 150000, 'extended by half again once 80% was used')
+        self.assertEqual(row['reserved_tokens'], 150000, 'the job estimate grows by half once 80% was used')
         self.assertEqual((row['over_run'], row['outcome']), (False, 'ok'))
 
-    def test_watch_records_an_over_run_when_the_extension_does_not_fit(self):
+    def test_watch_holds_only_the_remaining_need_capped_at_the_role_p95(self):
+        hold, state, reserved = b.plan_hold({}, consumed=0, initial=100000, cap=264000, live={'five_hour': 50}, reserved=100000)
+        self.assertEqual((hold, reserved), (100000, 100000))
+        hold, state, reserved = b.plan_hold(state, 60000, 100000, 264000, {'five_hour': 52}, reserved)
+        self.assertEqual(hold, 40000, 'what the job already spent is in the live reading, not held again')
+        hold, state, reserved = b.plan_hold(state, 90000, 100000, 264000, {'five_hour': 55}, reserved)
+        self.assertEqual((state['period_expected'], reserved), (150000, 150000))
+        self.assertEqual(hold, 60000)
+        # a runaway session cannot hold more than the role's p95, however much it has spent
+        runaway, _, _ = b.plan_hold({}, 50_000_000, 100000, 264000, {'five_hour': 55}, 100000)
+        self.assertLessEqual(runaway, 264000)
+        # idle for two ticks: down to a quarter, never below the floor
+        idle = dict(state, last_consumed=90000, idle_ticks=1)
+        hold, _, _ = b.plan_hold(idle, 90000, 100000, 264000, {'five_hour': 55}, 150000)
+        self.assertEqual(hold, max(10000, 60000 // 4))
+        # the window reset: a fresh period at the initial estimate
+        hold, state, _ = b.plan_hold(dict(state, window_seen={'five_hour': 80}), 50_000_000, 100000, 264000, {'five_hour': 3}, 100000)
+        self.assertEqual((hold, state['base']), (100000, 50_000_000))
+
+    def test_a_long_session_never_stalls_admission_after_the_window_resets(self):
+        lease = b.acquire('claude', 'interactive', tokens=100000, task='long session', cwd=os.getcwd())
+        self.write_transcript('long', [3_000_000])
+        b.update_lease(lease['id'], session_ids=['long'])
+        self.reading['windows']['five_hour']['live'] = 60
+        b.watch_tick(lease['id'])
+        self.reading['windows']['five_hour']['live'] = 2        # the window reset
+        b.watch_tick(lease['id'])
+        held = self.leases()[0]
+        cap = b.cached_estimates()['claude']['roles']['interactive']['tokens_p95']
+        self.assertLessEqual(held['held_tokens'], cap)
+        self.assertLess(held['pct'], 70 - 2, 'the old code reached 119% and blocked every headless admission')
+        self.assertGreater(b.allow('claude', 'subagent', 5), 0)
+
+    def test_watch_records_an_over_run_when_the_hold_does_not_fit(self):
+        lease = b.acquire('claude', 'worker', tokens=100000, task='t', cwd=os.getcwd())
+        self.write_transcript('w', [45000, 45000])
+        b.update_lease(lease['id'], session_ids=['w'])
+        b.watch_tick(lease['id'])
+        self.assertLess(self.leases()[0]['held_tokens'], 100000, 'the hold falls as the job spends')
+        self.reading['windows']['five_hour']['live'] = 5          # reset: a fresh period needs 100000 held again
+        b.acquire('claude', 'worker', tokens=self.tokens(63, 'claude'), task='hog', force=True)
         stderr = io.StringIO()
         with contextlib.redirect_stderr(stderr):
-            code, finished, row = self.watch_run(live=65.5, child_code=3)
-        self.assertEqual((code, finished), (3, True), 'the child ran to completion with its own exit status')
-        self.assertTrue(row['over_run'])
-        self.assertEqual(row['reserved_tokens'], 150000, 'the tokens were being spent, so other admitters must see them')
-        self.assertEqual(row['outcome'], 'error')
+            b.watch_tick(lease['id'])
+        mine = next(l for l in self.leases() if l['id'] == lease['id'])
+        self.assertTrue(mine['over_run'])
+        self.assertEqual(mine['held_tokens'], 100000, 'the tokens are being spent, so other admitters must see them')
         self.assertIn('recorded as an over-run, job left running', stderr.getvalue())
 
-    def test_nested_run_adopts_the_parents_lease(self):
-        parent = b.acquire('codex', 'worker', tokens=1000, task='parent task', linear_id='DEV-1')
+    def test_watch_discovers_the_session_in_the_cwd_when_none_is_known(self):
+        slug = ''.join(c if c.isalnum() else '-' for c in os.getcwd())
+        lease = b.acquire('claude', 'worker', tokens=100000, task='t', cwd=os.getcwd())
+        path = b.claude_home() / 'projects' / slug / 'found.jsonl'
+        path.parent.mkdir(parents=True)
+        path.write_text(json.dumps(dict(type='assistant', uuid='u', timestamp=time.time(),
+                                        message=dict(id='m', usage=dict(input_tokens=5, output_tokens=95000)))) + '\n')
+        b.watch_tick(lease['id'])
+        mine = self.leases()[0]
+        self.assertEqual(mine['session_ids'], ['found'])
+        self.assertEqual(mine['reserved_tokens'], 150000)
+
+    def test_nested_run_takes_a_child_lease_and_rolls_its_tokens_into_the_parent_row(self):
+        parent = b.acquire('claude', 'worker', tokens=1000, task='parent task', linear_id='DEV-1')
         marker = self.home / 'env'
+        self.write_transcript('child-sid', [300])
+        self.write_transcript('parent-sid', [50])
         session_out = self.home / 'nested-session'
-        session_out.write_text('nested-sid\n')
+        session_out.write_text('child-sid\n')
         script = f'import os, pathlib; pathlib.Path({str(marker)!r}).write_text(os.environ["AGENT_BUDGET_LEASE_ID"])'
         with patch.dict(os.environ, {'AGENT_BUDGET_LEASE_ID': parent['id']}):
-            code = b.run('codex', 'reviewer', [sys.executable, '-c', script], tokens=5000, task='nested',
-                         ticket='DEV-2', session_out=str(session_out))
-            code2, out, _ = self.cli('reserve', '--agent', 'codex', '--task', 'again', '--tokens', '2000', '--json')
-        self.assertEqual((code, code2), (0, 0))
-        self.assertEqual(marker.read_text(), parent['id'])
-        lease, = self.leases()
-        self.assertEqual((lease['id'], json.loads(out)['id'], json.loads(out)['adopted']), (parent['id'], parent['id'], True))
-        self.assertEqual((lease['reserved_tokens'], lease['session_ids'], lease['task'], lease['linear_id']),
-                         (5000, ['nested-sid'], 'parent task', 'DEV-1'))
-        self.assertEqual(self.ledger(), [], 'only the owner settles')
-        self.assertEqual(b.settle(parent['id'])[1]['session_ids'], ['nested-sid'])
+            self.assertEqual(b.run('claude', 'reviewer', [sys.executable, '-c', script], tokens=5000, task='nested review',
+                                   ticket='DEV-2', session_out=str(session_out)), 0)
+        self.assertNotEqual(marker.read_text(), parent['id'], 'the nested job runs under its own lease')
+        self.assertEqual(self.ledger(), [], 'a child writes no row while its parent is live')
+        mine, = self.leases()
+        self.assertEqual(mine['id'], parent['id'])
+        self.assertEqual((mine['reserved_tokens'], mine['task'], mine['session_ids']), (1000, 'parent task', []))
+        child, = mine['children']
+        self.assertEqual((child['task'], child['linear_id'], child['actual_total']), ('nested review', 'DEV-2', 300 + 100 + 10))
+        _, row = b.settle(parent['id'], session_ids=['parent-sid'])
+        self.assertEqual(row['actual_total'], (50 + 100 + 10) + (300 + 100 + 10), 'the parent row covers the nested work')
+        self.assertEqual((row['actual_source'], [c['task'] for c in row['children']]), ('sessions+children', ['nested review']))
+        self.assertEqual(sorted(row['session_ids']), ['child-sid', 'parent-sid'])
+        self.assertEqual(b.settle(child['lease_id'])[0], 'already_settled', 'a rolled-up child settles once')
+        self.assertEqual(len(self.ledger()), 1)
+
+    def test_plain_reserve_under_a_parent_never_returns_the_parents_id(self):
+        parent = b.acquire('codex', 'worker', tokens=1000, task='parent')
+        with patch.dict(os.environ, {'AGENT_BUDGET_LEASE_ID': parent['id']}):
+            code, out, _ = self.cli('reserve', '--agent', 'codex', '--task', 'sub', '--tokens', '2000', '--pid', str(os.getpid()), '--json')
+            child = json.loads(out)
+            self.assertNotEqual(child['id'], parent['id'])
+            self.assertEqual((child['child_of'], child['reserved_tokens']), (parent['id'], 2000))
+            # `id=$(reserve ...); settle --lease $id` is safe: it settles only the child
+            code, out, _ = self.cli('settle', '--lease', child['id'], '--output', '7', '--json')
+        self.assertEqual((code, json.loads(out)['status']), (0, 'rolled'))
+        parent_now, = self.leases()
+        self.assertEqual((parent_now['id'], parent_now['rolled_actual']['output']), (parent['id'], 7))
+        self.assertEqual(self.ledger(), [])
+        self.assertEqual(b.settle(parent['id'])[1]['actual_total'], 7, 'no usage was lost')
+
+    def test_a_child_cannot_settle_release_or_update_its_parent(self):
+        parent = b.acquire('codex', 'worker', tokens=1000, task='parent')
+        with patch.dict(os.environ, {'AGENT_BUDGET_LEASE_ID': parent['id']}):
+            for argv in (('settle', '--lease', parent['id'], '--output', '5'), ('release', parent['id']),
+                         ('update', '--lease', parent['id'], '--tokens', '1')):
+                code, _, err = self.cli(*argv)
+                self.assertEqual(code, b.EXIT_NOT_OWNER, argv)
+                self.assertIn('belongs to the enclosing run', err)
+            self.assertEqual(self.cli('settle', '--lease', parent['id'], '--output', '5', '--owner')[0], 0)
+        self.assertEqual(self.leases(), [])
+
+    def test_a_child_lease_goes_through_capacity_and_waits(self):
+        parent = b.acquire('codex', 'worker', tokens=1000, task='parent')
+        self.reading['windows']['five_hour']['live'] = 70
+        with patch.dict(os.environ, {'AGENT_BUDGET_LEASE_ID': parent['id']}):
+            self.assertEqual(self.cli('reserve', '--agent', 'codex', '--task', 'sub', '--pid', str(os.getpid()))[0], b.EXIT_NO_HEADROOM,
+                             'jobs spawned under an inherited lease no longer ride one reservation for free')
+            self.assertEqual(b.run('codex', 'worker', [sys.executable, '-c', 'pass']), 3)
+            waited = []
+
+            def clear(_seconds, _received):
+                self.reading['windows']['five_hour']['live'] = 50
+                waited.append(1)
+
+            with patch.object(b, 'pause', clear), contextlib.redirect_stderr(io.StringIO()):
+                self.assertEqual(b.run('codex', 'worker', [sys.executable, '-c', 'pass'], wait=True), 0)
+        self.assertEqual(waited, [1], '--wait under a parent waits for headroom')
+
+    def test_orphaned_child_writes_its_own_row_when_the_parent_is_gone(self):
+        parent = b.acquire('codex', 'worker', tokens=1000, task='parent')
+        child = b.acquire('codex', 'worker', tokens=1000, task='late child', child_of=parent['id'])
+        b.settle(parent['id'], dict(output=3))
+        status, row = b.settle(child['id'], dict(output=4))
+        self.assertEqual((status, row['task'], row['actual_total']), ('settled', 'late child', 4))
+        self.assertEqual(len(self.ledger()), 2)
+
+    def test_adopt_attaches_to_the_parent_through_capacity(self):
+        parent = b.acquire('codex', 'worker', tokens=1000, task='parent', linear_id='DEV-1')
+        with patch.dict(os.environ, {'AGENT_BUDGET_LEASE_ID': parent['id']}):
+            code, out, _ = self.cli('reserve', '--agent', 'codex', '--task', 'again', '--tokens', '2000', '--adopt', '--json')
+            lease = json.loads(out)
+            self.assertEqual((code, lease['id'], lease['adopted'], lease['reserved_tokens'], lease['task']), (0, parent['id'], True, 2000, 'parent'),
+                             'the raise is real and the parent keeps its own task')
+            self.reading['windows']['five_hour']['live'] = 69.9
+            code, out, err = self.cli('reserve', '--agent', 'codex', '--task', 'big', '--tokens', str(self.tokens(30)), '--adopt')
+            self.assertEqual(code, b.EXIT_NO_HEADROOM)
+        self.assertEqual(self.leases()[0]['reserved_tokens'], 2000, 'a raise that does not fit changes nothing')
+
+    def test_reserve_interactive_fails_open_on_a_broken_ledger(self):
+        for broken in ('parent_lease', 'admit'):
+            with patch.object(b, broken, side_effect=PermissionError('read-only')):
+                code, out, err = self.cli('reserve', '--agent', 'claude', '--task', 'session', '--interactive')
+            self.assertEqual((code, out), (0, ''), broken)
+            self.assertIn('session continues', err)
+        with patch.object(b, 'parent_lease', side_effect=PermissionError('read-only')):
+            with self.assertRaises(PermissionError):
+                self.cli('reserve', '--agent', 'claude', '--task', 'headless')
+
+    def test_a_run_lease_survives_its_wrapper_while_the_child_lives(self):
+        probe = self.home / 'child-pid'
+        script = f'import os, pathlib, time; pathlib.Path({str(probe)!r}).write_text(str(os.getpid())); time.sleep(2)'
+        import threading
+        seen = {}
+
+        def look():
+            deadline = time.time() + 3
+            while not probe.exists() and time.time() < deadline:
+                time.sleep(.02)
+            time.sleep(.1)
+            lease, = self.leases()
+            seen.update(child=lease.get('child_pid'), started=lease.get('child_started_at'), probe=int(probe.read_text()))
+            # the wrapper dies; its child keeps spending
+            stored = b.read_json(b.budget_dir() / 'leases.json')
+            stored[0].update(pid=99999999)
+            b.write_json(b.budget_dir() / 'leases.json', stored)
+            seen['alive'] = len(self.leases())
+
+        thread = threading.Thread(target=look)
+        thread.start()
+        b.run('codex', 'worker', [sys.executable, '-c', script], task='long')
+        thread.join()
+        self.assertEqual(seen['child'], seen['probe'])
+        self.assertEqual(seen['alive'], 1, 'the wrapper is dead but its child is not, so the reservation stands')
+
+    def test_reap_drops_a_lease_only_when_wrapper_and_child_are_both_gone(self):
+        lease = b.acquire('codex', 'worker', tokens=1000, task='t')
+        stored = b.read_json(b.budget_dir() / 'leases.json')
+        stored[0].update(pid=99999999, child_pid=os.getpid(), child_started_at=b.process_start(os.getpid()))
+        b.write_json(b.budget_dir() / 'leases.json', stored)
+        self.assertEqual(len(self.leases()), 1)
+        stored[0].update(child_pid=99999998)
+        b.write_json(b.budget_dir() / 'leases.json', stored)
+        self.assertEqual(self.leases(), [])
+        self.assertEqual(b.read_json(b.budget_dir() / 'reaped.json')[0]['reason'], 'owner exited')
+
+    def test_sweep_settles_dead_task_leases_but_not_hook_leases(self):
+        dead = b.acquire('claude', 'worker', tokens=1000, task='crashed run', linear_id='DEV-3')
+        hook = b.acquire('claude', 'subagent', label='hook', unknown_limit=False)
+        self.write_transcript('crash', [40])
+        b.update_lease(dead['id'], session_ids=['crash'])
+        stored = b.read_json(b.budget_dir() / 'leases.json')
+        for lease in stored:
+            lease.update(pid=99999999)
+        b.write_json(b.budget_dir() / 'leases.json', stored)
+        self.assertEqual(self.leases(), [])
+        self.assertEqual(self.cli('sweep')[1].strip(), '1')
+        row, = self.ledger()
+        self.assertEqual((row['task'], row['linear_id'], row['outcome'], row['settled_by'], row['actual_total']),
+                         ('crashed run', 'DEV-3', 'error', 'sweep', 40 + 100 + 10))
+        self.assertEqual(self.cli('sweep')[1].strip(), '0')
+        self.assertNotIn(hook['id'], [r['lease_id'] for r in self.ledger()])
+
+    def test_heartbeat_keeps_a_short_ttl_lease_alive_even_when_the_watch_fails(self):
+        probe = self.home / 'alive'
+        script = (f'import json, pathlib, time\ntime.sleep(2.4)\n'
+                  f'pathlib.Path({str(probe)!r}).write_text(str(len(json.load(open({str(b.budget_dir() / "leases.json")!r})))))')
+        with patch.object(b, 'watch_tick', side_effect=RuntimeError('watch broke')), contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(b.run('codex', 'worker', [sys.executable, '-c', script], task='long', ttl=1.5), 0)
+        self.assertEqual(probe.read_text(), '1', 'the lease outlived its ttl because it was renewed every ttl/3')
+        self.assertGreaterEqual(b.cached_estimates()['claude']['roles']['worker']['ttl'], 3 * b.WATCH_INTERVAL,
+                                'a ttl always spans three heartbeats')
+
+    def test_usage_counts_only_what_happened_since_the_lease_began(self):
+        old = time.time() - 5000
+        self.write_transcript('resumed', [9000, 9000], at=old)
+        lease = b.acquire('claude', 'worker', tokens=1000, task='resume')
+        path = b.claude_home() / 'projects/proj/resumed.jsonl'
+        with path.open('a') as handle:
+            handle.write(json.dumps(dict(type='assistant', uuid='n', timestamp=time.time(),
+                                         message=dict(id='new', usage=dict(input_tokens=1, output_tokens=7)))) + '\n')
+        self.assertEqual(b.settle(lease['id'], session_ids=['resumed'])[1]['actual'], dict(input=1, cache_write=0, cache_read=0, output=7))
+        sid = '5f1d2c3e-aaaa-bbbb-cccc-0123456789ab'
+        rollout = self.home / f'.codex/sessions/2026/10/29/rollout-2026-10-29T10-00-00-{sid}.jsonl'
+        rollout.parent.mkdir(parents=True)
+
+        def event(at, inp, cached, out):
+            return json.dumps(dict(timestamp=at, payload=dict(type='token_count', info=dict(total_token_usage=dict(
+                input_tokens=inp, cached_input_tokens=cached, output_tokens=out)))))
+
+        rollout.write_text('\n'.join([event(old, 5000, 4000, 300), event(time.time() + 1, 5600, 4500, 340)]) + '\n')
+        lease = b.acquire('codex', 'worker', tokens=1000, task='resume')
+        self.assertEqual(b.settle(lease['id'], session_ids=[sid])[1]['actual'], dict(input=100, cache_write=0, cache_read=500, output=40),
+                         'the rollout total at lease start is subtracted')
+
+    def test_an_interactive_lease_does_not_block_headless_jobs_when_quota_is_unknown(self):
+        for window in self.reading['windows'].values():
+            window['live'] = None
+        b.acquire('claude', 'interactive', tokens=1000, task='session', force=True, interactive=True)
+        self.assertEqual(b.allow('claude', 'subagent', 5), 1)
+        self.assertIsNotNone(b.acquire('claude', 'worker', tokens=1000, task='headless'))
+        self.assertEqual(b.allow('claude', 'subagent', 5), 0, 'a second headless job is still held to one')
+
+    def test_queued_costs_are_recomputed_from_current_estimates_every_poll(self):
+        head = self.waiter(1, 'stale head')
+        head.update(request_tokens=None, tokens=10**9, pct=60)       # enqueued under an old, huge estimate
+        b.write_json(b.waiters_path(), [head])
+        later = self.waiter(self.tokens(.5), 'later')
+        self.reading['windows']['five_hour']['live'] = 50           # a worker at today's estimate fits
+        self.assertIsNone(b.acquire('codex', 'worker', tokens=later['tokens'], waiter=later),
+                          'the head fits at its current cost, so a later waiter may not overtake it')
+        refreshed = b.read_json(b.waiters_path())[0]
+        self.assertEqual(refreshed['tokens'], b.cached_estimates()['codex']['roles']['worker']['tokens_p80'])
+        self.assertLess(refreshed['pct'], 60)
+
+    def test_a_failed_settle_and_release_never_change_the_childs_exit_status(self):
+        with patch.object(b, 'settle', side_effect=OSError('disk full')), patch.object(b, 'release', side_effect=OSError('disk full')), \
+                contextlib.redirect_stderr(io.StringIO()) as err:
+            self.assertEqual(b.run('codex', 'worker', [sys.executable, '-c', 'import sys; sys.exit(9)']), 9)
+        self.assertIn('settle failed', err.getvalue())
 
     def test_nested_run_for_another_agent_takes_its_own_lease(self):
         parent = b.acquire('cursor', 'worker', tokens=1000, task='parent')
@@ -1044,24 +1286,32 @@ pathlib.Path({str(path)!r}).write_text(json.dumps(dict(type='assistant', uuid='u
         return dict(lease_id=extra.pop('lease_id', os.urandom(4).hex()), agent=agent, role=role, kind=kind or role,
                     outcome=outcome, actual=dict(input=total, cache_write=0, cache_read=999999, output=0), duration_s=60, **extra)
 
-    def test_estimates_prefer_enough_ledger_rows_per_bucket(self):
+    def test_estimates_blend_ledger_rows_with_older_sources_until_there_are_enough(self):
         history = [{'provider': 'codex', 'role': 'worker', 'total': 5000}] * 10
-        two = b.ledger_records([self.row(total=100), self.row(total=200)])
-        self.assertEqual(b.estimates(history + two, [])['codex']['roles']['worker']['tokens_p80'], 5000,
-                         'two rows are not enough to displace the older sources, and are never pooled with them')
-        rows = b.ledger_records([self.row(total=t) for t in (100, 200, 300)] + [
-            self.row(total=9, outcome='error'), self.row(total=999999, outcome='cancelled')])
-        model = b.estimates(history + rows, [])['codex']['roles']['worker']
-        self.assertEqual((model['tokens_p80'], model['source'], model['observations']), (300, 'ledger', 3))
-        self.assertEqual(b.estimates(history, [])['codex']['roles']['worker']['source'], 'history')
-        self.assertEqual(b.estimates(rows, [])['claude']['roles']['worker']['source'], 'seed')
-        self.assertEqual(b.estimates(two, [])['codex']['roles']['worker']['source'], 'ledger', 'a thin ledger beats no history')
-        reviews = b.ledger_records([self.row(kind='review', total=t) for t in (10, 20, 30)] + [self.row(total=500)])
+
+        def worker(records):
+            return b.estimates(records, [])['codex']['roles']['worker']
+
+        def ledger(n, total=1000, **kw):
+            return b.ledger_records([self.row(total=total, **kw) for _ in range(n)])
+
+        self.assertEqual((worker(history + ledger(4))['tokens_p80'], worker(history + ledger(4))['source']), (5000, 'history'),
+                         'fewer than five rows are just their maximum: they never displace the older sources')
+        five = worker(history + ledger(5))
+        self.assertEqual((five['source'], five['tokens_p80']), ('blend', .25 * 1000 + .75 * 5000))
+        ten = worker(history + ledger(10))
+        self.assertEqual(ten['tokens_p80'], .5 * 1000 + .5 * 5000)
+        self.assertEqual((worker(history + ledger(20))['tokens_p80'], worker(history + ledger(20))['source']), (1000, 'ledger'))
+        failed = [self.row(total=9, outcome='error'), self.row(total=999999, outcome='cancelled')]
+        self.assertEqual(worker(history + ledger(20) + b.ledger_records(failed))['tokens_p80'], 1000, 'only ok rows count')
+        self.assertEqual(worker(history)['source'], 'history')
+        self.assertEqual(b.estimates(ledger(3), [])['claude']['roles']['worker']['source'], 'seed')
+        self.assertEqual(worker(ledger(2))['source'], 'ledger', 'a thin ledger still beats no history')
+        reviews = ledger(5, kind='review', total=30) + ledger(2, total=500)
         models = b.estimates(reviews, [])
-        self.assertEqual(models['codex']['roles']['worker']['kinds'], {'review': {'tokens_p80': 30, 'observations': 3}})
+        self.assertEqual(models['codex']['roles']['worker']['kinds'], {'review': {'tokens_p80': 30, 'observations': 5}})
         self.assertEqual(b.resolve_cost('codex', 'worker', None, 'review', models)[0], 30)
-        self.assertEqual(b.resolve_cost('codex', 'worker', None, 'other', models)[0],
-                         models['codex']['roles']['worker']['tokens_p80'])
+        self.assertEqual(b.resolve_cost('codex', 'worker', None, 'other', models)[0], models['codex']['roles']['worker']['tokens_p80'])
 
     def test_history_reads_the_ledger_and_calibrates_from_window_pairs(self):
         now = time.time()

@@ -113,7 +113,9 @@ agent-budget run --agent codex --role worker --task "review PR #12" --ticket DEV
   `$(...)` substitution's parent is a throwaway subshell. Without `--wait`, no headroom exits 3.
 - **`--interactive`** never blocks and never queues. It records the reservation, prints one stderr
   line when headroom is short (the lease is marked `over_capacity`), and returns 0, even if the
-  ledger itself fails. Only headless, launchd and fanout agents wait. Nothing heartbeats an
+  ledger itself fails (the whole path, including the parent lookup). An interactive lease counts
+  against headless capacity but not toward the single-job limit of an unknown reading, so an open
+  session never blocks every headless waiter. Only headless, launchd and fanout agents wait. Nothing heartbeats an
   interactive lease yet (G2), so it expires at its ttl unless `update` is called.
 - **`update`** takes `--tokens N` or `--add-tokens N` and `--session-id S`. An increase that does not
   fit leaves the lease unchanged and exits 4 (`would_exceed`); `--force` applies it anyway and marks
@@ -136,37 +138,64 @@ agent-budget run --agent codex --role worker --task "review PR #12" --ticket DEV
 - **`run`** reserves, starts the command in its own process group with `AGENT_BUDGET_LEASE_ID`,
   `AGENT_BUDGET_LEASES` and `AGENT_BUDGET_SESSION_FILE` exported, and watches it. It never touches
   the command's stdout or stdin. Session ids come from `--session-out`, the session file (one id
-  per line, for hooks and wrappers), the stdout header or Codex events in `--result-file`, and, last,
-  the only transcript or rollout the command started in its cwd (ambiguity yields nothing). For
+  per line, for hooks and wrappers), the stdout header or Codex events in `--result-file`, and, when
+  none of those exists, the only transcript or rollout the command started in its cwd (ambiguity
+  yields nothing; the mid-run watch uses the same discovery as the final settle). Usage is counted
+  from the lease's start, so a resumed session's earlier history is not charged: transcript rows
+  before `created`, and the Codex rollout's cumulative total at that moment, are subtracted. For
   Claude, where the result JSON's `modelUsage` and the transcript both cover a session, the larger
   figure per field wins: `modelUsage` also counts advisor and other server-tool models (saved
-  planner runs show input 214,797 against 60 in the transcript). Every
-  `AGENT_BUDGET_WATCH_INTERVAL` seconds (default 60) it heartbeats the lease, re-reads the usage
-  and, past 80% of the reservation, extends it to the larger of 1.5x and 1.25x the usage. An
-  extension that does not fit is applied and flagged over-run, with one stderr line; the child is
-  never interrupted. A command that never started logs no row. With `--interactive` the command
-  keeps the terminal's process group (a TUI needs its controlling terminal, resizes and job
-  control), Ctrl-C is the command's own and is not logged as a cancellation, and any failure to
-  reserve prints one stderr line and runs the command unreserved.
+  planner runs show input 214,797 against 60 in the transcript).
+  - **Child pid:** the lease is bound to the wrapper and to the child it started (`child_pid` and
+    its start time); it is reaped only when both are gone, so a dead wrapper cannot release the
+    reservation of a child that keeps spending. A lease whose owner died without settling is
+    archived and later settled best-effort by `agent-budget sweep` (also run by `status` and before
+    each admission): `error` at once, `timeout` an hour after a ttl lapse. Leases with no task
+    (the subagent hook's) are not ledger work.
+  - **Heartbeat:** every `min(60s, ttl/3)` the lease's `updated` is renewed, independently of the
+    watch, and ttl defaults never fall below three watch intervals, so a running job's lease
+    cannot lapse. `--ttl` overrides.
+  - **Watch (every 60s, `AGENT_BUDGET_WATCH_INTERVAL`):** the live reading already includes what the
+    job has spent, so the lease holds only the *remaining* expected need of the current window
+    period: the period's estimate less what the job spent in it, never more than the role's p95
+    (`tokens_p95` in `status`). The period estimate grows by half when 80% is used; an idle job
+    (two ticks without new tokens) drops to a quarter of its hold, floored at 10% of the initial
+    estimate; a window reset (a live reading that fell) starts a fresh period at the initial
+    estimate. The whole-job `reserved_tokens` that the ledger row compares against grows on its own
+    (1.5x or 1.25x the usage), so over-runs stay visible. A rise in the hold that does not fit is
+    applied anyway, flagged `over_run`, with one stderr line; the child is never interrupted.
+  - A command that never started logs no row. With `--interactive` the command keeps the terminal's
+    process group (a TUI needs its controlling terminal, resizes and job control), Ctrl-C is the
+    command's own and is not logged as a cancellation, and any failure to reserve prints one stderr
+    line and runs the command unreserved. A failed settle or release never changes the command's
+    exit status.
 
-**Nested runs adopt their parent's lease.** If `AGENT_BUDGET_LEASE_ID` (or the matching entry of
+**Nested runs get a child lease.** If `AGENT_BUDGET_LEASE_ID` (or the matching entry of
 `AGENT_BUDGET_LEASES`, `agent=id` pairs) names a live lease for the same agent, a nested `reserve`
-or `run` reserves nothing: it raises the lease's estimate to its own `--tokens` if larger, adds its
-session ids, fills metadata the parent left empty, and runs. It never settles or releases; the
-owner's settle reads every session id on the lease, so the one row covers the nested work. A nested
-run for a different agent (a Cursor job's Codex review) takes its own lease, records
-`parent_lease_id`, and settles its own row. A dead or settled lease id is ignored.
+or `run` takes its own **child lease** (`child_of`, with its own id and tokens), admitted through
+capacity like any other job and waiting if asked. Plain `reserve` prints the child's id, never the
+parent's. Settling a child writes no row while its parent is live: its actual tokens, tasks and
+session ids roll up into the parent's row (`children`, `actual_source: …+children`). An orphaned
+child (parent already settled) writes its own row. Only an explicit `--adopt` attaches to the
+parent lease itself (raising its estimate through capacity, adding session ids, filling metadata
+the parent left empty); the owner alone settles it. `settle`, `update` and `release` refuse (exit
+6) a lease named in the environment unless `--owner` is given, so a nested job can neither end its
+parent's run nor lose its usage. A nested run for a different agent (a Cursor job's Codex review)
+is no child: it takes its own lease, records `parent_lease_id`, and settles its own row. A dead or
+settled lease id is ignored.
 
-**Estimates.** `estimates()` prefers ledger rows (`outcome: ok`, measured) for an (agent, role)
-bucket once it has three, and a `kinds` entry per task kind with three. A bucket with fewer uses the
-older sources (runs.jsonl, agent-usage.jsonl, transcripts, completed fanouts), or its thin ledger
-rows when there is nothing else. Sources are never pooled in one percentile. Each settled row whose
-window readings before and after are both fresh and rising contributes a calibration sample
+**Estimates.** `estimates()` counts ledger rows (`outcome: ok`, measured) per (agent, role)
+bucket only from five rows, since the p80 of a handful is just their maximum. From five to nineteen
+it blends with the older sources (runs.jsonl, agent-usage.jsonl, transcripts, completed fanouts),
+weighting the ledger by `rows / 20`; from twenty the ledger alone sets it. With no older source,
+even a thin ledger beats the seed. A `kinds` entry per task kind needs five rows. Each settled row
+whose window readings before and after are both fresh and rising contributes a calibration sample
 (source `ledger`, rebuilt on every history scan). Account-wide deltas include concurrent work, so
 they err high, as with the quota-snapshot samples.
 
 **Fair waiting.** `run --wait` and `reserve --wait` queue in `waiters.json` under the same flock
-as admission. A waiter keeps its place for as long as its process lives, and admits only when it fits and no earlier waiter for the provider fits. A
+as admission. A waiter keeps its place for as long as its process lives, and admits only when it fits and no earlier waiter for the provider fits. Queued costs are recomputed
+from the current estimates on every poll, never judged by the number they queued with. A
 later job may overtake a head that does not fit, up to 3 times; after that the head is protected
 until releases admit it. A head blocked by live usage rather than by reservations protects nothing,
 so smaller jobs never starve behind it. Dead waiters are dropped by pid and start time.
