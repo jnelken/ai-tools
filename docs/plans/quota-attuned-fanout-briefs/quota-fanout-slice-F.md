@@ -20,7 +20,7 @@ Design (adjust if the code says otherwise, and say why in the PR):
 
 Also open a small PR in ~/Dropbox/code/ai-tools updating skills/unblock-roadmap/SKILL.md with a "Slack mode (Slackagent, DEV-320)" section describing the above. It's its own branch and PR from an ai-tools Superset workspace; if you can't create one, describe the needed doc change in your slackagent PR body instead.
 
-Note: DEV-321 (a subtask, blocked by this ticket) will later evaluate Linear's in-Slack `@Linear` agent. Do NOT build on `@Linear` here. Keep the Linear writes on src/linear.js, but keep the free-text→directive step behind one small function, so DEV-321 can swap its implementation.
+Note: slackagent ALREADY has an `/unblock` flow in src/unblock.js (fetchBlockers, recordAnswer which writes the directive and moves to Todo, advanceUnblock). Build DEV-320 on it: reuse and extend fetchBlockers and recordAnswer, and the session state it keeps in the store, rather than writing a parallel implementation. Separately, DEV-321 is evaluating Linear's in-Slack @Linear agent for Slackagent's Linear integration in general. Do NOT build on @Linear here; keep the Linear writes on src/linear.js.
 
 Rules:
 - **Tests (npm test):**
