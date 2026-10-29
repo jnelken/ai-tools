@@ -30,12 +30,14 @@ and reads use a separate stable flock file; writes replace the JSON atomically.
 Each lease stores its owner PID and process start identity (`ps lstart` on macOS;
 `/proc` start ticks on Linux). Reads reap dead/reused PIDs and expired TTLs. Old
 PID-only leases are retired because their owner incarnation cannot be verified.
-Only admitted children (fanout terminals, batch jobs, and gated subagents) hold leases. Open interactive sessions
-are not leased: their consumed usage is in the live reading, and the 30% above
-the five-hour 70% cap is reserved for interactive use. `run` owns its lease, forwards
-TERM/INT/HUP to the command's process group, preserves exit status, and releases
-in `finally`. Waiting shells back off to 30 seconds and consume no model tokens.
-This is polling admission; waiting terminals have no guaranteed FIFO ordering.
+Admitted children (fanout terminals, batch jobs, and gated subagents) hold leases, and so does
+anything that calls `reserve` or `run` (see the ledger below). A hand-started interactive session
+that has not called `reserve` holds none: its consumed usage is in the live reading, and the 30%
+above the five-hour 70% cap is reserved for interactive use. One that has, with `--interactive`,
+holds a lease that counts against headless capacity like any other. `run` owns its lease, forwards
+TERM/INT/HUP to the command's process group, preserves exit status, and settles in `finally`.
+Waiting shells back off to 30 seconds and consume no model tokens. They admit in arrival order
+(see Fair waiting).
 
 Caps come from roadmap `usage.py`: 70% over five hours, 80% weekly, and 100% for
 Cursor's selected pool, including that module's environment overrides. Claude
@@ -82,6 +84,87 @@ one-minute floor. Long sessions may outlive their reservation; this is admission
 control, not a provider-enforced spend limit or cross-machine lease service. TTLs
 use wall-clock time across processes; a large clock jump can change expiry timing.
 This known limit is unchanged.
+
+## Reservation ledger
+
+Every agent run reserves **tokens**, revises the reservation if its estimate changes, and settles
+it with what the run actually used. A reservation stores `reserved_tokens` (new input + cache
+writes + output; cache reads are tracked apart) and the derived `pct` per window at the provider's
+calibrated factor, so capacity still compares percentage points. Leases from before the ledger
+carry only `pct`; they keep working and convert at the current factor. A lease also carries
+`agent` (claude/codex/cursor), `model`, `role`, `kind`, `task`, `linear_id`, `repo`,
+`session_ids[]`, `interactive`, `created`/`updated`, the owner pid with its start time, `ttl`, and
+the window readings from reservation time. `updated` is a heartbeat: a lease expires `ttl`
+seconds after `max(created, updated)`.
+
+```sh
+id=$(agent-budget reserve --agent codex --role worker --task "review PR #12" --ticket DEV-7 --repo ai-tools --wait)
+agent-budget update --lease $id --add-tokens 40000 --session-id $SID     # exit 4 if it would not fit
+agent-budget settle --lease $id --outcome ok --session-id $SID           # actual read from the session
+agent-budget run --agent codex --role worker --task "review PR #12" --ticket DEV-7 \
+    --session-out $f --result-file $out -- codex exec ...               # reserve, exec, watch, settle
+```
+
+- **`reserve`** takes `--tokens N` or `--role R` (the ledger-backed estimate), then `--agent`,
+  `--model`, `--task` (required), `--ticket`, `--repo`, `--kind`, `--pid`, `--ttl`, `--wait`,
+  `--interactive`, `--json`. It prints the lease id (`--json`: the lease). The owner defaults to the
+  calling process, past transient shells, and the lease dies with that owner, so a reservation made
+  from a CLI that exits is not lost. Without `--wait`, no headroom exits 3.
+- **`--interactive`** never blocks and never queues. It records the reservation, prints one stderr
+  line when headroom is short (the lease is marked `over_capacity`), and returns 0, even if the
+  ledger itself fails. Only headless, launchd and fanout agents wait. Nothing heartbeats an
+  interactive lease yet (G2), so it expires at its ttl unless `update` is called.
+- **`update`** takes `--tokens N` or `--add-tokens N` and `--session-id S`. An increase that does not
+  fit leaves the lease unchanged and exits 4 (`would_exceed`); `--force` applies it anyway and marks
+  the lease `over_run`. It never signals a process; the caller decides. Shrinking always fits, and
+  session ids and the heartbeat apply either way.
+- **`settle`** takes the actual usage from `--input/--cache-write/--cache-read/--output`, or
+  `--actual-json F` (token counts, a Claude/Cursor result JSON, or a Codex usage object), or, with
+  neither, from every session id on the lease: Claude transcripts (subagents included), Codex
+  rollouts, then `--result-file`. It appends **one** row to `~/.claude/state/agent-budget/ledger.jsonl`
+  and releases the lease. `--outcome` is `ok|error|limit|timeout|cancelled`. Settling again returns
+  `already_settled` and writes nothing; a lease reaped meanwhile is archived in `reaped.json` for 24
+  hours, so a late settle still logs its row. `release` drops a lease with no row; use it only when
+  nothing ran.
+- **Ledger row:** `lease_id, agent, model, role, kind, task, linear_id, repo, session_ids,
+  parent_lease_id, interactive, reserved_tokens, initial_tokens, actual{input, cache_write,
+  cache_read, output}, actual_total, actual_source, window_before/after (+ observed_before/after),
+  started_at, at, duration_s, outcome, over_run`. `over_run` means the run used more than its final
+  reservation, or an extension was forced because it did not fit. One row per completed output (one
+  review of one PR), never per turn.
+- **`run`** reserves, starts the command in its own process group with `AGENT_BUDGET_LEASE_ID`,
+  `AGENT_BUDGET_LEASES` and `AGENT_BUDGET_SESSION_FILE` exported, and watches it. It never touches
+  the command's stdout or stdin. Session ids come from `--session-out`, the session file (one id
+  per line, for hooks and wrappers), the stdout header or Codex events in `--result-file`, and, last,
+  the only transcript or rollout the command started in its cwd (ambiguity yields nothing). Every
+  `AGENT_BUDGET_WATCH_INTERVAL` seconds (default 60) it heartbeats the lease, re-reads the usage
+  and, past 80% of the reservation, extends it to the larger of 1.5x and 1.25x the usage. An
+  extension that does not fit is applied and flagged over-run, with one stderr line; the child is
+  never interrupted. A command that never started logs no row.
+
+**Nested runs adopt their parent's lease.** If `AGENT_BUDGET_LEASE_ID` (or the matching entry of
+`AGENT_BUDGET_LEASES`, `agent=id` pairs) names a live lease for the same agent, a nested `reserve`
+or `run` reserves nothing: it raises the lease's estimate to its own `--tokens` if larger, adds its
+session ids, fills metadata the parent left empty, and runs. It never settles or releases; the
+owner's settle reads every session id on the lease, so the one row covers the nested work. A nested
+run for a different agent (a Cursor job's Codex review) takes its own lease, records
+`parent_lease_id`, and settles its own row. A dead or settled lease id is ignored.
+
+**Estimates.** `estimates()` prefers ledger rows (`outcome: ok`, measured) for an (agent, role)
+bucket once it has three, and a `kinds` entry per task kind with three. A bucket with fewer uses the
+older sources (runs.jsonl, agent-usage.jsonl, transcripts, completed fanouts), or its thin ledger
+rows when there is nothing else. Sources are never pooled in one percentile. Each settled row whose
+window readings before and after are both fresh and rising contributes a calibration sample
+(source `ledger`, rebuilt on every history scan). Account-wide deltas include concurrent work, so
+they err high, as with the quota-snapshot samples.
+
+**Fair waiting.** `run --wait` and `reserve --wait` queue in `waiters.json` under the same flock
+as admission. A waiter admits only when it fits and no earlier waiter for the provider fits. A
+later job may overtake a head that does not fit, up to 3 times; after that the head is protected
+until releases admit it. A head blocked by live usage rather than by reservations protects nothing,
+so smaller jobs never starve behind it. Dead waiters are dropped by pid and start time.
+`agent-budget status` lists the waiting jobs with their size, wait and how often they were
+overtaken. The batch's `reserve_bundle` and the subagent hook's `acquire` still bypass the queue.
 
 The daily roadmap batch uses the same lease file. Each poll refreshes usage once
 and admits at most `--lanes` planners, each reserving its planner cost plus its
