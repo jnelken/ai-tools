@@ -59,6 +59,7 @@ PENDING_DIR="${ADVANCE_ROADMAP_PENDING_DIR:-$CODE_DIR/.advance-roadmap}"
 PENDING_PLAN=""
 WORKER_SH="$ROOT/worker.sh"
 WORKSPACES_PY="$ROOT/lib/workspaces.py"
+PARTIAL_TRIAGE_PY="$ROOT/lib/partialtriage.py"
 # 1 = each dispatched item runs in its own Superset workspace and ships as a merged PR
 # (the only output the Production Run leaderboard credits). 0 = run worker.sh in-process,
 # for tests. With 1 and the Superset app down, a dispatch is skipped and its plan kept.
@@ -116,6 +117,41 @@ CHAIN_LINK="${ADVANCE_ROADMAP_CHAIN_LINK:-1}"
 regen_dashboard() {
   [ -f "$ROOT/gen-dashboard.py" ] || return 0
   python3 "$ROOT/gen-dashboard.py" >> "$LOG" 2>&1
+}
+
+PARTIAL_TRIAGE_FILE=""
+[[ "$THREAD" -eq 1 && "$TARGET_REPO" =~ '^[A-Za-z0-9][A-Za-z0-9._-]*$' ]] \
+  && PARTIAL_TRIAGE_FILE="$CODE_DIR/.advance-roadmap/partial-triage-$TARGET_REPO.md"
+PLANNER_ACTIVE=0
+ACTIVE_ORCH_OUT=""
+ACTIVE_ORCH_PROVIDER=""
+ACTIVE_PLANNER_STARTED=""
+ACTIVE_ATTEMPT_CAPTURED=0
+PARTIAL_TRIAGE_CONSUMED=0
+PARTIAL_ATTEMPT_COUNT=0
+capture_partial_attempt() {
+  local ended="$1" out="$2" provider="$3" started="$4"
+  [ -n "$PARTIAL_TRIAGE_FILE" ] || return 0
+  PARTIAL_ATTEMPT_COUNT=$(( PARTIAL_ATTEMPT_COUNT + 1 ))
+  local attempt_file="$RUN_DIR/partial-triage-attempt-$PARTIAL_ATTEMPT_COUNT.md"
+  python3 "$PARTIAL_TRIAGE_PY" capture --repo "$TARGET_REPO" --provider "$provider" --ended "$ended" \
+    --stamp "$STAMP" --started "$started" --result-json "$out.json" --session-file "$out.session" \
+    --stdout "$out" --out "$attempt_file" >> "$LOG" 2>&1 \
+    || echo "(partial triage capture failed for $TARGET_REPO/$provider)" >> "$LOG"
+  ACTIVE_ATTEMPT_CAPTURED=1
+}
+combine_partial_triage() {
+  [ -n "$PARTIAL_TRIAGE_FILE" ] || return 0
+  python3 "$PARTIAL_TRIAGE_PY" combine --repo "$TARGET_REPO" --stamp "$STAMP" --ended "$1" \
+    --attempt-dir "$RUN_DIR" --out "$PARTIAL_TRIAGE_FILE" >> "$LOG" 2>&1 \
+    || echo "(partial triage combine failed for $TARGET_REPO)" >> "$LOG"
+}
+on_planner_term() {
+  if [ "$PLANNER_ACTIVE" -eq 1 ]; then
+    capture_partial_attempt planning-timeout "$ACTIVE_ORCH_OUT" "$ACTIVE_ORCH_PROVIDER" "$ACTIVE_PLANNER_STARTED"
+    combine_partial_triage planning-timeout
+  fi
+  exit 143
 }
 
 mkdir -p "$LOGDIR"
@@ -188,7 +224,8 @@ on_exit() {
   regen_dashboard
 }
 trap on_exit EXIT
-trap 'exit 143' INT TERM
+trap 'exit 130' INT
+trap on_planner_term TERM
 
 # ── Cadence ───────────────────────────────────────────────────────────────────
 # launchd fires once an hour inside two daily sprint windows (10:30–15:30, 16:00–21:00;
@@ -467,7 +504,8 @@ run_orchestrator_codex() {
     --skip-git-repo-check \
     "$prompt" >"$out" 2>&1 </dev/null
   local rc=$?
-  python3 "$TOKENS_PY" codex "$out" --role orchestrator --model "$ORCH_CODEX_MODEL" --log "$USAGE_LOG" >> "$LOG" 2>&1
+  python3 "$TOKENS_PY" codex "$out" --role orchestrator --model "$ORCH_CODEX_MODEL" \
+    --log "$USAGE_LOG" --session-out "$out.session" >> "$LOG" 2>&1
   return $rc
 }
 
@@ -519,6 +557,11 @@ if [ -f "$JLIN_PY" ] && [ -z "$BATCH_PID" ]; then
 fi
 FINGERPRINT="$RUN_DIR/fingerprint.json"
 VERDICT_CHANGES="$RUN_DIR/verdict-changes.json"
+if [ -n "$TARGET_REPO" ]; then
+  python3 "$PARTIAL_TRIAGE_PY" expire --code-dir "$CODE_DIR" --repo "$TARGET_REPO" >> "$LOG" 2>&1 || true
+else
+  python3 "$PARTIAL_TRIAGE_PY" expire-all --code-dir "$CODE_DIR" >> "$LOG" 2>&1 || true
+fi
 if [ -n "$BATCH_SNAPSHOT" ]; then
   cp "$BATCH_SNAPSHOT" "$LINEAR_SNAPSHOT" || exit 1
 else
@@ -654,6 +697,11 @@ Production deploy snapshot (read this; never call GitHub yourself): $DEPLOY_SNAP
       ORCH_PROMPT="$ORCH_PROMPT
 Previous no-work verdict and what changed since (carry unchanged verdicts forward): $VERDICT_CHANGES"
     fi
+    if [ -n "$PARTIAL_TRIAGE_FILE" ] && [ -s "$PARTIAL_TRIAGE_FILE" ]; then
+      partial_prompt="$(python3 "$PARTIAL_TRIAGE_PY" prompt --file "$PARTIAL_TRIAGE_FILE" 2>/dev/null || true)"
+      [ -n "$partial_prompt" ] && ORCH_PROMPT="$ORCH_PROMPT
+$partial_prompt"
+    fi
     # The planner was picked before the snapshots; another lane may have gated it since.
     python3 "$USAGE_PY" --root "$ROOT" gate --role orchestrator --provider "$ORCH" >/dev/null 2>&1
     if [ $? -eq 3 ]; then
@@ -684,7 +732,13 @@ Previous no-work verdict and what changed since (carry unchanged verdicts forwar
       # Per-attempt artifacts: a prior Claude/Cursor .json must not be passed to the next
       # planner's live-limit (Codex writes no .json; stale is_error would gate the wrong provider).
       rm -f "$orch_out.last" "$orch_out.json" "$orch_out.session" "$orch_out.fence"
+      ACTIVE_ORCH_OUT="$orch_out"
+      ACTIVE_ORCH_PROVIDER="$ORCH"
+      ACTIVE_PLANNER_STARTED="$(date +%s)"
+      ACTIVE_ATTEMPT_CAPTURED=0
+      PLANNER_ACTIVE=1
       run_orchestrator "$ORCH" "$orch_out" "$ORCH_PROMPT" || orch_rc=$?
+      PLANNER_ACTIVE=0
       cat "$orch_out" 2>/dev/null
       echo ""
       echo "=== orchestrator provider=$ORCH exit=$orch_rc ==="
@@ -710,7 +764,9 @@ Previous no-work verdict and what changed since (carry unchanged verdicts forwar
       [ -f "$orch_out.json" ] && live_json=(--result-json "$orch_out.json")
       if ! text="$(python3 "$USAGE_PY" live-limit --transcript-file "$orch_out" --exit "$orch_rc" \
           --final-file "$orch_out.last" "${live_json[@]}" 2>/dev/null)" || [ -z "$text" ]; then
-        planner_hit=""; break
+        planner_hit=""
+        capture_partial_attempt error "$orch_out" "$ORCH" "$ACTIVE_PLANNER_STARTED"
+        break
       fi
       planner_hit="$RUN_DIR/orchestrator-limit-$ORCH.json"
       python3 "$USAGE_PY" parse-limit --provider "$ORCH" --text "$text" --scope orchestrator \
@@ -719,6 +775,7 @@ Previous no-work verdict and what changed since (carry unchanged verdicts forwar
              "$ORCH" "$text" > "$planner_hit"
       python3 "$USAGE_PY" --root "$ROOT" record-limit --provider "$ORCH" --text "$text" --scope orchestrator \
         || true
+      capture_partial_attempt quota-paused "$orch_out" "$ORCH" "$ACTIVE_PLANNER_STARTED"
       # The planner that just hit its limit is gated now; try the next one still under its gate.
       alt=""
       for p in ${=$(python3 "$USAGE_PY" --root "$ROOT" pick-orchestrators 2>/dev/null | tr -d '\r')}; do
@@ -739,11 +796,20 @@ ok or print("ORCHESTRATOR_RESULT_JSON has no valid action: %r" % (r.get("action"
 sys.exit(0 if ok else 1)' "$result")" || had_json=0
     fi
 
+    if [ "$had_json" -eq 1 ] && [ -n "$PARTIAL_TRIAGE_FILE" ] && [ -f "$PARTIAL_TRIAGE_FILE" ]; then
+      rm -f "$PARTIAL_TRIAGE_FILE"
+      PARTIAL_TRIAGE_CONSUMED=1
+    fi
+
     if [ "$had_json" -eq 0 ]; then
       # No plan: nothing may act on this run — no worker, no batch-ready, no pending plan, no
       # verdict. A limit banner is a quota pause (provider and reset kept); anything else is an error.
       planner_failed=1
       echo "WARNING: the planner produced no usable ORCHESTRATOR_RESULT_JSON — nothing dispatched"
+      partial_ended=error
+      [ -n "$planner_hit" ] && partial_ended=quota-paused
+      [ "$ACTIVE_ATTEMPT_CAPTURED" -eq 1 ] || capture_partial_attempt "$partial_ended" "$orch_out" "$ORCH" "$ACTIVE_PLANNER_STARTED"
+      combine_partial_triage "$partial_ended"
       planner_quota=""
       if [ -n "$planner_hit" ]; then
         # Every planner in the role, with the limits the ones tried here hit and the gates of the rest.
@@ -911,7 +977,10 @@ PY
         # re-triaging a repo that was already triaged. Fingerprint as planned (no worker changed anything).
         if [ "$THREAD" -le 1 ] && [ "$reused" -eq 0 ] \
            && [[ "$(jq -r '.action // empty' "$ORCH_RESULT" 2>/dev/null)" == (blocked_no_item|nothing_qualified) ]]; then
+          partial_triage_flags=()
+          [ "$PARTIAL_TRIAGE_CONSUMED" -eq 1 ] && partial_triage_flags=(--partial-triage-consumed)
           python3 "$VERDICT_PY" save --file "$LAST_VERDICT" --fingerprint "$FINGERPRINT" \
+            --repo "$TARGET_REPO" "${partial_triage_flags[@]}" \
             --orch-result "$ORCH_RESULT" --worker-result "$WORKER_RESULT" --stamp "$STAMP" \
             --bookkeeping-pending >> "$LOG" 2>&1 || true
         fi
@@ -1050,8 +1119,11 @@ PY
   # one the next run may carry forward.
   if [ -z "$BUSY_REPOS" ] || [ -n "$TARGET_REPO" ]; then
     # Daily batches use a distinct verdict file for each target repo.
+    partial_triage_flags=()
+    [ "$PARTIAL_TRIAGE_CONSUMED" -eq 1 ] && partial_triage_flags=(--partial-triage-consumed)
     python3 "$VERDICT_PY" save --file "$LAST_VERDICT" --fingerprint "$FINGERPRINT" \
       --post-fingerprint "$POST_FINGERPRINT" --repo "$TARGET_REPO" \
+      "${partial_triage_flags[@]}" \
       --orch-result "$ORCH_RESULT" --worker-result "$WORKER_RESULT" --stamp "$STAMP"
   fi
 
