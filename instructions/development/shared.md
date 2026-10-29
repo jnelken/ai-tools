@@ -72,6 +72,16 @@ When a commit only goes through with `--no-verify` because of lint errors alread
 **"ridealong" marks an intentional, user-requested extra change.** A commit whose message contains the word `ridealong` (or `ride-along`) on a branch/PR is deliberate: don't flag it as stray or unrelated, don't ask whether to drop it, and treat it as in scope (reviewed with the PR, mentioned in the PR description). When you write a ridealong commit — a change the user asked to bundle into a branch whose main task is something else — put the word `ridealong` in the commit message.
 
 
+## Plan Files
+
+### Running planning docs
+
+- **Open it early.** After orientation, any planning or investigation session opens a running doc: `docs/plans/<slug>.md` in the target repo, or the harness plan file in plan mode, copied to `docs/plans/` on exit.
+- **Use these sections:** Status, Decisions, Findings (with evidence), Open threads (checkbox list), Approach.
+- **Keep it current:** update it after each finding or agent result.
+- **Close threads visibly:** answer and tick with an annotation, or move the thread to a ticket or `IN_PROGRESS.md` and note where. Never delete one silently.
+- **Commit:** in personal repos, commit and push it under the existing commit rules.
+
 ## Golden Paths
 
 Match process to task size: small task → one prompt; unfamiliar area → explore, plan, build; feature → context, plan, split, parallelize; refactor → success criteria, TDD plan, execute, review; hard bug → debug, one validated fix at a time. Keep thinking and doing in separate contexts. Details: `~/.claude/instructions/golden-paths.md`.
