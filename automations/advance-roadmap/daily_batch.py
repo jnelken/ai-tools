@@ -238,7 +238,9 @@ class RoadmapBudget:
     def admit(self, item):
         # A pending dispatch needs its whole implementation. Prefer a planner
         # fallback if it fits, but saved work can run without that extra cost.
-        pending = item.get("verdict_check", {}).get("result") == "pending"
+        # Later threads inherit ordering metadata but always plan fresh in run.sh.
+        pending = (item.get("thread", 1) == 1
+                   and item.get("verdict_check", {}).get("result") == "pending")
         for planner in ([*self.planners, None] if pending else self.planners):
             allocation = self.choose(item=item, planner=planner,
                                      scale=1 if pending else self.rates.get(item["repo"], .3))
@@ -349,7 +351,7 @@ class Batch:
                "ADVANCE_ROADMAP_LAST_VERDICT": str(self.verdict_path(item))}
         allocation = item.get("allocation") or {}
         env["ADVANCE_ROADMAP_BUDGET_PLANNER"] = allocation.get("planner") or "none"
-        if item.get("verdict_check", {}).get("result") == "pending":
+        if item["thread"] == 1 and item.get("verdict_check", {}).get("result") == "pending":
             env["ADVANCE_ROADMAP_BUDGET_PENDING"] = "1"
         # Other repos are never this planner's fallback, even before they have a worker. Threads of
         # its own repo are not busy: they are the siblings it is planning around.

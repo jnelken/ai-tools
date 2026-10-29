@@ -388,6 +388,30 @@ class DailyBatchTest(unittest.TestCase):
             finally:
                 budget.release(item)
 
+    def test_second_thread_of_pending_dispatch_still_requires_planner_budget(self):
+        self.repo('a')
+        pending = self.code / '.advance-roadmap'
+        pending.mkdir()
+        (pending / 'pending-plan-a.json').write_text(json.dumps({
+            'orchestrator': {'repo': 'a', 'action': 'dispatch_worker', 'work_kind': 'feature'},
+            'planned_at': datetime.now().isoformat(), 'attempts': 0}))
+        state_path = self.root / 'providers-usage.json'
+        state = json.loads(state_path.read_text())
+        # Three Codex points fit the saved implementation's review, but cannot
+        # also fund a fresh planner for its later thread. Cursor stays healthy.
+        state['providers']['codex']['five_hour']['used_pct'] = 67
+        state_path.write_text(json.dumps(state))
+        self.run_batch(lanes=1, extra=['--threads', '2'])
+        by_thread = {i['thread']: i for i in self.state()['queue']}
+        self.assertEqual(set(by_thread), {1, 2})
+        self.assertIsNone(by_thread[1]['allocation']['planner'])
+        self.assertEqual(by_thread[1]['outcome'], 'shipped')
+        self.assertEqual(by_thread[2]['verdict_check']['result'], 'pending',
+                         'ordering metadata is inherited, but saved-plan admission must not be')
+        self.assertEqual(by_thread[2]['outcome'], 'skipped-quota')
+        self.assertNotIn('allocation', by_thread[2])
+        self.assertEqual([e['thread'] for e in self.events() if e['kind'] == 'plan-start'], [1])
+
     def test_single_lane_barrier_preserves_changed_repo_over_all_reservations(self):
         for repo in 'abcde':
             self.repo(repo)

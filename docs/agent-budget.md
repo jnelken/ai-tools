@@ -88,8 +88,9 @@ and admits at most `--lanes` planners, each reserving its planner cost plus its
 repo's historical share of `dispatch_worker` × (worker + required reviews).
 Without planning history the dispatch share is 0.3. Pending dispatch/resume plans
 come first and reserve a full implementation; when available they also reserve a
-planner fallback in case the saved plan cannot be reused. Changed verdicts precede
-repos with no verdict. Carried verdicts still pass through `run.sh`'s unchanged gate.
+planner fallback in case the saved plan cannot be reused. Only thread 1 can use
+that saved plan without planner headroom; later threads always reserve a planner.
+Changed verdicts precede repos with no verdict. Carried verdicts still pass through `run.sh`'s unchanged gate.
 
 At the planning barrier the planner portion is released. Before each implementation
 wave, fresh headroom must support an atomic conversion to full worker + review
