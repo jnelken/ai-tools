@@ -455,15 +455,61 @@ print(bool(b.acquire('codex','planner',pid=int(sys.argv[2]))))
         self.assertIn('ImportError', err)
 
     def test_hook_timeout_and_sigterm_allow_without_output(self):
+        script = """import importlib.util, os, signal, sys, time
+spec = importlib.util.spec_from_file_location('budget_hook', sys.argv[1])
+hook = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(hook)
+hook.HOOK_TIMEOUT_SECONDS = .05
+if sys.argv[2] == 'deadline':
+    hook.handle = lambda data: time.sleep(5)
+else:
+    hook.handle = lambda data: os.kill(os.getpid(), signal.SIGTERM)
+sys.exit(hook.main())
+"""
         payload = json.dumps(dict(hook_event_name='PreToolUse', tool_name='Workflow'))
-        with patch.object(hook, 'HOOK_TIMEOUT_SECONDS', .03), patch.object(hook, 'handle', side_effect=lambda data: time.sleep(5)):
-            out, err = self.invoke_hook(payload)
-            self.assertEqual(out, '')
-            self.assertIn('TimeoutError', err)
-        with patch.object(hook, 'handle', side_effect=lambda data: os.kill(os.getpid(), signal.SIGTERM)):
-            out, err = self.invoke_hook(payload)
-            self.assertEqual(out, '')
-            self.assertIn('allowing tool', err)
+        for mode in ('deadline', 'sigterm'):
+            with self.subTest(mode=mode):
+                result = subprocess.run([sys.executable, '-c', script, str(b.ROOT / 'hooks/agent-budget-gate.py'), mode],
+                                        input=payload, capture_output=True, text=True, timeout=2)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stdout, '')
+                self.assertIn('allowing tool', result.stderr)
+                self.assertEqual(len(result.stderr.splitlines()), 1)
+
+    def test_hook_deadline_exits_even_when_slow_probe_catches_exceptions(self):
+        script = """import hashlib, importlib.util, sys, time
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+import agent_budget as b
+import claude_quota as q
+spec = importlib.util.spec_from_file_location('budget_hook', b.ROOT / 'hooks/agent-budget-gate.py')
+hook = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(hook)
+hook.HOOK_TIMEOUT_SECONDS = .1
+state = Path(sys.argv[2])
+q.state_dir = lambda: state
+q.token = lambda: 'fixture'
+b.write_json(state / 'quota-snapshot-cache.json', {
+    'identity': hashlib.sha256(b'fixture').hexdigest(), 'observed_at': time.time(),
+    'attempted_at': 0, 'source': 'oauth_usage',
+    'windows': {'five_hour': {'used_percentage': 99}, 'seven_day': {'used_percentage': 99}}})
+def slow_probe(*args, **kwargs):
+    (state / 'probe-started').write_text('ready')
+    time.sleep(5)
+    raise RuntimeError('offline probe finished')
+q.urllib.request.urlopen = slow_probe
+b.cached_estimates = lambda: b.estimates([], [])
+sys.exit(hook.main())
+"""
+        state = self.home / 'slow-probe'
+        payload = json.dumps(dict(hook_event_name='PreToolUse', tool_name='Agent'))
+        result = subprocess.run([sys.executable, '-c', script, str(b.ROOT / 'lib'), str(state)],
+                                input=payload, capture_output=True, text=True, timeout=2)
+        self.assertTrue((state / 'probe-started').exists())
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, '')
+        self.assertIn('allowing tool', result.stderr)
+        self.assertEqual(len(result.stderr.splitlines()), 1)
 
     def test_estimates_cache_survives_calls_and_expires_after_ten_minutes(self):
         with patch.object(b, 'history', return_value=([], [])) as history:

@@ -81,9 +81,10 @@ The installer registers `agent-budget-gate.py` for PreToolUse (Agent/Workflow) a
 SubagentStop, preserving existing settings and removing its retired SessionStart/End
 registrations. Unknown readings, exceptions (including malformed input/state and
 filesystem errors), and timeout all fail open with no denial output. Errors emit
-one stderr line. An internal 25-second deadline exits successfully before Claude's
-30-second hook limit; SIGTERM also allows the call. Estimates are persisted under
-the budget directory and rebuilt at most every ten minutes. Each admission reads
+one stderr line. An internal six-second deadline writes a note and calls
+`os._exit(0)` directly, so broad exception handlers cannot swallow the deadline
+and continue into a denial or another lock wait. SIGTERM uses the same exit path.
+Estimates are persisted under the budget directory and rebuilt at most every ten minutes. Each admission reads
 quota once through `claude_quota`'s shared five-second cache. SubagentStop resolves
 `toolUseId` from the child's `.meta.json` and releases that exact reservation;
 missing metadata or a failed spawn leaves a bounded TTL reservation. Interactive

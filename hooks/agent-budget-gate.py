@@ -15,7 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'lib'))
 budget = None
 
 # Finish before Claude's 30s hook timeout, including a blocked stdin or flock.
-HOOK_TIMEOUT_SECONDS = 25
+HOOK_TIMEOUT_SECONDS = 6
 
 
 def owner_pid():
@@ -73,7 +73,12 @@ def handle(data):
 
 def main():
     def timeout(_signum, _frame):
-        raise TimeoutError('budget hook deadline')
+        # Exceptions can be swallowed by quota/file helpers. Terminate directly
+        # so a timed-out check cannot continue into a denial or another flock.
+        try:
+            os.write(2, b'agent-budget: deadline or termination; allowing tool\n')
+        finally:
+            os._exit(0)
 
     previous = {}
     try:
