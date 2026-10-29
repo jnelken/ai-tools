@@ -28,6 +28,42 @@ import planapproval  # noqa: E402
 import runrecord  # noqa: E402
 from usage import ROLE_PROVIDERS  # noqa: E402
 
+
+class Oct27BudgetAdmissionTest(unittest.TestCase):
+    def test_ten_planner_rollouts_do_not_charge_each_lane_the_whole_account(self):
+        b = daily_batch.agent_budget
+        fixture = json.loads((HERE.parents[1] / 'lib/fixtures/codex-oct27-planners.json').read_text())
+        with tempfile.TemporaryDirectory() as directory, mock.patch.dict(os.environ, {
+                'HOME': directory, 'AGENT_BUDGET_CLAUDE_HOME': directory + '/.claude',
+                'ADVANCE_ROADMAP_REVIEW_STRATEGY': 'cursor-then-codex'}):
+            observations = []
+            for n, rollout in enumerate(fixture['rollouts']):
+                path = Path(directory) / f'rollout-{n}.jsonl'
+                path.write_text(''.join(json.dumps(r) + '\n' for r in rollout))
+                observations.extend(b.codex_observations(path))
+            sample, = b.codex_calibration(observations)
+            budget = daily_batch.RoadmapBudget.__new__(daily_batch.RoadmapBudget)
+            budget.models = b.estimates([{'provider': 'codex', 'role': 'planner', 'total': 88000}],
+                                       [dict(sample, id=str(n)) for n in range(5)])
+            budget.rates, budget.forecast, budget.dry_run = {}, [], False
+            budget.workers, budget.planners, budget.gates = ['codex', 'claude'], ['codex'], {}
+            budget.readings = {p: {'windows': {'auto' if p == 'cursor' else 'five_hour': {'live': live, 'cap': cap}}}
+                               for p, live, cap in [('codex', 41, 70), ('claude', 16, 70), ('cursor', 100, 100)]}
+            self.assertLess(budget.models['codex']['roles']['planner']['pct'], 4.4)
+            # Actual 10-27 pool: mandatory Cursor review cannot run. A4 must
+            # stop before even the now-cheap Codex planners spend anything.
+            self.assertIsNone(budget.choose(commit=False))
+            self.assertFalse(budget.admit({'repo': 'demo', 'stamp': 'blocked'}))
+            # With an eligible cross-provider reviewer, the same 41% Codex
+            # reading can admit a bounded five-lane wave (old factor admitted 0).
+            os.environ['ADVANCE_ROADMAP_REVIEW_STRATEGY'] = 'cross-provider'
+            items = [{'repo': str(n), 'stamp': str(n)} for n in range(5)]
+            self.assertEqual(sum(budget.admit(item) for item in items), 5)
+            for item in items:
+                budget.release(item)
+            with b.lock():
+                self.assertEqual(b.reap(), [])
+
 FIXTURES = Path(__file__).resolve().parent / "fixtures" / "oct13"
 NY = ZoneInfo("America/New_York")
 FUTURE = int(time.time()) + 6 * 3600
@@ -195,7 +231,7 @@ class QuotaReplayTest(unittest.TestCase):
         env.update(fake)
         return env
 
-    def run_lane(self, cancel=False, **fake):
+    def run_lane(self, cancel=False, budget_route=None, **fake):
         """One daily-batch lane: release it at the barrier if it gets there, like daily_batch.py
         (or cancel it there, as a batch does when no worker has quota)."""
         env = self.env(**fake)
@@ -207,6 +243,8 @@ class QuotaReplayTest(unittest.TestCase):
         while proc.poll() is None and time.time() < deadline:
             if (run / "batch-ready").exists() and not (run / "batch-release").exists():
                 self.reached_barrier = True
+                if budget_route:
+                    (run / "batch-budget.json").write_text(json.dumps(budget_route))
                 (run / ("batch-cancel" if cancel else "batch-release")).write_text("test\n")
             time.sleep(0.05)
         if proc.poll() is None:
@@ -266,6 +304,24 @@ class QuotaReplayTest(unittest.TestCase):
         self.assertEqual(self.record()["outcome"], "skipped-quota")  # Claude is now gated until its reset
         self.assertEqual(self.alert(), "")
         self.assertNotIn("=== alert:", self.log)
+
+    def test_batch_planner_limit_cannot_spend_an_unleased_fallback(self):
+        self.usage_state()
+        run = self.run_lane(ADVANCE_ROADMAP_BUDGET_PLANNER='codex', FAKE_CODEX='limit', FAKE_CLAUDE='plan')
+        self.assert_nothing_dispatched(run)
+        self.assertEqual([c['bin'] for c in self.calls()], ['codex'])
+        self.assertEqual(self.record()['outcome'], 'quota-paused')
+
+    def test_batch_worker_uses_the_converted_reservation_route(self):
+        self.usage_state()
+        # Cursor is healthy and first in the ordinary chain. A full reserved
+        # implementation selected Codex; the shell must honor that decision.
+        run = self.run_lane(ADVANCE_ROADMAP_BUDGET_PLANNER='codex',
+            budget_route={'worker': 'codex', 'reviewers': ['cursor', 'codex']},
+            FAKE_PLAN=json.dumps({**NO_WORK, 'blockers': [{'repo':'demo', 'linear_id':'DEV-9', 'detail':'post'}]}))
+        self.assertTrue(self.reached_barrier)
+        self.assertEqual([(c['bin'],c['role']) for c in self.calls()],
+                         [('codex','orchestrator'), ('codex','worker')])
 
     def test_planner_limit_fails_over_to_the_next_planner_under_its_gate(self):
         self.usage_state()

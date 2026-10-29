@@ -10,6 +10,8 @@
 
 **Wave 2 (10-29 02:15):** launched on fresh windows (Codex 5h 0%, weekly 47%; Claude 0%). C2 (O11 calibration plus daily_batch→agent-budget wiring) is running in `budget-batch-wiring` on Codex Sol high, and E2 (partial triage) in `partial-triage` on Codex Luna high. A monitor watches for their PRs; each gets Codex review lenses plus a small Claude verify, then merge, install and a dry run.
 
+**C2 status (2026-10-29):** implemented and verified in `quota/budget-batch-wiring`; awaiting the conducting session's PR review/merge. O11 calibration and the daily-batch wiring thread are closed with evidence below. Live deployment/state is unchanged.
+
 **Watch at the 10-29 10:30 batch:** expect `skipped-unchanged` rows only from 10-30 on, once the first carried verdicts exist; no `error` rows from the Stop hook; Claude planners on Sonnet with medium effort; and no planning when no worker or reviewer is available.
 
 Repos:
@@ -132,7 +134,8 @@ Separately:
 
 - [x] **OA15.** (A+B verification) Running the required status-glyph suite under zsh exposed its pre-existing use of the read-only `status` variable in two test helpers. Renamed the test-local variable to `hook_rc`; the hook behavior is unchanged.
 
-- [ ] **O11 (C follow-up).** Wire `daily_batch.py` to `agent-budget` after `quota/roadmap-stop-waste` merges. Replace A4's standalone worker/reviewer headroom preflight stub with shared role reservations, including expected implementation cost; derive lanes and release waves from the shared ledger. This PR deliberately leaves `daily_batch.py`, `run.sh` and `lib/usage.py` untouched.
+- [x] **O11 (C follow-up).** Wired the daily batch to shared `agent-budget` leases in C2 (2026-10-29), after A+B/PR #9. Every planner reserves itself plus per-repo dispatch share × worker/review cost (default 0.3); completed planning drops only its planner portion. Pending plans reserve full implementation, with a planner fallback when available. Release refreshes usage once and atomically replaces the expectation with a full worker/review bundle on the first fitting chain provider. Interactive leases reduce batch capacity. Running jobs free capacity for later release waves; a fractional barrier cannot deadlock because lower priority held expectations are deferred first. Exact reserved routes prevent unleased fallback; default and cross-provider reviewer rules and preflight remain. Pending → changed → no-verdict ordering uses `verdict.py check` on a temporary copy, leaving actual carried-verdict skipping in `run.sh`. `batch.json.budget`, bot/webhook hold lines and read-only dry-run forecasts provide visibility. Evidence: the new compound admission, interactive contention, conversion, one-lane/five-job release, barrier, ordering, bot-summary, real-shell route and 10-27 replay regressions in the required three Python test files, plus the zsh reviewer reservation checks. Validation results recorded below.
+
 - [ ] **O12 (calibration).** Accumulate five measured samples/provider before replacing seeds; Cursor currently has no measured token-to-window factor (provisional 5 points/59k tokens). Claude starts at 10 points/251k tokens: F9's ~2 points/min across three sessions × 15 minutes/session. The five-hour factor is conservatively charged to weekly windows too. Connect runtime ledger launch/session ids to quota boundaries wherever callers currently omit them; unmatched boundaries remain uncalibrated rather than guessed.
 - [x] **E1.** Added the running planning-doc rule, aligned Claude plan-mode guidance, taught pick-up and close-out to account for repo and recent harness plan threads, and added both skills to the README table.
 
@@ -263,6 +266,8 @@ Separately:
   - The hook denies at 0.
   - `test_quota_replay.py` gets a 10-27-shaped fixture.
   - A quota-killed planner leaves `partial-triage-<repo>.md` built from a fixture transcript. The next planner's prompt names it, and a completed run deletes it.
+- **C2 validation (2026-10-29):** `uv run --with pytest python -m pytest automations/advance-roadmap/tests lib -q` → **398 passed, 108 subtests passed**. All four `automations/advance-roadmap/tests/*.sh` suites passed under zsh, including the new reserved-reviewer checks; `status-glyph-check.test.sh` and five other hook suites also passed under zsh. Three additional Bash-declared hook suites passed with their declared interpreter. The unrelated clone-lock suite has two installer cases failing on missing `restart_updated_installer` (83 checks pass); its test/installer/helper are unchanged by C2, and the same two failures were reproduced at base `9e865f9` in a temporary detached checkout (removed after verification). `/session-hardening` can address that existing installer-test extraction issue. A blanket zsh invocation is inappropriate for those Bash-declared hook suites (`status` is read-only in zsh). Python compilation, zsh syntax, Node syntax and `git diff --check` passed. All model calls, summaries, state and GitHub/Linear access in tests were isolated/faked; the rollout/calibration audit only read local logs.
+
 - **slackagent tests:** `npm test`.
   - The result-JSON parser records usage on success, error and timeout.
   - The transcript parser handles a fixture with MCP tool calls.

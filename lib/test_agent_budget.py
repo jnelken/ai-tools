@@ -74,6 +74,42 @@ class BudgetTests(unittest.TestCase):
         b.release(lease['id'])
         self.assertEqual(self.leases(), [])
 
+    def test_bundle_is_atomic_and_shares_interactive_reservations(self):
+        models = b.estimates([], [])
+        readings = {p: self.reading for p in b.PROVIDERS}
+        interactive = b.acquire('codex', 'planner')
+        requests = [dict(provider='codex', role='planner'), dict(provider='cursor', role='worker')]
+        leases = b.reserve_bundle(requests, models=models, reading_by_provider=readings)
+        self.assertEqual({l['provider'] for l in leases}, {'codex', 'cursor'})
+        self.reading['windows']['five_hour']['live'] = 69
+        before = self.leases()
+        self.assertIsNone(b.reserve_bundle(requests, replace_ids=[l['id'] for l in leases],
+                                          models=models, reading_by_provider=readings))
+        self.assertEqual(self.leases(), before, 'failed conversion must preserve both old reservations')
+        reduced = b.reserve_bundle([dict(provider='cursor', role='worker', scale=.3)],
+                                   replace_ids=[l['id'] for l in leases], models=models,
+                                   reading_by_provider=readings, reduce_only=True)
+        self.assertEqual(len(reduced), 1)
+        self.assertIn(interactive['id'], [l['id'] for l in self.leases()])
+        b.release_many([l['id'] for l in reduced])
+        self.assertEqual([l['id'] for l in self.leases()], [interactive['id']])
+
+    def test_unknown_bundle_is_one_job_per_provider(self):
+        readings = {p: {'windows': {'auto' if p == 'cursor' else 'five_hour': {'live': None, 'cap': 70}}} for p in b.PROVIDERS}
+        requests = [dict(provider='cursor', role='worker'), dict(provider='cursor', role='reviewer')]
+        lease, = b.reserve_bundle(requests, models=b.estimates([], []), reading_by_provider=readings)
+        self.assertEqual(lease['roles'], ['worker', 'reviewer'])
+        self.assertIsNone(b.reserve_bundle(requests, models=b.estimates([], []), reading_by_provider=readings))
+
+    def test_read_only_bundle_forecast_never_creates_budget_state(self):
+        requests = [dict(provider='codex', role='planner')]
+        models = b.cached_estimates(read_only=True)
+        self.assertFalse(b.budget_dir().exists())
+        preview = b.reserve_bundle(requests, commit=False, models=models,
+                                   reading_by_provider={'codex': self.reading})
+        self.assertEqual(len(preview), 1)
+        self.assertFalse(b.budget_dir().exists())
+
     def test_unknown_allows_one_lease_per_provider(self):
         for window in self.reading['windows'].values():
             window['live'] = None

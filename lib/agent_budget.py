@@ -5,7 +5,7 @@ window. It is not a hard provider limit: other machines and estimation error are
 visible only in subsequent readings. All admissions are serialized under flock.
 """
 import argparse
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from datetime import datetime
 import fcntl
 import importlib.util
@@ -208,7 +208,7 @@ def codex_samples(path):
     return codex_calibration(codex_observations(path))
 
 
-def history():
+def history(persist=True):
     """Keep job-cost totals separate from interval/session calibration usage."""
     home = claude_home()
     records, calibration_records = [], []
@@ -227,7 +227,7 @@ def history():
         records.extend(source)
         calibration_records.extend(source)
     samples, codex_rows = [], []
-    with lock('samples'):
+    with lock('samples') if persist else nullcontext():
         cache = read_json(budget_dir() / 'history-cache.json')
 
         def cached_transcript(path, role, since=None, until=None):
@@ -306,14 +306,15 @@ def history():
                     if r.get('source') not in ('quota_snapshots', 'rate_limits')}
         existing.update({r['id']: r for r in samples})
         combined = list(existing.values())
-        path = budget_dir() / 'samples.jsonl'
-        temporary = path.with_suffix('.tmp')
-        fd = os.open(temporary, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600)
-        with os.fdopen(fd, 'w') as handle:
-            for sample in combined:
-                handle.write(json.dumps(sample) + '\n')
-        os.replace(temporary, path)
-        write_json(budget_dir() / 'history-cache.json', cache)
+        if persist:
+            path = budget_dir() / 'samples.jsonl'
+            temporary = path.with_suffix('.tmp')
+            fd = os.open(temporary, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, 'w') as handle:
+                for sample in combined:
+                    handle.write(json.dumps(sample) + '\n')
+            os.replace(temporary, path)
+            write_json(budget_dir() / 'history-cache.json', cache)
     return records, combined
 
 
@@ -349,9 +350,9 @@ def estimates(records, samples):
     return result
 
 
-def cached_estimates():
+def cached_estimates(read_only=False):
     """Share models across short-lived hooks; scan history at most every 10m."""
-    with lock('estimates'):
+    with lock('estimates') if not read_only else nullcontext():
         path = budget_dir() / 'estimates.json'
         cached = read_json(path)
         if (isinstance(cached, dict) and cached.get('version') == ESTIMATE_VERSION
@@ -359,8 +360,9 @@ def cached_estimates():
                 and 0 <= time.time() - cached['generated_at'] < ESTIMATE_MAX_AGE
                 and isinstance(cached.get('models'), dict)):
             return cached['models']
-        models = estimates(*history())
-        write_json(path, dict(version=ESTIMATE_VERSION, generated_at=time.time(), models=models))
+        models = estimates(*history(persist=not read_only))
+        if not read_only:
+            write_json(path, dict(version=ESTIMATE_VERSION, generated_at=time.time(), models=models))
         return models
 
 
@@ -371,19 +373,25 @@ def window_live(window, fresh, now):
     return usage._zero_if_reset(normalized, now)['used_pct']
 
 
-def readings(provider):
+def readings(provider, root=None, probe=True):
     now = time.time()
     if provider == 'claude':
-        q = claude_quota.quota()
+        if probe:
+            q = claude_quota.quota()
+        else:
+            q = read_json(Path.home() / '.claude/state/quota-snapshot-cache.json')
+            q['age_seconds'] = now - q.get('observed_at', 0)
+            if q.get('source') != 'oauth_usage':
+                q['windows'] = {}
         fresh = number(q.get('age_seconds')) and q['age_seconds'] <= MAX_AGE
         return {'source': q.get('source'), 'observed_at': q.get('observed_at'), 'windows': {
             name: {'live': value.get('used_percentage') if fresh else None, 'cap': cap}
             for name, cap in [('five_hour', usage.MAX_FIVE_HOUR_PCT), ('seven_day', usage.MAX_SEVEN_DAY_PCT)]
             for value in [q.get('windows', {}).get(name, {})]}}
-    state = usage.load(claude_home() / 'automations/advance-roadmap')
+    state = usage.load(Path(root) if root else claude_home() / 'automations/advance-roadmap')
     prov = state['providers'][provider]
     observed = (prov.get('observed_epoch') or epoch(prov.get('observed_at'))) if provider == 'codex' else epoch(prov.get('included', {}).get('observed_at'))
-    if not observed or now - observed > MAX_AGE:
+    if probe and (not observed or now - observed > MAX_AGE):
         if provider == 'codex':
             usage.probe_codex(state)
         else:
@@ -428,7 +436,7 @@ def process_start(pid):
     return 'ps:' + value if result.returncode == 0 and value else None
 
 
-def reap():
+def reap(persist=True):
     """Caller holds leases.lock, including reads (which persist the reaping)."""
     leases = read_json(budget_dir() / 'leases.json', [])
     now = time.time()
@@ -444,7 +452,8 @@ def reap():
         if identities[pid] == lease['pid_started_at']:
             active.append(lease)
     leases = active
-    write_json(budget_dir() / 'leases.json', leases)
+    if persist:
+        write_json(budget_dir() / 'leases.json', leases)
     return leases
 
 
@@ -456,7 +465,7 @@ def capacity(reading, leases, provider, role, cost, want, unknown_limit=True):
         model = os.environ.get(usage.CURSOR_MODEL_ENV.get(role, usage.CURSOR_MODEL_ENV['worker']), 'auto')
         windows = {k: v for k, v in windows.items() if k == ('auto' if model == 'auto' else 'api')}
     known = [w['cap'] - w['live'] - reserved for w in windows.values() if number(w.get('live'))]
-    unknown = any(not number(w.get('live')) for w in windows.values())
+    unknown = not windows or any(not number(w.get('live')) for w in windows.values())
     fit = min(want, max(0, math.floor((min(known) + 1e-9) / cost))) if known else want
     if unknown and unknown_limit:
         fit = min(fit, 0 if active else 1)
@@ -495,6 +504,75 @@ def acquire(provider, role, pid=None, ttl=None, label=None, reading=None, unknow
         leases.append(lease)
         write_json(budget_dir() / 'leases.json', leases)
         return lease
+
+
+def reserve_bundle(requests, *, replace_ids=(), reading_by_provider=None, models=None,
+                   label=None, pid=None, ttl=None, commit=True, extra_leases=(), reduce_only=False):
+    """Atomically admit/replace a whole job, or leave its existing leases intact.
+
+    One lease per provider includes all roles of this job. Unknown quota still
+    allows only one job/provider, including a job with worker+review on Cursor.
+    `commit=False` is a read-only forecast; callers may include previous forecast
+    leases to simulate a wave. It never creates budget files or takes a lock.
+    """
+    models = cached_estimates(read_only=not commit) if models is None else models
+    providers = {r['provider'] for r in requests}
+    reading_by_provider = ({p: readings(p) for p in providers}
+                           if reading_by_provider is None else reading_by_provider)
+    grouped = {}
+    for request in requests:
+        provider, role = request['provider'], request['role']
+        scale = request.get('scale', 1)
+        if not number(scale) or scale < 0:
+            raise ValueError('reservation scale must be nonnegative')
+        if not scale:
+            continue
+        cost = models[provider]['roles'][role]
+        group = grouped.setdefault(provider, dict(pct=0, ttl=0, roles=[]))
+        group['pct'] += cost['pct'] * scale
+        group['ttl'] += cost['ttl']
+        group['roles'].append(role)
+    with lock() if commit else nullcontext():
+        existing = reap(persist=commit) + list(extra_leases)
+        remaining = [l for l in existing if l['id'] not in replace_ids]
+        for provider, group in grouped.items():
+            prior = sum(l['pct'] for l in existing if l['id'] in replace_ids and l['provider'] == provider)
+            if reduce_only:
+                if group['pct'] > prior + 1e-9:
+                    raise ValueError('a reduction cannot add reserved cost')
+                continue
+            if not all(capacity(reading_by_provider[provider], remaining, provider,
+                                role, group['pct'], 1) for role in group['roles']):
+                return None
+        owner = pid or os.getpid()
+        started = process_start(owner)
+        if started is None:
+            raise ProcessLookupError('lease owner exited')
+        admitted = [dict(id=uuid.uuid4().hex, provider=p, role=g['roles'][0],
+                         roles=g['roles'], pct=g['pct'], pid=owner, pid_started_at=started,
+                         created=time.time(), ttl=ttl or g['ttl'], label=label)
+                    for p, g in grouped.items()]
+        if commit:
+            write_json(budget_dir() / 'leases.json', remaining + admitted)
+        return admitted
+
+
+def transfer(lease_ids, pid):
+    started = process_start(pid)
+    if started is None:
+        raise ProcessLookupError('lease owner exited')
+    with lock():
+        leases = reap()
+        for lease in leases:
+            if lease['id'] in lease_ids:
+                lease.update(pid=pid, pid_started_at=started)
+        write_json(budget_dir() / 'leases.json', leases)
+
+
+def release_many(lease_ids):
+    with lock():
+        leases = reap()
+        write_json(budget_dir() / 'leases.json', [l for l in leases if l['id'] not in lease_ids])
 
 
 def release(lease_id):

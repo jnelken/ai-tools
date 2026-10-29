@@ -240,7 +240,8 @@ def usage_cli(root, *args):
 def provider_order():
     """Codex first, Claude only as the fallback. Every one is listed: whether it is under its gate
     is read right before it is tried, since a gate can open or close while the one before it runs."""
-    return [n for n in ROLE_PROVIDERS["approver"] if n in RUNNERS]
+    return [n for n in ROLE_PROVIDERS["approver"] if n in RUNNERS
+            and os.environ.get("ADVANCE_ROADMAP_BUDGET_PLANNER", n) == n]
 
 
 def still_under_gate(root, name):

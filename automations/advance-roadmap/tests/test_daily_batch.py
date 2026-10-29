@@ -1,4 +1,6 @@
 """Exercise the real batch controller with fake planners/workers, never live providers."""
+import hashlib
+import time
 import importlib.util
 import json
 import os
@@ -138,13 +140,34 @@ class DailyBatchTest(unittest.TestCase):
             "# any planner still passes); FAKE_NO_QUOTA_AT_START: it is dry before the batch plans anything.\n"
             "dry = os.environ.get('FAKE_NO_QUOTA_AT_START') or (\n"
             "    os.environ.get('FAKE_NO_QUOTA') and os.path.exists(os.path.join(os.environ['ADVANCE_ROADMAP_ROOT'], 'trace.jsonl')))\n"
+            "if 'budget-input' in sys.argv:\n"
+            "    gates = json.loads(os.environ.get('FAKE_REVIEWER_GATES') or '{}').get('gates', [])\n"
+            "    print(json.dumps({'workers': [] if dry else os.environ.get('FAKE_WORKER_CHAIN', 'cursor').split(),\n"
+            "                      'planners': ['codex'], 'reviewer_gates': gates}))\n"
+            "    raise SystemExit(0)\n"
             "print('' if dry else {'pick-worker-chain': os.environ.get('FAKE_WORKER_CHAIN', 'cursor'), 'pick-orchestrator': 'codex'}.get(sys.argv[-1], ''))\n")
         (self.root / 'lib/workspaces.py').write_text(
             "import os, sys\nsys.exit(1 if os.environ.get('FAKE_SUPERSET_DOWN') and 'available' in sys.argv else 0)\n")
         (self.root / 'lib/planapproval.py').write_text(FAKE_APPROVER)
         (self.root / 'lib/linearsnap.py').write_text(
             "import json, sys\njson.dump({'ok': True, 'issues': []}, open(sys.argv[-1], 'w'))\n")
-        self.env = {**os.environ, 'ADVANCE_ROADMAP_ROOT': str(self.root),
+        state = daily_batch.usage.empty_state()
+        now = time.time()
+        state['providers']['codex'].update(observed_epoch=now,
+            five_hour=dict(used_pct=0, reset_epoch=now+86400), weekly=dict(used_pct=0, reset_epoch=now+86400))
+        state['providers']['cursor']['included'].update(observed_at=now, auto_pct=0, api_pct=0, reset_epoch=now+86400)
+        (self.root / 'providers-usage.json').write_text(json.dumps(state))
+        quota_dir = self.root / '.claude/state'
+        quota_dir.mkdir(parents=True)
+        (quota_dir / 'quota-snapshot-cache.json').write_text(json.dumps(dict(
+            identity=hashlib.sha256(b'no-subscription').hexdigest(), attempted_at=now+3600,
+            observed_at=now, source='oauth_usage', windows={
+                'five_hour': {'used_percentage': 0}, 'seven_day': {'used_percentage': 0}})))
+        self.env = {**os.environ, 'HOME': str(self.root),
+                    'AGENT_BUDGET_CLAUDE_HOME': str(self.root / '.claude'),
+                    'ADVANCE_ROADMAP_CODEX_SESSIONS': str(self.root / '.codex/sessions'),
+                    'ADVANCE_ROADMAP_USAGE_PROBES': '0', 'ANTHROPIC_API_KEY': 'test-disable-oauth',
+                    'CLAUDE_CODE_OAUTH_TOKEN': '', 'CLAUDE_CONFIG_DIR': str(self.root / '.claude'), 'ADVANCE_ROADMAP_ROOT': str(self.root),
                     'PERSONAL_CODE_DIR': str(self.code), 'ADVANCE_ROADMAP_BATCH_POLL_S': '.02',
                     'ADVANCE_ROADMAP_SUPERSET': '0', 'DOTFILES_PERSONAL_MACHINE': '1',
                     'ADVANCE_ROADMAP_SKILL_DIR': str(self.root / 'skills'),
@@ -291,6 +314,144 @@ class DailyBatchTest(unittest.TestCase):
         self.repo('a')  # the fake prints nothing for `gates`
         self.run_batch()
         self.assertTrue(self.trace_exists())
+
+    def budget_context(self):
+        # Enter with patch.dict/patch.object so the real in-process budget uses
+        # exactly the same isolated account as the subprocess batch tests.
+        return patch.dict(os.environ, self.env)
+
+    def test_live_budget_limits_planning_and_waits_for_released_jobs_to_finish(self):
+        for repo in 'abcde':
+            self.repo(repo)
+        state_path = self.root / 'providers-usage.json'
+        state = json.loads(state_path.read_text())
+        state['providers']['codex']['five_hour']['used_pct'] = 64
+        state_path.write_text(json.dumps(state))
+        self.run_batch(lanes=5)
+        active, maximum = 0, 0
+        for event in self.events():
+            if event['kind'] == 'plan-start':
+                active += 1
+                maximum = max(maximum, active)
+            elif event['kind'] in {'plan-ready', 'plan-failed'}:
+                active -= 1
+        self.assertEqual(maximum, 1)
+        self.assertEqual(len([e for e in self.events() if e['kind'] == 'work-start']), 5)
+        self.assertEqual(self.state()['budget']['held'], [])
+        self.assertEqual(self.state()['budget']['providers']['codex']['reserved_pct'], 0)
+
+    def test_fractional_expectations_at_barrier_cannot_deadlock_the_batch(self):
+        for repo in 'abcde':
+            self.repo(repo)
+        state_path = self.root / 'providers-usage.json'
+        state = json.loads(state_path.read_text())
+        state['providers']['cursor']['included']['auto_pct'] = 86
+        state_path.write_text(json.dumps(state))
+        self.run_batch(lanes=5)
+        state = self.state()
+        self.assertEqual(state['phase'], 'done')
+        self.assertTrue(any(i['outcome'] == 'shipped' for i in state['queue']))
+        self.assertTrue(state['budget']['held'])
+        self.assertTrue(all(i['status'] == 'finished' for i in state['queue']))
+
+    def test_expected_cost_and_conversion_follow_the_first_fitting_worker(self):
+        with self.budget_context(), patch.object(daily_batch, 'ROOT', self.root), patch.object(daily_batch, 'dispatch_rates', return_value={'a': .6}):
+            budget = daily_batch.RoadmapBudget(dry_run=True)
+            budget.dry_run = False
+            budget.workers, budget.planners, budget.gates = ['cursor', 'codex', 'claude'], ['codex'], {}
+            item = {'repo': 'a', 'stamp': 'one'}
+            self.assertTrue(budget.admit(item))
+            allocation = item['allocation']
+            self.assertEqual(allocation['worker'], 'cursor')
+            self.assertEqual([r['scale'] for r in allocation['requests'] if r['role'] != 'planner'], [.6, .6, .6])
+            self.assertTrue(any(r['role'] == 'planner' for r in allocation['requests']))
+            budget.planned(item)
+            self.assertTrue(all(r['role'] != 'planner' for r in item['allocation']['requests']))
+            # Cursor still has quota by its raw gate, but a full worker+review
+            # no longer fits. The next worker in chain must be tried.
+            budget.readings['cursor']['windows']['auto']['live'] = 94
+            converted = budget.choose(item=item)
+            self.assertEqual(converted['worker'], 'codex')
+            self.assertEqual(converted['reviewers'], ['cursor', 'codex'])
+            self.assertEqual({r.get('scale', 1) for r in converted['requests']}, {1})
+            with daily_batch.agent_budget.lock():
+                leases = daily_batch.agent_budget.reap()
+            self.assertEqual({l['id'] for l in leases}, set(item['budget_leases']))
+            budget.release(item)
+
+    def test_interactive_leases_reduce_planner_lanes_and_refresh_blocks_conversion(self):
+        b = daily_batch.agent_budget
+        with self.budget_context(), patch.object(daily_batch, 'ROOT', self.root):
+            budget = daily_batch.RoadmapBudget(dry_run=True)
+            budget.dry_run = False
+            budget.workers, budget.planners, budget.gates = ['cursor'], ['codex'], {}
+            budget.readings['codex']['windows']['five_hour']['live'] = 61
+            interactive = b.reserve_bundle([{'provider': 'codex', 'role': 'planner'}],
+                models=budget.models, reading_by_provider=budget.readings)
+            admitted = []
+            for n in range(5):
+                item = {'repo': str(n), 'stamp': str(n)}
+                if budget.admit(item):
+                    admitted.append(item)
+            self.assertEqual(len(admitted), 1, 'the interactive lease leaves room for only one compound planner')
+            before = set(admitted[0]['budget_leases'])
+            budget.readings['cursor']['windows']['auto']['live'] = 100
+            self.assertIsNone(budget.choose(item=admitted[0]))
+            with b.lock():
+                self.assertTrue(before <= {l['id'] for l in b.reap()})
+            budget.release(admitted[0])
+            b.release_many([l['id'] for l in interactive])
+
+    def test_dispatch_share_ignores_skips_and_defaults_to_point_three(self):
+        (self.root / 'runs.jsonl').write_text(''.join(json.dumps(r) + '\n' for r in [
+            {'repo': 'a', 'action': 'dispatch_worker'}, {'repo': 'a', 'action': 'blocked_no_item'},
+            {'repo': 'a', 'outcome': 'skipped-quota'}, {'repo': 'b', 'action': 'resume_worker'}]))
+        with patch.object(daily_batch, 'ROOT', self.root):
+            self.assertEqual(daily_batch.dispatch_rates(), {'a': .5, 'b': 0})
+
+    def test_budget_holds_are_visible_and_do_not_leak_leases(self):
+        self.repo('a')
+        self.env['FAKE_NO_QUOTA'] = '1'
+        self.run_batch()
+        state = self.state()
+        self.assertEqual(state['budget']['held'][0]['repo'], 'a')
+        self.assertIn('Budget hold: a:', daily_batch.quota_line(state))
+        self.assertEqual(state['budget']['providers']['codex']['reserved_pct'], 0)
+        self.assertIn('headroom', state['budget']['providers']['codex']['windows']['five_hour'])
+        leases = json.loads((self.root / '.claude/state/agent-budget/leases.json').read_text())
+        self.assertEqual(leases, [])
+
+    def test_priority_reports_pending_changes_and_no_verdict_without_mutating_carried_state(self):
+        for name in ('pending', 'changed', 'new', 'carried'):
+            self.repo(name)
+        pending = self.code / '.advance-roadmap'
+        pending.mkdir()
+        (pending / 'pending-plan-pending.json').write_text(json.dumps({'orchestrator': {'action': 'resume_worker'}}))
+        verdicts = self.root / 'batch-verdicts'
+        verdicts.mkdir()
+        for repo in ('changed', 'carried'):
+            (verdicts / f'{repo}.json').write_text('{"stamp":"kept"}')
+        snapshot = self.root / 'snapshot.json'
+        snapshot.write_text('{"ok":true}')
+        (self.root / 'lib/deploysnap.py').write_text('')
+        (self.root / 'lib/verdict.py').write_text("""import json,sys
+from pathlib import Path
+a=sys.argv
+if 'fingerprint' in a:
+    Path(a[a.index('--out')+1]).write_text('{}')
+else:
+    changed = 'changed' in Path(a[a.index('--file')+1]).read_text()
+    # The copied file is intentionally destructive, like contamination recovery.
+    Path(a[a.index('--file')+1]).unlink()
+    Path(a[a.index('--changes')+1]).write_text(json.dumps({'changed':['repo:changed'] if changed else []}))
+    raise SystemExit(1 if changed else 0)
+""")
+        (verdicts / 'changed.json').write_text('{"stamp":"changed"}')
+        with self.budget_context(), patch.object(daily_batch, 'ROOT', self.root), patch.object(daily_batch.shared, 'LIB', self.root / 'lib'):
+            results = {repo: daily_batch.repo_priority(repo, snapshot) for repo in ('pending','changed','new','carried')}
+        self.assertEqual([results[r]['priority'] for r in ('pending','changed','new','carried')], [0,1,2,3])
+        self.assertTrue((verdicts / 'changed.json').exists())
+        self.assertTrue((verdicts / 'carried.json').exists())
 
     # ── A5: an outage must not use up the day ────────────────────────────────
 
@@ -444,7 +605,12 @@ class DailyBatchTest(unittest.TestCase):
         self.repo('spoof', owner='not-jnelken')
         (self.code / 'alias').symlink_to(self.code / 'a')
         p = self.run_batch(extra=['--dry-run'])
-        self.assertEqual(json.loads(p.stdout)['repos'], ['a'])
+        output = json.loads(p.stdout)
+        self.assertEqual(output['repos'], ['a'])
+        self.assertEqual(output['verdict_checks'][0]['result'], 'no-verdict')
+        self.assertEqual(output['lanes'], 1)
+        self.assertIn('headroom', output['budget']['providers']['codex']['windows']['five_hour'])
+        self.assertFalse((self.root / '.claude/state/agent-budget').exists())
         self.assertFalse((self.root / 'batches').exists())
 
     def test_empty_queue_finishes(self):
@@ -580,6 +746,40 @@ class DailyBatchTest(unittest.TestCase):
         self.assertEqual((posts[0]['phase'], posts[0]['lanes']), ('done', 2))
         self.assertGreaterEqual(posts[0]['time'], max(e['time'] for e in events if e['kind'] == 'work-end'))
         self.assertTrue(self.state()['summary_posted'])
+
+    def test_bot_summary_appends_one_hold_line_without_posting_twice(self):
+        if not shutil.which('node'):
+            self.skipTest('node is not installed')
+        slack = self.root / 'slackagent'
+        for path in ('scripts', 'src', 'node_modules/dotenv', 'node_modules/@slack/web-api'):
+            (slack / path).mkdir(parents=True)
+        (slack / 'package.json').write_text('{"type":"module"}')
+        (slack / 'scripts/post-roadmap-summary.mjs').write_text('throw new Error("adapter required");')
+        (slack / 'node_modules/dotenv/index.js').write_text('exports.config = () => {};')
+        posts = self.root / 'bot-posts.jsonl'
+        (slack / 'node_modules/@slack/web-api/index.js').write_text(
+            "const fs = require('node:fs'); exports.WebClient = class { constructor() { this.chat = {"
+            f"postMessage: async args => fs.appendFileSync({json.dumps(str(posts))}, JSON.stringify(args)+'\\n')"
+            "}; } };")
+        (slack / 'src/roadmap-summary.js').write_text("""import {readFileSync} from 'node:fs';
+export const DEFAULT_ROADMAP_CHANNEL = 'fake-channel';
+export const loadBatchState = path => JSON.parse(readFileSync(path));
+export const loadRunRecords = () => new Map();
+export const formatBatchSummary = () => 'Batch summary';
+export const postBatchSummary = ({client, channel, state, records}) =>
+  client.chat.postMessage({channel, text: formatBatchSummary(state, records)});
+""")
+        directory = self.root / 'summary'
+        directory.mkdir()
+        (directory / 'batch.json').write_text(json.dumps({'queue': [], 'budget': {
+            'held': [{'repo':'a', 'reason':'shared headroom'}]}}))
+        with self.budget_context(), patch.object(daily_batch, 'ROOT', self.root), patch.object(
+                daily_batch, 'slackagent_script', return_value=slack / 'scripts/post-roadmap-summary.mjs'), patch.dict(
+                os.environ, {'SLACK_BOT_TOKEN': 'test-only'}):
+            self.assertTrue(daily_batch.post_slack_summary(directory))
+        records = [json.loads(line) for line in posts.read_text().splitlines()]
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]['text'], 'Batch summary\nBudget hold: a: shared headroom.')
 
     def test_failed_summary_never_fails_the_batch(self):
         if not shutil.which('node'):

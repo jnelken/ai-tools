@@ -83,6 +83,36 @@ control, not a provider-enforced spend limit or cross-machine lease service. TTL
 use wall-clock time across processes; a large clock jump can change expiry timing.
 This known limit is unchanged.
 
+The daily roadmap batch uses the same lease file. Each poll refreshes usage once
+and admits at most `--lanes` planners, each reserving its planner cost plus its
+repo's historical share of `dispatch_worker` × (worker + required reviews).
+Without planning history the dispatch share is 0.3. Pending dispatch/resume plans
+come first and reserve a full implementation; when available they also reserve a
+planner fallback in case the saved plan cannot be reused. Changed verdicts precede
+repos with no verdict. Carried verdicts still pass through `run.sh`'s unchanged gate.
+
+At the planning barrier the planner portion is released. Before each implementation
+wave, fresh headroom must support an atomic conversion to full worker + review
+leases on the first fitting worker in `pick-worker-chain` order. Cross-provider
+reviews remain on a different provider; the default still requires Cursor then
+Codex. Calls stay on the reserved route; a later gate/limit stops them without
+spending an unleased fallback. Plan approvers reserve planner cost too. Leases
+follow the lane PID and release at completion/cancel/timeout (or normal reaping).
+
+A ready job held behind running jobs retries after they finish. If fractional
+expectations fill the barrier and nothing can start, the lowest priority held
+plan is deferred, freeing its expectation before retrying higher priority plans.
+This finite queue never waits all day for a quota reset. Saved plans and verdicts
+retain the existing cancellation semantics.
+
+`batch.json.budget` reports provider windows' live, reserved and headroom figures,
+plus held/skipped repos and reasons. Both Slack posting paths append one budget
+hold line. The bot path uses a local adapter around slackagent's existing formatter
+and post helper; it needs no slackagent deployment. `daily_batch.py --dry-run`
+prints verdict checks, saved live headroom, and the number of lanes that would be
+admitted. It uses saved Linear/deploy/quota snapshots, labels those verdict checks
+as saved, and creates no leases, batch state, probes or external requests.
+
 The installer registers `agent-budget-gate.py` for PreToolUse (Agent/Workflow) and
 SubagentStop, preserving existing settings and removing its retired SessionStart/End
 registrations. Unknown readings, exceptions (including malformed input/state and
