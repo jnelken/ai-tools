@@ -22,6 +22,11 @@
 
 **C2 status (2026-10-29):** implemented in `quota/budget-batch-wiring`; PR #13 review corrections C2R1–C2R4 are fixed with failing-before/passing-after regressions. Awaiting the conducting session's review/merge. O11 calibration and the daily-batch wiring thread are closed with evidence below. Live deployment/state is unchanged.
 
+**Decisions (Jake, 10-29 16:20):**
+1. **Universal reservation ledger:** every agent launch reserves tokens, updates its estimate, waits if there's no headroom, and settles with actual tokens, ticket, session ids and task. One ledger row per completed output. This is slice G: G1 is the ledger core (brief `quota-fanout-slice-G1.md`, on Claude Sonnet to save Codex's weekly headroom), and G2 wires every launcher to it.
+2. **Hand-started interactive sessions are never blocked:** they reserve and warn.
+3. **Review fallback:** when Cursor is gated, review switches automatically to cross-provider. This is slice H (brief `quota-fanout-slice-H.md`, Codex Luna) and must merge before the 10:30 batch on 10-30.
+
 **Watch at the 10-29 10:30 batch:** expect `skipped-unchanged` rows only from 10-30 on, once the first carried verdicts exist; no `error` rows from the Stop hook; Claude planners on Sonnet with medium effort; and no planning when no worker or reviewer is available.
 
 Repos:
