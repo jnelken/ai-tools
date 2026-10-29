@@ -82,18 +82,22 @@ def implementation_headroom(budget=None):
     """
     if budget is not None:
         workers, by_provider = budget.workers, budget.gates
+        decision = budget.review_strategy
     else:
         try:
-            chain = shared.py("usage.py", "--root", str(ROOT), "pick-worker-chain", timeout=120)
-            workers = chain.stdout.split() if chain.returncode == 0 else []
-            gates = shared.py("usage.py", "--root", str(ROOT), "gates", "--role", "reviewer", timeout=120)
-            by_provider = {g.get("provider"): g for g in json.loads(gates.stdout).get("gates") or []
+            inputs = shared.py("usage.py", "--root", str(ROOT), "budget-input", timeout=120)
+            values = json.loads(inputs.stdout) if inputs.returncode == 0 else {}
+            workers = values.get("workers", [])
+            by_provider = {g.get("provider"): g for g in values.get("reviewer_gates", [])
                            if isinstance(g, dict)}
+            decision = values.get("review_strategy") or usage.effective_review_strategy(
+                os.environ.get("ADVANCE_ROADMAP_REVIEW_STRATEGY", "cursor-then-codex"),
+                list(by_provider.values()))
         except (OSError, ValueError, AttributeError, subprocess.TimeoutExpired):
             return True, "", None
     if not workers:
         return False, "no worker provider is under its quota gate", "worker"
-    if os.environ.get("ADVANCE_ROADMAP_REVIEW_STRATEGY", "cursor-then-codex") == "cross-provider":
+    if decision.get("strategy") == "cross-provider":
         reviewers = [name for name, gate in by_provider.items() if gate.get("state") not in OUT_STATES]
         if by_provider and not any(r != w for w in workers for r in reviewers):
             reason = "every reviewer is gated" if not reviewers else "no cross-provider reviewer is under its quota gate"
@@ -197,12 +201,21 @@ class RoadmapBudget:
         self.workers = [p for p in options.get("workers", []) if p in agent_budget.PROVIDERS]
         self.planners = [p for p in options.get("planners", []) if p in ("codex", "claude")]
         self.gates = {g["provider"]: g for g in options.get("reviewer_gates", []) if isinstance(g, dict)}
+        self.review_strategy = options.get("review_strategy") or usage.effective_review_strategy(
+            os.environ.get("ADVANCE_ROADMAP_REVIEW_STRATEGY", "cursor-then-codex"),
+            list(self.gates.values()))
         self.readings = {p: agent_budget.readings(p, root=ROOT, probe=not self.dry_run and p == "claude")
                          for p in agent_budget.PROVIDERS}
 
+    def review_decision(self):
+        return getattr(self, "review_strategy", None) or usage.effective_review_strategy(
+            os.environ.get("ADVANCE_ROADMAP_REVIEW_STRATEGY", "cursor-then-codex"),
+            list(self.gates.values()))
+
     def routes(self):
+        decision = self.review_decision()
         for worker in self.workers:
-            if os.environ.get("ADVANCE_ROADMAP_REVIEW_STRATEGY", "cursor-then-codex") == "cross-provider":
+            if decision.get("strategy") == "cross-provider":
                 order = {"cursor": ["codex", "claude"], "codex": ["cursor", "claude"],
                          "claude": ["codex", "cursor"]}[worker]
                 reviews = [[p] for p in order if self.gates.get(p, {}).get("state") not in OUT_STATES]
@@ -226,7 +239,10 @@ class RoadmapBudget:
                 ttl=PLAN_TIMEOUT_S + APPROVAL_TIMEOUT_S if planner else None,
                 commit=commit and not self.dry_run, extra_leases=self.forecast)
             if leases is not None:
+                decision = self.review_decision()
                 allocation = {"worker": worker, "reviewers": reviewers, "planner": planner,
+                              "review_strategy": decision.get("strategy"),
+                              "review_fallback_reason": decision.get("reason"),
                               "requests": requests, "leases": leases}
                 if item is not None and commit:
                     item.update(budget_leases=[l["id"] for l in leases], allocation=allocation)
@@ -581,8 +597,23 @@ class Batch:
         except (OSError, ValueError, TypeError, KeyError):
             return None
 
+    def sync_review_fallback(self):
+        """Keep the visible batch note aligned with the latest reservation decision."""
+        decision = self.budget.review_strategy
+        reason = decision.get("reason")
+        if reason:
+            self.state["review_fallback"] = f"review fallback: cross-provider ({reason})"
+        else:
+            self.state.pop("review_fallback", None)
+        return decision
+
+    def refresh_budget(self):
+        self.budget.refresh()
+        return self.sync_review_fallback()
+
     def run(self):
         self.budget = RoadmapBudget()
+        self.sync_review_fallback()
         for item in self.state["queue"]:
             item["verdict_check"] = repo_priority(item["repo"], self.directory / "linear-snapshot.json")
         self.state["queue"].sort(key=lambda i: i["verdict_check"]["priority"])
@@ -602,7 +633,7 @@ class Batch:
         while any(i["status"] in {"queued", "planning"} for i in self.state["queue"]):
             self.poll()
             self.spawn_threads()
-            self.budget.refresh()
+            self.refresh_budget()
             slots = self.limit - sum(i["status"] == "planning" for i in self.state["queue"])
             launched = 0
             for item in sorted((i for i in self.state["queue"] if i["status"] == "queued"),
@@ -622,7 +653,7 @@ class Batch:
             time.sleep(POLL_S)
         self.state["phase"] = "approving"
         self.write()
-        self.budget.refresh()
+        self.refresh_budget()
         self.approve_threads()
         self.state["phase"] = "implementing"
         self.write()
@@ -640,7 +671,7 @@ class Batch:
             if chosen:
                 # Convert expected costs to full costs atomically against a fresh
                 # reading. Other jobs' and interactive reservations remain charged.
-                self.budget.refresh()
+                self.refresh_budget()
                 held = []
                 for item in chosen:
                     allocation = self.budget.choose(item=item)
@@ -651,7 +682,9 @@ class Batch:
                         continue
                     run = ROOT / "runs" / item["stamp"]
                     save(run / "batch-budget.json", {"worker": allocation["worker"],
-                                                    "reviewers": allocation["reviewers"]})
+                                                    "reviewers": allocation["reviewers"],
+                                                    "review_strategy": allocation.get("review_strategy"),
+                                                    "review_fallback_reason": allocation.get("review_fallback_reason")})
                     (run / "batch-release").touch()
                     item.pop("budget_hold", None)
                     item.update(status="running", released_at=time.time())
@@ -718,12 +751,16 @@ def quota_line(state):
              + (f', resets {q["reset_at"]}' if q.get("reset_at") else "")
              for q in state.get("quota_paused") or []]
     text = ("; ".join(parts) + ".") if parts else ""
-    return "\n".join(filter(None, (text, budget_hold_line(state))))
+    return "\n".join(filter(None, (state.get("review_fallback"), text, budget_hold_line(state))))
 
 
 def budget_hold_line(state):
     held = (state.get("budget") or {}).get("held") or []
     return ("Budget hold: " + "; ".join(f'{i["repo"]}: {i["reason"]}' for i in held) + ".") if held else ""
+
+
+def summary_note_line(state):
+    return "\n".join(filter(None, (state.get("review_fallback"), budget_hold_line(state))))
 
 
 def slackagent_script():
@@ -754,7 +791,7 @@ def post_slack_summary(directory):
     args = ["--batch", str(directory / "batch.json"), "--runs", str(ROOT / "runs.jsonl")]
     text = ""
     state = shared.read_json(directory / "batch.json") or {}
-    hold_line = budget_hold_line(state)
+    hold_line = summary_note_line(state)
     command = [node, str(script)]
     if hold_line:
         command = [node, str(Path(__file__).resolve().parent / "lib/post_batch_summary.mjs"),

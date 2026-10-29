@@ -18,6 +18,15 @@ cp "$HERE/lib/models.sh" "$HERE/lib/tokens.py" "$ROOT/lib/"
 cat > "$ROOT/lib/usage.py" <<'PY'
 import json, os, re, sys
 args = sys.argv[1:]
+if "effective-review-strategy" in args:
+    strategy = args[args.index("--strategy") + 1]
+    if strategy == "cross-provider":
+        print(json.dumps({"strategy": strategy, "reason": None}))
+    elif "cursor" in os.environ.get("FAKE_GATED", "").split():
+        print(json.dumps({"strategy": "cross-provider", "reason": "cursor gated until 2026-11-03T10:30:00-05:00"}))
+    else:
+        print(json.dumps({"strategy": strategy, "reason": None}))
+    sys.exit(0)
 if "gate" in args:
     provider = args[args.index("--provider") + 1]
     if provider in os.environ.get("FAKE_GATED", "").split():
@@ -143,6 +152,12 @@ review() {  # review WORKER ROUND [env...]
     ADVANCE_ROADMAP_AGENT_BIN="$BIN/agent" ADVANCE_ROADMAP_CLAUDE_BIN="$BIN/claude" "$@" \
     zsh "$ROOT/review.sh" --repo "$REPO" --worker "$w" --round "$r" --log "$LOG" --base main
 }
+review_default() {  # default strategy, allowing the fake usage resolver to exercise fallback
+  local w="$1" r="$2"; shift 2
+  env ADVANCE_ROADMAP_ROOT="$ROOT" ADVANCE_ROADMAP_CODEX_BIN="$BIN/codex" \
+    ADVANCE_ROADMAP_AGENT_BIN="$BIN/agent" ADVANCE_ROADMAP_CLAUDE_BIN="$BIN/claude" "$@" \
+    zsh "$ROOT/review.sh" --repo "$REPO" --worker "$w" --round "$r" --log "$LOG" --base main
+}
 field() { python3 -c "import json; print(json.loads(open('$LOG').readlines()[-1])['$1'])"; }
 check() { [ "$2" = "$3" ] || { echo "FAIL [$1]: expected '$3', got '$2'"; exit 1; }; echo "ok   $1"; }
 
@@ -156,6 +171,25 @@ review codex 2 FAKE_AGENT=clean >/dev/null
 check "codex's work → cursor reviews"        "$(field reviewer)" cursor
 check "clean verdict"                         "$(field verdict)" clean
 check "round recorded"                        "$(field round)" 2
+review_default codex 3 FAKE_AGENT=clean >/dev/null
+check "Cursor available keeps default strategy" "$(field strategy)" cursor-then-codex
+
+out="$(review_default cursor 1 FAKE_GATED=cursor FAKE_CODEX=clean)"
+check "gated Cursor falls back to Codex" "$(field reviewer)" codex
+check "fallback strategy is logged" "$(field strategy)" cross-provider
+check "fallback reason is logged" "$(field fallback_reason)" "cursor gated until 2026-11-03T10:30:00-05:00"
+case "$out" in *"strategy=cross-provider"*) echo "ok   fallback execution is cross-provider" ;; *) echo "FAIL: fallback strategy missing from output"; exit 1 ;; esac
+
+review_default codex 1 ADVANCE_ROADMAP_REVIEW_STRATEGY=cross-provider FAKE_GATED=cursor FAKE_AGENT=clean >/dev/null
+check "explicit cross-provider remains configured" "$(field strategy)" cross-provider
+check "explicit strategy has no fallback reason" "$(python3 -c "import json; print('fallback_reason' in json.loads(open('$LOG').readlines()[-1]))")" False
+
+review_default codex 1 ADVANCE_ROADMAP_BUDGET_REVIEW_STRATEGY=cross-provider \
+  ADVANCE_ROADMAP_BUDGET_REVIEW_FALLBACK_REASON="cursor gated until reserved reset" \
+  ADVANCE_ROADMAP_BUDGET_REVIEWERS=claude FAKE_AGENT=clean >/dev/null
+check "batch reservation pins its strategy" "$(field strategy)" cross-provider
+check "batch reservation pins fallback reason" "$(field fallback_reason)" "cursor gated until reserved reset"
+check "reserved reviewer is used after Cursor resets" "$(field reviewer)" claude
 
 out="$(review cursor 1 FAKE_CODEX=limit FAKE_CLAUDE=clean)"
 check "limited codex → claude reviews"       "$(field reviewer)" claude
@@ -168,7 +202,7 @@ check "limited reviewer logged with its reset" \
 rc=0; review claude 1 FAKE_CODEX=limit FAKE_AGENT=limit >/dev/null || rc=$?
 check "all reviewers limited → exit 3"       "$rc" 3
 check "logged as unavailable"                "$(field verdict)" unavailable
-check "one log line per round"               "$(wc -l < "$LOG" | tr -d ' ')" 4
+check "one log row per completed review stage" "$(wc -l < "$LOG" | tr -d ' ')" 9
 
 rc=0; review cursor 1 ADVANCE_ROADMAP_CODEX_BIN=/nonexistent FAKE_CLAUDE=clean >/dev/null || rc=$?
 check "missing binary → next reviewer"       "$(field reviewer)" claude
@@ -257,6 +291,8 @@ check "cursor reviewer session id logged"    "$(field session_id)" agent-session
 case "$out" in *"echoed prompt"*) echo "FAIL: transcript printed instead of the final answer"; exit 1 ;; *) echo "ok   only the final answer printed" ;; esac
 
 # Cursor completes; Codex is then gated before launch. Its stage has no session.
+# Clear the earlier default-strategy integration row so it cannot satisfy the one-time Codex pass.
+: > "$LOG"
 rc=0; review cursor 1 ADVANCE_ROADMAP_REVIEW_STRATEGY=cursor-then-codex FAKE_AGENT=clean FAKE_GATED=codex >/dev/null || rc=$?
 check "required Codex gate → exit 3" "$rc" 3
 check "required Codex gate logged" "$(field reviewer)" codex

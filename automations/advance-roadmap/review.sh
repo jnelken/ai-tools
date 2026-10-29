@@ -35,7 +35,8 @@ REVIEW_EFFORT="${ADVANCE_ROADMAP_REVIEW_EFFORT:-low}"
 export PATH="/opt/homebrew/bin:/opt/homebrew/opt/node@22/bin:/usr/bin:/bin:/usr/sbin:/sbin:/Users/jake/.local/bin"
 
 REPO="" WORKER="" ROUND="" LOG="" BASE=""
-REVIEW_STRATEGY="${ADVANCE_ROADMAP_REVIEW_STRATEGY:-cursor-then-codex}"
+CONFIGURED_REVIEW_STRATEGY="${ADVANCE_ROADMAP_REVIEW_STRATEGY:-cursor-then-codex}"
+REVIEW_STRATEGY="$CONFIGURED_REVIEW_STRATEGY"
 while [ $# -gt 0 ]; do
   case "$1" in
     --repo) REPO="$2"; shift 2 ;;
@@ -66,6 +67,27 @@ case "$REVIEW_STRATEGY" in
   cursor-then-codex|cross-provider) ;;
   *) echo "FATAL: --strategy must be cursor-then-codex or cross-provider" >&2; exit 2 ;;
 esac
+
+# Batch admission and this execution path share usage.py's strategy resolver. A
+# batch carries the admitted decision with its reviewer reservation so a quota
+# reset cannot switch the route after it has been reserved.
+if [ -n "${ADVANCE_ROADMAP_BUDGET_REVIEW_STRATEGY:-}" ]; then
+  case "$ADVANCE_ROADMAP_BUDGET_REVIEW_STRATEGY" in
+    cursor-then-codex|cross-provider) REVIEW_STRATEGY="$ADVANCE_ROADMAP_BUDGET_REVIEW_STRATEGY" ;;
+    *) echo "FATAL: invalid reserved review strategy: $ADVANCE_ROADMAP_BUDGET_REVIEW_STRATEGY" >&2; exit 2 ;;
+  esac
+  REVIEW_FALLBACK_REASON="${ADVANCE_ROADMAP_BUDGET_REVIEW_FALLBACK_REASON:-}"
+else
+  # If its live refresh fails, keep the configured strategy; the normal reviewer
+  # gate below still prevents a gated Cursor cycle from proceeding.
+  effective_json="$(python3 "$USAGE_PY" --root "$ROOT" effective-review-strategy --strategy "$REVIEW_STRATEGY" 2>/dev/null || true)"
+  if [ -n "$effective_json" ]; then
+    REVIEW_STRATEGY="$(print -r -- "$effective_json" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("strategy", ""))' 2>/dev/null || true)"
+    REVIEW_FALLBACK_REASON="$(print -r -- "$effective_json" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("reason") or "")' 2>/dev/null || true)"
+    [ -n "$REVIEW_STRATEGY" ] || REVIEW_STRATEGY="$CONFIGURED_REVIEW_STRATEGY"
+  fi
+  REVIEW_FALLBACK_REASON="${REVIEW_FALLBACK_REASON:-}"
+fi
 
 case "$WORKER" in
   cursor) cross_provider_reviewers=(codex claude) ;;
@@ -175,9 +197,9 @@ limit_hit() {
 
 record_review() {
   # record_review REVIEWER VERDICT PHASE [HITS] — HITS: limit_hit lines for the reviewers a banner stopped.
-  python3 - "$LOG" "$ROUND" "$WORKER" "$1" "$2" "$3" "$REPO" "$REVIEW_STRATEGY" "${4:-}" "$out.session" "${gated_list:-}" "${capacity_list:-}" <<'PY'
+  python3 - "$LOG" "$ROUND" "$WORKER" "$1" "$2" "$3" "$REPO" "$REVIEW_STRATEGY" "${4:-}" "$out.session" "${gated_list:-}" "${capacity_list:-}" "$REVIEW_FALLBACK_REASON" <<'PY'
 import json, subprocess, sys, time
-log, rnd, worker, reviewer, verdict, phase, repo, strategy, hits, session_path, gated, capacity = sys.argv[1:13]
+log, rnd, worker, reviewer, verdict, phase, repo, strategy, hits, session_path, gated, capacity, fallback_reason = sys.argv[1:14]
 session = None
 if reviewer:
     try:
@@ -194,11 +216,14 @@ for line in hits.splitlines():
     if isinstance(h, dict):
         limited.append({"provider": h.get("provider"), "cause": h.get("exact_cli_text"),
                         "reset_epoch": h.get("reset_epoch"), "reset_at": h.get("reset_at")})
+row = {"round": int(rnd), "worker": worker, "reviewer": reviewer or None,
+       "strategy": strategy, "phase": phase, "verdict": verdict, "head": head,
+       "gated": gated.split(), "capacity": capacity.split(),
+       "limited": limited, "session_id": session, "at": int(time.time())}
+if fallback_reason:
+    row["fallback_reason"] = fallback_reason
 with open(log, "a", encoding="utf-8") as f:
-    f.write(json.dumps({"round": int(rnd), "worker": worker, "reviewer": reviewer or None,
-                        "strategy": strategy, "phase": phase, "verdict": verdict, "head": head,
-                        "gated": gated.split(), "capacity": capacity.split(),
-                        "limited": limited, "session_id": session, "at": int(time.time())}) + "\n")
+    f.write(json.dumps(row) + "\n")
 PY
 }
 
