@@ -2,7 +2,7 @@
 
 > **Suggested execution:** Sonnet with high reasoning: well-scoped Python, zsh and Node edits to existing, well-tested code, but they touch concurrency, gate semantics and hooks. Step up to Opus for slice C (shared budget and leases) if lease and wait semantics get subtle. Step down to Haiku for slices A1, A2 and D3 on their own.
 
-**Status (2026-10-29 16:45):** all of wave 1 and wave 2 are merged and deployed on this machine (`~/.ai-tools` at `6ccb4ef`): #8, #9, #10, #12 (partial triage, 3 rounds) and #13 (batch budget admission plus the O11 calibration fix, 3 rounds; the live Codex planner estimate is now 5.67%, against 69% before and ~3% measured). `daily_batch.py --dry-run` shows the budget block and lanes=0, because the required Cursor reviewer is gated (F10). **Slice H (review fallback) must merge before the 10-30 10:30 batch.** In flight: H (Codex Luna), G1 (ledger core, Claude Sonnet), and slackagent#7/DEV-320 fixing 10 review findings (3 P1). The open decision for Jake: DEV-320 channel access, a Slack reinstall for the new scopes or a channel ID.
+**Status (2026-10-29 17:20):** #15 (H, the Cursor-gated cross-provider review fallback, 2 rounds) is merged and deployed (`01af84e`). The dry run no longer holds on the Cursor reviewer, but it still shows lanes=0 with 'no worker plus required review fits shared headroom'. That's **F11**: `agent_budget.capacity()` charges the 7d/weekly windows at the 5-hour-calibrated rate, with Codex weekly at 71% and Claude 7d at 53%. **Slice W (per-window factors) is now the last blocker for the 10-30 10:30 batch.** In flight: W (Codex Luna), the #16 G1 review (Claude workflow), and slackagent#7 fixes. The open decision for Jake: DEV-320 channel access (reinstall or channel ID).
 
 **Wave 2 (10-29 03:15):**
 - **E2, PR #12:** round 2 is verified by Claude. P1-1, P2-3, P2-4 and P2-5 are FIXED. P1-2 (redaction variants) and P2-6 (the per-attempt bound) are PARTIAL, and there are new findings (over-redaction, the batch-cancel save, an unattributable attempt erasing research). Round 3 is written in `~/.claude/state/fanout/review-ai-tools-12/fix-request-r3.txt` and goes out at 07:21.
@@ -122,6 +122,8 @@ Separately:
 - **Why:** the default `cursor-then-codex` review strategy hard-requires a Cursor review cycle (`review.sh`: `run_required_review cursor cursor-cycle || exit $?`), and Cursor's auto pool is at 100% until 11-03. The #9 pre-plan gate saw that nothing could finish review and skipped planning, so nothing was wasted. Claude was also at 93% of its 5h window at 10:30, and quota_paused lists cursor and claude.
 - **Not exercised today:** missing-fence `error` rows, the Sonnet-medium planner and verdict saving, because no planner ran.
 - **Consequence:** carried verdicts can't start until a day that actually plans, and **the batch will skip every day until Cursor resets on 11-03** unless the review strategy falls back (cross-provider, or Codex-only final review when Cursor is gated). That's a decision for Jake.
+
+**F11. Long windows charged at the 5-hour rate.** `lib/agent_budget.py capacity()` subtracts the same five_hour-calibrated cost and reservations from every window; calibration only reads five_hour deltas. Live evidence: Claude 5h 0% with 7d 53% gave `allow --want 4` → 1, and the 10-29 17:20 dry run held every repo with 'no worker plus required review fits'. The fix is slice W (per-window factors).
 
 ## Open threads
 
