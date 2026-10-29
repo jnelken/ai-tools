@@ -971,7 +971,10 @@ PY
         # re-triaging a repo that was already triaged. Fingerprint as planned (no worker changed anything).
         if [ "$THREAD" -le 1 ] && [ "$reused" -eq 0 ] \
            && [[ "$(jq -r '.action // empty' "$ORCH_RESULT" 2>/dev/null)" == (blocked_no_item|nothing_qualified) ]]; then
+          partial_triage_flags=()
+          [ "$PARTIAL_TRIAGE_CONSUMED" -eq 1 ] && partial_triage_flags=(--partial-triage-consumed)
           python3 "$VERDICT_PY" save --file "$LAST_VERDICT" --fingerprint "$FINGERPRINT" \
+            --repo "$TARGET_REPO" "${partial_triage_flags[@]}" \
             --orch-result "$ORCH_RESULT" --worker-result "$WORKER_RESULT" --stamp "$STAMP" \
             --bookkeeping-pending >> "$LOG" 2>&1 || true
         fi

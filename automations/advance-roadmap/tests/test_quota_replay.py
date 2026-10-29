@@ -317,6 +317,18 @@ class QuotaReplayTest(unittest.TestCase):
         self.assertTrue(self.plan_accepted(run))
         self.assertFalse(triage.exists(), "a valid targeted no-work result owns this repo's digest")
 
+    def test_batch_cancel_verdict_settles_consumed_partial_triage(self):
+        triage = self.code / ".advance-roadmap" / "partial-triage-demo.md"
+        triage.parent.mkdir(parents=True)
+        triage.write_text("planner findings\n")
+        plan = {**NO_WORK, "blockers": [{"repo": "demo", "linear_id": "DEV-12", "detail": "blocked"}]}
+        run = self.run_lane(cancel=True, FAKE_CODEX="plan", FAKE_PLAN=json.dumps(plan))
+        self.assertTrue(self.reached_barrier, "the batch should defer this plan before its worker runs")
+        self.assertFalse(triage.exists())
+        saved = json.loads(self.verdict.read_text())
+        self.assertNotIn("demo", saved["fingerprint"].get("partial_triage", {}))
+        self.assertTrue((run / "batch-cancel").exists())
+
     def test_thread_two_neither_prompts_with_nor_overwrites_partial_triage(self):
         triage = self.code / ".advance-roadmap" / "partial-triage-demo.md"
         triage.parent.mkdir(parents=True)
