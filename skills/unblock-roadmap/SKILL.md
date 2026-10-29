@@ -33,8 +33,9 @@ an **Other** answer; bot seed reactions and other users never authorize a decisi
 The application acquires live read-only evidence using Step 1's repo exclusions, dirty trees,
 open decisions and Needs Input rules (including stale hand-parked tickets). A headless sweep
 formats that evidence into a `QUESTIONS_JSON` fence: a list of
-`{repo, linear_id, blocker, evidence, question, options, directive_template}` entries, with a
-source identity for reconciliation. Use Codex first, then Claude, through runtime profiles:
+`{repo, linear_id, blocker, evidence, question, options}` entries, with a
+source identity for reconciliation. Acquire/format evidence in a background job outside the answer
+lock; unrelated household events must return without waiting for a sweep. Use Codex first, then Claude, through runtime profiles:
 Codex is sandboxed read-only with tools disabled; Claude receives supplied text with no tools.
 Before launching, gate each provider with
 `agent-budget allow --provider P --role planner --want 1 --json`. With no headroom, post a
@@ -43,17 +44,26 @@ call is recorded through Slackagent's existing runners as `unblock-sweep` or `un
 
 Before posting a question, cheaply recheck Linear state and the live dirty-tree snapshot. Mark
 resolved or changed blockers **superseded** and skip them; never apply an old destructive choice
-to a changed tree. Recheck again before recording an answer. Preserve skip, close and park
+to a changed tree. Hash the newest blocker comment (including its identity and content) at enqueue
+and re-fetch it before posting and under the recording lock. Supersede replaced/edited blocker
+comments and re-sweep that ticket. Allow at most one undecided question per repo, and check for
+pending directives repo-wide before writing. Preserve skip, close and park
 semantics from Step 2: skip/leave writes nothing, close sets Done or Canceled, and keep-parked
-comments without a directive or state change.
+records a parked note without a directive or state change.
 
-Persist each answer before recording it. Preset choices map deterministically to directive
-prose; only a free-text Other answer needs one small headless formatting call. All Linear writes
+Persist each answer before recording it. Presets authorize exactly the displayed option text,
+recorded verbatim inside a fixed repo/ticket/question wrapper; never use hidden model-generated
+directive prose. Labels are capped single-line plain text, with Markdown headings and control
+characters neutralized before display. Only a free-text Other answer needs one small headless
+formatting call; admission errors and denials both save an hourly retry deadline and a visible
+deferral. Run all outbound Slack and Linear text through the shared secret redactor. All Linear writes
 go through Slackagent's own Linear client, never the in-Slack @Linear agent. Keep the marked
-`## Directive` in the work ticket's **description**, where advance-roadmap consumes it, and add
-an audit comment. Move Needs Input to Todo in the same description update; preserve other
-states. Stable decision markers and deterministic audit-comment IDs make retries idempotent
-after a crash between the Linear write and local queue status update. A repo without an eligible
+`## Directive` in the work ticket's **description**, where advance-roadmap consumes it. Record
+the directive and Needs Input → Todo in one atomic `issueUpdate`; preserve other states. Do not
+make recording depend on an audit comment. Both DM and scheduled writers share repo/ticket
+locks, re-read immediately before writing, and verify the decision marker afterward. Missing
+markers trigger bounded retries; unverifiable answers remain pending with a thread notice.
+Stable decision markers recover a crash between the Linear write and local queue status update. A repo without an eligible
 ticket gets a labelled cleanup-only carrier only after an answer, with a fresh overlap check.
 
 **V1 writes Linear only.** Do not edit any repo Markdown from Slack mode. Record the owner's
@@ -61,16 +71,21 @@ answer in the directive so advance-roadmap can fold it into the repo later. This
 limit avoids the dirty-tree trap; dirty-tree directives still carry the exact canonical snapshot
 and distinguish cleanup-only from permission to implement a qualifying item.
 
-Confirm the recorded answer in its question thread, then advance. When the queue empties,
+Attempt a confirmation in the question thread, then advance; a failed confirmation is best-effort
+and never blocks the next question. When the queue empties,
 re-sweep until a sweep returns no blockers, post “roadmap is unblocked” once, and idle until the
 next weekday 8:45. Skipped/repeated evidence must not create an endless re-sweep loop or a false
 unblocked claim: leave it for the next weekday pass and say so. Queue statuses are pending,
 posted, answered, recorded and superseded, with source evidence, selected answer, Slack message
 timestamps and update timestamps persisted across restarts. On startup re-read posted-message
 reactions to backfill owner answers missed during downtime; retain older daily post mappings.
+Check newest copies first, skip unavailable/deleted copies, and backfill after reconciling a
+previously accepted post whose queue timestamp was not saved.
 
-Resolve the configured channel through the bot's paginated `conversations.list` and cache its
-ID. If missing or the bot is not a member, log and notify the admin once with an instruction to
+Resolve a configured channel **name** through the bot's paginated `conversations.list` and
+cache its ID; this needs `channels:read` / `groups:read` and an app reinstall. A configured
+`C…` channel ID bypasses name lookup and needs only the existing history/reaction scopes,
+so it works without reinstalling; verify access with a history read. If missing or the bot is not a member, log and notify the admin once with an instruction to
 `/invite Slackagent`; do not crash or self-join. Deployment/restarts and live QA are separate
 from implementation: tests use fake Slack, Linear and model clients.
 
