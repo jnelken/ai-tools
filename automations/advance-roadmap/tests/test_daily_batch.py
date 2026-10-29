@@ -354,6 +354,40 @@ class DailyBatchTest(unittest.TestCase):
         self.assertTrue(state['budget']['held'])
         self.assertTrue(all(i['status'] == 'finished' for i in state['queue']))
 
+    def test_pending_plan_can_launch_without_planner_budget(self):
+        b = daily_batch.agent_budget
+        (self.root / 'logs').mkdir()
+        with self.budget_context(), patch.object(daily_batch, 'ROOT', self.root), patch.object(
+                daily_batch.shared, 'LOG', None):
+            budget = daily_batch.RoadmapBudget(dry_run=True)
+            budget.dry_run = False
+            budget.workers, budget.planners, budget.gates = ['cursor'], ['codex'], {}
+            # The raw planner gate is open, but the two remaining Codex points
+            # fit its review only, not the additional three-point planner.
+            budget.readings['codex']['windows']['five_hour']['live'] = 68
+            batch = daily_batch.Batch(self.root, ['saved'], lanes=1)
+            batch.budget = budget
+            item = batch.state['queue'][0]
+            item['verdict_check'] = {'priority': 0, 'result': 'pending', 'action': 'resume_worker'}
+            try:
+                self.assertIsNone(budget.choose(item=item, planner='codex', commit=False))
+                self.assertIsNotNone(budget.choose(item=item, commit=False))
+                self.assertTrue(budget.admit(item))
+                self.assertIsNone(item['allocation']['planner'])
+                with b.lock():
+                    self.assertTrue(all('planner' not in lease['roles'] for lease in b.reap()))
+                # Exercise launch's real environment construction without a model.
+                started = b.process_start(os.getpid())
+                with patch.object(daily_batch.subprocess, 'Popen') as spawn, patch.object(
+                        b, 'process_start', return_value=started):
+                    spawn.return_value.pid = os.getpid()
+                    batch.launch(item)
+                env = spawn.call_args.kwargs['env']
+                self.assertEqual(env['ADVANCE_ROADMAP_BUDGET_PENDING'], '1')
+                self.assertEqual(env['ADVANCE_ROADMAP_BUDGET_PLANNER'], 'none')
+            finally:
+                budget.release(item)
+
     def test_expected_cost_and_conversion_follow_the_first_fitting_worker(self):
         with self.budget_context(), patch.object(daily_batch, 'ROOT', self.root), patch.object(daily_batch, 'dispatch_rates', return_value={'a': .6}):
             budget = daily_batch.RoadmapBudget(dry_run=True)

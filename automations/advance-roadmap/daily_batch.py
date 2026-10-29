@@ -236,10 +236,10 @@ class RoadmapBudget:
         return None
 
     def admit(self, item):
-        # A pending dispatch needs its whole implementation. Reserve a planner
-        # fallback when available in case run.sh rejects an expired/unsafe plan.
+        # A pending dispatch needs its whole implementation. Prefer a planner
+        # fallback if it fits, but saved work can run without that extra cost.
         pending = item.get("verdict_check", {}).get("result") == "pending"
-        for planner in ((self.planners or [None]) if pending else self.planners):
+        for planner in ([*self.planners, None] if pending else self.planners):
             allocation = self.choose(item=item, planner=planner,
                                      scale=1 if pending else self.rates.get(item["repo"], .3))
             if allocation is not None:
