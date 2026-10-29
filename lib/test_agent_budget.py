@@ -151,6 +151,9 @@ class BudgetTests(unittest.TestCase):
         sparse = b.estimates([], samples[:4])['claude']
         self.assertEqual(sparse['factor_source']['seven_day'], 'seed')
         self.assertAlmostEqual(sparse['factor']['seven_day'] / sparse['factor']['five_hour'], .1)
+        codex = b.estimates([], [dict(provider='codex', tokens=10000, pct=1) for _ in range(4)])['codex']
+        self.assertEqual(codex['factor_source']['weekly'], 'seed')
+        self.assertAlmostEqual(codex['factor']['weekly'] / codex['factor']['five_hour'], .25)
 
     def test_dead_pids_and_expired_ttl_reaped_on_read(self):
         live = b.acquire('codex', 'planner')
@@ -281,7 +284,7 @@ print(bool(b.acquire('codex','planner',pid=int(sys.argv[2]))))
         self.assertEqual(subagent['agent_type'], 'Explore')
         self.assertEqual(samples[0]['tokens'], 250000)
         self.assertEqual(samples[0]['pct'], 4)
-        self.assertEqual(samples[0]['windows_pct'], {'five_hour': 4, 'seven_day': 1})
+        self.assertEqual(samples[0]['windows_pct'], {'five_hour': 4})
         self.assertEqual(len(b.history()[1]), 1)
         self.assertTrue((b.budget_dir() / 'samples.jsonl').exists())
 
@@ -303,6 +306,28 @@ print(bool(b.acquire('codex','planner',pid=int(sys.argv[2]))))
         self.assertEqual([s['tokens'] for s in samples], [70000, 70000])
         self.assertEqual([s['tokens'] for s in b.rows(b.budget_dir() / 'samples.jsonl')], [70000, 70000])
         self.assertEqual(len(b.history()[1]), 2)
+
+    def test_claude_weekly_samples_accumulate_until_two_points(self):
+        ch = b.claude_home()
+        intervals = []
+        calls = []
+        for index, (start, finish, five_before, five_after, week_before, week_after) in enumerate((
+                (10, 20, 10, 11, 40, 41), (30, 40, 20, 21, 41, 42))):
+            session = f'weekly-{index}'
+            calls.append(dict(provider='claude', role='worker', total=10000, session_id=session))
+            for event, at, five, week in (('start', start, five_before, week_before),
+                                          ('finish', finish, five_after, week_after)):
+                intervals.append(dict(event=event, session_id=session, timestamp=at,
+                    quota=dict(age_seconds=0, windows={
+                        'five_hour': dict(used_percentage=five, resets_at=2000000000 + index * 100),
+                        'seven_day': dict(used_percentage=week, resets_at=2000000000)})))
+        self.append(ch / 'state/agent-usage.jsonl', calls)
+        self.append(ch / 'state/quota-snapshots.jsonl', intervals)
+        _, samples = b.history()
+        weekly, = [sample for sample in samples if sample.get('windows_pct', {}).get('seven_day')]
+        self.assertEqual(weekly['tokens'], 20000)
+        self.assertEqual(weekly['windows_pct']['seven_day'], 2)
+        self.assertNotIn('five_hour', weekly['windows_pct'])  # 5h reset boundaries remain independent
 
     def test_ambiguous_multi_session_totals_are_not_reused_per_session(self):
         ch = b.claude_home()
@@ -409,9 +434,31 @@ print(bool(b.acquire('codex','planner',pid=int(sys.argv[2]))))
         self.append(path, [dict(payload=dict(info=dict(total_token_usage=dict(input_tokens=t, output_tokens=0)),
             rate_limits=dict(primary=dict(used_percent=five, resets_at=2000000000, window_minutes=300),
                              secondary=dict(used_percent=weekly, resets_at=2000001000, window_minutes=10080))))
-            for t, five, weekly in [(1000, 10, 30), (11000, 12, 31)]])
+            for t, five, weekly in [(1000, 10, 30), (11000, 12, 31), (21000, 14, 32)]])
         sample, = b.codex_samples(path)
-        self.assertEqual(sample['windows_pct'], {'five_hour': 2, 'weekly': 1})
+        self.assertEqual(sample['windows_pct'], {'five_hour': 4, 'weekly': 2})
+        self.assertEqual(sample['tokens'], 20000)
+
+    def test_codex_weekly_samples_accumulate_whole_point_rollouts(self):
+        observations = [
+            dict(id=str(i), sequence=i, at=i * 1800, tokens=10000, pcts={'weekly': pct},
+                 resets={'weekly': 7})
+            for i, pct in enumerate((20, 21, 21, 22))]
+        sample, = b.codex_calibration(observations, 'weekly')
+        self.assertEqual(sample['pct'], 2)
+        self.assertEqual(sample['tokens'], 30000)
+
+    def test_history_rebuilds_codex_samples_for_both_windows(self):
+        path = self.home / '.codex/sessions/2026/10/29/rollout-weekly.jsonl'
+        self.append(path, [dict(payload=dict(info=dict(total_token_usage=dict(input_tokens=t, output_tokens=0)),
+            rate_limits=dict(primary=dict(used_percent=five, resets_at=2000000000, window_minutes=300),
+                             secondary=dict(used_percent=weekly, resets_at=2000001000, window_minutes=10080))))
+            for t, five, weekly in [(1000, 10, 30), (11000, 12, 31), (21000, 14, 32)]])
+        _, samples = b.history(persist=False)
+        sample, = [row for row in samples if row.get('source') == 'rate_limits'
+                   and row.get('windows_pct', {}).get('weekly')]
+        self.assertEqual(sample['windows_pct'], {'five_hour': 4, 'weekly': 2})
+        self.assertEqual(sample['tokens'], 20000)
 
     def test_stale_readings_are_unknown_and_claude_uses_live_quota(self):
         self.readings.stop()

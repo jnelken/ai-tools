@@ -59,9 +59,11 @@ Adjacent metadata preserves agent type while all child types share the subagent 
 Each window's conversion factor remains seeded until five positive measurements
 exist for that window, then uses p80 percentage points/token (token-weighted
 account intervals for Codex). Long-window seeds use the paired observed
-long/five-hour delta ratio once five such pairs exist. Until then they use 10% of
-the five-hour factor: the observed quota sizes make 1% safer than 100%, while 10%
-is above Claude's nominal ~3% weekly-to-five-hour capacity ratio.
+long/five-hour delta ratio once five such pairs exist. Until then Codex uses 25%
+of its five-hour factor: the 10-28 observation was about 15 weekly points per 72
+five-hour points (~21%), rounded up. Claude uses 10%, above its nominal ~3%
+weekly-to-five-hour capacity ratio. Long-window samples accumulate across
+same-reset intervals until their rounded delta reaches two points.
 Paired Claude snapshots match
 launch/session ids to per-session ledger usage, preserving review-round boundaries.
 They never pair a role's whole-job total with each session. Ambiguous multi-session
