@@ -773,7 +773,8 @@ def refresh(root: Path) -> dict[str, Any]:
 def pick_orchestrators(state: dict[str, Any]) -> list[str]:
     """Codex Sol, then Claude Sonnet — each only while under its gate."""
     return [n for n in ROLE_PROVIDERS["orchestrator"]
-            if state["providers"][n].get("available_for_orchestrator")]
+            if state["providers"][n].get("available_for_orchestrator")
+            and os.environ.get("ADVANCE_ROADMAP_BUDGET_PLANNER", n) == n]
 
 
 def pick_orchestrator(state: dict[str, Any]) -> str | None:
@@ -1137,6 +1138,13 @@ def cmd_pick_orchestrator(args: argparse.Namespace) -> None:
     print(orch)
 
 
+def cmd_budget_input(args: argparse.Namespace) -> None:
+    """One quota refresh for a batch poll's routing and reviewer constraints."""
+    state = refresh(Path(args.root))
+    print(json.dumps({"workers": pick_worker_chain(state), "planners": pick_orchestrators(state),
+                      "reviewer_gates": role_gates(state, "reviewer")}))
+
+
 def cmd_pick_worker_chain(args: argparse.Namespace) -> None:
     state = refresh(Path(args.root))
     chain = pick_worker_chain(state)
@@ -1215,6 +1223,9 @@ def main() -> None:
 
     p = sub.add_parser("pick-orchestrators")
     p.set_defaults(func=cmd_pick_orchestrators)
+
+    p = sub.add_parser("budget-input")
+    p.set_defaults(func=cmd_budget_input)
 
     p = sub.add_parser("pick-worker-chain")
     p.set_defaults(func=cmd_pick_worker_chain)

@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Behaviour matrix for status-glyph-check.sh. Run: bash (or zsh) hooks/tests/status-glyph-check.test.sh
+# Behaviour matrix for status-glyph-check.sh: it never blocks (the sign-off rule
+# lives in the instructions now), it only warns about session-only schedules. Run: bash (or zsh) hooks/tests/status-glyph-check.test.sh
 HOOK="${1:-$(cd "$(dirname "$0")/.." && pwd -P)/status-glyph-check.sh}"
 pass=0; fail=0
 TMP=$(mktemp -d "${TMPDIR:-/tmp}/status-glyph-test-$$-XXXXXX")
@@ -33,11 +34,11 @@ expect PASS  "leading dash"            "$(msg $'body\n— ✅ done')"
 expect PASS  "trailing blank lines"    "$(msg $'body\n✅ done\n\n  \n')"
 expect PASS  "caution emoji form"      "$(msg "body"$'\n'"⚠${FE0F} tests red")"
 expect PASS  "pickaxe emoji form"      "$(msg "body"$'\n'"⛏${FE0F} reapable")"
-expect BLOCK "caution bare text form"  "$(msg $'body\n\xe2\x9a\xa0 tests red')"
-expect BLOCK "pickaxe bare text form"  "$(msg $'body\n\xe2\x9b\x8f reapable')"
-expect BLOCK "missing glyph"           "$(msg $'All done, nothing else.')"
-expect BLOCK "glyph not on last line"  "$(msg $'✅ done\nand one more thing')"
-expect BLOCK "glyph mid-line"          "$(msg $'shipped it ✅')"
+expect PASS  "caution bare text form"  "$(msg $'body\n\xe2\x9a\xa0 tests red')"
+expect PASS  "pickaxe bare text form"  "$(msg $'body\n\xe2\x9b\x8f reapable')"
+expect PASS  "missing glyph"           "$(msg $'All done, nothing else.')"
+expect PASS  "glyph not on last line"  "$(msg $'✅ done\nand one more thing')"
+expect PASS  "glyph mid-line"          "$(msg $'shipped it ✅')"
 
 out=$(jq -n '{last_assistant_message:"no glyph", stop_hook_active:true}' | bash "$HOOK"); expect PASS "stop_hook_active" "$(classify "$out" $?)"
 out=$(printf 'not json' | bash "$HOOK");  expect PASS "malformed input" "$(classify "$out" $?)"
@@ -53,7 +54,7 @@ A_TEXT_BAD='{"type":"assistant","message":{"content":[{"type":"text","text":"don
 A_TOOL='{"type":"assistant","message":{"content":[{"type":"tool_use","name":"AskUserQuestion","input":{}}]}}'
 SIDE='{"type":"assistant","isSidechain":true,"message":{"content":[{"type":"text","text":"subagent, no glyph"}]}}'
 expect PASS  "transcript: glyph"            "$(tx "$A_TEXT_OK")"
-expect BLOCK "transcript: missing"          "$(tx "$A_TEXT_BAD")"
+expect PASS  "transcript: missing"          "$(tx "$A_TEXT_BAD")"
 expect PASS  "transcript: ends on tool_use" "$(tx "$A_TEXT_BAD"$'\n'"$A_TOOL")"
 expect PASS  "transcript: sidechain ignored" "$(tx "$A_TEXT_OK"$'\n'"$SIDE")"
 out=$(jq -n '{transcript_path:"/nonexistent/x.jsonl"}' | bash "$HOOK"); expect PASS "transcript: missing file" "$(classify "$out" $?)"
@@ -96,7 +97,7 @@ expect WARN  "sched: wakeup pending"              "$(sched 2026-10-15T17:30:00 "
 expect PASS  "sched: wakeup already fired"        "$(sched 2026-10-15T18:00:00 "$W")"
 expect PASS  "sched: wakeup cancelled (stop)"     "$(sched 2026-10-15T17:30:00 "$W"$'\n'"$WSTOP")"
 expect PASS  "sched: sidechain schedule ignored"  "$(sched 2026-10-15T18:00:00 "$SIDE_CC"$'\n'"$CR")"
-expect BLOCK "sched: missing glyph still blocks"  "$(sched 2026-10-15T18:00:00 "$CC"$'\n'"$CR" "no glyph here")"
+expect WARN  "sched: missing glyph only warns"   "$(sched 2026-10-15T18:00:00 "$CC"$'\n'"$CR" "no glyph here")"
 expect WARN  "sched: warns after the retry pass"  "$(sched 2026-10-15T18:00:00 "$CC"$'\n'"$CR" "no glyph here" true)"
 msgtext=$(sched_msg 2026-10-15T18:00:00 "$CC"$'\n'"$CR")
 [[ "$msgtext" == *"c0882707"* && "$msgtext" == *"one-shot"* && "$msgtext" == *"lost if this session closes"* ]] \
@@ -113,8 +114,8 @@ headless() { # headless <value|-> <message> — hook run with ADVANCE_ROADMAP_HE
   classify "$out" $?
 }
 expect PASS  "headless: no glyph is fine"        "$(headless 1 $'planner answer\n```ORCHESTRATOR_RESULT_JSON\n{}\n```')"
-expect BLOCK "headless: unset still blocks"      "$(headless - 'planner answer, no glyph')"
-expect BLOCK "headless: only 1 exempts"          "$(headless 0 'planner answer, no glyph')"
+expect PASS  "headless: unset, no schedule"      "$(headless - 'planner answer, no glyph')"
+expect PASS  "headless: 0, no schedule"          "$(headless 0 'planner answer, no glyph')"
 
 echo "status-glyph-check: $pass passed, $fail failed"
 (( fail == 0 ))

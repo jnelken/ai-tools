@@ -47,7 +47,7 @@ expect "⏳💡 ship-widget" "stop: combo"   "$(run stop claude "◐ ship-widget
 expect "⚠${FE0F} ship-widget" "stop: caution emoji form" "$(run stop claude "◐ ship-widget" "{\"last_assistant_message\":\"body\\n⚠${FE0F} tests red\"}")"
 expect "⛏${FE0F} ship-widget" "stop: pickaxe emoji form" "$(run stop claude "◐ ship-widget" "{\"last_assistant_message\":\"body\\n⛏${FE0F} reapable\"}")"
 expect "✅ ship-widget" "stop: leading dash" "$(run stop claude "◐ ship-widget" '{"last_assistant_message":"body\n— ✅ done"}')"
-expect "" "stop: claude, no glyph → wait for the re-sent turn" "$(run stop claude "◐ ship-widget" '{"last_assistant_message":"All done, nothing else."}')"
+expect "○ ship-widget" "stop: claude, no glyph → idle marker" "$(run stop claude "◐ ship-widget" '{"last_assistant_message":"All done, nothing else."}')"
 expect "○ ship-widget" "stop: codex, no glyph → idle marker" "$(run stop codex "◐ ship-widget" '{"last_assistant_message":"All done, nothing else."}')"
 expect "" "stop: nothing named yet → no-op" "$(run stop claude "" '{"last_assistant_message":"✅ done"}')"
 
@@ -59,7 +59,7 @@ A_ASK='{"type":"assistant","message":{"content":[{"type":"tool_use","name":"AskU
 A_TOOL='{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","input":{}}]}}'
 SIDE='{"type":"assistant","isSidechain":true,"message":{"content":[{"type":"text","text":"🛑 subagent"}]}}'
 expect "✅ ship-widget" "transcript: glyph"              "$(tx "$A_OK")"
-expect "" "transcript: no glyph → wait"                  "$(tx "$A_BAD")"
+expect "○ ship-widget" "transcript: no glyph → idle"          "$(tx "$A_BAD")"
 expect "🛑 ship-widget" "transcript: AskUserQuestion → blocked" "$(tx "$A_BAD"$'\n'"$A_ASK")"
 expect "○ ship-widget" "transcript: ends on plain tool_use → idle" "$(tx "$A_BAD"$'\n'"$A_TOOL")"
 expect "✅ ship-widget" "transcript: sidechain ignored"  "$(tx "$A_OK"$'\n'"$SIDE")"

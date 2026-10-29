@@ -23,6 +23,8 @@
 # YYYY-MM-DD that was successfully posted. Catchup posts every day from
 # last+1 through yesterday, one message per day. The marker advances only
 # after each successful POST, so transient Slack failures resume cleanly.
+# The already-posted check runs first and costs one `date` on macOS, before
+# any state-directory, lock, or git work (GNU date uses a fallback).
 #
 # Failures: a failed ccusage run or Slack POST is appended to
 # ~/.claude/.ccusage-state/errors.log and raises one macOS notification per
@@ -42,6 +44,21 @@ done
 
 state_dir="$HOME/.claude/.ccusage-state"
 last_file="$state_dir/last-posted"
+
+# Yesterday in YYYY-MM-DD (BSD `date` on macOS; GNU `date` elsewhere)
+yesterday=$(date -v-1d +%Y-%m-%d 2>/dev/null)
+[ -n "$yesterday" ] || yesterday=$(date -d 'yesterday' +%Y-%m-%d)
+
+last_posted=""
+if [ -r "$last_file" ]; then
+  read -r last_posted 2>/dev/null < "$last_file" || true
+fi
+date_pattern='^[0-9]{4}-[0-9]{2}-[0-9]{2}$'
+if [[ "$last_posted" =~ $date_pattern ]] \
+   && [[ "$last_posted" > "$yesterday" || "$last_posted" == "$yesterday" ]]; then
+  exit 0
+fi
+
 mkdir -p "$state_dir" 2>/dev/null || exit 0
 
 # Who's posting — prefer git global identity, fall back to $USER@hostname
@@ -56,9 +73,6 @@ elif [ -n "$git_name" ]; then
 else
   who="${USER:-unknown}@$(hostname -s 2>/dev/null || echo unknown)"
 fi
-
-# Yesterday in YYYY-MM-DD (BSD `date` on macOS; GNU `date` elsewhere)
-yesterday=$(date -v-1d +%Y-%m-%d 2>/dev/null || date -d 'yesterday' +%Y-%m-%d)
 
 # Atomic claim — keyed on yesterday so parallel sessions don't both catch up
 lock="$state_dir/.lock-$yesterday"

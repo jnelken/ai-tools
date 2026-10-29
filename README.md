@@ -43,6 +43,7 @@ Personal AI coding tools — Claude Code and Cursor skills, slash commands, hook
 | [`superset-config`](skills/superset-config) | Configure superset.sh (agentic IDE) project scripts — setup/run/teardown |
 | [`tab-triage`](skills/tab-triage) | Flush open Chrome tabs through chrome-tab-org, then triage the JSON log into vault notes and ClickUp tasks |
 | [`unblock-roadmap`](skills/unblock-roadmap) | Interactive sweep of the repos `advance-roadmap` is blocked on — asks how to resolve each, records answers as directives for a later run |
+| [`unblock-sessions`](skills/unblock-sessions) | Walk every Claude session in a Superset tab one at a time, ask Jake (with full context) about whatever each is waiting on, relay the answer or `reap`, and rescan for follow-ups; Skip for now / Skip forever on every prompt |
 | [`use-spark`](skills/use-spark) | Query the Spark email client CLI — emails, calendar, contacts, scheduling |
 | [`weekly-product-changelog-and-announcement`](skills/weekly-product-changelog-and-announcement) | Generate + post a weekly per-engineer changelog (internal) and a customer-facing product announcement (external) from cross-repo git history |
 | [`wrapup-repos`](skills/wrapup-repos) | Wrap up in-progress work in one repo unattended — commit + record decisions in `.claude/IN_PROGRESS.md` |
@@ -166,6 +167,7 @@ Flags: `--dev` (link from the checkout you're running instead of `~/.ai-tools` �
 The installer creates symlinks at:
 - `~/.claude/skills/<name>` → `~/.ai-tools/skills/<name>` (per skill)
 - `~/.claude/commands/<name>.md` → `~/.ai-tools/commands/<name>.md` (per slash command)
+- `~/.claude/output-styles/<name>.md` → `~/.ai-tools/output-styles/<name>.md` (per output style; select with `outputStyle` in settings.json)
 - `~/.claude/agents/<name>.md` → `~/.ai-tools/agents/<name>.md` (per agent)
 - `~/.claude/hooks/<name>` → `~/.ai-tools/hooks/<name>` (per hook)
 - `~/.claude/automations/<name>/<script>` → `~/.ai-tools/automations/<name>/<script>` (per automation script; scheduling itself is separate, see [`automations/README.md`](automations/README.md))

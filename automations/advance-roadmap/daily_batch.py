@@ -22,6 +22,7 @@ import shutil
 import subprocess
 import sys
 import time
+import tempfile
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
@@ -30,6 +31,8 @@ import supervisor as shared
 
 sys.path.insert(0, str(shared.HERE / "lib"))
 import usage  # noqa: E402
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "lib"))
+import agent_budget  # noqa: E402
 
 ROOT = shared.ROOT
 POLL_S = float(os.environ.get("ADVANCE_ROADMAP_BATCH_POLL_S", "1"))
@@ -71,35 +74,201 @@ def candidates(code):
     return repos
 
 
-def implementation_headroom():
-    """(ok, reason, blocking_role): whether anything could implement a plan today. Slice C's agent-budget replaces
-    this with a real budget; until then planning waits for a worker provider under its gate and the
-    reviewers the default strategy requires (review.sh: Cursor's cycle, then a final Codex pass,
-    with no fallback). Planning that cannot be carried to a merge only spends quota. A usage.py that
-    fails or prints nothing readable is no reading, which never blocks."""
-    try:
-        chain = shared.py("usage.py", "--root", str(ROOT), "pick-worker-chain", timeout=120)
-        if chain.returncode or chain.stdout.strip() in {"", "none"}:
-            return False, "no worker provider is under its quota gate", "worker"
-        gates = shared.py("usage.py", "--root", str(ROOT), "gates", "--role", "reviewer", timeout=120)
-        by_provider = {g.get("provider"): g for g in json.loads(gates.stdout).get("gates") or []
-                       if isinstance(g, dict)}
-    except (OSError, ValueError, AttributeError, subprocess.TimeoutExpired):
-        return True, "", None
+def implementation_headroom(budget=None):
+    """Preserve A4's provider/reviewer gates, then require one complete job's budget.
+
+    A broken quota gate is unknown, as in run.sh; shared budget admission still
+    bounds unknown readings to one job per provider.
+    """
+    if budget is not None:
+        workers, by_provider = budget.workers, budget.gates
+    else:
+        try:
+            chain = shared.py("usage.py", "--root", str(ROOT), "pick-worker-chain", timeout=120)
+            workers = chain.stdout.split() if chain.returncode == 0 else []
+            gates = shared.py("usage.py", "--root", str(ROOT), "gates", "--role", "reviewer", timeout=120)
+            by_provider = {g.get("provider"): g for g in json.loads(gates.stdout).get("gates") or []
+                           if isinstance(g, dict)}
+        except (OSError, ValueError, AttributeError, subprocess.TimeoutExpired):
+            return True, "", None
+    if not workers:
+        return False, "no worker provider is under its quota gate", "worker"
     if os.environ.get("ADVANCE_ROADMAP_REVIEW_STRATEGY", "cursor-then-codex") == "cross-provider":
-        workers = chain.stdout.split()
         reviewers = [name for name, gate in by_provider.items() if gate.get("state") not in OUT_STATES]
         if by_provider and not any(r != w for w in workers for r in reviewers):
             reason = "every reviewer is gated" if not reviewers else "no cross-provider reviewer is under its quota gate"
             return False, reason, "reviewer"
-        return True, "", None
     else:
-        required = ["cursor", "codex"]
-    for name in required:
-        g = by_provider.get(name) or {}
-        if g.get("state") in OUT_STATES:
-            return False, f'the required {name} reviewer is gated ({g.get("reason") or g["state"]})', "reviewer"
+        for name in ("cursor", "codex"):
+            g = by_provider.get(name) or {}
+            if g.get("state") in OUT_STATES:
+                return False, f'the required {name} reviewer is gated ({g.get("reason") or g["state"]})', "reviewer"
+    if budget is not None and budget.choose(scale=1, commit=False) is None:
+        return False, "no worker plus required review fits the shared agent budget", "worker"
     return True, "", None
+
+
+def repo_priority(repo, snapshot=None, dry_run=False):
+    """Inspect carried state without changing it; run.sh owns the actual skip/reuse.
+
+    Check a temporary copy because verdict.check may discard a contaminated
+    verdict. A dry run uses saved snapshots only and never calls Linear/GitHub.
+    """
+    code = Path(shared.code_dir())
+    pending = code / ".advance-roadmap"
+    for path in sorted(pending.glob(f"pending-plan-{repo}*.json")):
+        if path.name != f"pending-plan-{repo}.json" and not path.name.startswith(f"pending-plan-{repo}.t"):
+            continue
+        saved = shared.read_json(path) or {}
+        action = (saved.get("orchestrator") or saved).get("action")
+        if action in WORK_ACTIONS:
+            return {"priority": 0, "result": "pending", "action": action}
+    verdict = ROOT / "batch-verdicts" / f"{repo}.json"
+    if not verdict.exists():
+        return {"priority": 2, "result": "no-verdict"}
+    if snapshot is None:
+        snapshots = sorted((ROOT / "batches").glob("*/linear-snapshot.json"))
+        snapshot = snapshots[-1] if snapshots else None
+    if snapshot is None or not snapshot.exists():
+        return {"priority": 2, "result": "unknown", "reason": "no saved Linear snapshot"}
+    with tempfile.TemporaryDirectory(prefix="roadmap-verdict-") as directory:
+        temp = Path(directory)
+        carried, fingerprint, changes, deploys = [temp / name for name in ("verdict.json", "fp.json", "changes.json", "deploys.json")]
+        shutil.copyfile(verdict, carried)
+        if dry_run:
+            old = shared.read_json(verdict) or {}
+            # Preserve saved deploy values; report that deployment changes have not
+            # been refreshed, rather than making a network call from a dry run.
+            save(deploys, {"repos": {k: {"status": v} for k, v in
+                                    old.get("fingerprint", {}).get("deploys", {}).items()}})
+        else:
+            shared.py("deploysnap.py", "--code-dir", str(code), "--repo", repo, "--out", str(deploys))
+        fp = shared.py("verdict.py", "fingerprint", "--snapshot", str(snapshot), "--deploys", str(deploys),
+                       "--out", str(fingerprint), "--repo", repo)
+        if fp.returncode or not fingerprint.exists():
+            return {"priority": 2, "result": "unknown", "reason": "fingerprint unavailable"}
+        check = shared.py("verdict.py", "check", "--file", str(carried), "--fingerprint", str(fingerprint),
+                          "--changes", str(changes), "--max-age-hours", "72", "--root", str(ROOT))
+        changed = (shared.read_json(changes) or {}).get("changed") or []
+        return {"priority": 1 if changed else 3 if check.returncode == 0 else 2,
+                "result": "changed" if changed else "unchanged" if check.returncode == 0 else "retriage",
+                "changed": changed, "detail": check.stdout.strip(),
+                "snapshot": "saved" if dry_run else "current"}
+
+
+def dispatch_rates():
+    counts = {}
+    for row in agent_budget.rows(ROOT / "runs.jsonl"):
+        repo = row.get("repo")
+        if not repo:
+            continue
+        action = row.get("action")
+        if action is None:
+            action = (shared.read_json(ROOT / "runs" / str(row.get("stamp", "")) / "orchestrator-result.json") or {}).get("action")
+        if action not in WORK_ACTIONS | {"blocked_no_item", "nothing_qualified"}:
+            continue  # skips/failures are not planning observations
+        dispatch, total = counts.get(repo, (0, 0))
+        counts[repo] = (dispatch + (action == "dispatch_worker"), total + 1)
+    return {repo: n / total for repo, (n, total) in counts.items()}
+
+
+class RoadmapBudget:
+    """Batch jobs transact on exactly the same leases as interactive fan-out."""
+    def __init__(self, dry_run=False):
+        self.dry_run = dry_run
+        self.models = agent_budget.cached_estimates(read_only=dry_run)
+        self.rates = dispatch_rates()
+        self.forecast = []
+        self.refresh()
+
+    def refresh(self):
+        options = None
+        if not self.dry_run:
+            result = shared.py("usage.py", "--root", str(ROOT), "budget-input", timeout=120)
+            try:
+                options = json.loads(result.stdout) if result.returncode == 0 else None
+            except ValueError:
+                pass
+        if not isinstance(options, dict):
+            state = usage.load(ROOT)
+            usage.recompute_flags(state)
+            options = {"workers": usage.pick_worker_chain(state), "planners": usage.pick_orchestrators(state),
+                       "reviewer_gates": usage.role_gates(state, "reviewer")}
+        self.workers = [p for p in options.get("workers", []) if p in agent_budget.PROVIDERS]
+        self.planners = [p for p in options.get("planners", []) if p in ("codex", "claude")]
+        self.gates = {g["provider"]: g for g in options.get("reviewer_gates", []) if isinstance(g, dict)}
+        self.readings = {p: agent_budget.readings(p, root=ROOT, probe=not self.dry_run and p == "claude")
+                         for p in agent_budget.PROVIDERS}
+
+    def routes(self):
+        for worker in self.workers:
+            if os.environ.get("ADVANCE_ROADMAP_REVIEW_STRATEGY", "cursor-then-codex") == "cross-provider":
+                order = {"cursor": ["codex", "claude"], "codex": ["cursor", "claude"],
+                         "claude": ["codex", "cursor"]}[worker]
+                reviews = [[p] for p in order if self.gates.get(p, {}).get("state") not in OUT_STATES]
+            else:
+                reviews = [["cursor", "codex"]] if all(
+                    self.gates.get(p, {}).get("state") not in OUT_STATES for p in ("cursor", "codex")) else []
+            for reviewers in reviews:
+                yield worker, reviewers
+
+    def choose(self, *, item=None, planner=None, scale=1, commit=True):
+        for worker, reviewers in self.routes():
+            requests = [{"provider": worker, "role": "worker", "scale": scale},
+                        *[{"provider": p, "role": "reviewer", "scale": scale} for p in reviewers]]
+            if planner:
+                requests.append({"provider": planner, "role": "planner"})
+            leases = agent_budget.reserve_bundle(
+                requests, replace_ids=(item or {}).get("budget_leases", []),
+                reading_by_provider=self.readings, models=self.models,
+                pid=(item or {}).get("pid"),
+                label=f'roadmap:{item["stamp"]}' if item else "roadmap:forecast",
+                ttl=PLAN_TIMEOUT_S + APPROVAL_TIMEOUT_S if planner else None,
+                commit=commit and not self.dry_run, extra_leases=self.forecast)
+            if leases is not None:
+                allocation = {"worker": worker, "reviewers": reviewers, "planner": planner,
+                              "requests": requests, "leases": leases}
+                if item is not None and commit:
+                    item.update(budget_leases=[l["id"] for l in leases], allocation=allocation)
+                    if self.dry_run:
+                        self.forecast.extend(leases)
+                return allocation
+        return None
+
+    def admit(self, item):
+        # A pending dispatch needs its whole implementation. Prefer a planner
+        # fallback if it fits, but saved work can run without that extra cost.
+        # Later threads inherit ordering metadata but always plan fresh in run.sh.
+        pending = (item.get("thread", 1) == 1
+                   and item.get("verdict_check", {}).get("result") == "pending")
+        for planner in ([*self.planners, None] if pending else self.planners):
+            allocation = self.choose(item=item, planner=planner,
+                                     scale=1 if pending else self.rates.get(item["repo"], .3))
+            if allocation is not None:
+                return True
+        return False
+
+    def planned(self, item):
+        allocation = item.get("allocation") or {}
+        requests = [r for r in allocation.get("requests", []) if r["role"] != "planner"]
+        leases = agent_budget.reserve_bundle(requests, replace_ids=item.get("budget_leases", []),
+            reading_by_provider=self.readings, models=self.models,
+            pid=item.get("pid"), label=f'roadmap:{item["stamp"]}', reduce_only=True)
+        item["budget_leases"] = [l["id"] for l in leases]
+        allocation.update(requests=requests, leases=leases, planner=None)
+
+    def release(self, item):
+        ids = item.pop("budget_leases", [])
+        if ids and not self.dry_run:
+            agent_budget.release_many(ids)
+
+    def snapshot(self, queue):
+        with agent_budget.lock() if not self.dry_run else agent_budget.nullcontext():
+            leases = agent_budget.reap(persist=not self.dry_run) + self.forecast
+        return {"providers": {p: agent_budget.view(p, self.readings[p], self.models[p], leases)
+                              for p in agent_budget.PROVIDERS},
+                "held": [{"repo": i["repo"], "thread": i.get("thread", 1), "reason": i["budget_hold"]}
+                         for i in queue if i.get("budget_hold")]}
 
 
 def plan_of(result, item):
@@ -124,6 +293,7 @@ class Batch:
         self.limit = lanes
         self.threads = threads
         self.procs = {}
+        self.budget = None
         self.state = {"date": directory.name, "phase": "preparing", "lanes_max": self.limit,
                       "threads_max": self.threads,
                       "started_at": datetime.now().isoformat(timespec="seconds"), "queue": []}
@@ -148,6 +318,8 @@ class Batch:
                 "thread": thread, "status": "queued"}
         if parent:
             item["parent"] = parent
+            prior = next(i for i in self.state["queue"] if i["stamp"] == parent)
+            item["verdict_check"] = prior.get("verdict_check", {"priority": 2})
         self.state["queue"].append(item)
         return item
 
@@ -155,6 +327,8 @@ class Batch:
         return [i for i in self.state["queue"] if i["repo"] == item["repo"] and i is not item]
 
     def write(self):
+        if self.budget:
+            self.state["budget"] = self.budget.snapshot(self.state["queue"])
         self.state["updated_at"] = datetime.now().isoformat(timespec="seconds")
         save(self.directory / "batch.json", self.state)
 
@@ -175,6 +349,10 @@ class Batch:
                "ADVANCE_ROADMAP_BATCH_SNAPSHOT": str(self.directory / "linear-snapshot.json"),
                "ADVANCE_ROADMAP_INFLIGHT_STAMPS": " ".join(i["stamp"] for i in self.state["queue"]),
                "ADVANCE_ROADMAP_LAST_VERDICT": str(self.verdict_path(item))}
+        allocation = item.get("allocation") or {}
+        env["ADVANCE_ROADMAP_BUDGET_PLANNER"] = allocation.get("planner") or "none"
+        if item["thread"] == 1 and item.get("verdict_check", {}).get("result") == "pending":
+            env["ADVANCE_ROADMAP_BUDGET_PENDING"] = "1"
         # Other repos are never this planner's fallback, even before they have a worker. Threads of
         # its own repo are not busy: they are the siblings it is planning around.
         env["ADVANCE_ROADMAP_BUSY_REPOS"] = " ".join(
@@ -184,6 +362,8 @@ class Batch:
                                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                                     stderr=err, start_new_session=True)
         self.procs[item["stamp"]] = proc
+        if self.budget:
+            agent_budget.transfer(item.get("budget_leases", []), proc.pid)
         item.update(status="planning", pid=proc.pid, started=time.time())
         shared.log(f'planning {item["repo"]} thread {item["thread"]} [{item["stamp"]}]')
 
@@ -196,6 +376,8 @@ class Batch:
                 row = shared.run_records({item["stamp"]}).get(item["stamp"], {})
                 item.update(status="finished", outcome=row.get("outcome", "unrecorded"),
                             pr_url=row.get("pr_url"), exit_code=proc.returncode, detail=row.get("detail"))
+                if self.budget:
+                    self.budget.release(item)
                 if row.get("quota"):
                     item["quota"] = row["quota"]  # who ran out, when it resets, the CLI's words
                 continue
@@ -205,6 +387,8 @@ class Batch:
                 item.update(status="ready", action=result.get("action"),
                             linear_id=result.get("linear_id"), item=result.get("item"),
                             plan=plan_of(result, item))
+                if self.budget:
+                    self.budget.planned(item)
             elif item["status"] == "planning" and time.time() - item["started"] > PLAN_TIMEOUT_S:
                 # Only planning gets this deadline. Already dispatched workers retain run.sh's
                 # existing timeout/recovery behavior and are never killed by this controller.
@@ -215,6 +399,8 @@ class Batch:
                     os.killpg(proc.pid, signal.SIGKILL)
                     proc.wait()
                 item.update(status="finished", outcome="planning-timeout")
+                if self.budget:
+                    self.budget.release(item)
 
     def spawn_threads(self):
         """Once a thread has planned a feature, queue the repo's next thread (up to --threads).
@@ -240,20 +426,37 @@ class Batch:
         out = self.directory / f"approval-{repo}.json"
         save(req, request)
         reason = "the plan approver did not run"
+        approval_leases = []
         try:
             doc = Path(os.environ.get("ADVANCE_ROADMAP_SKILL_DIR",
                                       str(Path.home() / ".claude/skills/advance-roadmap"))) / "PLAN_APPROVAL.md"
-            proc = shared.py("planapproval.py", "--root", str(ROOT), "approve", "--request", str(req),
-                             "--out", str(out), "--doc", str(doc), "--code-dir", str(shared.code_dir()),
-                             timeout=APPROVAL_TIMEOUT_S)
+            provider = None
+            for candidate in self.budget.planners:
+                approval_leases = agent_budget.reserve_bundle(
+                    [{"provider": candidate, "role": "planner"}],
+                    reading_by_provider=self.budget.readings, models=self.budget.models,
+                    label=f"roadmap:approve:{repo}", ttl=APPROVAL_TIMEOUT_S)
+                if approval_leases is not None:
+                    provider = candidate
+                    break
+            if provider is None:
+                raise RuntimeError("no shared headroom for the plan approver")
+            proc = subprocess.run([sys.executable, str(shared.LIB / "planapproval.py"), "--root", str(ROOT),
+                                  "approve", "--request", str(req), "--out", str(out), "--doc", str(doc),
+                                  "--code-dir", str(shared.code_dir())], capture_output=True, text=True,
+                                  stdin=subprocess.DEVNULL, timeout=APPROVAL_TIMEOUT_S,
+                                  env={**os.environ, "ADVANCE_ROADMAP_BUDGET_PLANNER": provider})
             result = shared.read_json(out) if proc.returncode == 0 else None
             if result and result.get("ok"):
                 if result.get("error"):
                     shared.log(f"{repo}: approver unavailable ({result['error']}); extra threads wait")
                 return result
             reason = f"the plan approver failed (exit {proc.returncode}): {(proc.stderr or '').strip()[-300:]}"
-        except (OSError, subprocess.TimeoutExpired) as error:
+        except (OSError, RuntimeError, subprocess.TimeoutExpired) as error:
             reason = f"the plan approver could not run: {error}"
+        finally:
+            if approval_leases:
+                agent_budget.release_many([l["id"] for l in approval_leases])
         shared.log(f"{repo}: {reason}")
         return {"ok": True, "repo": repo, "standing_conflicts": [], "error": reason,
                 "decisions": [{"stamp": i["stamp"], "thread": i["thread"],
@@ -304,6 +507,8 @@ class Batch:
                            + (f' ({d.get("reason")})' if d.get("reason") else ""))
 
     def cancel(self, item, reason):
+        if getattr(self, "budget", None):
+            self.budget.release(item)
         (ROOT / "runs" / item["stamp"] / "batch-cancel").write_text(reason + "\n")
         item.update(status="canceling", reason=reason)
 
@@ -348,6 +553,9 @@ class Batch:
         for item in self.state["queue"]:
             if item["status"] != "queued":
                 continue
+            item["budget_hold"] = reason
+            if self.budget:
+                self.budget.release(item)
             gates = ROOT / "runs" / item["stamp"] / "quota-gates.json"
             if quota:
                 gates.write_text(quota)
@@ -374,8 +582,12 @@ class Batch:
             return None
 
     def run(self):
+        self.budget = RoadmapBudget()
+        for item in self.state["queue"]:
+            item["verdict_check"] = repo_priority(item["repo"], self.directory / "linear-snapshot.json")
+        self.state["queue"].sort(key=lambda i: i["verdict_check"]["priority"])
         self.write()
-        ok, reason, blocking_role = implementation_headroom()
+        ok, reason, blocking_role = implementation_headroom(self.budget)
         if not ok:
             self.state["phase"] = "skipped"
             self.state["skipped_reason"] = reason
@@ -390,13 +602,27 @@ class Batch:
         while any(i["status"] in {"queued", "planning"} for i in self.state["queue"]):
             self.poll()
             self.spawn_threads()
+            self.budget.refresh()
             slots = self.limit - sum(i["status"] == "planning" for i in self.state["queue"])
-            for item in [i for i in self.state["queue"] if i["status"] == "queued"][:slots]:
-                self.launch(item)
+            launched = 0
+            for item in sorted((i for i in self.state["queue"] if i["status"] == "queued"),
+                               key=lambda i: i.get("verdict_check", {}).get("priority", 2)):
+                if launched >= slots:
+                    break
+                if self.budget.admit(item):
+                    item.pop("budget_hold", None)
+                    self.launch(item)
+                    launched += 1
+                else:
+                    item["budget_hold"] = "planner plus expected implementation does not fit shared headroom"
+            self.state["lanes"] = sum(i["status"] == "planning" for i in self.state["queue"])
+            if not launched and not any(i["status"] == "planning" for i in self.state["queue"]):
+                self.skip_planning("planner plus expected implementation does not fit shared headroom", "orchestrator")
             self.write()
             time.sleep(POLL_S)
         self.state["phase"] = "approving"
         self.write()
+        self.budget.refresh()
         self.approve_threads()
         self.state["phase"] = "implementing"
         self.write()
@@ -406,25 +632,44 @@ class Batch:
                                     for i in self.state["queue"])
             ready, chosen = sorted(
                 (i for i in self.state["queue"] if i["status"] == "ready"),
-                key=lambda i: (i.get("action") not in {"dispatch_worker", "resume_worker"}, i["thread"])), []
+                key=lambda i: (i.get("action") not in WORK_ACTIONS,
+                               i.get("verdict_check", {}).get("priority", 2), i["thread"])), []
             for item in ready:
                 if len(chosen) < slots and self.releasable(item, chosen):
                     chosen.append(item)
             if chosen:
-                # Recheck before each wave; exhaustion defers the remaining saved plans to
-                # tomorrow. It never turns the daily job into an all-day retry loop.
-                shared.py("usage.py", "--root", str(ROOT), "refresh", timeout=120)
-                providers = shared.py("usage.py", "--root", str(ROOT), "pick-worker-chain")
-                if providers.returncode or providers.stdout.strip() in {"", "none"}:
-                    reason = "no worker quota available; saved plans wait for the next daily batch"
+                # Convert expected costs to full costs atomically against a fresh
+                # reading. Other jobs' and interactive reservations remain charged.
+                self.budget.refresh()
+                held = []
+                for item in chosen:
+                    allocation = self.budget.choose(item=item)
+                    if allocation is None:
+                        reason = "worker plus required review no longer fits shared headroom; saved plan waits for the next daily batch"
+                        item["budget_hold"] = reason
+                        held.append(item)
+                        continue
+                    run = ROOT / "runs" / item["stamp"]
+                    save(run / "batch-budget.json", {"worker": allocation["worker"],
+                                                    "reviewers": allocation["reviewers"]})
+                    (run / "batch-release").touch()
+                    item.pop("budget_hold", None)
+                    item.update(status="running", released_at=time.time())
+                    shared.log(f'released {item["repo"]} thread {item["thread"]} {item.get("linear_id") or ""}')
+                if held and not any(i["status"] in {"running", "canceling"} for i in self.state["queue"]):
+                    # Running jobs can free headroom: wait for their completion.
+                    # Otherwise free the lowest priority reservation across the
+                    # whole barrier, including jobs outside this wave's lane cap.
+                    # A one-lane candidate slice contains the highest priority
+                    # job, whose expectation must not be sacrificed first.
+                    reserved = [i for i in ready if i.get("budget_leases")]
+                    item = reserved[-1] if reserved else held[-1]
+                    item.setdefault("budget_hold", "shared headroom is needed for higher priority plans; "
+                                    "saved plan waits for the next daily batch")
                     quota = self.quota_record()
-                    self.defer_ready(reason, quota)
-                    self.defer_bookkeeping(reason, quota)
-                else:
-                    for item in chosen:
-                        (ROOT / "runs" / item["stamp"] / "batch-release").touch()
-                        item.update(status="running", released_at=time.time())
-                        shared.log(f'released {item["repo"]} thread {item["thread"]} {item.get("linear_id") or ""}')
+                    if quota:
+                        (ROOT / "runs" / item["stamp"] / "quota-gates.json").write_text(quota)
+                    self.cancel(item, item["budget_hold"])
             self.write()
             time.sleep(POLL_S)
         self.state["phase"] = "done"
@@ -472,7 +717,13 @@ def quota_line(state):
     parts = [f'{q["provider"] or "?"} out of quota for {len(q["repos"])} repo(s)'
              + (f', resets {q["reset_at"]}' if q.get("reset_at") else "")
              for q in state.get("quota_paused") or []]
-    return ("; ".join(parts) + ".") if parts else ""
+    text = ("; ".join(parts) + ".") if parts else ""
+    return "\n".join(filter(None, (text, budget_hold_line(state))))
+
+
+def budget_hold_line(state):
+    held = (state.get("budget") or {}).get("held") or []
+    return ("Budget hold: " + "; ".join(f'{i["repo"]}: {i["reason"]}' for i in held) + ".") if held else ""
 
 
 def slackagent_script():
@@ -502,15 +753,21 @@ def post_slack_summary(directory):
     node = shutil.which("node")
     args = ["--batch", str(directory / "batch.json"), "--runs", str(ROOT / "runs.jsonl")]
     text = ""
+    state = shared.read_json(directory / "batch.json") or {}
+    hold_line = budget_hold_line(state)
+    command = [node, str(script)]
+    if hold_line:
+        command = [node, str(Path(__file__).resolve().parent / "lib/post_batch_summary.mjs"),
+                   "--script", str(script), "--hold-line", hold_line]
     if node and script.exists():
         try:
-            done = subprocess.run([node, str(script), *args], capture_output=True, text=True,
+            done = subprocess.run([*command, *args], capture_output=True, text=True,
                                   timeout=120, stdin=subprocess.DEVNULL)
             if done.returncode == 0:
                 shared.log("posted the batch summary to Slack")
                 return True
             shared.log(f"slackagent batch post failed: {(done.stderr or done.stdout).strip()[-300:]}")
-            dry = subprocess.run([node, str(script), *args, "--dry-run"], capture_output=True, text=True,
+            dry = subprocess.run([*command, *args, "--dry-run"], capture_output=True, text=True,
                                  timeout=60, stdin=subprocess.DEVNULL)
             text = dry.stdout.strip() if dry.returncode == 0 else ""
         except (OSError, subprocess.TimeoutExpired) as error:
@@ -520,7 +777,6 @@ def post_slack_summary(directory):
     url = webhook_url()
     if not url:
         return False
-    state = shared.read_json(directory / "batch.json") or {}
     text = text or " ".join(filter(None, [f'advance-roadmap batch {state.get("date")}: {state.get("phase")}.',
                                           quota_line(state)]))
     try:
@@ -556,9 +812,23 @@ def main():
         return 0
     repos = candidates(Path(code))
     if args.dry_run:
-        print(json.dumps({"repos": repos, "concurrency": args.lanes,
-                          "schedule": "daily at 10:30 local time",
-                          "threads_per_repo": args.threads}, indent=2))
+        budget = RoadmapBudget(dry_run=True)
+        queue = [{"repo": repo, "stamp": f"dry-{n}", "verdict_check": repo_priority(repo, dry_run=True)}
+                 for n, repo in enumerate(repos)]
+        queue.sort(key=lambda i: i["verdict_check"]["priority"])
+        lanes = 0
+        implementation_fits = budget.choose(commit=False) is not None
+        for item in queue:
+            if implementation_fits and lanes < args.lanes and budget.admit(item):
+                lanes += 1
+            else:
+                item["budget_hold"] = ("lane cap" if lanes >= args.lanes else
+                                       "shared headroom" if implementation_fits else
+                                       "no worker plus required review fits shared headroom")
+        print(json.dumps({"repos": repos, "concurrency": args.lanes, "lanes": lanes,
+                          "verdict_checks": [{"repo": i["repo"], **i["verdict_check"]} for i in queue],
+                          "budget": budget.snapshot(queue),
+                          "schedule": "daily at 10:30 local time", "threads_per_repo": args.threads}, indent=2))
         return 0
     ROOT.mkdir(parents=True, exist_ok=True)
     with open(ROOT / "run.lock.f", "a") as lock:
@@ -620,6 +890,13 @@ def main():
             batch.post_summary()
             return 1
         finally:
+            if batch.budget:
+                for item in batch.state["queue"]:
+                    # Model calls in detached lane processes can outlive this
+                    # controller. Their PID-bound leases must follow those calls
+                    # until process death or TTL, including unfinished planners.
+                    if item["status"] not in {"planning", "running", "canceling"}:
+                        batch.budget.release(item)
             shutil.rmtree(marker_dir, ignore_errors=True)
 
 

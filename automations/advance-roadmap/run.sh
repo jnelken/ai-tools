@@ -312,7 +312,10 @@ fi
 
 ORCH="$(python3 "$USAGE_PY" --root "$ROOT" pick-orchestrator 2>/dev/null | tr -d '\r')"
 orch_pick_rc=$?
-if [ "$orch_pick_rc" -ne 0 ] || [ -z "$ORCH" ] || [ "$ORCH" = "none" ]; then
+# A saved plan may run without a planner lease. If it cannot be reused,
+# run_orchestrator below refuses an unreserved planning call.
+[ "${ADVANCE_ROADMAP_BUDGET_PENDING:-0}" = 1 ] && ORCH="${ADVANCE_ROADMAP_BUDGET_PLANNER:-none}" && orch_pick_rc=0
+if [ "$orch_pick_rc" -ne 0 ] || [ -z "$ORCH" ] || { [ "$ORCH" = "none" ] && [ "${ADVANCE_ROADMAP_BUDGET_PENDING:-0}" != 1 ]; }; then
   echo "=== advance-roadmap $STAMP: skipping — no orchestrator available ===" >> "$LOG"
   ORCH=""
   save_quota_gates
@@ -528,6 +531,9 @@ run_orchestrator_claude() {
 
 run_orchestrator() {
   # run_orchestrator PROVIDER OUT PROMPT — 127 when that provider's CLI is missing.
+  if [ -n "${ADVANCE_ROADMAP_BUDGET_PLANNER:-}" ] && [ "$1" != "$ADVANCE_ROADMAP_BUDGET_PLANNER" ]; then
+    echo "planner $1 has no batch budget reservation" > "$2"; return 3
+  fi
   case "$1" in
     codex)  command -v "$CODEX" >/dev/null 2>&1 || { echo "codex not found: $CODEX" > "$2"; return 127; }
             run_orchestrator_codex "$2" "$3" ;;
@@ -991,6 +997,15 @@ PY
     done
     # The first plan may have waited for slower planners: route on the current pool state.
     WORKERS="$(python3 "$USAGE_PY" --root "$ROOT" pick-worker-chain 2>/dev/null | tr -d '\r' || true)"
+    # Release is an atomic budget conversion. Use exactly its worker/review route;
+    # later live gates may stop it, but may never spill into an unleased provider.
+    if [ -n "${ADVANCE_ROADMAP_BUDGET_PLANNER:-}" ]; then
+      WORKERS="$(jq -r '.worker // empty' "$RUN_DIR/batch-budget.json")"
+      export ADVANCE_ROADMAP_BUDGET_REVIEWERS="$(jq -r '.reviewers | join(" ")' "$RUN_DIR/batch-budget.json")"
+      if [ -z "$WORKERS" ]; then
+        record skipped-quota "batch release has no worker reservation"; exit 0
+      fi
+    fi
   fi
 
   action="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("action",""))' "$result")"

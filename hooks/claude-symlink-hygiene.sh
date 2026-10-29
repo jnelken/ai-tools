@@ -4,6 +4,7 @@
 # Checks ~/.claude/{hooks,commands,agents}/ for regular files that should
 # be symlinks to ai-tools. Nudges the user to move them if found.
 # Non-blocking; runs once per SESSION_START to avoid nagging every turn.
+# No processes at all when nothing is out of place (bash globs, no find/basename).
 
 set -e
 
@@ -23,17 +24,21 @@ fi
 
 offenders=()
 
+# Plain globs over the three fixed dirs instead of `find`: a healthy session
+# (no offenders) spawns nothing. Equivalent to `find -maxdepth 1 -type f` minus
+# symlinks: regular files only, dotfiles included.
 for dir in hooks commands agents; do
   target_dir="$claude_dir/$dir"
   [[ ! -d "$target_dir" ]] && continue
 
-  while IFS= read -r file; do
-    # Skip if doesn't exist or is a symlink
+  for file in "$target_dir"/* "$target_dir"/.[!.]* "$target_dir"/..?*; do
+    # Skip if doesn't exist (unmatched glob), is a symlink, or isn't a file
     [[ ! -e "$file" ]] && continue
     [[ -L "$file" ]] && continue
+    [[ -f "$file" ]] || continue
 
     # It's a regular file. Check if it's on the allowlist.
-    basename=$(basename "$file")
+    basename="${file##*/}"
     skip=0
     for allowed in "${allowlist[@]}"; do
       if [[ "$basename" == "$allowed" ]]; then
@@ -43,31 +48,42 @@ for dir in hooks commands agents; do
     done
 
     [[ $skip -eq 0 ]] && offenders+=("$file")
-  done < <(find "$target_dir" -maxdepth 1 -type f 2>/dev/null)
+  done
 done
 
 if [[ ${#offenders[@]} -gt 0 ]]; then
-  # Cooldown: only nudge once per day per file
+  # Cooldown: only nudge once per day per file set
   state_dir="$HOME/.claude/state"
-  mkdir -p "$state_dir"
+  [[ -d "$state_dir" ]] || mkdir -p "$state_dir"
   state_file="$state_dir/claude-symlink-nudge.txt"
 
-  # Hash the offenders list to detect changes
-  current_hash=$(printf '%s\n' "${offenders[@]}" | shasum | awk '{print $1}')
+  # Key the offenders list to detect changes. The key is the list itself (paths
+  # joined with "|"), not a shasum of it: the state line is "<key> <epoch>", so
+  # the epoch is whatever follows the last space.
+  current_hash=""
+  for file in "${offenders[@]}"; do current_hash="${current_hash:+$current_hash|}$file"; done
   last_hash=""
   last_time=0
 
   if [[ -f "$state_file" ]]; then
-    read -r last_hash last_time < "$state_file" 2>/dev/null || true
+    state_line=""
+    IFS= read -r state_line < "$state_file" 2>/dev/null || true
+    if [[ "$state_line" == *" "* ]]; then
+      last_hash="${state_line% *}"
+      last_time="${state_line##* }"
+    fi
+    [[ "$last_time" =~ ^[0-9]+$ ]] || last_time=0
   fi
 
+  now=$(date +%s)
+
   # If same offenders as last time and less than 24h have passed, skip nudging
-  if [[ "$current_hash" == "$last_hash" && $(($(date +%s) - last_time)) -lt 86400 ]]; then
+  if [[ "$current_hash" == "$last_hash" && $((now - last_time)) -lt 86400 ]]; then
     exit 0
   fi
 
   # Record this nudge
-  echo "$current_hash $(date +%s)" > "$state_file"
+  echo "$current_hash $now" > "$state_file"
 
   # Build the message
   msg="⚠️ Unsymlinked files in ~/.claude/ detected:

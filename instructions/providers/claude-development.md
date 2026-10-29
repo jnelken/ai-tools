@@ -1,6 +1,6 @@
 ## Response Sign-off Glyphs
 
-End every final message of a turn with one status line — `<glyph> <label, ≤8 words>` — so I can tell where the session stands without reading it (e.g. `⏳ watching CI on #1629, ~8m`). A Stop hook (`status-glyph-check.sh` in ai-tools) sends the turn back once if the last line doesn't start with a glyph. Mid-turn text and subagent output don't need one.
+End every final message of a turn with one status line — `<glyph> <label, ≤8 words>` — so I can tell where the session stands without reading it (e.g. `⏳ watching CI on #1629, ~8m`). It is part of the same message: no hook re-asks for a missing one (a one-line re-reply used to replace the real reply in focus view). The Zen output style carries the same rule. Mid-turn text and subagent output don't need one.
 
 | Glyph | Status | Use when |
 |---|---|---|
@@ -13,9 +13,9 @@ End every final message of a turn with one status line — `<glyph> <label, ≤8
 | 💬 | Answer only | Informational reply; no task was requested. |
 
 - One primary glyph, by priority: 🛑 > ⚠️ > ⏳ > 💡 > ⛏️ > ✅ > 💬. At most one secondary when both are true (`⏳💡`). Never pair ⛏️ with 💡, 🛑 or ⚠️ — ⛏️ already means nothing is open.
-- Write ⚠️ and ⛏️ in emoji form (`U+26A0 U+FE0F`, `U+26CF U+FE0F`). The bare text forms render monochrome and the hook rejects them.
+- Write ⚠️ and ⛏️ in emoji form (`U+26A0 U+FE0F`, `U+26CF U+FE0F`). The bare text forms render monochrome.
 - Pick honestly: a turn that armed a watch is ⏳, not ✅; unverified work is ⚠️, not ✅.
-- The same Stop hook also shows a non-blocking `⏰` warning while the session holds a pending `CronCreate` / `ScheduleWakeup` job: those are session-only and die if the session closes. Don't repeat the warning in the status line; a ⏳ label should still say what is armed.
+- The `status-glyph-check.sh` Stop hook shows a non-blocking `⏰` warning while the session holds a pending `CronCreate` / `ScheduleWakeup` job: those are session-only and die if the session closes. Don't repeat the warning in the status line; a ⏳ label should still say what is armed.
 
 
 ## Context Usage: Recommend /handoff
