@@ -1,26 +1,20 @@
 #!/usr/bin/env bash
-# Stop hook, two jobs:
+# Stop hook: session-only schedules. If the session holds CronCreate /
+# ScheduleWakeup jobs that are still pending, show Jake a non-blocking warning
+# (hook `systemMessage`) that they die if the session closes. Those tools never
+# write to disk, so closing the session silently cancels them.
 #
-# 1. Sign-off: every final assistant message must end with a status line that
-#    starts with one of the sign-off glyphs defined in the global CLAUDE.md
-#    ("Response Sign-off Glyphs"). If it doesn't, block once so Claude appends
-#    one.
-# 2. Session-only schedules: if the session holds CronCreate / ScheduleWakeup
-#    jobs that are still pending, show Jake a non-blocking warning (hook
-#    `systemMessage`) that they die if the session closes. Those tools never
-#    write to disk, so closing the session silently cancels them.
+# It used to also block turns whose last line lacked a sign-off glyph, asking
+# for a one-line re-reply. That re-reply became the turn's final message, so
+# focus view showed only the glyph and hid the real reply. The sign-off rule now
+# lives in the instructions alone (output-styles/zen.md, the bootstrap CLAUDE.md,
+# instructions/providers/claude-development.md); nothing blocks on it. The
+# filename is kept so settings.json wiring doesn't churn.
 #
-# Fails open (exit 0) on anything unexpected — this must never wedge a
-# session.
+# Never blocks; fails open (exit 0) on anything unexpected.
 #
-# ⚠️ and ⛏️ count only in their emoji form (followed by U+FE0F); the bare
-# text-presentation glyphs render monochrome and are rejected on purpose.
-#
-# Headless advance-roadmap runs (ADVANCE_ROADMAP_HEADLESS=1, exported by run.sh, worker.sh,
-# review.sh and planapproval.py) are exempt: a forced glyph turn replaces the planner's final
-# answer, which is where its ORCHESTRATOR_RESULT_JSON fence lives, and no one reads the sign-off.
-# CLAUDE_QUOTA_MANAGED can't stand in for this: planapproval.py calls claude directly, and any
-# interactive claude started inside a managed session would inherit it.
+# Headless advance-roadmap runs (ADVANCE_ROADMAP_HEADLESS=1) get no warning:
+# nobody is there to read it.
 #
 # Test seam: STATUS_GLYPH_NOW_EPOCH overrides "now" (seconds) for the schedule
 # check.
@@ -125,40 +119,5 @@ warning_json() { # warning_json -> JSON with systemMessage, or nothing
   jq -n --arg m "⏰ Session-only schedule — lost if this session closes: $msg" '{systemMessage: $m}'
 }
 
-# Already sent back once this turn — never loop. Still surface schedules.
-active=$(printf '%s' "$input" | jq -r '.stop_hook_active // false' 2>/dev/null || echo false)
-if [ "$active" = "true" ]; then
-  warning_json
-  exit 0
-fi
-
-# Prefer the message the harness hands us; fall back to the transcript. In
-# the transcript each content block can be its own entry, so only the LAST
-# assistant entry counts: if it's a tool_use (AskUserQuestion, ExitPlanMode)
-# there is no final text to check.
-text=$(printf '%s' "$input" | jq -r '.last_assistant_message // empty | if type == "string" then . else empty end' 2>/dev/null || true)
-if [ -z "$text" ]; then
-  [ -n "$transcript" ] && [ -f "$transcript" ] || exit 0
-  text=$(jq -rs '
-    [ .[] | select(.type == "assistant" and (.isSidechain | not)) ] | last
-    | (.message.content // [])
-    | if type == "array" then [ .[] | select(.type == "text") | .text ] | join("\n") else . end
-  ' "$transcript" 2>/dev/null || true)
-fi
-[ -z "$text" ] && exit 0
-
-ok=$(printf '%s' "$text" | jq -Rrs '
-  [ split("\n")[] | sub("\\s+$"; "") | select(length > 0) ] | last // ""
-  | sub("^[—–-]\\s*"; "")
-  | test("^(🛑|⚠️|⏳|💡|✅|⛏️|💬)")
-' 2>/dev/null || echo true)
-if [ "$ok" = "true" ]; then
-  warning_json
-  exit 0
-fi
-
-jq -n '{
-  decision: "block",
-  reason: "Your final message is missing its sign-off line. Reply with ONLY a single line: <glyph> <label, 8 words max>. Glyphs (priority order): 🛑 blocked on Jake · ⚠️ stopped short/caveat · ⏳ idle, watching, resumes on its own · 💡 done, follow-ups worth a look · ⛏️ done + sswt reapable · ✅ done · 💬 answer only. Write ⚠️ and ⛏️ in emoji form (with U+FE0F)."
-}'
+warning_json
 exit 0

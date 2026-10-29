@@ -416,10 +416,8 @@ def decide(event, harness, data, existing, state):
     if not run:
         if tool in BLOCKING_TOOLS:
             run = SIGNOFF[0]  # 🛑 waiting on Jake
-        elif harness == "claude" and text.strip():
-            return None, new_state  # status-glyph-check will block; the glyph arrives on the next Stop
         else:
-            run = IDLE
+            run = IDLE  # no sign-off: nothing re-asks for one, so mark it idle
     return run + " " + base, new_state
 
 

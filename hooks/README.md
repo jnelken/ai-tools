@@ -74,7 +74,7 @@ A **Stop hook** that turns the "any other style cleanup in the same vein?" quest
 
 "UI work" means: after the last real user prompt the assistant edited or wrote a `.tsx/.jsx/.css/.scss/.vue/.svelte` file, or any tailwind config, and the edited text contains styling tokens (className/tailwind utilities, CSS vars, `hover:`/`dark:` variants, ...). Logic-only edits, tests, stories and generated files don't trigger it, and subagent (sidechain) edits are ignored. Work delegated to a subagent therefore only counts if the parent edits UI files itself.
 
-It fires at most once per user prompt (marker files under `~/.claude/state/ui-hygiene/`, pruned after 7 days), so the review turn and `status-glyph-check.sh` never loop, and it fails open on any parse problem.
+It fires at most once per user prompt (marker files under `~/.claude/state/ui-hygiene/`, pruned after 7 days), so the review turn never loops, and it fails open on any parse problem.
 
 ### Per-repo hints
 
@@ -86,7 +86,7 @@ Drop a `.claude/ui-hygiene-hints.md` in a repo (first 2KB is appended to the rev
 
 ### settings.json wiring
 
-Add its own `Stop` group **before** the `status-glyph-check.sh` group (so the review reply still gets its sign-off check). In `~/dotfiles/claude/settings.base.json`:
+Add its own `Stop` group. In `~/dotfiles/claude/settings.base.json`:
 
 ```json
 { "hooks": [ { "type": "command", "command": "bash \"$HOME/.claude/hooks/ui-hygiene-check.sh\"" } ] }
@@ -96,9 +96,9 @@ Tests: `bash hooks/tests/ui-hygiene-check.test.sh`.
 
 ## status-glyph-check.sh
 
-A **Stop hook** that enforces the response sign-off glyphs defined in the global `CLAUDE.md` ("Response Sign-off Glyphs"): the last non-blank line of every final assistant message must start with 🛑 ⚠️ ⏳ 💡 ✅ ⛏️ or 💬. If it doesn't, it returns `decision: "block"` with the legend, so Claude appends a single status line. ⚠️ and ⛏️ count only in emoji form (followed by U+FE0F); the bare text glyphs are rejected.
+A **Stop hook** that shows Jake a non-blocking `⏰` warning (`systemMessage`) while the session holds a pending session-only `CronCreate` / `ScheduleWakeup` job, since closing the session silently cancels it. It never blocks and fails open on any parse problem; headless advance-roadmap runs (`ADVANCE_ROADMAP_HEADLESS=1`) are skipped.
 
-Reads `last_assistant_message` from the hook input, falling back to the last non-sidechain assistant entry in `transcript_path`. A turn that ended on a tool call (AskUserQuestion, ExitPlanMode) has no final text and passes. `stop_hook_active` short-circuits so it blocks at most once per turn, and any parse failure exits 0.
+It no longer enforces the sign-off glyph. It used to block a turn whose last line lacked one and ask for a one-line re-reply, but that re-reply became the turn's final message, and focus view then showed only the glyph and hid the real reply. The rule now lives in the instructions only (`output-styles/zen.md`, `instructions/bootstrap/CLAUDE.md`, `instructions/providers/claude-development.md`). The filename is kept so the settings wiring doesn't churn.
 
 ### settings.json wiring
 
@@ -110,7 +110,7 @@ Tests: `bash hooks/tests/status-glyph-check.test.sh`.
 
 ## superset-tab-title.py
 
-A **UserPromptSubmit + Stop hook** (Claude Code and Codex) that names the Superset terminal tab after the work in it. First prompt of a session → `◐ <kebab-slug-of-the-prompt>` (stopwords stripped, ≤5 words, ≤32 chars; falls back to the git branch). Every later prompt flips the glyph back to `◐`; every Stop swaps in the sign-off glyph from the final assistant line (the `status-glyph-check.sh` legend: 🛑 ⚠️ ⏳ 💡 ✅ ⛏️ 💬, combos like `⏳💡` kept). A turn ending on `AskUserQuestion`/`ExitPlanMode` gets 🛑; a Codex stop with no glyph gets `○`. For Claude the base mirrors Claude Code's own session name (read from `~/.claude/sessions/<pid>.json`): a `/rename` (`nameSource: user`) always wins, so **`/rename <name>` renames both the Claude session and the Superset tab** — the prompt is honoured in the same turn, before Claude writes the file; Claude's `auto` first-prompt title replaces the slug but never a name typed in Superset's rename dialog; `derived` names (branch/cwd) are ignored. A name Jake typed in the app's dialog (or set with the host API) is otherwise kept as the base — only the glyph moves — and a new session in the same terminal re-slugs. `--set "<name>"` renames directly from a script or skill, keeping the current glyph.
+A **UserPromptSubmit + Stop hook** (Claude Code and Codex) that names the Superset terminal tab after the work in it. First prompt of a session → `◐ <kebab-slug-of-the-prompt>` (stopwords stripped, ≤5 words, ≤32 chars; falls back to the git branch). Every later prompt flips the glyph back to `◐`; every Stop swaps in the sign-off glyph from the final assistant line (the sign-off legend in `instructions/providers/claude-development.md`: 🛑 ⚠️ ⏳ 💡 ✅ ⛏️ 💬, combos like `⏳💡` kept). A turn ending on `AskUserQuestion`/`ExitPlanMode` gets 🛑; any stop with no glyph gets `○`. For Claude the base mirrors Claude Code's own session name (read from `~/.claude/sessions/<pid>.json`): a `/rename` (`nameSource: user`) always wins, so **`/rename <name>` renames both the Claude session and the Superset tab** — the prompt is honoured in the same turn, before Claude writes the file; Claude's `auto` first-prompt title replaces the slug but never a name typed in Superset's rename dialog; `derived` names (branch/cwd) are ignored. A name Jake typed in the app's dialog (or set with the host API) is otherwise kept as the base — only the glyph moves — and a new session in the same terminal re-slugs. `--set "<name>"` renames directly from a script or skill, keeping the current glyph.
 
 It writes through the Superset host service's loopback tRPC `terminal.rename` (unsupported internal API, Superset ≥1.35): endpoint + bearer token are read at call time from `~/.superset/host/<orgId>/manifest.json`, trying the env's org first and every other org manifest after, 2s timeout. Visible only on tabs without a pane title override — sessions created from the CLI/MCP (`superset terminals create`, `agents create`) and adopted by the desktop, which is where Claude-spawned sessions live. Desktop-launched agent tabs keep their launch label (e.g. "Fable") until the in-app rename dialog retires it (upstream: superset-sh/superset#4934, #6846).
 

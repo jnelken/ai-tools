@@ -132,22 +132,17 @@ class Profiles(unittest.TestCase):
                          {'mailcrush':{'url':'http://localhost:9999','http_headers':{'X-Example':'test'}}})
         with self.assertRaises(ValueError): p.codex_servers({'mailcrush':{'unknown':'bad'}})
 
-    def test_bootstrap_glyph_contract_matches_provider_and_stop_hook(self):
-        import re, shutil
+    def test_bootstrap_glyph_contract_matches_provider_and_zen_style(self):
+        import re
         provider = (p.ROOT/'instructions/providers/claude-development.md').read_text(encoding='utf-8')
         glyphs = re.findall(r'^\| ([^\x00-\x7f]\S*) \|', provider, re.MULTILINE)
         self.assertTrue(glyphs, 'provider status table must define the accepted glyphs')
         bootstrap = (p.ROOT/'instructions/bootstrap/CLAUDE.md').read_text(encoding='utf-8')
         codex_bootstrap = (p.ROOT/'instructions/bootstrap/AGENTS.md').read_text(encoding='utf-8')
+        zen = (p.ROOT/'output-styles/zen.md').read_text(encoding='utf-8')
         for glyph in glyphs:
             self.assertIn(glyph, bootstrap)
             self.assertNotIn(glyph, codex_bootstrap)
-            result = subprocess.run(
-                [shutil.which('bash') or '/bin/bash', str(p.ROOT/'hooks/status-glyph-check.sh')],
-                input=json.dumps({'last_assistant_message': 'Pong.\n\n'+glyph+' answer only',
-                                  'stop_hook_active': False}),
-                capture_output=True, encoding='utf-8', check=True,
-            )
-            self.assertEqual(result.stdout.strip(), '', 'bootstrap glyph rejected by Stop hook: '+glyph)
+            self.assertIn(glyph, zen, 'Zen status line must list glyph: '+glyph)
 
 if __name__=='__main__':unittest.main()
