@@ -261,4 +261,14 @@ rc=0; review cursor 1 ADVANCE_ROADMAP_REVIEW_STRATEGY=cursor-then-codex FAKE_AGE
 check "required Codex gate → exit 3" "$rc" 3
 check "required Codex gate logged" "$(field reviewer)" codex
 check "gated Codex has no Cursor session" "$(field session_id)" None
+# A batch reservation selects one cross-provider reviewer. Limits cannot
+# spill to a healthy provider which has no lease.
+rc=0; review cursor 1 ADVANCE_ROADMAP_BUDGET_REVIEWERS=codex FAKE_GATED=codex FAKE_CLAUDE=clean >/dev/null || rc=$?
+check "unleased reviewer cannot be a quota fallback" "$rc" 3
+check "unleased fallback is unavailable" "$(field verdict)" unavailable
+check "unleased fallback recorded as gated" "$(field gated)" "['codex', 'claude']"
+
+review cursor 1 ADVANCE_ROADMAP_BUDGET_REVIEWERS=claude FAKE_CODEX=findings FAKE_CLAUDE=clean >/dev/null
+check "reserved cross-provider reviewer is used" "$(field reviewer)" claude
+
 echo "all passed"

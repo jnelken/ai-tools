@@ -54,14 +54,20 @@ are deduplicated by API message id; per-field maxima retain the final usage.
 Adjacent metadata preserves agent type while all child types share the subagent role.
 
 Conversion factors remain seeded until five positive measurements exist for a
-provider, then use p80 percentage points/token. Paired Claude snapshots match
+provider, then use p80 percentage points/token (token-weighted account intervals for Codex). Paired Claude snapshots match
 launch/session ids to per-session ledger usage, preserving review-round boundaries.
 They never pair a role's whole-job total with each session. Ambiguous multi-session
 rows are skipped. Transcript calibration counts only assistant messages within the
 start/finish interval, so resuming a session does not charge its earlier history.
 Reset-crossing,
-stale, zero and negative deltas are excluded. Codex uses cumulative token deltas
-paired with rate-limit deltas within one reset window. Account-wide Claude deltas
+stale, zero and negative deltas are excluded. Codex merges cumulative new-token deltas from concurrent rollouts against one
+account-wide quota delta within a reset window and active interval (15-minute gap
+ends an interval). Flat integer-quota intervals contribute tokens; stale parallel
+readings use a high-water mark. Each interval is weighted by its token exposure
+when taking p80, so short intervals crossing rounded boundaries cannot dominate.
+The sanitized 10-27 rollout fixture yields 29 points/~770k tokens (3.8e-5/token).
+Claude's account-wide samples do not support separate model factors: concurrent
+Sonnet, Opus and advisor work cannot be attributed from quota boundaries alone. Account-wide Claude deltas
 can include concurrent work, so their estimates deliberately err high. Samples
 are deduplicated in `samples.jsonl`; generated samples are rebuilt to repair old
 denominators after an upgrade. Parsed files and bounded transcript intervals are
@@ -76,6 +82,37 @@ one-minute floor. Long sessions may outlive their reservation; this is admission
 control, not a provider-enforced spend limit or cross-machine lease service. TTLs
 use wall-clock time across processes; a large clock jump can change expiry timing.
 This known limit is unchanged.
+
+The daily roadmap batch uses the same lease file. Each poll refreshes usage once
+and admits at most `--lanes` planners, each reserving its planner cost plus its
+repo's historical share of `dispatch_worker` × (worker + required reviews).
+Without planning history the dispatch share is 0.3. Pending dispatch/resume plans
+come first and reserve a full implementation; when available they also reserve a
+planner fallback in case the saved plan cannot be reused. Only thread 1 can use
+that saved plan without planner headroom; later threads always reserve a planner.
+Changed verdicts precede repos with no verdict. Carried verdicts still pass through `run.sh`'s unchanged gate.
+
+At the planning barrier the planner portion is released. Before each implementation
+wave, fresh headroom must support an atomic conversion to full worker + review
+leases on the first fitting worker in `pick-worker-chain` order. Cross-provider
+reviews remain on a different provider; the default still requires Cursor then
+Codex. Calls stay on the reserved route; a later gate/limit stops them without
+spending an unleased fallback. Plan approvers reserve planner cost too. Leases
+follow the lane PID and release at completion/cancel/timeout (or normal reaping).
+
+A ready job held behind running jobs retries after they finish. If fractional
+expectations fill the barrier and nothing can start, the lowest priority held
+plan is deferred, freeing its expectation before retrying higher priority plans.
+This finite queue never waits all day for a quota reset. Saved plans and verdicts
+retain the existing cancellation semantics.
+
+`batch.json.budget` reports provider windows' live, reserved and headroom figures,
+plus held/skipped repos and reasons. Both Slack posting paths append one budget
+hold line. The bot path uses a local adapter around slackagent's existing formatter
+and post helper; it needs no slackagent deployment. `daily_batch.py --dry-run`
+prints verdict checks, saved live headroom, and the number of lanes that would be
+admitted. It uses saved Linear/deploy/quota snapshots, labels those verdict checks
+as saved, and creates no leases, batch state, probes or external requests.
 
 The installer registers `agent-budget-gate.py` for PreToolUse (Agent/Workflow) and
 SubagentStop, preserving existing settings and removing its retired SessionStart/End

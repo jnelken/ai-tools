@@ -99,6 +99,9 @@ Diff:
 $DIFF"
 
 run_reviewer() {
+  if [ -n "${ADVANCE_ROADMAP_BUDGET_REVIEWERS:-}" ] && [[ " $ADVANCE_ROADMAP_BUDGET_REVIEWERS " != *" $1 "* ]]; then
+    echo "reviewer $1 has no batch budget reservation" > "$2"; return 127
+  fi
   local who="$1" out="$2"
   case "$who" in
     codex)
@@ -250,6 +253,10 @@ run_cross_provider_review() {
   local used="" verdict="unavailable" who rc text gate hits="" hit
   gated_list="" capacity_list=""   # read by record_review: reviewers skipped over their gate / at capacity
   for who in "${cross_provider_reviewers[@]}"; do
+    if [ -n "${ADVANCE_ROADMAP_BUDGET_REVIEWERS:-}" ] && [[ " $ADVANCE_ROADMAP_BUDGET_REVIEWERS " != *" $who "* ]]; then
+      gated_list="$gated_list $who"
+      continue
+    fi
     gate="$(python3 "$USAGE_PY" --root "$ROOT" gate --role reviewer --provider "$who" 2>/dev/null)"
     if [ "$?" -eq 3 ]; then
       echo "(skipping reviewer $who — over its usage gate: $gate)"

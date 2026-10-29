@@ -74,6 +74,42 @@ class BudgetTests(unittest.TestCase):
         b.release(lease['id'])
         self.assertEqual(self.leases(), [])
 
+    def test_bundle_is_atomic_and_shares_interactive_reservations(self):
+        models = b.estimates([], [])
+        readings = {p: self.reading for p in b.PROVIDERS}
+        interactive = b.acquire('codex', 'planner')
+        requests = [dict(provider='codex', role='planner'), dict(provider='cursor', role='worker')]
+        leases = b.reserve_bundle(requests, models=models, reading_by_provider=readings)
+        self.assertEqual({l['provider'] for l in leases}, {'codex', 'cursor'})
+        self.reading['windows']['five_hour']['live'] = 69
+        before = self.leases()
+        self.assertIsNone(b.reserve_bundle(requests, replace_ids=[l['id'] for l in leases],
+                                          models=models, reading_by_provider=readings))
+        self.assertEqual(self.leases(), before, 'failed conversion must preserve both old reservations')
+        reduced = b.reserve_bundle([dict(provider='cursor', role='worker', scale=.3)],
+                                   replace_ids=[l['id'] for l in leases], models=models,
+                                   reading_by_provider=readings, reduce_only=True)
+        self.assertEqual(len(reduced), 1)
+        self.assertIn(interactive['id'], [l['id'] for l in self.leases()])
+        b.release_many([l['id'] for l in reduced])
+        self.assertEqual([l['id'] for l in self.leases()], [interactive['id']])
+
+    def test_unknown_bundle_is_one_job_per_provider(self):
+        readings = {p: {'windows': {'auto' if p == 'cursor' else 'five_hour': {'live': None, 'cap': 70}}} for p in b.PROVIDERS}
+        requests = [dict(provider='cursor', role='worker'), dict(provider='cursor', role='reviewer')]
+        lease, = b.reserve_bundle(requests, models=b.estimates([], []), reading_by_provider=readings)
+        self.assertEqual(lease['roles'], ['worker', 'reviewer'])
+        self.assertIsNone(b.reserve_bundle(requests, models=b.estimates([], []), reading_by_provider=readings))
+
+    def test_read_only_bundle_forecast_never_creates_budget_state(self):
+        requests = [dict(provider='codex', role='planner')]
+        models = b.cached_estimates(read_only=True)
+        self.assertFalse(b.budget_dir().exists())
+        preview = b.reserve_bundle(requests, commit=False, models=models,
+                                   reading_by_provider={'codex': self.reading})
+        self.assertEqual(len(preview), 1)
+        self.assertFalse(b.budget_dir().exists())
+
     def test_unknown_allows_one_lease_per_provider(self):
         for window in self.reading['windows'].values():
             window['live'] = None
@@ -299,6 +335,30 @@ print(bool(b.acquire('codex','planner',pid=int(sys.argv[2]))))
         b.write_json(path, state)
         self.assertIsNone(b.readings('codex')['windows']['five_hour']['live'])
         self.assertIsNone(b.readings('cursor')['windows']['auto']['live'])
+
+    def test_real_shaped_oct27_parallel_rollouts_share_one_account_delta(self):
+        fixture = json.loads((Path(__file__).parent / 'fixtures/codex-oct27-planners.json').read_text())
+        observations = []
+        for i, rollout in enumerate(fixture['rollouts']):
+            path = self.home / f'rollout-{i}.jsonl'
+            self.append(path, rollout)
+            observations.extend(b.codex_observations(path))
+        sample, = b.codex_calibration(observations)
+        self.assertEqual(sample['pct'], 29)
+        self.assertGreater(sample['tokens'], 700000)
+        factor = sample['pct'] / sample['tokens']
+        self.assertTrue(3e-5 < factor < 5e-5, factor)
+        model = b.estimates([dict(provider='codex', role='planner', total=88000)],
+                            [dict(sample, id=str(i)) for i in range(5)])['codex']
+        self.assertLess(model['roles']['planner']['pct'], 4.4)
+
+    def test_codex_flat_intervals_stale_parallel_readings_and_idle_gaps(self):
+        obs = [dict(id=str(i), sequence=i, at=t, tokens=tokens, pct=pct, reset=1)
+               for i, (t, tokens, pct) in enumerate([
+                   (0, 10000, 41), (1, 30000, 41), (2, 30000, 42),
+                   (3, 10000, 41), (4, 30000, 44), (1000, 100, 60), (1001, 10000, 61)])]
+        samples = b.codex_calibration(obs)
+        self.assertEqual([(s['tokens'], s['pct']) for s in samples], [(100000, 3), (10000, 1)])
 
     def test_codex_samples_exclude_cache_and_window_resets(self):
         path = self.home / 'rollout.jsonl'
