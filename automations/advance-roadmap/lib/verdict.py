@@ -280,6 +280,9 @@ def settled_fingerprint(a, orch, worker):
     """Start from the planner's inputs; adopt only changes this bookkeeping run owns."""
     fp = load(a.fingerprint) or {}
     post = load(a.post_fingerprint) if a.post_fingerprint else None
+    # The planner consumed and removed this repo's digest, so carry forward its settled absence.
+    if getattr(a, "partial_triage_consumed", False):
+        fp.setdefault("partial_triage", {}).pop(a.repo, None)
     if not isinstance(post, dict) or a.bookkeeping_pending:
         return fp
     if post.get("linear_ok") is True:
@@ -363,6 +366,7 @@ def main():
     s.add_argument("--orch-result", required=True); s.add_argument("--worker-result", required=True); s.add_argument("--stamp", required=True)
     s.add_argument("--bookkeeping-pending", action="store_true")
     s.add_argument("--post-fingerprint", default=""); s.add_argument("--repo", default="")
+    s.add_argument("--partial-triage-consumed", action="store_true")
     s = sub.add_parser("noop-check"); s.add_argument("--file", required=True); s.add_argument("--orch-result", required=True)
     s = sub.add_parser("clear"); s.add_argument("--file", required=True)
     s = sub.add_parser("ticket-changes"); s.add_argument("--file", required=True); s.add_argument("--fingerprint", required=True)

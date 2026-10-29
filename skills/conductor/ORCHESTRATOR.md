@@ -138,8 +138,9 @@ Never edit or delete these files — `run.sh` owns them.
 `$CODE_DIR/.advance-roadmap/partial-triage-<repo>.md` carries findings from a planner that ended
 quota-paused, planning-timeout or error before a valid result. When the prompt names one, reuse its
 findings and don't repeat its reads unless the fingerprint says they changed. It expires after 72h;
-`run.sh` removes it after a completed plan. State interim conclusions in plain text as you go, such as
-"so far: X is blocked by Y", so partial triage can preserve the useful result.
+`run.sh` removes it after a completed plan. As you investigate, state interim conclusions in plain text,
+such as "so far: X is blocked by Y", so partial triage can preserve the useful result. Thread 1 owns
+this repo-wide digest.
 
 ### Threads
 

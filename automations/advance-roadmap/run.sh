@@ -120,21 +120,36 @@ regen_dashboard() {
 }
 
 PARTIAL_TRIAGE_FILE=""
-[[ "$TARGET_REPO" =~ '^[A-Za-z0-9][A-Za-z0-9._-]*$' ]] && PARTIAL_TRIAGE_FILE="$CODE_DIR/.advance-roadmap/partial-triage-$TARGET_REPO.md"
+[[ "$THREAD" -eq 1 && "$TARGET_REPO" =~ '^[A-Za-z0-9][A-Za-z0-9._-]*$' ]] \
+  && PARTIAL_TRIAGE_FILE="$CODE_DIR/.advance-roadmap/partial-triage-$TARGET_REPO.md"
 PLANNER_ACTIVE=0
 ACTIVE_ORCH_OUT=""
 ACTIVE_ORCH_PROVIDER=""
 ACTIVE_PLANNER_STARTED=""
-capture_partial_triage() {
+ACTIVE_ATTEMPT_CAPTURED=0
+PARTIAL_TRIAGE_CONSUMED=0
+PARTIAL_ATTEMPT_COUNT=0
+capture_partial_attempt() {
   local ended="$1" out="$2" provider="$3" started="$4"
   [ -n "$PARTIAL_TRIAGE_FILE" ] || return 0
+  PARTIAL_ATTEMPT_COUNT=$(( PARTIAL_ATTEMPT_COUNT + 1 ))
+  local attempt_file="$RUN_DIR/partial-triage-attempt-$PARTIAL_ATTEMPT_COUNT.md"
   python3 "$PARTIAL_TRIAGE_PY" capture --repo "$TARGET_REPO" --provider "$provider" --ended "$ended" \
-    --stamp "$STAMP" --started "$started" --result-json "$out.json" --out "$PARTIAL_TRIAGE_FILE" \
-    >> "$LOG" 2>&1 || echo "(partial triage capture failed for $TARGET_REPO)" >> "$LOG"
+    --stamp "$STAMP" --started "$started" --result-json "$out.json" --session-file "$out.session" \
+    --stdout "$out" --out "$attempt_file" >> "$LOG" 2>&1 \
+    || echo "(partial triage capture failed for $TARGET_REPO/$provider)" >> "$LOG"
+  ACTIVE_ATTEMPT_CAPTURED=1
+}
+combine_partial_triage() {
+  [ -n "$PARTIAL_TRIAGE_FILE" ] || return 0
+  python3 "$PARTIAL_TRIAGE_PY" combine --repo "$TARGET_REPO" --stamp "$STAMP" --ended "$1" \
+    --attempt-dir "$RUN_DIR" --out "$PARTIAL_TRIAGE_FILE" >> "$LOG" 2>&1 \
+    || echo "(partial triage combine failed for $TARGET_REPO)" >> "$LOG"
 }
 on_planner_term() {
   if [ "$PLANNER_ACTIVE" -eq 1 ]; then
-    capture_partial_triage planning-timeout "$ACTIVE_ORCH_OUT" "$ACTIVE_ORCH_PROVIDER" "$ACTIVE_PLANNER_STARTED"
+    capture_partial_attempt planning-timeout "$ACTIVE_ORCH_OUT" "$ACTIVE_ORCH_PROVIDER" "$ACTIVE_PLANNER_STARTED"
+    combine_partial_triage planning-timeout
   fi
   exit 143
 }
@@ -486,7 +501,8 @@ run_orchestrator_codex() {
     --skip-git-repo-check \
     "$prompt" >"$out" 2>&1 </dev/null
   local rc=$?
-  python3 "$TOKENS_PY" codex "$out" --role orchestrator --model "$ORCH_CODEX_MODEL" --log "$USAGE_LOG" >> "$LOG" 2>&1
+  python3 "$TOKENS_PY" codex "$out" --role orchestrator --model "$ORCH_CODEX_MODEL" \
+    --log "$USAGE_LOG" --session-out "$out.session" >> "$LOG" 2>&1
   return $rc
 }
 
@@ -713,6 +729,7 @@ $partial_prompt"
       ACTIVE_ORCH_OUT="$orch_out"
       ACTIVE_ORCH_PROVIDER="$ORCH"
       ACTIVE_PLANNER_STARTED="$(date +%s)"
+      ACTIVE_ATTEMPT_CAPTURED=0
       PLANNER_ACTIVE=1
       run_orchestrator "$ORCH" "$orch_out" "$ORCH_PROMPT" || orch_rc=$?
       PLANNER_ACTIVE=0
@@ -741,7 +758,9 @@ $partial_prompt"
       [ -f "$orch_out.json" ] && live_json=(--result-json "$orch_out.json")
       if ! text="$(python3 "$USAGE_PY" live-limit --transcript-file "$orch_out" --exit "$orch_rc" \
           --final-file "$orch_out.last" "${live_json[@]}" 2>/dev/null)" || [ -z "$text" ]; then
-        planner_hit=""; break
+        planner_hit=""
+        capture_partial_attempt error "$orch_out" "$ORCH" "$ACTIVE_PLANNER_STARTED"
+        break
       fi
       planner_hit="$RUN_DIR/orchestrator-limit-$ORCH.json"
       python3 "$USAGE_PY" parse-limit --provider "$ORCH" --text "$text" --scope orchestrator \
@@ -750,6 +769,7 @@ $partial_prompt"
              "$ORCH" "$text" > "$planner_hit"
       python3 "$USAGE_PY" --root "$ROOT" record-limit --provider "$ORCH" --text "$text" --scope orchestrator \
         || true
+      capture_partial_attempt quota-paused "$orch_out" "$ORCH" "$ACTIVE_PLANNER_STARTED"
       # The planner that just hit its limit is gated now; try the next one still under its gate.
       alt=""
       for p in ${=$(python3 "$USAGE_PY" --root "$ROOT" pick-orchestrators 2>/dev/null | tr -d '\r')}; do
@@ -770,9 +790,9 @@ ok or print("ORCHESTRATOR_RESULT_JSON has no valid action: %r" % (r.get("action"
 sys.exit(0 if ok else 1)' "$result")" || had_json=0
     fi
 
-    if [ "$had_json" -eq 1 ] && [ -n "$PARTIAL_TRIAGE_FILE" ] \
-       && [ "$(jq -r '.repo // empty' "$result" 2>/dev/null)" = "$TARGET_REPO" ]; then
+    if [ "$had_json" -eq 1 ] && [ -n "$PARTIAL_TRIAGE_FILE" ] && [ -f "$PARTIAL_TRIAGE_FILE" ]; then
       rm -f "$PARTIAL_TRIAGE_FILE"
+      PARTIAL_TRIAGE_CONSUMED=1
     fi
 
     if [ "$had_json" -eq 0 ]; then
@@ -782,7 +802,8 @@ sys.exit(0 if ok else 1)' "$result")" || had_json=0
       echo "WARNING: the planner produced no usable ORCHESTRATOR_RESULT_JSON — nothing dispatched"
       partial_ended=error
       [ -n "$planner_hit" ] && partial_ended=quota-paused
-      capture_partial_triage "$partial_ended" "$orch_out" "$ORCH" "$ACTIVE_PLANNER_STARTED"
+      [ "$ACTIVE_ATTEMPT_CAPTURED" -eq 1 ] || capture_partial_attempt "$partial_ended" "$orch_out" "$ORCH" "$ACTIVE_PLANNER_STARTED"
+      combine_partial_triage "$partial_ended"
       planner_quota=""
       if [ -n "$planner_hit" ]; then
         # Every planner in the role, with the limits the ones tried here hit and the gates of the rest.
@@ -1080,8 +1101,11 @@ PY
   # one the next run may carry forward.
   if [ -z "$BUSY_REPOS" ] || [ -n "$TARGET_REPO" ]; then
     # Daily batches use a distinct verdict file for each target repo.
+    partial_triage_flags=()
+    [ "$PARTIAL_TRIAGE_CONSUMED" -eq 1 ] && partial_triage_flags=(--partial-triage-consumed)
     python3 "$VERDICT_PY" save --file "$LAST_VERDICT" --fingerprint "$FINGERPRINT" \
       --post-fingerprint "$POST_FINGERPRINT" --repo "$TARGET_REPO" \
+      "${partial_triage_flags[@]}" \
       --orch-result "$ORCH_RESULT" --worker-result "$WORKER_RESULT" --stamp "$STAMP"
   fi
 

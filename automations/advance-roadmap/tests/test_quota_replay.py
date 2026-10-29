@@ -48,7 +48,10 @@ with open(os.environ["FAKE_CALLS"], "a") as f:
     f.write(json.dumps({{"bin": name, "role": role, "args": args, "prompt": prompt,
                          "headless": os.environ.get("ADVANCE_ROADMAP_HEADLESS")}}) + "\n")
 mode = os.environ.get(f"FAKE_{{name.upper()}}_{{role.upper()}}") or os.environ.get("FAKE_" + name.upper(), "plan")
+session_id = os.environ.get(f"FAKE_{{name.upper()}}_SESSION_ID") or os.environ.get("FAKE_SESSION_ID")
 if mode == "wait":
+    if name == "codex" and session_id:
+        print("session id: " + session_id, flush=True)
     time.sleep(30)
     sys.exit(1)
 fence = "```ORCHESTRATOR_RESULT_JSON\n" + os.environ.get("FAKE_PLAN", "{{}}") + "\n```"
@@ -68,6 +71,8 @@ elif name == "agent":
               open(path, "w"))
     print(json.dumps({{"type": "result", "result": "done", "usage": {{"inputTokens": 1, "outputTokens": 1}}}}))
 elif name == "codex":
+    if session_id:
+        print("session id: " + session_id, flush=True)
     out = args[args.index("-o") + 1] if "-o" in args else None
     if mode.startswith("echo-"):
         print("user\n" + prompt + "\n" + echo)
@@ -107,8 +112,8 @@ elif name == "claude":
             prov["available_for_worker"] = True
             json.dump(state, open(path, "w"))
         reply = json.load(open(os.environ["FAKE_LIMIT_FIXTURE"]))
-        if os.environ.get("FAKE_SESSION_ID"):
-            reply["session_id"] = os.environ["FAKE_SESSION_ID"]
+        if session_id:
+            reply["session_id"] = session_id
         print(json.dumps(reply))  # one line, as the CLI prints it
         sys.exit(0)
     if mode == "result-limit":  # the limit only in the worker's result file, no banner on stdout
@@ -117,8 +122,8 @@ elif name == "claude":
                     "limit_text": os.environ["FAKE_RESULT_LIMIT"]}}, open(path, "w"))
     result = fence if mode == "plan" else "I looked around and decided nothing."
     reply = {{"type": "result", "subtype": "success", "is_error": False, "result": result, "modelUsage": {{}}}}
-    if os.environ.get("FAKE_SESSION_ID"):
-        reply["session_id"] = os.environ["FAKE_SESSION_ID"]
+    if session_id:
+        reply["session_id"] = session_id
     if os.environ.get("FAKE_FINAL"):  # what the final answer says when it holds no fence (a sign-off turn)
         reply["result"] = os.environ["FAKE_FINAL"]
     print(json.dumps(reply))
@@ -303,8 +308,45 @@ class QuotaReplayTest(unittest.TestCase):
         self.assertIn("don't redo those reads unless the fingerprint says they changed", next_planner["prompt"])
         self.assertFalse(triage.exists())
 
+    def test_completed_repo_null_result_deletes_digest_by_target_repo(self):
+        triage = self.code / ".advance-roadmap" / "partial-triage-demo.md"
+        triage.parent.mkdir(parents=True)
+        triage.write_text("old findings\n")
+        plan = {**NO_WORK, "repo": None}
+        run = self.run_lane(FAKE_CODEX="plan", FAKE_PLAN=json.dumps(plan))
+        self.assertTrue(self.plan_accepted(run))
+        self.assertFalse(triage.exists(), "a valid targeted no-work result owns this repo's digest")
+
+    def test_thread_two_neither_prompts_with_nor_overwrites_partial_triage(self):
+        triage = self.code / ".advance-roadmap" / "partial-triage-demo.md"
+        triage.parent.mkdir(parents=True)
+        triage.write_text("thread one findings\n")
+        self.run_lane(FAKE_CODEX="plan", ADVANCE_ROADMAP_THREAD="2")
+        planner = [c for c in self.calls() if c["role"] == "orchestrator"][-1]
+        self.assertNotIn("Partial triage from", planner["prompt"])
+        self.assertEqual(triage.read_text(), "thread one findings\n")
+
+    def test_failover_digest_combines_each_failed_attempt(self):
+        codex = self.dir / "codex-sessions" / "2026" / "10" / "rollout-codex-attempt.jsonl"
+        claude = self.dir / "claude-projects" / "demo" / "claude-attempt.jsonl"
+        codex.parent.mkdir(parents=True)
+        claude.parent.mkdir(parents=True)
+        codex.write_text((HERE / "tests/fixtures/partial-triage/codex-rollout.jsonl").read_text()
+                         .replace("DEV-42", "DEV-901"))
+        claude.write_text((HERE / "tests/fixtures/partial-triage/claude.jsonl").read_text()
+                          .replace("DEV-42", "DEV-902"))
+        self.usage_state()
+        self.run_lane(FAKE_CODEX="limit", FAKE_CLAUDE="nofence",
+                      FAKE_CODEX_SESSION_ID="codex-attempt", FAKE_CLAUDE_SESSION_ID="claude-attempt")
+        digest = (self.code / ".advance-roadmap" / "partial-triage-demo.md").read_text()
+        self.assertIn("Attempt 1: codex (ended quota-paused)", digest)
+        self.assertIn("Attempt 2: claude (ended error)", digest)
+        self.assertIn("DEV-901", digest)
+        self.assertIn("DEV-902", digest)
+        self.assertLessEqual(len(digest.encode()), 20 * 1024)
+
     def test_terminated_planner_leaves_codex_rollout_as_planning_timeout(self):
-        env = self.env(FAKE_CODEX="wait")
+        env = self.env(FAKE_CODEX="wait", FAKE_CODEX_SESSION_ID="codex-timeout-id")
         proc = subprocess.Popen(["/bin/zsh", str(self.root / "run.sh")], env=env,
                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
         calls = self.dir / "calls.jsonl"
@@ -312,7 +354,11 @@ class QuotaReplayTest(unittest.TestCase):
         while not calls.exists() and time.time() < deadline:
             time.sleep(0.02)
         self.assertTrue(calls.exists(), "fake Codex did not start")
-        rollout = self.dir / "codex-sessions" / "2026" / "10" / "rollout-fixture.jsonl"
+        stdout = self.root / "runs" / self.stamp / "orchestrator-stdout.txt"
+        while (not stdout.exists() or "session id: codex-timeout-id" not in stdout.read_text()) and time.time() < deadline:
+            time.sleep(0.02)
+        self.assertIn("session id: codex-timeout-id", stdout.read_text())
+        rollout = self.dir / "codex-sessions" / "2026" / "10" / "rollout-fixture-codex-timeout-id.jsonl"
         rollout.parent.mkdir(parents=True)
         shutil.copyfile(HERE / "tests/fixtures/partial-triage/codex-rollout.jsonl", rollout)
         os.killpg(proc.pid, signal.SIGTERM)

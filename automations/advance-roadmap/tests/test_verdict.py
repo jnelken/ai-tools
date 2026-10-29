@@ -181,14 +181,15 @@ class ScopedVerdictTest(unittest.TestCase):
         self.assertEqual(p.returncode, 0, p.stderr)
         return json.loads((self.dir / out).read_text())
 
-    def save(self, orch, worker=None, pending=False, fp="fp.json", post=None):
+    def save(self, orch, worker=None, pending=False, fp="fp.json", post=None, consumed=False):
         o, w = self.dir / "orch.json", self.dir / "worker.json"
         o.write_text(json.dumps(orch))
         w.write_text(json.dumps({"outcome": "bookkeeping"} if worker is None else worker))
         return self.run_verdict("save", "--file", str(self.verdict), "--fingerprint", str(self.dir / fp),
                                 "--orch-result", str(o), "--worker-result", str(w), "--stamp", "20261014-103004",
                                 *(["--bookkeeping-pending"] if pending else []),
-                                *(["--post-fingerprint", str(self.dir / post), "--repo", "a"] if post else []))
+                                *(["--post-fingerprint", str(self.dir / post), "--repo", "a"] if post else []),
+                                *( ["--partial-triage-consumed"] if consumed else []))
 
     def check(self, fp="fp2.json", *extra):
         return self.run_verdict("check", "--file", str(self.verdict), "--fingerprint", str(self.dir / fp),
@@ -302,6 +303,20 @@ class ScopedVerdictTest(unittest.TestCase):
         self.assertEqual(before["partial_triage"], {})
         self.assertIn("a", after["partial_triage"])
         self.assertIn("partial_triage:a", verdict.diff(before, after))
+
+    def test_consumed_partial_triage_is_settled_absent_in_saved_fingerprint(self):
+        triage = self.code / ".advance-roadmap" / "partial-triage-a.md"
+        triage.parent.mkdir(parents=True)
+        triage.write_text("findings consumed by planner\n")
+        self.fingerprint("fp.json")
+        triage.unlink()
+        self.fingerprint("post.json")
+        p = self.save(self.NO_WORK, fp="fp.json", post="post.json", consumed=True)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        saved = json.loads(self.verdict.read_text())
+        self.assertNotIn("a", saved["fingerprint"]["partial_triage"])
+        self.fingerprint("fp2.json")
+        self.assertEqual(self.check().returncode, 0, "the digest deletion is already settled")
 
     def test_batch_runs_carry_a_verdict_for_72_hours(self):
         self.carried()
