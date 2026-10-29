@@ -158,6 +158,41 @@ if [ ${#providers[@]} -eq 0 ]; then
   echo "(worker chain empty — falling back to claude for bookkeeping attempt)"
 fi
 
+# A batch supplies the strategy whose reviewers it reserved. For standalone runs,
+# resolve it from the same usage.py decision review.sh uses.
+WORKER_REVIEW_STRATEGY="${ADVANCE_ROADMAP_BUDGET_REVIEW_STRATEGY:-}"
+WORKER_REVIEW_FALLBACK_REASON="${ADVANCE_ROADMAP_BUDGET_REVIEW_FALLBACK_REASON:-}"
+if [ -z "$WORKER_REVIEW_STRATEGY" ]; then
+  configured_strategy="${ADVANCE_ROADMAP_REVIEW_STRATEGY:-cursor-then-codex}"
+  effective_json="$(python3 "$USAGE_PY" --root "$ROOT" effective-review-strategy \
+    --strategy "$configured_strategy" 2>/dev/null || true)"
+  WORKER_REVIEW_STRATEGY="$configured_strategy"
+  if [ -n "$effective_json" ]; then
+    WORKER_REVIEW_STRATEGY="$(print -r -- "$effective_json" | python3 -c \
+      'import json,sys; print(json.load(sys.stdin).get("strategy") or "")' 2>/dev/null || true)"
+    WORKER_REVIEW_FALLBACK_REASON="$(print -r -- "$effective_json" | python3 -c \
+      'import json,sys; print(json.load(sys.stdin).get("reason") or "")' 2>/dev/null || true)"
+    [ -n "$WORKER_REVIEW_STRATEGY" ] || WORKER_REVIEW_STRATEGY="$configured_strategy"
+  fi
+fi
+case "$WORKER_REVIEW_STRATEGY" in
+  cursor-then-codex|cross-provider) ;;
+  *) echo "worker: invalid effective review strategy: $WORKER_REVIEW_STRATEGY" >&2; exit 2 ;;
+esac
+export ADVANCE_ROADMAP_EFFECTIVE_REVIEW_STRATEGY="$WORKER_REVIEW_STRATEGY"
+export ADVANCE_ROADMAP_REVIEW_FALLBACK_REASON="$WORKER_REVIEW_FALLBACK_REASON"
+REVIEW_CONTEXT="Effective review strategy for this run: $WORKER_REVIEW_STRATEGY."
+if [ -n "$WORKER_REVIEW_FALLBACK_REASON" ]; then
+  REVIEW_CONTEXT="$REVIEW_CONTEXT
+Fallback reason: $WORKER_REVIEW_FALLBACK_REASON."
+fi
+if [ "$WORKER_REVIEW_STRATEGY" = cross-provider ]; then
+  REVIEW_CONTEXT="$REVIEW_CONTEXT
+For review findings, follow the cross-provider remediation rules in WORKER.md: address them
+yourself or use another under-gate provider, never a gated provider; the next reviewer must
+differ from the worker and use cross-provider."
+fi
+
 BASE_PROMPT="$(cat <<EOF
 Read and follow $SKILL_DIR/WORKER.md and $SKILL_DIR/SAFETY.md exactly.
 Code-health passes and the Step 7c retrospective also follow $SKILL_DIR/CODE_HEALTH.md.
@@ -169,6 +204,9 @@ $REQUEST_FILE
 Print a \`\`\`WORKER_RESULT_JSON fence at the end per WORKER.md, plus the plain 5-line summary.
 EOF
 )"
+BASE_PROMPT="$BASE_PROMPT
+
+$REVIEW_CONTEXT"
 if [ -n "${ADVANCE_ROADMAP_TARGET_REPO:-}" ]; then
   BASE_PROMPT="$BASE_PROMPT
 

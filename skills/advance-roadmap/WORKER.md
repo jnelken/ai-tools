@@ -288,14 +288,22 @@ or limited, stop before merging and report the blocker. Commit your work before 
 reviews commits, not the working tree.
 
 - **`VERDICT: clean`** from the Codex pass or a post-Codex Cursor follow-up → go to Step 6.
-- **`VERDICT: findings`** (or `unparsed` — read the text as findings) → have Cursor assess and
-  address the real findings, regardless of which provider did the initial implementation. Re-run
-  Step 5's verification, commit (`fix: address review round N`), then call the review command with
-  the next round number. After the one Codex pass, later calls run Cursor only; Codex is never
-  repeated. If you are not Cursor, dispatch the fixes to Cursor with
+- **`VERDICT: findings`** (or `unparsed` — read the text as findings), effective strategy
+  `cursor-then-codex` with Cursor available → have Cursor assess and address the real findings,
+  regardless of which provider did the initial implementation. Re-run Step 5's verification,
+  commit (`fix: address review round N`), then call the review command with the next round number.
+  After the one Codex pass, later calls run Cursor only; Codex is never repeated. If you are not
+  Cursor, dispatch the fixes to Cursor with
   `~/.local/bin/agent -p --force --trust --model auto --workspace <repo> "<findings and context>"`
   and inspect its diff before committing. A finding Cursor judges wrong is dismissed, not fixed —
   note it and why in your summary.
+- **`VERDICT: findings`** (or `unparsed` — read the text as findings), effective strategy
+  `cross-provider` (configured or fallback) → address the real findings yourself, or use another
+  provider that is under its gate and differs from the worker. Never dispatch remediation to a
+  gated provider, including Cursor when its reviewer gate caused the fallback. Re-run Step 5's
+  verification and call the next review round with the same effective `cross-provider` strategy;
+  its reviewer must differ from the worker. The worker brief supplies the effective strategy and
+  fallback reason for the run. Commit the fixes as `fix: address review round N` before reviewing.
 - **After 3 Cursor rounds before the Codex pass, still findings** → **merge anyway** without the
   Codex pass, with every unresolved finding marked in the code where it applies, in the file's
   comment syntax:
