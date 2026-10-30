@@ -199,6 +199,12 @@ woodrow's PR guide (`docs/guides/pr-descriptions.md`, `## Preview`) owns the hos
 
 If the body's `## Preview` already follows these rules, leave it. Otherwise rewrite only that section, reading and writing the body through a file the same way step 5 does. Add the section, placed after `## Summary` as the guide's template has it, when it's missing and the change is visible in a preview.
 
+### 3.9. Record the feature walkthrough
+
+Only for a `Concentro-Inc/woodrow` PR, after CI is green (step 3) and before the trunk merge (3.6) or the Slack post (4). Skip silently when the repo has no `.claude/skills/feature-demo/SKILL.md` on the branch.
+
+Read `app/lib/feature-guides/feature-guides.json` at `HEAD` and the branch diff for added `data-feature="…"` anchors. When any registry key has `demoId: null` or an added anchor has no demo, run `/feature-demo` for this PR: it captures the walkthrough on a deploy preview, needs one human upload step and a Creator Supademo MCP token, and commits the demo id (which also turns the registry test green). A sub-PR into a trunk has no preview of its own, so for sub-PRs run it against the trunk PR's preview once this sub-PR has merged (3.6), before the trunk is announced. When the developer declines or the token is missing, report `feature demo: skipped (<why>)` in step 7 and continue; the registry test stays red until it runs.
+
 ### 4. Post to Slack
 
 Channel `#pr-review` (ID `C0APAAD3PP0`). The message body is *only* the link:
