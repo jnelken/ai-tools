@@ -171,7 +171,7 @@ class RunRecordTest(unittest.TestCase):
         return runrecord.read_records(str(self.root))[-1]
 
     ORCH_GATED = quota("orchestrator", [
-        {"provider": "codex", "state": "over", "reason": "weekly 85% >= 80%",
+        {"provider": "codex", "state": "over", "reason": "weekly 90% >= 90%",
          "reset_epoch": 1792000000, "reset_at": "2026-10-15T09:00:00-04:00"},
         {"provider": "claude", "state": "limited", "reason": "session limit",
          "reset_epoch": 1791906600, "reset_at": "2026-10-13T11:50:00-04:00"}])
@@ -182,7 +182,7 @@ class RunRecordTest(unittest.TestCase):
         self.assertEqual((rec["quota"]["role"], rec["quota"]["provider"], rec["quota"]["reset_epoch"]),
                          ("orchestrator", "claude", 1791906600))
         self.assertEqual(rec["quota"]["reset_at"], "2026-10-13T11:50:00-04:00")
-        self.assertIn("codex: weekly 85%", rec["quota"]["cause"])
+        self.assertIn("codex: weekly 90%", rec["quota"]["cause"])
         self.assertEqual(len(rec["quota"]["providers"]), 2)
 
     def test_quota_skip_without_a_gated_reading_has_no_quota(self):

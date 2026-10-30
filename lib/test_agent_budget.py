@@ -33,7 +33,7 @@ class BudgetTests(unittest.TestCase):
         self.env.start()
         self.addCleanup(self.env.stop)
         self.reading = {'source': 'fixture', 'windows': {'five_hour': {'live': 50, 'cap': 70},
-                                                       'weekly': {'live': 60, 'cap': 80}}}
+                                                       'weekly': {'live': 60, 'cap': 90}}}
         self.readings = patch.object(b, 'readings', return_value=self.reading)
         self.readings.start()
         self.addCleanup(self.readings.stop)
@@ -71,7 +71,7 @@ class BudgetTests(unittest.TestCase):
         status = b.view('codex', self.reading, {}, self.leases())
         self.assertEqual(status['windows']['five_hour']['headroom'], 17)
         self.reading['windows']['weekly']['live'] = 79.5
-        self.assertEqual(b.allow('codex', 'planner', 99), 0)
+        self.assertGreater(b.allow('codex', 'planner', 99), 0)
         b.release(lease['id'])
         self.assertEqual(self.leases(), [])
 
@@ -120,21 +120,33 @@ class BudgetTests(unittest.TestCase):
         self.assertEqual(b.allow('claude', 'subagent', 99), 1)
         self.reading['windows']['seven_day'] = self.reading['windows'].pop('weekly')
         self.reading['windows']['seven_day']['live'] = 81
-        self.assertEqual(b.allow('claude', 'subagent', 99), 0)
+        self.assertGreater(b.allow('claude', 'subagent', 99), 0)
 
-    def test_per_window_admission_does_not_charge_five_hour_cost_to_long_window(self):
+    def test_per_window_admission_projects_long_window_cost_against_90_percent(self):
         model = b.estimates([], [])
-        claude = {'windows': {'five_hour': {'live': 0, 'cap': 70},
-                              'seven_day': {'live': 53, 'cap': 80}}}
+        claude = {'windows': {'five_hour': {'live': 10, 'cap': 70},
+                              'seven_day': {'live': 85, 'cap': 90}}}
         with patch.object(b, 'cached_estimates', return_value=model), patch.object(b, 'readings', return_value=claude):
-            self.assertEqual(b.allow('claude', 'subagent', 4), 4)
-            claude['windows']['five_hour']['live'] = 65
-            self.assertLessEqual(b.allow('claude', 'subagent', 4), 1)
+            self.assertEqual(b.capacity(claude, [], 'claude', 'subagent',
+                                        {'five_hour': 3, 'seven_day': 3}, 1), 1)
+            claude['windows']['seven_day']['live'] = 90
+            self.assertEqual(b.capacity(claude, [], 'claude', 'subagent',
+                                        {'five_hour': 3, 'seven_day': 3}, 1), 0)
+            claude['windows']['seven_day']['live'] = 88
+            self.assertEqual(b.capacity(claude, [], 'claude', 'subagent',
+                                        {'five_hour': 3, 'seven_day': 3}, 1), 0)
 
-        codex = {'windows': {'five_hour': {'live': 0, 'cap': 70},
-                             'weekly': {'live': 70, 'cap': 80}}}
+        codex = {'windows': {'five_hour': {'live': 10, 'cap': 70},
+                             'weekly': {'live': 85, 'cap': 90}}}
         with patch.object(b, 'cached_estimates', return_value=model), patch.object(b, 'readings', return_value=codex):
-            self.assertGreater(b.allow('codex', 'planner', 10), 1)
+            self.assertEqual(b.capacity(codex, [], 'codex', 'planner',
+                                        {'five_hour': 3, 'weekly': 3}, 1), 1)
+            codex['windows']['weekly']['live'] = 90
+            self.assertEqual(b.capacity(codex, [], 'codex', 'planner',
+                                        {'five_hour': 3, 'weekly': 3}, 1), 0)
+            codex['windows']['weekly']['live'] = 88
+            self.assertEqual(b.capacity(codex, [], 'codex', 'planner',
+                                        {'five_hour': 3, 'weekly': 3}, 1), 0)
 
     def test_scalar_legacy_lease_scales_long_window_cost(self):
         model = b.estimates([], [])['claude']

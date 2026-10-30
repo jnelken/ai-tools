@@ -295,7 +295,7 @@ class QuotaReplayTest(unittest.TestCase):
 
     def test_oct13_planner_limit_dispatches_nothing_and_pauses_for_quota(self):
         # Codex was over its gate that morning, so Claude planned; Claude answered only the banner.
-        self.usage_state(codex={"weekly": {"used_pct": 85, "reset_epoch": FUTURE}})
+        self.usage_state(codex={"weekly": {"used_pct": 90, "reset_epoch": FUTURE}})
         before = time.time()
         run = self.run_lane(FAKE_CLAUDE="limit")
         self.assert_nothing_dispatched(run)
@@ -348,7 +348,7 @@ class QuotaReplayTest(unittest.TestCase):
         transcript = self.dir / "claude-projects" / "demo" / "partial-session.jsonl"
         transcript.parent.mkdir(parents=True)
         shutil.copyfile(HERE / "tests/fixtures/partial-triage/claude.jsonl", transcript)
-        self.usage_state(codex={"weekly": {"used_pct": 85, "reset_epoch": FUTURE}})
+        self.usage_state(codex={"weekly": {"used_pct": 90, "reset_epoch": FUTURE}})
         self.run_lane(FAKE_CLAUDE="limit", FAKE_SESSION_ID="partial-session")
         self.assertEqual(self.record()["outcome"], "quota-paused")
         triage = self.code / ".advance-roadmap" / "partial-triage-demo.md"
@@ -439,7 +439,7 @@ class QuotaReplayTest(unittest.TestCase):
     def test_claude_json_limit_does_not_poison_failover_codex_via_stale_json(self):
         # Codex gated → Claude plans and hits is_error JSON; FAKE_UNGATE opens Codex for failover.
         # Codex returns no fence (exit 0). Stale Claude .json must not make Codex look limited.
-        self.usage_state(codex={"weekly": {"used_pct": 85, "reset_epoch": FUTURE}})
+        self.usage_state(codex={"weekly": {"used_pct": 90, "reset_epoch": FUTURE}})
         run = self.run_lane(FAKE_CLAUDE="limit", FAKE_UNGATE="codex", FAKE_CODEX="nofence")
         self.assertEqual([c["bin"] for c in self.calls() if c["role"] == "orchestrator"],
                          ["claude", "codex"])
@@ -543,7 +543,7 @@ class QuotaReplayTest(unittest.TestCase):
     def test_every_provider_in_the_role_is_in_the_record_when_the_last_one_runs_out(self):
         # Every provider but the last is over its gate; the last one is tried and hits its limit.
         # Whatever chain the lane was handed, the record and the batch summary name them all.
-        over_codex = {"weekly": {"used_pct": 85, "reset_epoch": FUTURE}}
+        over_codex = {"weekly": {"used_pct": 90, "reset_epoch": FUTURE}}
         over_cursor = {"included": {"auto_pct": 100, "reset_epoch": LATER}}
         cases = [("orchestrator", dict(codex=over_codex), self.planner_row, {"codex": FUTURE}),
                  ("worker", dict(codex=over_codex, cursor=over_cursor), self.worker_row,
@@ -642,7 +642,7 @@ exec(compile(open(__file__).read(), __file__, "exec"))
     def test_failing_usage_helpers_never_lose_an_observed_limit(self):
         # Each path observes a limit (banner, result-only limit_hit, or a gate) and then calls a
         # usage.py helper that fails. The run record must still carry the provider, cause and reset.
-        over_codex = {"weekly": {"used_pct": 85, "reset_epoch": FUTURE}}
+        over_codex = {"weekly": {"used_pct": 90, "reset_epoch": FUTURE}}
         over_cursor = {"included": {"auto_pct": 100, "reset_epoch": LATER}}
         over_claude = {"five_hour": {"used_pct": 90, "reset_epoch": LATER}}
         def at_1150(reset):
@@ -658,7 +658,7 @@ exec(compile(open(__file__).read(), __file__, "exec"))
             ("planner banner", dict(codex=over_codex), lane(FAKE_CLAUDE="limit"),
              "claude", BANNER, at_1150, {"record-limit", "quota-record"}),
             ("planner skipped over its gate", dict(codex=over_codex, claude=over_claude), lane(),
-             "codex", "weekly 85%", lambda r: r == FUTURE, {"quota-record"}),
+             "codex", "weekly 90%", lambda r: r == FUTURE, {"quota-record"}),
             ("worker banner", dict(codex=over_codex, cursor=over_cursor),
              lane(FAKE_CLAUDE="plan", FAKE_CLAUDE_WORKER="limit", FAKE_PLAN=self.worker_plan()),
              "claude", BANNER, at_1150, {"record-limit", "quota-record"}),
@@ -696,7 +696,7 @@ exec(compile(open(__file__).read(), __file__, "exec"))
         for plan_mode, fake_plan in (("garbage", json.dumps(NO_WORK)), ("plan", '{"action": "launch_rockets"}'),
                                      ("plan", '["not", "an", "object"]')):
             with self.subTest(plan_mode=plan_mode, fake_plan=fake_plan):
-                self.usage_state(codex={"weekly": {"used_pct": 85, "reset_epoch": FUTURE}})
+                self.usage_state(codex={"weekly": {"used_pct": 90, "reset_epoch": FUTURE}})
                 run = self.run_lane(FAKE_CLAUDE=plan_mode, FAKE_PLAN=fake_plan)
                 self.assert_nothing_dispatched(run)
                 rec = self.record()
@@ -705,7 +705,7 @@ exec(compile(open(__file__).read(), __file__, "exec"))
                 self.assertIsNone(rec["quota"])
 
     def test_raw_claude_fence_outside_its_json_answer_is_not_a_plan(self):
-        self.usage_state(codex={"weekly": {"used_pct": 85, "reset_epoch": FUTURE}})
+        self.usage_state(codex={"weekly": {"used_pct": 90, "reset_epoch": FUTURE}})
         run = self.run_lane(FAKE_CLAUDE="raw")
         self.assert_nothing_dispatched(run)
         rec = self.record()
@@ -763,7 +763,7 @@ exec(compile(open(__file__).read(), __file__, "exec"))
     # ── a real no-work plan keeps its bookkeeping ────────────────────────────
 
     def test_no_work_plan_with_a_new_blocker_runs_bookkeeping_and_saves_its_verdict(self):
-        self.usage_state(codex={"weekly": {"used_pct": 85, "reset_epoch": FUTURE}})
+        self.usage_state(codex={"weekly": {"used_pct": 90, "reset_epoch": FUTURE}})
         plan = {**NO_WORK, "blockers": [{"repo": "demo", "linear_id": "DEV-7", "detail": "needs a decision"}]}
         self.run_lane(FAKE_CLAUDE="plan", FAKE_PLAN=json.dumps(plan))
         self.assertTrue(self.reached_barrier)
@@ -776,7 +776,7 @@ exec(compile(open(__file__).read(), __file__, "exec"))
         return (self.root.parent / "memory" / "advance-roadmap-runs" / "demo.md")
 
     def test_noop_no_work_plan_skips_the_worker_writes_the_ledger_row_and_saves_the_verdict(self):
-        self.usage_state(codex={"weekly": {"used_pct": 85, "reset_epoch": FUTURE}})
+        self.usage_state(codex={"weekly": {"used_pct": 90, "reset_epoch": FUTURE}})
         run = self.run_lane(FAKE_CLAUDE="plan")
         self.assertFalse(self.reached_barrier, "nothing waits on a worker, so nothing waits at the barrier")
         self.assertEqual([c["role"] for c in self.calls()], ["orchestrator"])
@@ -798,7 +798,7 @@ exec(compile(open(__file__).read(), __file__, "exec"))
         self.assertEqual([c["role"] for c in self.calls()], ["orchestrator"])
 
     def test_a_canceled_no_work_plan_keeps_its_verdict_and_tomorrow_skips_it(self):
-        self.usage_state(codex={"weekly": {"used_pct": 85, "reset_epoch": FUTURE}})
+        self.usage_state(codex={"weekly": {"used_pct": 90, "reset_epoch": FUTURE}})
         plan = {**NO_WORK, "blockers": [{"repo": "demo", "linear_id": "DEV-7", "detail": "needs a decision"}]}
         self.run_lane(cancel=True, FAKE_CLAUDE="plan", FAKE_PLAN=json.dumps(plan))
         self.assertTrue(self.reached_barrier)
@@ -815,7 +815,7 @@ exec(compile(open(__file__).read(), __file__, "exec"))
         self.assertNotIn("bookkeeping_pending", json.loads(self.verdict.read_text()))
 
     def test_a_canceled_dispatch_plan_saves_no_verdict(self):
-        self.usage_state(codex={"weekly": {"used_pct": 85, "reset_epoch": FUTURE}})
+        self.usage_state(codex={"weekly": {"used_pct": 90, "reset_epoch": FUTURE}})
         self.verdict.write_text(json.dumps({"stamp": "20261012-103001", "decided_at": "2026-10-28T10:00:00",
                                             "outcome_token": "blocked-no-item", "fingerprint": {}}))
         before = self.verdict.read_text()
@@ -826,7 +826,7 @@ exec(compile(open(__file__).read(), __file__, "exec"))
     # ── headless planners ────────────────────────────────────────────────────
 
     def test_headless_marker_reaches_every_model_call_and_planners_default_to_sonnet_medium(self):
-        self.usage_state(codex={"weekly": {"used_pct": 85, "reset_epoch": FUTURE}})
+        self.usage_state(codex={"weekly": {"used_pct": 90, "reset_epoch": FUTURE}})
         self.run_lane(FAKE_CLAUDE="plan")
         planner = self.calls()[0]
         self.assertEqual(planner["headless"], "1")
@@ -836,14 +836,14 @@ exec(compile(open(__file__).read(), __file__, "exec"))
         self.assertNotIn("advisor", " ".join(args), "--disallowedTools advisor does not stop the advisor server tool")
 
     def test_planner_model_and_effort_overrides_still_win(self):
-        self.usage_state(codex={"weekly": {"used_pct": 85, "reset_epoch": FUTURE}})
+        self.usage_state(codex={"weekly": {"used_pct": 90, "reset_epoch": FUTURE}})
         self.run_lane(FAKE_CLAUDE="plan", ADVANCE_ROADMAP_ORCH_CLAUDE_MODEL="claude-opus-5",
                       ADVANCE_ROADMAP_ORCH_CLAUDE_EFFORT="high")
         args = self.calls()[0]["args"]
         self.assertEqual((args[args.index("--model") + 1], args[args.index("--effort") + 1]), ("claude-opus-5", "high"))
 
     def test_planner_reads_its_repos_snapshot_while_the_fingerprint_keeps_the_whole_queue(self):
-        self.usage_state(codex={"weekly": {"used_pct": 85, "reset_epoch": FUTURE}})
+        self.usage_state(codex={"weekly": {"used_pct": 90, "reset_epoch": FUTURE}})
         def issue(id_, labels, state_type="unstarted"):
             return {"id": id_, "title": id_, "description": "", "state": "Todo", "state_type": state_type,
                     "priority": 2, "labels": labels, "blocked_by": [], "human_comments_sha": "-"}
@@ -861,7 +861,7 @@ exec(compile(open(__file__).read(), __file__, "exec"))
     # ── a pending plan only disables its own repo's verdict check ───────────
 
     def test_pending_plans_of_other_repos_do_not_disable_this_repos_verdict(self):
-        self.usage_state(codex={"weekly": {"used_pct": 85, "reset_epoch": FUTURE}})
+        self.usage_state(codex={"weekly": {"used_pct": 90, "reset_epoch": FUTURE}})
         self.run_lane(FAKE_CLAUDE="plan")  # carries a no-op verdict for demo
         pending = self.root / "pending"
         pending.mkdir(exist_ok=True)
@@ -878,7 +878,7 @@ exec(compile(open(__file__).read(), __file__, "exec"))
         self.assertNotEqual(self.record()["outcome"], "skipped-unchanged")
 
     def test_another_repos_commit_leaves_this_repos_carried_verdict_valid(self):
-        self.usage_state(codex={"weekly": {"used_pct": 85, "reset_epoch": FUTURE}})
+        self.usage_state(codex={"weekly": {"used_pct": 90, "reset_epoch": FUTURE}})
         for name in ("demo2",):
             subprocess.run(["git", "init", "-q", str(self.code / name)], check=True)
             subprocess.run(["git", "-C", str(self.code / name), "remote", "add", "origin",
@@ -899,7 +899,7 @@ exec(compile(open(__file__).read(), __file__, "exec"))
         return sid
 
     def test_oct27_a_signoff_turn_after_the_fence_keeps_the_planners_triage(self):
-        self.usage_state(codex={"weekly": {"used_pct": 85, "reset_epoch": FUTURE}})
+        self.usage_state(codex={"weekly": {"used_pct": 90, "reset_epoch": FUTURE}})
         sid = self.write_oct27_transcript()
         self.run_lane(FAKE_CLAUDE="plan", FAKE_SESSION_ID=sid, FAKE_FINAL="💬 No item for demo",
                       FAKE_PLAN=json.dumps({**NO_WORK, "repo": "demo", "considered": ["WRONG: the live fence"]}))
@@ -934,7 +934,7 @@ exec(compile(open(__file__).read(), __file__, "exec"))
         self.assertIn('issue:DEV-8', check.stdout)
 
     def test_limit_killed_planner_cannot_recover_a_transcript_fence(self):
-        self.usage_state(codex={"weekly": {"used_pct": 85, "reset_epoch": FUTURE}})
+        self.usage_state(codex={"weekly": {"used_pct": 90, "reset_epoch": FUTURE}})
         sid = self.write_oct27_transcript()
         run = self.run_lane(FAKE_CLAUDE="limit", FAKE_SESSION_ID=sid)
         self.assert_nothing_dispatched(run)
@@ -945,7 +945,7 @@ exec(compile(open(__file__).read(), __file__, "exec"))
         self.assertEqual(self.record()['outcome'], 'skipped-quota')
 
     def test_limit_killed_planner_with_a_fence_still_fails_over(self):
-        self.usage_state(codex={"weekly": {"used_pct": 85, "reset_epoch": FUTURE}})
+        self.usage_state(codex={"weekly": {"used_pct": 90, "reset_epoch": FUTURE}})
         sid = self.write_oct27_transcript()
         run = self.run_lane(FAKE_CLAUDE="limit", FAKE_SESSION_ID=sid, FAKE_UNGATE="codex", FAKE_CODEX="plan")
         self.assertTrue(self.plan_accepted(run))
@@ -954,14 +954,14 @@ exec(compile(open(__file__).read(), __file__, "exec"))
         self.assertEqual(self.record()['orchestrator'], 'codex')
 
     def test_oct27_without_a_transcript_the_sign_off_is_still_an_error(self):
-        self.usage_state(codex={"weekly": {"used_pct": 85, "reset_epoch": FUTURE}})
+        self.usage_state(codex={"weekly": {"used_pct": 90, "reset_epoch": FUTURE}})
         self.run_lane(FAKE_CLAUDE="plan", FAKE_SESSION_ID="no-such-session", FAKE_FINAL="💬 No item")
         rec = self.record()
         self.assertEqual(rec["outcome"], "error", rec)
         self.assertFalse(self.verdict.exists())
 
     def test_offline_deploy_snapshot_is_unknown_and_never_blocks_planning(self):
-        self.usage_state(codex={"weekly": {"used_pct": 85, "reset_epoch": FUTURE}})
+        self.usage_state(codex={"weekly": {"used_pct": 90, "reset_epoch": FUTURE}})
         run = self.run_lane(FAKE_CLAUDE="plan")
         snap = json.loads((run / "deploy-snapshot.json").read_text())
         self.assertEqual(snap["repos"]["demo"]["status"], "unknown")
@@ -971,7 +971,7 @@ exec(compile(open(__file__).read(), __file__, "exec"))
         self.assertEqual(self.record()["outcome"], "blocked-no-item")
 
     def test_contaminated_verdict_on_disk_is_discarded_and_the_repo_replanned(self):
-        self.usage_state(codex={"weekly": {"used_pct": 85, "reset_epoch": FUTURE}})
+        self.usage_state(codex={"weekly": {"used_pct": 90, "reset_epoch": FUTURE}})
         fp, deploys = self.dir / "fp.json", self.dir / "deploys.json"
         subprocess.run([sys.executable, str(self.root / "lib/deploysnap.py"), "--code-dir", str(self.code),
                         "--out", str(deploys)], env=self.env(), check=True, capture_output=True)

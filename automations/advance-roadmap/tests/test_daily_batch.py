@@ -40,8 +40,8 @@ if repo in os.environ.get('FAKE_PLANNER_GATED', '').split():
     # An earlier lane's planner limit already gated every planner: run.sh skips before planning.
     (run / 'quota-gates.json').write_text(json.dumps({
         'role': 'orchestrator', 'provider': 'claude', 'reset_epoch': 1791906600,
-        'reset_at': '2026-10-13T11:50:00-04:00', 'cause': 'codex: weekly 85%; claude: session limit', 'providers': [
-            {'provider': 'codex', 'state': 'over', 'cause': 'weekly 85%', 'reset_epoch': None, 'reset_at': None},
+        'reset_at': '2026-10-13T11:50:00-04:00', 'cause': 'codex: weekly 90%; claude: session limit', 'providers': [
+            {'provider': 'codex', 'state': 'over', 'cause': 'weekly 90%', 'reset_epoch': None, 'reset_at': None},
             {'provider': 'claude', 'state': 'limited', 'cause': 'session limit',
              'reset_epoch': 1791906600, 'reset_at': '2026-10-13T11:50:00-04:00'}]}))
     event('quota-skip')
@@ -97,7 +97,7 @@ if verdict == 'quota':
                           'reason': 'no approver ruling was obtained', 'after': None} for n, p in enumerate(plans)],
            'quota': {'role': 'approver', 'provider': 'claude', 'reset_epoch': 1791906600, 'reset_at': 'r1',
                      'cause': 'session limit', 'providers': [
-                         {'provider': 'codex', 'state': 'over', 'cause': 'weekly 85%', 'reset_epoch': 1792000000,
+                         {'provider': 'codex', 'state': 'over', 'cause': 'weekly 90%', 'reset_epoch': 1792000000,
                           'reset_at': 'r2'},
                          {'provider': 'claude', 'state': 'limited', 'cause': 'session limit',
                           'reset_epoch': 1791906600, 'reset_at': 'r1'}]}}
@@ -771,7 +771,7 @@ else:
                          [('a', 'shipped'), ('b', 'skipped-quota'), ('c', 'skipped-quota')])
         self.assertEqual([(q['provider'], q['role'], sorted(q['repos']), q['reset_at'], q['cause'])
                           for q in state['quota_paused']],
-                         [('codex', 'orchestrator', ['b', 'c'], None, 'weekly 85%'),
+                         [('codex', 'orchestrator', ['b', 'c'], None, 'weekly 90%'),
                           ('claude', 'orchestrator', ['b', 'c'], '2026-10-13T11:50:00-04:00', 'session limit')])
 
     def test_quota_summary_merges_pauses_and_skips_per_provider(self):

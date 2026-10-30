@@ -64,7 +64,7 @@ LOG_TAIL_CHARS = 4000
 
 # Thresholds mirror lib/usage.py (same defaults, same env overrides). Kept in sync by hand;
 # shown so the page can say whether the next run would be gated. Claude and Codex share them.
-MAX_SEVEN_DAY_PCT = float(os.environ.get("ADVANCE_ROADMAP_MAX_WEEKLY_PCT", 80))
+MAX_SEVEN_DAY_PCT = float(os.environ.get("ADVANCE_ROADMAP_MAX_WEEKLY_PCT", 90))
 MAX_FIVE_HOUR_PCT = float(os.environ.get("ADVANCE_ROADMAP_MAX_FIVE_HOUR_PCT", 70))
 MAX_CURSOR_PCT = float(os.environ.get("ADVANCE_ROADMAP_MAX_CURSOR_PCT", 95))
 # worker.sh draws Cursor usage from the Auto pool unless a named model is pinned;

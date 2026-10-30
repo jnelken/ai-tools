@@ -37,7 +37,7 @@ TERM/INT/HUP to the command's process group, preserves exit status, and releases
 in `finally`. Waiting shells back off to 30 seconds and consume no model tokens.
 This is polling admission; waiting terminals have no guaranteed FIFO ordering.
 
-Caps come from roadmap `usage.py`: 70% over five hours, 80% weekly, and 100% for
+Caps come from roadmap `usage.py`: 70% over five hours, 90% weekly, and 100% for
 Cursor's selected pool, including that module's environment overrides. Claude
 uses the live OAuth quota helper. Other providers use fresh saved state or the
 existing probes. Fresh saved windows whose reset has passed read as zero, using

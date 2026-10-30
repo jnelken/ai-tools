@@ -84,7 +84,7 @@ def _pct_env(name: str, default: float) -> float:
 # One gate per provider, applied to every role that calls a model (planner, worker, reviewer,
 # plan approver): stop routing to a provider well before its hard limit, not at it.
 MAX_FIVE_HOUR_PCT = _pct_env("ADVANCE_ROADMAP_MAX_FIVE_HOUR_PCT", 70)
-MAX_SEVEN_DAY_PCT = _pct_env("ADVANCE_ROADMAP_MAX_WEEKLY_PCT", 80)
+MAX_SEVEN_DAY_PCT = _pct_env("ADVANCE_ROADMAP_MAX_WEEKLY_PCT", 90)
 # Cursor quotas are monthly and worker.sh fails over within the tick, so gate
 # only when the pool is fully spent (Jake, 2026-10-19: use Cursor to 100%).
 MAX_CURSOR_PCT = _pct_env("ADVANCE_ROADMAP_MAX_CURSOR_PCT", 100)
