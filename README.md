@@ -4,6 +4,14 @@ Personal AI coding tools — Claude Code and Cursor skills, slash commands, hook
 
 ## What's here
 
+### Menu bar apps (`apps/`)
+
+[Active agents](apps/agent-count) shows the number of working Claude/Codex and
+Superset terminal sessions across hosts using SwiftBar. The dropdown separates
+working, waiting, and open sessions; local updates run every 5 seconds and remote
+host updates every 30 seconds. Install with `python3 ~/.ai-tools/apps/agent-count/install.py`
+after installing SwiftBar (`brew install --cask swiftbar`).
+
 ### Skills (`skills/`)
 
 | Skill | Purpose |
