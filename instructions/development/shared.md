@@ -6,6 +6,9 @@ Default structure:
 ## Summary
 <One sentence: what problem exists (if applicable). One sentence: what the solution does. One sentence: impact or why it matters.>
 
+## Preview
+<label>: <deploy-preview URL of the changed screen, with any flag params>
+
 ## Changes
 - High-level bullet describing a behavior or capability change
 - High-level bullet describing a behavior or capability change
@@ -20,6 +23,8 @@ Apply this when creating new PRs (`gh pr create`) and when editing existing ones
 **Optimize every section for skimmability.** A reviewer should get the full picture in the time it takes to scroll past it — short lines, no filler words, no hedging. If a sentence can lose words without losing meaning, cut them.
 
 **Summary** is 1–3 sentences max: problem → solution → impact. Omit whichever sentences don't apply (e.g. a pure refactor has no user-facing problem sentence). Keep it short enough that a reviewer can absorb it before opening the diff.
+
+**Preview** applies only in repos with deploy previews (today woodrow); omit it elsewhere and when nothing is visible in a preview. Link the deepest screen that shows the change, not the app's front page, with `?<flag_key>=true` for any feature flag gating it; one `<label>: <url>` line per distinct screen; the bare host only for app-wide changes. The repo's PR guide owns the host and entity rules (woodrow: `docs/guides/pr-descriptions.md`; `pnpm run pr:create -- --preview "<label>: <path>"` fills the host in once the PR number exists).
 
 **Changes** lists what changed at the behavior or capability level — not code mechanics. "Grouping state is now persisted per-view" not "moved grouping into useViewState hook." Omit this section for very small single-focus PRs where the Summary already says it all.
 
