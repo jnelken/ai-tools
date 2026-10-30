@@ -1,6 +1,7 @@
 ---
 name: unblock-roadmap
-description: Interactive-only sweep across every personal repo under the personal code dir that is currently blocked from advance-roadmap — a dirty working tree, a `Needs Input` Linear ticket, or open "decisions needed" questions — and asks Jake how to resolve each one, one repo at a time. Writes no code and runs no git: it persists each answer immediately as a `## Directive` section on that repo's Linear ticket (moving the ticket out of `Needs Input` when that's what was gating it), and may record the answer in the repo's own markdown (ROADMAP.md, docs/plans/, IN_PROGRESS.md), which a later /advance-roadmap run reads, commits, and acts on. Use on-demand ("/unblock-roadmap", "unblock the roadmap repos", "clear the roadmap blockers", "sweep the blocked repos"). Complementary to [[advance-roadmap]], never a replacement — this skill only asks and records; that one is the only thing that ever writes code, commits, or pushes.
+description: >-
+  Interactive sweep of personal repos blocked from advance-roadmap by dirty trees, Needs Input tickets or unresolved decisions. Ask Jake one question at a time in a terminal or through Slackagent Slack mode, then record his answer as a Linear directive for advance-roadmap. Never implements work or mutates git.
 ---
 
 > **Personal machines only (OMEN, JXIV).** `install.sh` doesn't link this skill on the work laptop
@@ -16,8 +17,77 @@ repo, surface what's blocking each one, ask Jake one question at a time, and rec
 answer immediately — so a sweep he abandons halfway through still leaves every repo he did
 answer fully unblocked.
 
-**This skill is interactive-only.** It exists to ask questions a human has to answer, so
-it has no scheduled/unattended mode. If invoked headlessly, say so and stop.
+**This skill requires a human answer.** In a terminal, run it interactively; a standalone
+headless invocation must stop. The explicit Slackagent mode below uses Slack as its interactive
+surface while discovery and answer formatting run headlessly.
+
+## Slack mode (Slackagent, DEV-320)
+
+Slackagent runs this pass in **#agent-blockers** by default (`UNBLOCK_ROADMAP_CHANNEL`), with a
+durable SQLite question queue. Every weekday at **8:45 America/New_York**, resume and re-post
+an outstanding question before considering a fresh sweep. Ask one question at a time, leading
+with the repo and ticket and showing the blocker evidence. Offer 2–6 numbered choices, seed
+1️⃣…6️⃣ reactions, and accept only `SLACK_OWNER_USER_ID`'s answer. An owner's thread reply is
+an **Other** answer; bot seed reactions and other users never authorize a decision.
+
+The application acquires live read-only evidence using Step 1's repo exclusions, dirty trees,
+open decisions and Needs Input rules (including stale hand-parked tickets). A headless sweep
+formats that evidence into a `QUESTIONS_JSON` fence: a list of
+`{repo, linear_id, blocker, evidence, question, options}` entries, with a
+source identity for reconciliation. Acquire/format evidence in a background job outside the answer
+lock; unrelated household events must return without waiting for a sweep. Use Codex first, then Claude, through runtime profiles:
+Codex is sandboxed read-only with tools disabled; Claude receives supplied text with no tools.
+Before launching, gate each provider with
+`agent-budget allow --provider P --role planner --want 1 --json`. With no headroom, post a
+short deferral and retry at a scheduler tick **at most hourly, weekdays 8:45–18:00**. Each model
+call is recorded through Slackagent's existing runners as `unblock-sweep` or `unblock-directive`.
+
+Before posting a question, cheaply recheck Linear state and the live dirty-tree snapshot. Mark
+resolved or changed blockers **superseded** and skip them; never apply an old destructive choice
+to a changed tree. Hash the newest blocker comment (including its identity and content) at enqueue
+and re-fetch it before posting and under the recording lock. Supersede replaced/edited blocker
+comments and re-sweep that ticket. Allow at most one undecided question per repo, and check for
+pending directives repo-wide before writing. Preserve skip, close and park
+semantics from Step 2: skip/leave writes nothing, close sets Done or Canceled, and keep-parked
+records a parked note without a directive or state change.
+
+Persist each answer before recording it. Presets authorize exactly the displayed option text,
+recorded verbatim inside a fixed repo/ticket/question wrapper; never use hidden model-generated
+directive prose. Labels are capped single-line plain text, with Markdown headings and control
+characters neutralized before display. Only a free-text Other answer needs one small headless
+formatting call; admission errors and denials both save an hourly retry deadline and a visible
+deferral. Run all outbound Slack and Linear text through the shared secret redactor. All Linear writes
+go through Slackagent's own Linear client, never the in-Slack @Linear agent. Keep the marked
+`## Directive` in the work ticket's **description**, where advance-roadmap consumes it. Record
+the directive and Needs Input → Todo in one atomic `issueUpdate`; preserve other states. Do not
+make recording depend on an audit comment. Both DM and scheduled writers share repo/ticket
+locks, re-read immediately before writing, and verify the decision marker afterward. Missing
+markers trigger bounded retries; unverifiable answers remain pending with a thread notice.
+Stable decision markers recover a crash between the Linear write and local queue status update. A repo without an eligible
+ticket gets a labelled cleanup-only carrier only after an answer, with a fresh overlap check.
+
+**V1 writes Linear only.** Do not edit any repo Markdown from Slack mode. Record the owner's
+answer in the directive so advance-roadmap can fold it into the repo later. This deliberate
+limit avoids the dirty-tree trap; dirty-tree directives still carry the exact canonical snapshot
+and distinguish cleanup-only from permission to implement a qualifying item.
+
+Attempt a confirmation in the question thread, then advance; a failed confirmation is best-effort
+and never blocks the next question. When the queue empties,
+re-sweep until a sweep returns no blockers, post “roadmap is unblocked” once, and idle until the
+next weekday 8:45. Skipped/repeated evidence must not create an endless re-sweep loop or a false
+unblocked claim: leave it for the next weekday pass and say so. Queue statuses are pending,
+posted, answered, recorded and superseded, with source evidence, selected answer, Slack message
+timestamps and update timestamps persisted across restarts. On startup re-read posted-message
+reactions to backfill owner answers missed during downtime; retain older daily post mappings.
+Check newest copies first, skip unavailable/deleted copies, and backfill after reconciling a
+previously accepted post whose queue timestamp was not saved.
+
+Resolve a configured channel **name** through the bot's paginated `conversations.list` and
+cache its ID; this needs `channels:read` / `groups:read` and an app reinstall. A configured
+`C…` channel ID bypasses name lookup and needs only the existing history/reaction scopes,
+so it works without reinstalling; verify access with a history read. If missing or the bot is not a member, log and notify the admin once with an instruction to
+`/invite Slackagent`; do not crash or self-join. Deployment/restarts and live QA are separate
+from implementation: tests use fake Slack, Linear and model clients.
 
 ## The hard rule: no code, no git — prose and Linear only
 
