@@ -2,7 +2,7 @@
 
 ## Status
 
-Implementation verified; deploying and installing the SwiftBar plugin on this Mac.
+Complete. Implemented, tested, pushed, deployed, and installed on this Mac.
 
 ## Decisions
 
@@ -22,14 +22,16 @@ Implementation verified; deploying and installing the SwiftBar plugin on this Ma
 - Existing so-agentbar and AgentBar projects focus on local agents; SwiftBar supports a custom collector spanning hosts without maintaining a new native app.
 - Live collector result: 1 working, 1 waiting, 14 open across This Mac and jake2, with no coverage errors. Eight behavioral tests pass, including dead/reused pids, helpers, duplicate local sources, long turns, interruption, unavailable hosts, and output markup.
 - Coverage is local Claude Code registries and Codex processes with open rollouts, plus Superset terminal sessions. Chat-only sessions, remote agents outside Superset, and closed-rollout desktop threads are explicitly outside coverage.
+- Installed SwiftBar 2.1.1; native menu accessibility readback confirms the `1` menu title and the working/waiting/open breakdown for This Mac and jake2. SwiftBar logs confirm successful plugin execution.
+- Plugin symlink resolves to `~/.ai-tools/apps/agent-count/agents.5s.sh`; the login LaunchAgent is loaded and its launch command exited successfully (0). No sleep behavior or agent configuration was changed.
 
 ## Open threads
 
 - [x] Confirm definition of active: actively working.
 - [x] Implement collector, caching, and native menu output.
 - [x] Verify count semantics, deduplication, stale activity, and unreachable hosts.
-- [ ] Install, launch, and verify SwiftBar with deployed source symlinks.
-- [ ] Commit, push, and deploy.
+- [x] Install, launch, and verify SwiftBar with deployed source symlinks.
+- [x] Commit, push, and deploy.
 
 ## Approach
 
