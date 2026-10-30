@@ -2,13 +2,7 @@
 
 > **Suggested execution:** Sonnet with high reasoning: well-scoped Python, zsh and Node edits to existing, well-tested code, but they touch concurrency, gate semantics and hooks. Step up to Opus for slice C (shared budget and leases) if lease and wait semantics get subtle. Step down to Haiku for slices A1, A2 and D3 on their own.
 
-**Status (2026-10-29 17:35):**
-- **Merged and deployed (`~/.ai-tools` at `823aab6`):** #8, #9, #10, #12, #13, #15 and **#17 (W, per-window costs)**. Codex weekly is now calibrated (88 samples, 0.18× the 5h rate); Claude seven_day is still seeded at 0.1× (3 samples).
-- **Dry run at 17:30:** lanes=0, held 'no worker plus required review fits'. With Cursor gated, review is cross-provider, so a Codex worker needs a **Claude reviewer**, estimated at ~28.5% of the 5h window from only 2 samples, while Claude 5h is at 68%. That's correct at this moment. At 10:30 the batch admits only if Claude 5h is below ~40%; otherwise it holds rather than burning.
-- **Follow-up (O12):** the Claude reviewer estimate rests on 2 samples. Prefer a proxy (worker/subagent p80, scaled) until there are ≥5.
-- **G1 (#16):** fixing 9 review findings, and must adopt per-window costs from #17.
-- **DEV-320 (slackagent#7 plus #14):** fixed; verification queued through fanout.
-- **DEV-320 channel:** #agent-blockers is `C0CD946GNMP` (Jake, 10-29 17:45). It's set as UNBLOCK_ROADMAP_CHANNEL at deploy; no reinstall is needed. The Claude verifier queued via fanout sat waiting on Claude 5h headroom (correct behavior), so it was replaced with a Codex verifier, which now costs under 1 weekly point.
+**Status (2026-10-30 11:50):** everything from waves 1–2 plus H, W and X is merged and deployed. DEV-320 is live in #agent-blockers (13 questions queued). The 10-30 batch held, correctly but with zero throughput (F13), because the cross-provider Claude reviewer estimate (O12) didn't fit Claude's 5h headroom. Next: the O12 estimate fix; Jake to decide whether to move the batch time. G1 (#16) is still in its fix round.
 
 **Wave 2 (10-29 03:15):**
 - **E2, PR #12:** round 2 is verified by Claude. P1-1, P2-3, P2-4 and P2-5 are FIXED. P1-2 (redaction variants) and P2-6 (the per-attempt bound) are PARTIAL, and there are new findings (over-redaction, the batch-cancel save, an unattributable attempt erasing research). Round 3 is written in `~/.claude/state/fanout/review-ai-tools-12/fix-request-r3.txt` and goes out at 07:21.
@@ -139,6 +133,14 @@ Separately:
 - **10:12 (weekly cap 80):** lanes=1, with 23 repos held on 'shared headroom'. Claude 5h 38% (32 headroom) and 7d 65% (15 headroom); Codex 5h 0% (70) and weekly 74% (6); Cursor auto 100%, api 92.7%. Verdict checks: 11 no-verdict, 9 changed, 4 retriage.
 - **10:16:** **#18 (X, weekly cap 90%) merged and deployed (`a2cd292`; 440 tests)**. Weekly headroom rose to Codex 16 and Claude 25, but lanes stayed at 1.
 - **The binding constraint is now the cross-provider Claude reviewer** (Cursor is out), estimated at ~28.5% of Claude 5h from **2 samples** (O12), against 29 points of 5h headroom. Fixing O12 (a proxy estimate until there are ≥5 reviewer samples) is the next lever for lane count.
+
+**F13. The 10-30 10:30 batch planned nothing: the cross-provider Claude reviewer didn't fit.**
+- **Outcome:** `phase: skipped`, 24/24 skipped-quota, 0 model calls, 0 tokens. The reason was 'no worker plus required review fits the shared agent budget'. For comparison: 10-27 had 16 skipped-quota, 5 quota-paused and 3 errors (~898k new / 12.2M cached Claude planner tokens); 10-28 had 11, 5, 4, 4 and 1; 10-29 had 24 skipped-quota (the Cursor reviewer gate).
+- **The fixes worked as designed:** batch.json carried 'review fallback: cross-provider (cursor gated until 2026-11-03)' and the new `budget` block. quota_paused listed only cursor. No lane hit quota mid-run.
+- **The binding constraint at 10:30:** Claude 5h was at **48%** (22 headroom, cap 70) against the **~28.5% Claude-reviewer estimate from 2 samples** (O12). Codex had plenty of room: 5h at 10% (60 headroom) and weekly at 76% (14 headroom at cap 90).
+- **Fragility:** between the 10:16 dry run (41%, lanes=1) and 10:30, Claude 5h rose 7 points, partly from this conducting session's own Claude turns. Lane admission at a fixed 10:30 depends on how much Claude is used that morning.
+- **Not exercised again** (no planner ran): missing-fence errors, Sonnet-medium planners, verdict saving, partial-triage digests.
+- **Levers:** (1) fix O12, the Claude reviewer estimate, with a proxy from comparable roles until there are ≥5 samples (real Claude PR reviews this week used ~120–260k tokens), so 22 points of headroom fits a review; (2) move the batch to a time when Claude's 5h window is usually low, such as before Jake's day; that's Jake's call.
 
 ## Open threads
 
