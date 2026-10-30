@@ -133,6 +133,11 @@ Separately:
 
 **F11. Long windows charged at the 5-hour rate.** `lib/agent_budget.py capacity()` subtracts the same five_hour-calibrated cost and reservations from every window; calibration only reads five_hour deltas. Live evidence: Claude 5h 0% with 7d 53% gave `allow --want 4` → 1, and the 10-29 17:20 dry run held every repo with 'no worker plus required review fits'. The fix is slice W (per-window factors).
 
+**F12. Pre-batch check, 10-30 10:12–10:16.**
+- **10:12 (weekly cap 80):** lanes=1, with 23 repos held on 'shared headroom'. Claude 5h 38% (32 headroom) and 7d 65% (15 headroom); Codex 5h 0% (70) and weekly 74% (6); Cursor auto 100%, api 92.7%. Verdict checks: 11 no-verdict, 9 changed, 4 retriage.
+- **10:16:** **#18 (X, weekly cap 90%) merged and deployed (`a2cd292`; 440 tests)**. Weekly headroom rose to Codex 16 and Claude 25, but lanes stayed at 1.
+- **The binding constraint is now the cross-provider Claude reviewer** (Cursor is out), estimated at ~28.5% of Claude 5h from **2 samples** (O12), against 29 points of 5h headroom. Fixing O12 (a proxy estimate until there are ≥5 reviewer samples) is the next lever for lane count.
+
 ## Open threads
 
 - [x] **O1.** Answered: no, a dedicated variable is needed; `ADVANCE_ROADMAP_HEADLESS=1`. `CLAUDE_QUOTA_MANAGED` is set only inside `claude_quota.run`, which `claude-session run` and `agent-run` (for Claude) go through; `planapproval.py` calls `claude` directly, so its approver turns never carry it, and any interactive `claude` started inside a managed session would inherit it and lose its sign-off check. The new variable is exported by `run.sh`, `worker.sh`, `review.sh` and set in `planapproval.py`'s subprocess env, and matches the `ADVANCE_ROADMAP_*` pattern the Superset worker launcher re-exports. `run.sh`'s planner does go through `claude-session run`. Evidence: `grep CLAUDE_QUOTA_MANAGED` (only `lib/claude_quota.py`); hook cases in `hooks/tests/status-glyph-check.test.sh`; the replay test checks the marker reaches the planner call. Live reproduction of F1(b) (the four O2 smoke runs, each with the deployed Stop hook active): `claude -p … --output-format json` returned only the `💬 …` line as `result` while the session transcript held the fence in an earlier assistant message, which is what `lib/lastfence.py` recovers.
