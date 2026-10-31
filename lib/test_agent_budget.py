@@ -54,6 +54,43 @@ class BudgetTests(unittest.TestCase):
         self.assertEqual(model['roles']['planner']['tokens_p80'], 40)
         self.assertEqual(model['roles']['reviewer']['tokens_p80'], 29000)
 
+    def test_thin_role_estimate_blends_toward_cross_provider_proxy(self):
+        records = ([{'provider': 'claude', 'role': 'reviewer', 'total': n} for n in (120000, 260000)]
+                   + [{'provider': 'codex', 'role': 'reviewer', 'total': 40000}])
+        role = b.estimates(records, [])['claude']['roles']['reviewer']
+        self.assertEqual(role['source'], 'blended')
+        self.assertEqual(role['sample_count'], 2)
+        self.assertEqual(role['tokens_p80'], 128000)  # 2/5 × 260k + 3/5 × 40k
+
+    def test_five_role_observations_keep_the_raw_estimate(self):
+        records = ([{'provider': 'claude', 'role': 'reviewer', 'total': n}
+                    for n in (50000, 60000, 70000, 80000, 90000)]
+                   + [{'provider': 'codex', 'role': 'reviewer', 'total': 300000}])
+        role = b.estimates(records, [])['claude']['roles']['reviewer']
+        self.assertEqual((role['source'], role['sample_count'], role['tokens_p80']),
+                         ('observed', 5, 80000))
+
+    def test_thin_reviewer_uses_same_provider_subagent_when_no_peer_role_exists(self):
+        records = ([{'provider': 'claude', 'role': 'reviewer', 'total': 200000}] * 2
+                   + [{'provider': 'claude', 'role': 'subagent', 'total': 150000}] * 5)
+        role = b.estimates(records, [])['claude']['roles']['reviewer']
+        self.assertEqual(role['source'], 'blended')
+        self.assertEqual(role['tokens_p80'], 170000)
+
+    def test_unobserved_role_reports_proxy_source(self):
+        role = b.estimates([{'provider': 'codex', 'role': 'reviewer', 'total': 40000}], [])['claude']['roles']['reviewer']
+        self.assertEqual((role['source'], role['sample_count'], role['tokens_p80']), ('proxy', 0, 40000))
+
+    def test_status_json_exposes_role_estimate_source_and_sample_count(self):
+        model = b.estimates([{'provider': 'claude', 'role': 'reviewer', 'total': 100000}], [])
+        output = io.StringIO()
+        with patch.object(b, 'cached_estimates', return_value=model), \
+                patch.object(b, 'readings', return_value=self.reading), \
+                contextlib.redirect_stdout(output):
+            b.main(['status', '--json'])
+        role = json.loads(output.getvalue())['claude']['estimates']['roles']['reviewer']
+        self.assertEqual((role['source'], role['sample_count']), ('blended', 1))
+
     def test_seeds_until_five_calibrated_samples(self):
         samples = [{'provider': 'codex', 'tokens': 1000, 'pct': i} for i in range(1, 6)]
         self.assertEqual(b.estimates([], samples[:4])['codex']['factor']['five_hour'], 3 / 70000)
@@ -300,6 +337,21 @@ print(bool(b.acquire('codex','planner',pid=int(sys.argv[2]))))
         self.assertEqual(len(b.history()[1]), 1)
         self.assertTrue((b.budget_dir() / 'samples.jsonl').exists())
 
+    def test_history_counts_successful_claude_reviewer_ledger_runs(self):
+        self.append(b.claude_home() / 'automations/advance-roadmap/runs.jsonl', [
+            dict(tokens=dict(calls=[dict(provider='claude', role='reviewer', round=1, total=110000),
+                                   dict(provider='claude', role='reviewer', round=2, total=130000)]))])
+        self.append(b.budget_dir() / 'ledger.jsonl', [
+            dict(agent='claude', role='reviewer', outcome='ok', actual_total=125000),
+            dict(agent='claude', role='reviewer', outcome='error', actual_total=999999),
+            dict(agent='codex', role='worker', outcome='ok', actual_total=80000)])
+        records, _ = b.history(persist=False)
+        claude_reviews = [r for r in records if r.get('provider') == 'claude' and r.get('role') == 'reviewer']
+        self.assertEqual(sorted((r['total'], r.get('source')) for r in claude_reviews),
+                         [(110000, None), (125000, 'ledger'), (130000, None)])
+        role = b.estimates(records, [])['claude']['roles']['reviewer']
+        self.assertEqual((role['source'], role['sample_count']), ('blended', 3))
+
     def quota_rows(self, session, start, finish, before=10, after=13, path=None):
         return [dict(event=event, session_id=session, timestamp=at, transcript_path=str(path) if path else None,
                      quota=dict(age_seconds=0, windows={'five_hour': dict(used_percentage=pct, resets_at=2000000000)}))
@@ -314,7 +366,7 @@ print(bool(b.acquire('codex','planner',pid=int(sys.argv[2]))))
         self.append(b.budget_dir() / 'samples.jsonl', [dict(id='quota:one:10', source='quota_snapshots',
                     provider='claude', tokens=140000, pct=3)])
         records, samples = b.history()
-        self.assertEqual(records[0]['total'], 140000)  # whole-job estimate
+        self.assertEqual(sorted(r['total'] for r in records), [70000, 70000])  # one reviewer observation per round
         self.assertEqual([s['tokens'] for s in samples], [70000, 70000])
         self.assertEqual([s['tokens'] for s in b.rows(b.budget_dir() / 'samples.jsonl')], [70000, 70000])
         self.assertEqual(len(b.history()[1]), 2)
@@ -775,8 +827,11 @@ sys.exit(hook.main())
         self.append(b.claude_home() / 'automations/advance-roadmap/runs.jsonl', [
             dict(duration_s=100, tokens=dict(calls=[dict(provider='claude', role='orchestrator', total=v, sessions=['sid']) for v in (10, 20)]))])
         records, _ = b.history()
-        self.assertEqual(b.estimates(records, [])['claude']['roles']['planner']['tokens_p80'], 30)
-        self.assertEqual(b.estimates(records, [])['claude']['roles']['planner']['ttl'], 150)
+        self.assertEqual(records[0]['total'], 30)
+        role = b.estimates(records, [])['claude']['roles']['planner']
+        self.assertEqual((role['source'], role['sample_count']), ('blended', 1))
+        self.assertEqual(role['tokens_p80'], .2 * 30 + .8 * b.SEED_TOKENS['claude']['planner'])
+        self.assertEqual(role['ttl'], 150)
 
     def test_installer_preserves_and_deduplicates_gate_hooks(self):
         import shutil
