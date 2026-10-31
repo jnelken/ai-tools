@@ -60,8 +60,7 @@ Serialize only for a real dependency: two targets sharing a worktree or branch, 
 
 ### 1.5. Confirm the Linear ticket is in the PR title
 
-The ticket id as a `(CON-N)` / `(DEV-N)` suffix on the PR title is the link: Linear picks it up from the title, the same way it does from commit titles. **Do not add magic-word lines (`Fixes`, `Part of`, `Related to`) to the PR description.** Jake's ruling (api #1607, 2026-10-29): magic words belong in commit messages only; a magic word in a PR body drives the ticket's workflow state from the PR, which is not wanted.
-
+The ticket id as a `(CON-N)` / `(DEV-N)` suffix on the PR title is the link: Linear picks it up from the title, the same way it does from commit titles.
 ```bash
 gh pr view <PR_NUMBER> --repo <OWNER/REPO> --json title -q .title | grep -oiE '\((dev|con)-[0-9]+\)'
 ```
