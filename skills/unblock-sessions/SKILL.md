@@ -1,6 +1,6 @@
 ---
 name: unblock-sessions
-description: Walk every Claude session running in a Superset terminal tab on this machine, one at a time, and ask Jake here (AskUserQuestion) about each one that is waiting on him — open questions, Decisions blocks, live AskUserQuestion/permission dialogs, and finished (✅/⛏️) tabs that could be reaped — with enough transcript context that he never has to open the tab. Relays each answer into the session, then rescans for follow-ups until nothing is left. Every prompt offers Skip for now and Skip forever. Use when Jake says "unblock my sessions", "what's waiting on me", "check my tabs for questions", "answer my sessions", "survey open sessions", or "/unblock-sessions".
+description: Walk every Claude session running in a Superset terminal tab on any of Jake's online hosts (this Mac, jake2, …), one at a time, and ask Jake here (AskUserQuestion) about each one that is waiting on him — open questions, Decisions blocks, live AskUserQuestion/permission dialogs, and finished (✅/⛏️) tabs that could be reaped — with enough transcript context that he never has to open the tab. Relays each answer into the session, then rescans for follow-ups until nothing is left. Every prompt offers Skip for now and Skip forever. Pass `--host <name|id|local>` to scope the run to one host; with no flag it covers all hosts. Use when Jake says "unblock my sessions", "what's waiting on me", "check my tabs for questions", "answer my sessions", "survey open sessions", or "/unblock-sessions".
 ---
 
 # unblock-sessions
@@ -9,10 +9,16 @@ An interactive inbox over Jake's parallel Claude sessions. Questions pile up in 
 looking at; this skill brings them to him one at a time, relays his answer, and keeps going.
 
 **Helper:** `~/.claude/skills/unblock-sessions/unblock.py` (stdlib Python, run with `python3 -I`).
-It reads `superset snapshot`, maps each terminal to its Claude session via Superset's
-`host.db` (read-only), and parses that session's transcript JSONL. The transcript holds
-the full turn, not just the visible screen. Always go through the helper rather than dumping
-snapshots or transcripts into context.
+It reads `superset snapshot` for each host in scope. On this machine it maps each terminal to
+its Claude session via Superset's `host.db` (read-only) and parses that session's transcript
+JSONL. A remote host's disk isn't reachable, so its sessions are read with
+`superset agents read --host` instead. Either way the helper sees the full turn, not just the
+visible screen. Always go through the helper rather than dumping snapshots or transcripts into
+context.
+
+**Host scope.** With no `--host`, the run covers every online host in the org (offline hosts are
+skipped and reported). If the user passed `--host <name|id|local>` (for example
+`/unblock-sessions --host jake2`), pass it through to `next` and cover only that host.
 
 State lives in `~/.claude/state/unblock-sessions/`:
 - `skip-forever.json`: question keys Jake muted.
@@ -31,23 +37,28 @@ H=~/.claude/skills/unblock-sessions/unblock.py
 SEEN="<scratchpad>/unblock-seen.txt"; : > "$SEEN"
 ```
 
-Keep a `relayed` list (`WORKSPACE_ID:TERMINAL_ID`) in your head.
+Keep a `relayed` list (`HOST_ID:WORKSPACE_ID:TERMINAL_ID`) in your head.
 
 ### 2. Get the next candidate
 
 ```bash
-python3 -I "$H" next --seen "$SEEN"
+python3 -I "$H" next --seen "$SEEN"                 # all online hosts
+python3 -I "$H" next --seen "$SEEN" --host jake2    # only if the user passed --host
 ```
 
-This returns one idle or blocked agent tab from **any** workspace on this host (your own tab
-is excluded), or `{"done": true}`. The fields:
+This returns one idle or blocked agent tab from **any** workspace on any host in scope (your own
+tab is excluded), or `{"done": true}`, which may carry `skipped_hosts` (offline or unreachable
+hosts; mention them in the report). The fields:
+- `host`, `host_id`: which machine the tab runs on (`host_id` is `local` for this Mac)
 - `project`, `workspace_name`, `branch`, `title`, `glyph`, `state`
-- `first_prompt`: the session's mission or handoff
-- `last_user_message`
+- `first_prompt`: the session's mission or handoff (this machine only)
+- `last_user_message` (this machine only)
 - `earlier_turn_text` and `final_message`: the last turn
-- `pending_tool_use`: an unanswered tool call, meaning a live dialog
+- `pending_tool_use`: an unanswered tool call, meaning a live dialog (this machine only)
 - `screen_tail`: blocked or dialog tabs only
 - `key`
+
+Name the host in Jake's question text whenever more than one host is in scope.
 
 Handle exactly this one candidate (step 3), then call `next` again. Order doesn't matter.
 
@@ -55,7 +66,8 @@ Handle exactly this one candidate (step 3), then call `next` again. Order doesn'
 
 Work through these in order.
 
-**a. Live dialog.** `pending_tool_use` is set, or `state` is `blocked`.
+**a. Live dialog.** `pending_tool_use` is set, or `state` is `blocked`. On a remote host
+`pending_tool_use` is never set, so rely on `state` and `screen_tail`.
 - **AskUserQuestion:** the questions and options are in `pending_tool_use.input`. Ask Jake the
   same questions (step 4) and answer with key presses (step 5).
 - **Permission prompt or another tool:** describe the tool and its input, and ask
@@ -110,16 +122,17 @@ Don't paste raw transcript or tool output.
     2) base on main …`. If Jake skipped some of several questions, say so in the same message
     ("#3 skipped for now").
     ```bash
-    python3 -I "$H" relay <workspace_id> <terminal_id> --text "<answer>"
+    python3 -I "$H" relay <workspace_id> <terminal_id> --host <host_id> --text "<answer>"
     ```
+    Always pass the candidate's `host_id` as `--host` (use `local` for this Mac).
   - **Live AskUserQuestion dialog:** navigate with keys, for example
     `--keys "down,down,enter"` to pick the third option. Multi-question dialogs advance per
     question, then usually need one more `enter` to submit. Free text: pick the "Type
     something" row, then `--text`. After **each** send, check the screen with
-    `python3 -I "$H" screen <ws> <term> --lines 30` before the next key. If the screen isn't
+    `python3 -I "$H" screen <ws> <term> --host <host_id> --lines 30` before the next key. If the screen isn't
     what you expect, stop and tell Jake to finish in the tab.
 
-  Then add `<ws>:<term>` to `relayed` and append the key to `$SEEN`.
+  Then add `<host_id>:<ws>:<term>` to `relayed` and append the key to `$SEEN`.
 - **Skip for now:** append the key to `$SEEN`. It won't come back this run.
 - **Skip forever:** `python3 -I "$H" skip-forever <key> "<project · short label>"`.
 
@@ -137,7 +150,7 @@ When `next` returns `done`:
   naturally.
 
 ```bash
-python3 -I "$H" wait <ws:term> [<ws:term> ...]    # polls ≤540s; run with a 600000ms Bash timeout
+python3 -I "$H" wait <host_id:ws:term> [<host_id:ws:term> ...]    # polls ≤540s; run with a 600000ms Bash timeout
 ```
 
 If some are still working after one wait, wait once more. If they're still working after that,
@@ -153,8 +166,14 @@ with the status line.
 ## Gotchas
 
 - **`terminals read` shows only the screen.** That's why the helper reads the transcript
-  JSONL (via `host.db` → `~/.claude/projects/*/<session>.jsonl`). Non-Claude agents fall
-  back to `superset agents read`.
+  JSONL on this machine (via `host.db` → `~/.claude/projects/*/<session>.jsonl`). Remote hosts
+  and non-Claude agents fall back to `superset agents read`, which gives the final message
+  but not `first_prompt`, `last_user_message` or `pending_tool_use`.
+- **Skip-forever keys are per terminal and turn,** so they work across hosts. A session's key
+  differs between this Mac's transcript path and the remote path, so a mute set before a tab
+  moved hosts won't carry over.
+- **A host can drop out mid-run.** An offline or unreachable host is listed under
+  `skipped_hosts` rather than failing the run; say so in the report.
 - **A tab can close between `next` and `relay`.** A send error like "has ended" means the
   session is gone. Tell Jake, mark the key seen, and move on.
 - **Never relay into a `working` tab.** `next` only returns idle or blocked tabs. If Jake took

@@ -1,18 +1,28 @@
 #!/usr/bin/env python3
 """Helper for the unblock-sessions skill.
 
-Walks the Claude sessions running in Superset terminal tabs on this host and
-hands the model ONE idle/blocked session at a time, with enough transcript
-context to ask Jake about it without him opening the tab.
+Walks the Claude sessions running in Superset terminal tabs and hands the model
+ONE idle/blocked session at a time, with enough transcript context to ask Jake
+about it without him opening the tab.
+
+Scope: every online host in the org by default. `--host HOST` (id, id prefix,
+name, or "local") narrows `next` / `list` to that one host. Candidates carry
+`host` (display name) and `host_id` ("local" for this machine); pass `host_id`
+back as `--host` to relay / screen, or as the first part of a wait target.
 
 Subcommands (all print JSON):
-  next  --seen FILE     next unseen candidate, or {"done": true}
-  list  [--seen FILE]   every candidate with its key and filter reason (debug)
+  next  [--host HOST] --seen FILE   next unseen candidate, or {"done": true}
+  list  [--host HOST] [--seen FILE] every candidate with its key and filter reason (debug)
   skip-forever KEY LABEL
   no-question KEY
-  relay WS TERM (--text TEXT | --keys KEYS)
-  screen WS TERM [--lines N]
-  wait  WS:TERM [WS:TERM ...] [--timeout SECONDS]
+  relay WS TERM [--host HOST_ID] (--text TEXT | --keys KEYS)
+  screen WS TERM [--host HOST_ID] [--lines N]
+  wait  [HOST_ID:]WS:TERM ...  [--timeout SECONDS]
+
+Transcripts: this machine's sessions are parsed from the local transcript JSONL
+(via host.db). A remote host's disk is out of reach, so its sessions go through
+`superset agents read --host`, which returns the transcript text the same way
+the non-Claude fallback does (no pending_tool_use; blocked tabs get screen_tail).
 
 Read-only toward Superset's host.db (opened with mode=ro). The only writes are
 the state files under ~/.claude/state/unblock-sessions/ and `terminals send`.
@@ -47,6 +57,84 @@ def superset(*args, check=True):
     if check and res.returncode != 0:
         raise SystemExit(f"superset {' '.join(args)} failed: {res.stderr.strip() or res.stdout.strip()}")
     return res
+
+
+# --- Hosts -------------------------------------------------------------------
+
+class Host:
+    """One Superset host. The local machine uses --local (and no flag for
+    snapshot); a remote host uses --host <id>."""
+
+    def __init__(self, hid, name, local=False, online=True):
+        self.id, self.name, self.local, self.online = hid, name, local, online
+
+    @property
+    def key(self):
+        return "local" if self.local else self.id
+
+    @property
+    def flags(self):
+        return ["--local"] if self.local else ["--host", self.id]
+
+    @property
+    def snapshot_flags(self):
+        return [] if self.local else ["--host", self.id]
+
+
+def list_hosts():
+    rows = json.loads(superset("hosts", "list").stdout)
+    # `hosts list` only says "local" while the desktop app serves this machine;
+    # once a standalone `superset start` daemon does, it reports "yes" like any
+    # remote. `superset status` carries this machine's host id either way.
+    st = superset("status", check=False)
+    try:
+        local_id = json.loads(st.stdout).get("hostId")
+    except json.JSONDecodeError:
+        local_id = None
+    hosts = []
+    for r in rows:
+        status = r.get("online")
+        hosts.append(Host(r["id"], r.get("name") or r["id"],
+                          local=(status == "local" or r["id"] == local_id),
+                          online=status in ("local", "yes", True)))
+    return hosts
+
+
+def match_host(hosts, selector):
+    """Host named by selector: "local", an id, an id prefix, or a name."""
+    sel = selector.lower()
+    if sel == "local":
+        return next((h for h in hosts if h.local), None)
+    exact = [h for h in hosts if h.id.lower() == sel or h.name.lower() == sel]
+    if exact:
+        return exact[0]
+    prefix = [h for h in hosts if h.id.lower().startswith(sel)]
+    return prefix[0] if len(prefix) == 1 else None
+
+
+def get_host(selector):
+    """Host for relay/screen/wait. None or "local" means this machine."""
+    if selector in (None, "local"):
+        return Host("local", "local", local=True)
+    host = match_host(list_hosts(), selector)
+    if not host:
+        raise SystemExit(f"unknown host: {selector}")
+    return host
+
+
+def scan_hosts(selector):
+    """(hosts to scan, skipped) for `next` / `list`. No selector = every online
+    host; offline ones are reported in skipped. A named host must be online."""
+    hosts = list_hosts()
+    if selector:
+        host = match_host(hosts, selector)
+        if not host:
+            raise SystemExit(f"unknown host: {selector} (known: {', '.join(h.name for h in hosts)})")
+        if not host.online:
+            raise SystemExit(f"host {host.name} is offline")
+        return [host], []
+    return ([h for h in hosts if h.online],
+            [{"host": h.name, "reason": "offline"} for h in hosts if not h.online])
 
 
 def load_json(path, default):
@@ -210,8 +298,8 @@ def summarize_transcript(path):
 
 # --- Candidates --------------------------------------------------------------
 
-def screen_tail(ws, term, lines=40):
-    res = superset("terminals", "read", "--local", "--workspace", ws, "--terminal", term,
+def screen_tail(host, ws, term, lines=40):
+    res = superset("terminals", "read", *host.flags, "--workspace", ws, "--terminal", term,
                    "--max-lines", str(lines), check=False)
     if res.returncode != 0:
         return None
@@ -228,26 +316,36 @@ def glyph_of(title):
     return first if not first.isascii() else None
 
 
-def iter_terminals():
-    snap = json.loads(superset("snapshot").stdout)
+def iter_terminals(hosts, skipped):
+    """Yield (host, ws, terminal, agent, reason) across hosts. A host whose
+    snapshot fails is appended to `skipped` instead of aborting the run."""
     me = os.environ.get("SUPERSET_TERMINAL_ID")
-    for ws in snap.get("workspaces", []):
-        for t in ws.get("terminals", []):
-            agent = t.get("agent") or {}
-            reason = None
-            if t["id"] == me:
-                reason = "self"
-            elif not agent:
-                reason = "no-agent"
-            elif agent.get("state") not in CANDIDATE_STATES:
-                reason = f"state:{agent.get('state')}"
-            yield ws, t, agent, reason
+    for host in hosts:
+        res = superset("snapshot", *host.snapshot_flags, check=False)
+        if res.returncode != 0:
+            skipped.append({"host": host.name, "reason": (res.stderr.strip() or res.stdout.strip())[:200]})
+            continue
+        for ws in json.loads(res.stdout).get("workspaces", []):
+            for t in ws.get("terminals", []):
+                agent = t.get("agent") or {}
+                reason = None
+                if t["id"] == me:
+                    reason = "self"
+                elif not agent:
+                    reason = "no-agent"
+                elif agent.get("state") not in CANDIDATE_STATES:
+                    reason = f"state:{agent.get('state')}"
+                yield host, ws, t, agent, reason
 
 
-def build_candidate(ws, t, agent, bindings):
-    session_id = bindings.get(t["id"])
+def build_candidate(host, ws, t, agent, bindings):
+    # host.db and transcripts are this machine's disk, so only local sessions
+    # can be parsed directly; remote ones fall back to `agents read --host`.
+    session_id = bindings.get(t["id"]) if host.local else None
     path = transcript_path(session_id) if session_id else None
     cand = {
+        "host": host.name,
+        "host_id": host.key,
         "workspace_id": ws["id"],
         "workspace_name": ws.get("name"),
         "project": ws.get("project"),
@@ -264,12 +362,12 @@ def build_candidate(ws, t, agent, bindings):
         cand.update(summarize_transcript(path))
     else:
         # Non-Claude agent or unbound tab: fall back to the agent's own reader.
-        res = superset("agents", "read", "--local", "--workspace", ws["id"], "--terminal", t["id"], check=False)
+        res = superset("agents", "read", *host.flags, "--workspace", ws["id"], "--terminal", t["id"], check=False)
         text = json.loads(res.stdout).get("text") if res.returncode == 0 else None
         cand["final_message"] = trunc(text[-6000:] if text else None, 6000)
         cand["turn_id"] = hashlib.sha1((text or "").encode()).hexdigest()
     if cand["state"] == "blocked" or cand.get("pending_tool_use"):
-        cand["screen_tail"] = screen_tail(ws["id"], t["id"])
+        cand["screen_tail"] = screen_tail(host, ws["id"], t["id"])
     cand["key"] = hashlib.sha1(f"{t['id']}|{session_id}|{cand.get('turn_id')}".encode()).hexdigest()[:16]
     return cand
 
@@ -289,15 +387,19 @@ def cmd_next(args):
     skip_forever = load_json(SKIP_FOREVER, {})
     no_question = load_json(NO_QUESTION, {})
     bindings = session_bindings()
-    for ws, t, agent, reason in iter_terminals():
+    hosts, skipped = scan_hosts(args.host)
+    for host, ws, t, agent, reason in iter_terminals(hosts, skipped):
         if reason:
             continue
-        cand = build_candidate(ws, t, agent, bindings)
+        cand = build_candidate(host, ws, t, agent, bindings)
         if filter_reason(cand["key"], seen, skip_forever, no_question):
             continue
         out(cand)
         return
-    out({"done": True})
+    done = {"done": True}
+    if skipped:
+        done["skipped_hosts"] = skipped
+    out(done)
 
 
 def cmd_list(args):
@@ -305,16 +407,18 @@ def cmd_list(args):
     skip_forever = load_json(SKIP_FOREVER, {})
     no_question = load_json(NO_QUESTION, {})
     bindings = session_bindings()
+    hosts, skipped = scan_hosts(args.host)
     rows = []
-    for ws, t, agent, reason in iter_terminals():
-        row = {"project": ws.get("project"), "workspace": ws.get("name"), "terminal_id": t["id"],
-               "title": t.get("title"), "state": agent.get("state")}
+    for host, ws, t, agent, reason in iter_terminals(hosts, skipped):
+        row = {"host": host.name, "project": ws.get("project"), "workspace": ws.get("name"),
+               "terminal_id": t["id"], "title": t.get("title"), "state": agent.get("state")}
         if not reason:
-            cand = build_candidate(ws, t, agent, bindings)
+            cand = build_candidate(host, ws, t, agent, bindings)
             row["key"] = cand["key"]
             reason = filter_reason(cand["key"], seen, skip_forever, no_question) or "CANDIDATE"
         row["status"] = reason
         rows.append(row)
+    rows.extend({"host": s["host"], "status": f"host-skipped: {s['reason']}"} for s in skipped)
     out(rows)
 
 
@@ -336,7 +440,8 @@ def cmd_no_question(args):
 
 
 def cmd_relay(args):
-    base = ["terminals", "send", "--local", "--workspace", args.workspace, "--terminal", args.terminal]
+    host = get_host(args.host)
+    base = ["terminals", "send", *host.flags, "--workspace", args.workspace, "--terminal", args.terminal]
     if args.keys:
         res = superset(*base, "--keys", args.keys, check=False)
     else:
@@ -345,23 +450,29 @@ def cmd_relay(args):
 
 
 def cmd_screen(args):
-    out({"text": screen_tail(args.workspace, args.terminal, args.lines)})
+    out({"text": screen_tail(get_host(args.host), args.workspace, args.terminal, args.lines)})
 
 
 def cmd_wait(args):
-    targets = {}
+    # Target spec: WS:TERM (this machine) or HOST_ID:WS:TERM.
+    targets = {}  # terminal id -> host selector
     for spec in args.targets:
-        ws, _, term = spec.partition(":")
-        targets[term] = ws
+        parts = spec.split(":")
+        host_sel, term = (parts[0], parts[-1]) if len(parts) == 3 else ("local", parts[-1])
+        targets[term] = host_sel
+    hosts = {sel: get_host(sel) for sel in set(targets.values())}
     deadline = time.time() + args.timeout
     states = {}
     while True:
-        snap = json.loads(superset("snapshot").stdout)
         states = {}
-        for ws in snap.get("workspaces", []):
-            for t in ws.get("terminals", []):
-                if t["id"] in targets:
-                    states[t["id"]] = (t.get("agent") or {}).get("state", "exited")
+        for sel, host in hosts.items():
+            res = superset("snapshot", *host.snapshot_flags, check=False)
+            if res.returncode != 0:
+                continue  # unreachable host: its targets fall through to "gone"
+            for ws in json.loads(res.stdout).get("workspaces", []):
+                for t in ws.get("terminals", []):
+                    if targets.get(t["id"]) == sel:
+                        states[t["id"]] = (t.get("agent") or {}).get("state", "exited")
         for term in targets:
             states.setdefault(term, "gone")
         busy = [term for term, s in states.items() if s in ("working", "starting")]
@@ -377,10 +488,12 @@ def main():
 
     s = sub.add_parser("next")
     s.add_argument("--seen")
+    s.add_argument("--host", help="only this host (id, name, or 'local'); default: every online host")
     s.set_defaults(fn=cmd_next)
 
     s = sub.add_parser("list")
     s.add_argument("--seen")
+    s.add_argument("--host", help="only this host (id, name, or 'local'); default: every online host")
     s.set_defaults(fn=cmd_list)
 
     s = sub.add_parser("skip-forever")
@@ -395,6 +508,7 @@ def main():
     s = sub.add_parser("relay")
     s.add_argument("workspace")
     s.add_argument("terminal")
+    s.add_argument("--host", help="host_id from the candidate; default: this machine")
     g = s.add_mutually_exclusive_group(required=True)
     g.add_argument("--text")
     g.add_argument("--keys")
@@ -404,10 +518,11 @@ def main():
     s.add_argument("workspace")
     s.add_argument("terminal")
     s.add_argument("--lines", type=int, default=40)
+    s.add_argument("--host", help="host_id from the candidate; default: this machine")
     s.set_defaults(fn=cmd_screen)
 
     s = sub.add_parser("wait")
-    s.add_argument("targets", nargs="+", help="WORKSPACE_ID:TERMINAL_ID")
+    s.add_argument("targets", nargs="+", help="[HOST_ID:]WORKSPACE_ID:TERMINAL_ID")
     s.add_argument("--timeout", type=int, default=540)
     s.set_defaults(fn=cmd_wait)
 
