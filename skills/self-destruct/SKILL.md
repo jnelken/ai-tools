@@ -72,6 +72,13 @@ git status --porcelain | cut -c1-2 | sort | uniq -c    # summarize by status cod
 git fetch origin "$BRANCH" -q 2>/dev/null
 git rev-list --count "origin/$BRANCH..HEAD"              # unpushed: vs the branch's own remote, never main
 ```
+A merged PR usually deletes the remote branch, so the fetch fails and `origin/$BRANCH` is a
+stale tracking ref that proves nothing. When the fetch fails, instead confirm `HEAD` is one of
+the merged PR's commits:
+```bash
+gh api repos/<owner>/<repo>/pulls/<N>/commits --paginate --jq '.[].sha' | grep -c "$(git rev-parse HEAD)"   # 1 = carried by the PR
+```
+A `0` there means local commits the PR never carried: treat them as outstanding.
 Uncommitted changes or unpushed commits are work the PR never carried. A tree that is
 nothing but ` D` entries (a half-removed worktree, thousands of lines) is not real work, but
 still say so before treating it as clean: it is uncommitted state that archiving will
@@ -84,10 +91,10 @@ open**, **already done** or **stale**, with the evidence. Never edit the file; t
 
 **c. Sibling terminals and this session's own loose ends.**
 ```bash
-superset terminals list --workspace "$SUPERSET_WORKSPACE_ID" --local --json
+superset terminals list --workspace "$SUPERSET_WORKSPACE_ID" --local --json | jq -c '.sessions[] | {terminalId, exited, title}'
 ```
 Note any terminal other than `$SUPERSET_TERMINAL_ID` that is busy or bound to a Claude
-session. Also count this session's own background tasks, Monitors, scheduled wakeups and
+session (the output is `{"sessions":[…]}`, not a bare array). Also count this session's own background tasks, Monitors, scheduled wakeups and
 open questions to Jake; each dies with the session.
 
 ## 3. Decide: clean close vs. confirm
