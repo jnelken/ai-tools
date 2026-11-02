@@ -29,6 +29,11 @@ The installer captures its absolute CLI path for GUI launches.
   the active organization. Working/running counts as working; blocked is waiting.
   Local provider counts use the greater of process/registry and terminal evidence,
   so Claude/Codex also running inside Superset are not added a second time.
+  `superset hosts list` shows this Mac as an ordinary online host, so it is
+  skipped by the `hostId` from `superset status --json`; if that id is
+  unavailable the menu warns that this Mac may be counted twice.
+- **Claude desktop app** sessions are in the same registry (`entrypoint:
+  claude-desktop`, own pid), so they count once under This Mac.
 - Local status refreshes every **5 seconds**. Remote host discovery and snapshots
   refresh every **30 seconds**. Each CLI call has a 7-second timeout.
 - **`!` means incomplete coverage.** Offline or unreachable hosts contribute no

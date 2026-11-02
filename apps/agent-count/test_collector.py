@@ -72,13 +72,33 @@ class CollectorTests(unittest.TestCase):
             with patch.object(c, "run", return_value=json.dumps([
                 {"id": "self", "name": "self", "online": "local"},
                 {"id": "remote", "name": "remote", "online": "yes"},
-                {"id": "offline", "name": "offline", "online": "no"}])):
+                {"id": "offline", "name": "offline", "online": "no"}])), \
+                    patch.object(c, "local_host_id", return_value="self-id"):
                 with patch.object(c, "cli_snapshot", side_effect=subprocess.TimeoutExpired("superset", 7)):
                     result = c.remote_hosts("superset")
             self.assertEqual(len(result["hosts"]), 2)
             self.assertTrue(all(h["error"] and not h["groups"] for h in result["hosts"]))
             with patch.object(c, "run", side_effect=AssertionError("Must use fresh cache")):
                 self.assertEqual(c.remote_hosts("superset"), result)
+
+    def test_this_mac_listed_as_online_host_is_not_counted_again(self):
+        hosts = [{"id": "me", "name": "Jakes-MacBook-Pro", "online": "yes"},
+                 {"id": "other", "name": "jake2", "online": "yes"}]
+        def fake_run(args):
+            return json.dumps({"hostId": "me"} if args[1] == "status" else hosts)
+        with tempfile.TemporaryDirectory() as directory, patch.object(c, "CACHE", Path(directory)), \
+                patch.object(c, "run", side_effect=fake_run), \
+                patch.object(c, "cli_snapshot", return_value=snapshot()) as snap:
+            result = c.remote_hosts("superset")
+        self.assertEqual([h["name"] for h in result["hosts"]], ["jake2"])
+        snap.assert_called_once_with("superset", "other")
+        self.assertEqual(result["errors"], [])
+
+    def test_unknown_local_host_id_is_flagged(self):
+        with tempfile.TemporaryDirectory() as directory, patch.object(c, "CACHE", Path(directory)), \
+                patch.object(c, "run", side_effect=lambda args: (_ for _ in ()).throw(OSError())
+                             if args[1] == "status" else "[]"):
+            self.assertIn("counted twice", c.remote_hosts("superset")["errors"][0])
 
     def test_superset_discovery_failure_is_visible(self):
         with tempfile.TemporaryDirectory() as directory, patch.object(c, "CACHE", Path(directory)):
