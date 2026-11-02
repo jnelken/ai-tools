@@ -1,6 +1,6 @@
 ---
 name: unblock-sessions
-description: Walk every Claude session running in a Superset terminal tab on any of Jake's online hosts (this Mac, jake2, …), one at a time, and ask Jake here (AskUserQuestion) about each one that is waiting on him — open questions, Decisions blocks, live AskUserQuestion/permission dialogs, and finished (✅/⛏️) tabs that could be reaped — with enough transcript context that he never has to open the tab. Relays each answer into the session, then rescans for follow-ups until nothing is left. Every prompt offers Skip for now and Skip forever. Pass `--host <name|id|local>` to scope the run to one host; with no flag it covers all hosts. Use when Jake says "unblock my sessions", "what's waiting on me", "check my tabs for questions", "answer my sessions", "survey open sessions", or "/unblock-sessions".
+description: Walk every Claude session running in a Superset terminal tab on any of Jake's online hosts (this Mac, jake2, …), one at a time, and ask Jake here (AskUserQuestion) about each one that is waiting on him — open questions, Decisions blocks, live AskUserQuestion/permission dialogs, and finished (✅/⛏️) tabs that could be reaped — with enough transcript context that he never has to open the tab. Relays each answer into the session, then rescans for follow-ups until nothing is left. Every prompt offers Skip for now and Skip forever, and typing `exit` sends the answers so far and stops. Pass `--host <name|id|local>` to scope the run to one host; with no flag it covers all hosts. Use when Jake says "unblock my sessions", "what's waiting on me", "check my tabs for questions", "answer my sessions", "survey open sessions", or "/unblock-sessions".
 ---
 
 # unblock-sessions
@@ -120,7 +120,22 @@ Don't paste raw transcript or tool output.
 goes through the automatic "Other" rather than a fifth option. Never open a tab on your own:
 `open` pulls the Superset window to the front, so only run it when Jake asks.
 
+**Exiting.** Also add `type "exit" under Other to send what's answered and stop` to the hint.
+It goes through "Other" for the same reason as `open`: the four slots are two real choices plus
+Skip for now and Skip forever. Without it the only way out is Esc, which discards every answer
+in the dialog.
+
 ### 5. Act on the answer
+
+- **Answer is `exit`** (case-insensitive; `quit` and `done` count too): stop the loop, but first
+  deliver everything already answered.
+  1. A dialog can carry several questions (max 4). Relay every question in it that got a real
+     answer, exactly as below. The `exit` question itself relays nothing, and no key is sent
+     into its live dialog.
+  2. Finish any relay already in flight: a live AskUserQuestion dialog you navigated but didn't
+     submit still needs its final `enter`. Check with `screen` and complete it.
+  3. Don't call `next` again and skip the step 6 wait. Go straight to step 7. List the relayed
+     sessions as "sent, not waited on", so follow-up questions wait for the next run.
 
 - **Answer is `open`:** run `python3 -I "$H" open <workspace_id> <terminal_id>`, which jumps the
   Superset GUI to that tab. Then ask the same question again, unchanged, so Jake can answer
