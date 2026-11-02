@@ -18,6 +18,11 @@ Subcommands (all print JSON):
   relay WS TERM [--host HOST_ID] (--text TEXT | --keys KEYS)
   screen WS TERM [--host HOST_ID] [--lines N]
   wait  [HOST_ID:]WS:TERM ...  [--timeout SECONDS]
+  open  WS TERM [--print]      jump the Superset GUI to that tab (--print: just show the link)
+
+Every candidate carries `link`, a superset:// deep link to its tab. The link is
+host-agnostic (workspace ids are unique) and its focusRequestId is a nonce the
+app needs to re-focus a tab it already showed, so `open` mints a fresh one.
 
 Transcripts: this machine's sessions are parsed from the local transcript JSONL
 (via host.db). A remote host's disk is out of reach, so its sessions go through
@@ -37,6 +42,7 @@ import sqlite3
 import subprocess
 import sys
 import time
+import uuid
 
 STATE_DIR = os.path.expanduser("~/.claude/state/unblock-sessions")
 SKIP_FOREVER = os.path.join(STATE_DIR, "skip-forever.json")
@@ -309,6 +315,11 @@ def screen_tail(host, ws, term, lines=40):
         return res.stdout
 
 
+def deep_link(ws, term):
+    """superset:// link that focuses a terminal tab in the desktop app."""
+    return f"superset://v2-workspace/{ws}?terminalId={term}&focusRequestId={uuid.uuid4()}"
+
+
 def glyph_of(title):
     if not title:
         return None
@@ -351,6 +362,7 @@ def build_candidate(host, ws, t, agent, bindings):
         "project": ws.get("project"),
         "branch": ws.get("branch"),
         "terminal_id": t["id"],
+        "link": deep_link(ws["id"], t["id"]),
         "title": t.get("title"),
         "glyph": glyph_of(t.get("title")),
         "state": agent.get("state"),
@@ -453,6 +465,16 @@ def cmd_screen(args):
     out({"text": screen_tail(get_host(args.host), args.workspace, args.terminal, args.lines)})
 
 
+def cmd_open(args):
+    url = deep_link(args.workspace, args.terminal)
+    if args.print:
+        out({"ok": True, "link": url, "opened": False})
+        return
+    res = subprocess.run(["open", url], capture_output=True, text=True)
+    out({"ok": res.returncode == 0, "link": url, "opened": res.returncode == 0,
+         "stderr": res.stderr.strip()})
+
+
 def cmd_wait(args):
     # Target spec: WS:TERM (this machine) or HOST_ID:WS:TERM.
     targets = {}  # terminal id -> host selector
@@ -520,6 +542,12 @@ def main():
     s.add_argument("--lines", type=int, default=40)
     s.add_argument("--host", help="host_id from the candidate; default: this machine")
     s.set_defaults(fn=cmd_screen)
+
+    s = sub.add_parser("open")
+    s.add_argument("workspace")
+    s.add_argument("terminal")
+    s.add_argument("--print", action="store_true", help="print the link without opening it")
+    s.set_defaults(fn=cmd_open)
 
     s = sub.add_parser("wait")
     s.add_argument("targets", nargs="+", help="[HOST_ID:]WORKSPACE_ID:TERMINAL_ID")

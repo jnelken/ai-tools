@@ -50,6 +50,7 @@ This returns one idle or blocked agent tab from **any** workspace on any host in
 tab is excluded), or `{"done": true}`, which may carry `skipped_hosts` (offline or unreachable
 hosts; mention them in the report). The fields:
 - `host`, `host_id`: which machine the tab runs on (`host_id` is `local` for this Mac)
+- `link`: a `superset://` deep link that jumps the Superset GUI to this tab
 - `project`, `workspace_name`, `branch`, `title`, `glyph`, `state`
 - `first_prompt`: the session's mission or handoff (this machine only)
 - `last_user_message` (this machine only)
@@ -114,8 +115,17 @@ Use one call per session, with one question per decision (max 4). If a session h
 
 Don't paste raw transcript or tool output.
 
+**Opening the tab.** End the question text with the candidate's `link` and the hint
+`type "open" under Other to jump to the tab`. The dialog is capped at 4 options, so "open"
+goes through the automatic "Other" rather than a fifth option. Never open a tab on your own:
+`open` pulls the Superset window to the front, so only run it when Jake asks.
+
 ### 5. Act on the answer
 
+- **Answer is `open`:** run `python3 -I "$H" open <workspace_id> <terminal_id>`, which jumps the
+  Superset GUI to that tab. Then ask the same question again, unchanged, so Jake can answer
+  after looking. Don't add the key to `$SEEN` yet. If `open` fails (`ok: false`), say so and
+  show the `link` for him to click.
 - **Real answer:**
   - **Text questions:** relay in the session's own format. Zen Decisions take the letters
     (`B D`). Otherwise send a short message: `Jake (via /unblock-sessions): 1) stage first
