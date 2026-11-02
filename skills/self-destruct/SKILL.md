@@ -1,0 +1,156 @@
+---
+name: self-destruct
+description: The session deletes its own Superset workspace (worktree, local branch, workspace registration, and this terminal tab) once its branch is confirmed merged, then signs off ⛏️. Checks IN_PROGRESS.md, unpushed commits and sibling terminals first and puts any loss in front of the user like a delete-confirmation dialog. Use when the user types /self-destruct or explicitly asks this session to clean up after itself. Trigger phrases include "self-destruct", "delete your own worktree", "reap this session", "reap this workspace", "close this workspace", "this PR merged, clean up this workspace", "tear down this superset workspace", "am I safe to close this workspace". Formerly named close-sswt.
+disable-model-invocation: true
+---
+
+# self-destruct
+
+A session removes the workspace it is running in, then signs off. Everything is shaped by
+one fact: **the worktree, the branch and this terminal all disappear under the running
+session**, so the teardown cannot be a normal series of tool calls. The checks run now; the
+destructive part runs from a detached script (`scripts/teardown.sh`) that outlives the
+session.
+
+This skill is `/reap` for the session itself. After a ⛏️ sign-off, a bare "reap" reply
+already authorizes the same teardown; `/self-destruct` is the explicit, guarded form of it.
+
+Siblings: [[done]] closes only the terminal tab. [[clean-sswts]] sweeps many workspaces
+from the root checkout (it refuses to run from inside one, which is the gap this fills).
+[[cleanup-local-branches]] owns the `~/.claude/local-branch-archive.md` recovery-log
+convention. [[pick-up]] is the method for verifying `IN_PROGRESS.md` items, borrowed here for
+the opposite question: not "what next" but "is it safe to throw this away".
+
+**Destructive: a git worktree, a local branch, a Superset workspace, and every terminal in
+it, including this one.** That's why model invocation is off. A branch *becomes* merged at
+exactly the moment an agent loop finishes, which is exactly when this must not fire on its
+own. If Jake decides he wants sessions to reap themselves, removing that frontmatter line is
+the deliberate switch.
+
+## Guardrails: check before anything else
+
+Refuse outright, no exceptions, if any hold:
+
+1. `$SUPERSET_WORKSPACE_ID` or `$SUPERSET_TERMINAL_ID` is unset or empty. The CLI reports
+   success for IDs that don't exist, so empty or wrong IDs would silently do nothing.
+2. The workspace `type` is not `worktree`:
+   ```bash
+   superset workspaces get --local --json | jq -r '.type'
+   ```
+   `main` is a project's root checkout; deleting it removes the primary clone.
+3. The current branch is `main`/`master` (`git branch --show-current`). Belt and braces
+   over (2).
+4. `superset`, `jq` or `gh` is not on `PATH`.
+
+Say plainly which guardrail tripped and stop.
+
+## 1. Confirm the branch is merged
+
+Everything after this is destructive, so detection has to be real.
+
+```bash
+BRANCH=$(git branch --show-current)
+gh pr list --head "$BRANCH" --state all --json number,state,mergedAt,url --limit 5
+```
+
+- A `MERGED` PR → proceed.
+- A PR exists but its latest state is `OPEN` or `CLOSED` (never merged) → not merged. Report
+  the state and stop.
+- No PR at all → fall back to ancestry (`git fetch origin main -q`, then
+  `git merge-base --is-ancestor "$BRANCH" origin/main`). Merged only on a clean "ancestor".
+  Say the detection was ancestry, not a PR record. A miss proves nothing (squash merges
+  never show as ancestors), so with no PR and no ancestry, say detection failed and stop.
+
+Never gate on `git rev-list origin/main..HEAD`: these repos squash-merge, so a merged
+branch always looks many commits ahead.
+
+## 2. Build the loss picture
+
+**a. Git state.**
+```bash
+git status --porcelain | cut -c1-2 | sort | uniq -c    # summarize by status code, don't list
+git fetch origin "$BRANCH" -q 2>/dev/null
+git rev-list --count "origin/$BRANCH..HEAD"              # unpushed: vs the branch's own remote, never main
+```
+Uncommitted changes or unpushed commits are work the PR never carried. A tree that is
+nothing but ` D` entries (a half-removed worktree, thousands of lines) is not real work, but
+still say so before treating it as clean: it is uncommitted state that archiving will
+discard.
+
+**b. `IN_PROGRESS.md`.** Look in `.claude/IN_PROGRESS.md`, else the repo root; absent means
+nothing to lose. Verify each item the way [[pick-up]] step 3 does and classify it **still
+open**, **already done** or **stale**, with the evidence. Never edit the file; that stays
+[[close-out]]'s job.
+
+**c. Sibling terminals and this session's own loose ends.**
+```bash
+superset terminals list --workspace "$SUPERSET_WORKSPACE_ID" --local --json
+```
+Note any terminal other than `$SUPERSET_TERMINAL_ID` that is busy or bound to a Claude
+session. Also count this session's own background tasks, Monitors, scheduled wakeups and
+open questions to Jake; each dies with the session.
+
+## 3. Decide: clean close vs. confirm
+
+- **All clear** (2a empty, 2b nothing still open, 2c no busy siblings, no loose ends of
+  this session's own): print a one-line "nothing at stake, self-destructing" summary and go
+  to step 4. Silent destruction is never appropriate, even with nothing to lose.
+- **Anything outstanding**: `AskUserQuestion`, styled like a delete-confirmation dialog,
+  succinct, naming exactly what is at risk. Options: **Close anyway (discard)**, **Run
+  /pick-up first**, **Cancel**.
+
+## 4. Self-destruct
+
+Resolve the inputs while the worktree still exists:
+
+```bash
+WT=$(git rev-parse --show-toplevel)
+ROOT=$SUPERSET_ROOT_PATH                               # the project's root checkout
+[ -d "$ROOT/.git" ] || ROOT=$(git rev-parse --path-format=absolute --git-common-dir | sed 's#/\.git$##')
+SHA=$(git rev-parse HEAD)
+```
+
+Bookkeeping, still before the point of no return:
+
+1. Remove this PR's entry from `~/.claude/state/pr-review-posted.jsonl` (match on `pr` and
+   `repo`), per the global CLAUDE.md.
+2. Nothing else needs archiving: the script logs the recovery command to
+   `~/.claude/state/self-destruct.log`.
+
+Then, in this order:
+
+1. **Write the final message now**, because nothing after the teardown call can be seen:
+   what was removed, what was at stake (or "nothing"), the recovery command
+   (`git -C "$ROOT" branch <branch> <sha>`), and the status line `⛏️ <label>` (emoji form,
+   U+26CF U+FE0F). Name the branch and PR in the message; never print the workspace UUID.
+2. **As the last tool call of the turn**, launch the detached teardown and write nothing
+   after it:
+   ```bash
+   nohup sh ~/.claude/skills/self-destruct/scripts/teardown.sh \
+     "$SUPERSET_WORKSPACE_ID" "$SUPERSET_TERMINAL_ID" "$ROOT" "$WT" "$BRANCH" "$SHA" \
+     >/dev/null 2>&1 &
+   ```
+   Reading or executing the script *through* the symlink is fine; never `rm`, `ln` or write
+   to a path inside `~/.claude/skills/self-destruct/` (it resolves into the ai-tools repo).
+
+The script, after a few seconds: archives the workspace with `--local` (removes the worktree
+folder, keeps the branch), removes the folder itself if it somehow survived, prunes worktree
+registrations, deletes the local branch with `git branch -D` from the root checkout, and
+closes this terminal's pane (archiving alone can leave a dead, unresponsive tab). Every
+step is logged to `~/.claude/state/self-destruct.log`; if the tab is still there afterwards,
+read that file.
+
+## Notes
+
+- **Why detached.** Run inline, the teardown kills the very shell executing it midway
+  (worktree gone → `cd` fails; terminal gone → no further steps; archive alone leaves a
+  frozen tab). A `nohup`'d script started from `/` has no worktree to lose and keeps going.
+- **`archive`, not `delete`.** Superset CLI 2.x renamed `workspaces delete` to `archive`
+  (`delete` still works as a hidden alias). Always pass `--local`; without it the CLI
+  targets cloud workspaces.
+- **Single workspace only.** For sweeping many merged workspaces, [[clean-sswts]].
+- **History.** This skill replaces `close-sswt` (same single-workspace teardown), updated
+  for CLI 2.x, squash-merge-safe unpushed detection and the detached teardown.
+- **Testing the script.** `SELF_DESTRUCT_DRY_RUN=1 SELF_DESTRUCT_DELAY=0
+  SELF_DESTRUCT_LOG=/tmp/x.log sh scripts/teardown.sh …` prints the commands instead of
+  running them.

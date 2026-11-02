@@ -28,6 +28,7 @@ after installing SwiftBar (`brew install --cask swiftbar`).
 | [`deploy-koyeb`](skills/deploy-koyeb) | Deploy a local service directory to a Koyeb app/service from a worktree or branch |
 | [`handoff`](skills/handoff) | Close out the session, then spawn a successor agent in the right Superset workspace with state, not transcript; `--cloud` writes the prompt for a claude.ai cloud session instead |
 | [`done`](skills/done) | Close this session's Superset terminal tab after checking for its own uncommitted, unpushed, or background work; Superset terminals only, `/done` or explicit request |
+| [`self-destruct`](skills/self-destruct) | The session deletes its own Superset worktree, local branch, workspace and tab after its PR is confirmed merged (loss check + confirm first), then signs off ⛏️; teardown runs from a detached script so it survives the session. Replaces `close-sswt` |
 | [`kosha-triage`](skills/kosha-triage) | Migrate stale ClickUp captures into the markdown vault, then delete the originals |
 | [`jnelken-linear`](skills/jnelken-linear) | File or relabel a personal-workspace (DEV-*) Linear issue — refuses to create one without the `repo/<directory>` label advance-roadmap routes on |
 | [`linear-cli`](skills/linear-cli) | Read/write Linear from the shell with the `linear` CLI — the fallback when MCP is logged out or expired, plus the default filters that make `issue list` hide issues that exist |

@@ -1,13 +1,13 @@
 ---
 name: done
-description: Close the Superset terminal tab this Claude session is running in, after a quick check that this session isn't leaving its own uncommitted or unpushed work or live background tasks behind. Use only when the user types /done or explicitly says to close this terminal/tab/session ("close this terminal", "we're done, close it"). Superset terminals only; it does not delete the workspace or worktree (that is close-sswt).
+description: Close the Superset terminal tab this Claude session is running in, after a quick check that this session isn't leaving its own uncommitted or unpushed work or live background tasks behind. Use only when the user types /done or explicitly says to close this terminal/tab/session ("close this terminal", "we're done, close it"). Superset terminals only; it does not delete the workspace or worktree (that is self-destruct).
 disable-model-invocation: true
 ---
 
 # done
 
 Closes the one terminal this session lives in, via the local `superset` CLI, and nothing else.
-It is the light sibling of [[close-sswt]] (which also tears down the worktree, branch and
+It is the light sibling of [[self-destruct]] (which also tears down the worktree, branch and
 workspace) and [[close-out]] (which sweeps for orphaned follow-ups). Use those when the work
 needs wrapping up; use this when it already is.
 
