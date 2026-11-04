@@ -26,6 +26,15 @@ Read `~/.claude/instructions/superset-workspaces.md` before creating, renaming o
 - **Title** is `#<pr> <CON-ID> <short-slug>`; add the PR number as soon as the PR opens.
 
 
+## Secrets and `.env` files
+
+The 1Password vault `ENV` (concentro.1password.com) is the source of truth for env-var secrets. Each variable is its own API Credential item, titled with the exact variable name, with the value in its `credential` field. Each item is tagged `woodrow`, `api`, both, or `scripts` (run ad hoc, not needed for the app to run). Page logins stay in `Engineering`.
+
+- **Work from local, git-ignored `.env` files, not 1Password.** Put each value in the `.env` of the repo that reads it. Company-wide scripts and automations use `internal-tools/.env`, or `folio-platform/.env` when the tool is platform or observability tooling (Datadog, monitors, deploys), whichever fits.
+- **New or rotated value:** pull it from `ENV` in one batched `op` run and write it to the matching `.env`. Each batch needs Jake to approve 1Password on the machine running it, and the approval lapses after about 10 idle minutes. Never print values.
+- **Between Macs:** move a value with `zsh-secrets scratch` (`set NAME` on one Mac, `put <repo>/.env NAME` on the other) instead of 1Password. Shell-wide keys live in `~/.zsh_secrets`, synced by `zsh-secrets push`/`pull`.
+
+
 ## Datadog
 
 Default to the `pup` CLI; reach for the `claude.ai Datadog` MCP connector only when `pup` lacks the surface. After a Datadog debugging session that hit observability gaps, close with a **Follow-up** note and file one `telemetry`-labeled Linear ticket. Details: `~/.claude/instructions/datadog.md`.
