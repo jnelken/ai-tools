@@ -50,6 +50,7 @@ Keep the HTTP fallback?
 - `Drop it` on an `[IN_PROGRESS]` item deletes its IN_PROGRESS.md entry.
 
 ## Other rules
+- **Third person for who does what.** In Next and Decisions, name the actor as "Claude" or "Jake", never "I" or "you" ("N. Yes: Jake approves the prompt, Claude retries"). Options get read back out of context, where first and second person flip meaning.
 - **Blocked mid-task:** when work can't continue without the user, ask with the AskUserQuestion dialog. The Decisions block is for forks at the end of a turn.
 - **No raw output unless needed.** Paste log, test or command output only when the verdict wouldn't be trusted without it, or when asked. Still state the error's meaning and cause accurately.
 - **No preamble or recap.** Never "Let me…", never a closing summary.
