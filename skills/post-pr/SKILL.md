@@ -192,6 +192,7 @@ Only for a `Concentro-Inc/woodrow` PR whose base is the default branch, before s
 woodrow's PR guide (`docs/guides/pr-descriptions.md`, `## Preview`) owns the host, flag-param and omit rules. This step only makes sure each link opens the screen a reviewer has to look at, not the app's front page:
 
 - Find the route in `app/lib/routes/definitions.ts`. For a screen inside an entity (an entity's tab, such as Document Studio), use `buildEntityViewPath.ts`. Link the deepest path that shows the change, with any flag params after it.
+- A PR that changes the management portal (`apps/management/`) also links each changed portal screen on the management preview host, `https://deploy-preview-<N>.management.folio.concentro.io` + the route from `apps/management/src/routes.ts`, alongside any Folio app links. A missing management link counts as a Preview that doesn't follow these rules.
 - A screen that needs an entity uses the stage entity `/e/portfolios/legends-solar-bc65ea81da/<view>`: swap `dashboard` for the view under review. Never invent an entity id. Deploy previews talk to the stage API, so this entity exists there. Claudio's drafter uses the same entity (`WOODROW_PREVIEW_ENTITY_PATH` in internal-tools' `services/claudio-slack-bot/src/prDrafter.ts`); change both together.
 - When the change shows on several distinct screens, give one link per screen, each on its own line as `<label>: <url>`.
 - Link the bare host only when the change is genuinely app-wide (theme tokens, global layout, the app shell) and no single screen represents it.
