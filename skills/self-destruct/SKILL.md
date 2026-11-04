@@ -1,6 +1,6 @@
 ---
 name: self-destruct
-description: The session deletes its own Superset workspace (worktree, local branch, workspace registration, and this terminal tab) once its branch is confirmed merged, then signs off ⛏️. Checks IN_PROGRESS.md, unpushed commits and sibling terminals first and puts any loss in front of the user like a delete-confirmation dialog. Use when the user types /self-destruct or explicitly asks this session to clean up after itself. Trigger phrases include "self-destruct", "delete your own worktree", "reap this session", "reap this workspace", "close this workspace", "this PR merged, clean up this workspace", "tear down this superset workspace", "am I safe to close this workspace". Formerly named close-sswt.
+description: The session deletes its own Superset workspace (worktree, local branch, workspace registration, and this terminal tab) once its branch is confirmed merged, then signs off ⛏️. In a project's root checkout it keeps the workspace and only closes the terminal, like /done. Checks IN_PROGRESS.md, unpushed commits and sibling terminals first and puts any loss in front of the user like a delete-confirmation dialog. Use when the user types /self-destruct or explicitly asks this session to clean up after itself. Trigger phrases include "self-destruct", "delete your own worktree", "reap this session", "reap this workspace", "close this workspace", "this PR merged, clean up this workspace", "tear down this superset workspace", "am I safe to close this workspace". Formerly named close-sswt.
 disable-model-invocation: true
 ---
 
@@ -33,16 +33,28 @@ Refuse outright, no exceptions, if any hold:
 
 1. `$SUPERSET_WORKSPACE_ID` or `$SUPERSET_TERMINAL_ID` is unset or empty. The CLI reports
    success for IDs that don't exist, so empty or wrong IDs would silently do nothing.
-2. The workspace `type` is not `worktree`:
-   ```bash
-   superset workspaces get --local --json | jq -r '.type'
-   ```
-   `main` is a project's root checkout; deleting it removes the primary clone.
-3. The current branch is `main`/`master` (`git branch --show-current`). Belt and braces
-   over (2).
-4. `superset`, `jq` or `gh` is not on `PATH`.
+2. `superset`, `jq` or `gh` is not on `PATH`.
 
 Say plainly which guardrail tripped and stop.
+
+### Root checkout: close the terminal only
+
+If either of these holds, this is a project's root checkout, not a disposable worktree:
+
+- The workspace `type` is not `worktree` (root checkouts report `local` or `main`):
+  ```bash
+  superset workspaces get --local --json | jq -r '.type'
+  ```
+- The current branch is `main`/`master` (`git branch --show-current`). Belt and braces over
+  the type check.
+
+Deleting it would remove the primary clone, so **never archive the workspace, delete a
+branch or run `teardown.sh`.** The user still wants the session gone, so do what [[done]]
+does instead: run its guardrails (this session's own uncommitted changes, unpushed commits,
+background tasks), write the final message saying the workspace was kept because it is the
+root checkout and only this terminal is closing, then make its detached
+`superset terminals close … --local` call the last tool call of the turn. Skip steps 1–4
+below entirely.
 
 ## 1. Confirm the branch is merged
 
