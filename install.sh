@@ -422,13 +422,14 @@ update_ai_tools_home() {
 }
 
 # ── personal-only content ──
-# These work across the personal repos and personal Linear workspace
-# (advance-roadmap and wrapup-repos commit and push there), so they belong on the
-# personal machines (OMEN, JXIV) only. On the work laptop they aren't linked at
-# all, and links left by an earlier install are removed.
+# These work across the personal repos, the personal Linear workspace (advance-roadmap
+# and wrapup-repos commit and push there), or personal finance data (lunchmoney-hygiene
+# audits Jake's Lunch Money account), so they belong on the personal machines
+# (OMEN, JXIV) only. On the work laptop they aren't linked at all, and links left by
+# an earlier install are removed.
 # dotfiles' is-personal-machine decides; without it (a cloud env, a machine with
 # no dotfiles) the machine counts as personal, same as hygiene-scan-all.sh.
-PERSONAL_ONLY="advance-roadmap wrapup-repos unblock-roadmap jnelken-linear"
+PERSONAL_ONLY="advance-roadmap wrapup-repos unblock-roadmap jnelken-linear lunchmoney-hygiene"
 IS_WORK_MACHINE=0
 if [ -x "$HOME/dotfiles/bin/is-personal-machine" ]; then
   # Only exit 1 means "work": a guard that can't run (no zsh) must not hide them.
