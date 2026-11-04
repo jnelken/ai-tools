@@ -6,13 +6,15 @@ ONE idle/blocked session at a time, with enough transcript context to ask Jake
 about it without him opening the tab.
 
 Scope: every online host in the org by default. `--host HOST` (id, id prefix,
-name, or "local") narrows `next` / `list` to that one host. Candidates carry
+name, "local", or this machine's hostname) narrows `next` / `list` to that one
+host. `--repo NAME` (repeatable or comma-separated; matched case-insensitively
+against the workspace's Superset project) narrows them to those repos. Candidates carry
 `host` (display name) and `host_id` ("local" for this machine); pass `host_id`
 back as `--host` to relay / screen, or as the first part of a wait target.
 
 Subcommands (all print JSON):
-  next  [--host HOST] --seen FILE   next unseen candidate, or {"done": true}
-  list  [--host HOST] [--seen FILE] every candidate with its key and filter reason (debug)
+  next  [--host HOST] [--repo NAME] --seen FILE   next unseen candidate, or {"done": true}
+  list  [--host HOST] [--repo NAME] [--seen FILE] every candidate with its key and filter reason (debug)
   skip-forever KEY LABEL
   no-question KEY
   relay WS TERM [--host HOST_ID] (--text TEXT | --keys KEYS)
@@ -38,6 +40,7 @@ import glob
 import hashlib
 import json
 import os
+import socket
 import sqlite3
 import subprocess
 import sys
@@ -107,9 +110,11 @@ def list_hosts():
 
 
 def match_host(hosts, selector):
-    """Host named by selector: "local", an id, an id prefix, or a name."""
+    """Host named by selector: "local", this machine's hostname, an id, an id
+    prefix, or a name. Superset names this Mac after its ComputerName, so its
+    short hostname (e.g. "jake1") is accepted as an alias for "local"."""
     sel = selector.lower()
-    if sel == "local":
+    if sel in ("local", socket.gethostname().split(".")[0].lower()):
         return next((h for h in hosts if h.local), None)
     exact = [h for h in hosts if h.id.lower() == sel or h.name.lower() == sel]
     if exact:
@@ -119,8 +124,9 @@ def match_host(hosts, selector):
 
 
 def get_host(selector):
-    """Host for relay/screen/wait. None or "local" means this machine."""
-    if selector in (None, "local"):
+    """Host for relay/screen/wait. None, "local" or this machine's hostname
+    means this machine."""
+    if selector is None or selector.lower() in ("local", socket.gethostname().split(".")[0].lower()):
         return Host("local", "local", local=True)
     host = match_host(list_hosts(), selector)
     if not host:
@@ -327,9 +333,16 @@ def glyph_of(title):
     return first if not first.isascii() else None
 
 
-def iter_terminals(hosts, skipped):
+def parse_repos(values):
+    """--repo values (repeatable, comma-separated) -> lowercase set, or None."""
+    repos = {r.strip().lower() for v in values or [] for r in v.split(",") if r.strip()}
+    return repos or None
+
+
+def iter_terminals(hosts, skipped, repos=None):
     """Yield (host, ws, terminal, agent, reason) across hosts. A host whose
-    snapshot fails is appended to `skipped` instead of aborting the run."""
+    snapshot fails is appended to `skipped` instead of aborting the run.
+    `repos` (lowercase project names) filters before any transcript is read."""
     me = os.environ.get("SUPERSET_TERMINAL_ID")
     for host in hosts:
         res = superset("snapshot", *host.snapshot_flags, check=False)
@@ -342,6 +355,8 @@ def iter_terminals(hosts, skipped):
                 reason = None
                 if t["id"] == me:
                     reason = "self"
+                elif repos and (ws.get("project") or "").lower() not in repos:
+                    reason = f"repo:{ws.get('project')}"
                 elif not agent:
                     reason = "no-agent"
                 elif agent.get("state") not in CANDIDATE_STATES:
@@ -400,7 +415,7 @@ def cmd_next(args):
     no_question = load_json(NO_QUESTION, {})
     bindings = session_bindings()
     hosts, skipped = scan_hosts(args.host)
-    for host, ws, t, agent, reason in iter_terminals(hosts, skipped):
+    for host, ws, t, agent, reason in iter_terminals(hosts, skipped, parse_repos(args.repo)):
         if reason:
             continue
         cand = build_candidate(host, ws, t, agent, bindings)
@@ -421,7 +436,7 @@ def cmd_list(args):
     bindings = session_bindings()
     hosts, skipped = scan_hosts(args.host)
     rows = []
-    for host, ws, t, agent, reason in iter_terminals(hosts, skipped):
+    for host, ws, t, agent, reason in iter_terminals(hosts, skipped, parse_repos(args.repo)):
         row = {"host": host.name, "project": ws.get("project"), "workspace": ws.get("name"),
                "terminal_id": t["id"], "title": t.get("title"), "state": agent.get("state")}
         if not reason:
@@ -510,12 +525,16 @@ def main():
 
     s = sub.add_parser("next")
     s.add_argument("--seen")
-    s.add_argument("--host", help="only this host (id, name, or 'local'); default: every online host")
+    s.add_argument("--host", help="only this host (id, name, hostname, or 'local'); default: every online host")
+    s.add_argument("--repo", action="append",
+                   help="only workspaces of this Superset project (repeatable or comma-separated); default: all")
     s.set_defaults(fn=cmd_next)
 
     s = sub.add_parser("list")
     s.add_argument("--seen")
-    s.add_argument("--host", help="only this host (id, name, or 'local'); default: every online host")
+    s.add_argument("--host", help="only this host (id, name, hostname, or 'local'); default: every online host")
+    s.add_argument("--repo", action="append",
+                   help="only workspaces of this Superset project (repeatable or comma-separated); default: all")
     s.set_defaults(fn=cmd_list)
 
     s = sub.add_parser("skip-forever")

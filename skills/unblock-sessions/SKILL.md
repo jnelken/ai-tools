@@ -1,6 +1,6 @@
 ---
 name: unblock-sessions
-description: Walk every Claude session running in a Superset terminal tab on any of Jake's online hosts (this Mac, jake2, …), one at a time, and ask Jake here (AskUserQuestion) about each one that is waiting on him — open questions, Decisions blocks, live AskUserQuestion/permission dialogs, and finished (✅/⛏️) tabs that could be reaped — with enough transcript context that he never has to open the tab. Relays each answer into the session, then rescans for follow-ups until nothing is left. Every prompt offers Skip for now and Skip forever, and typing `exit` sends the answers so far and stops. Pass `--host <name|id|local>` to scope the run to one host; with no flag it covers all hosts. Use when Jake says "unblock my sessions", "what's waiting on me", "check my tabs for questions", "answer my sessions", "survey open sessions", or "/unblock-sessions".
+description: Walk every Claude session running in a Superset terminal tab on any of Jake's online hosts (this Mac, jake2, …), one at a time, and ask Jake here (AskUserQuestion) about each one that is waiting on him — open questions, Decisions blocks, live AskUserQuestion/permission dialogs, and finished (✅/⛏️) tabs that could be reaped — with enough transcript context that he never has to open the tab. Relays each answer into the session, then rescans for follow-ups until nothing is left. Every prompt offers Skip for now and Skip forever, and typing `exit` sends the answers so far and stops. Pass `--host <name|id|local>` to scope the run to one host and `--repo <name>[,<name>]` to scope it to those repos; with no flags it covers every repo on every host. Use when Jake says "unblock my sessions", "what's waiting on me", "check my tabs for questions", "answer my sessions", "survey open sessions", or "/unblock-sessions".
 ---
 
 # unblock-sessions
@@ -16,9 +16,13 @@ JSONL. A remote host's disk isn't reachable, so its sessions are read with
 visible screen. Always go through the helper rather than dumping snapshots or transcripts into
 context.
 
-**Host scope.** With no `--host`, the run covers every online host in the org (offline hosts are
-skipped and reported). If the user passed `--host <name|id|local>` (for example
-`/unblock-sessions --host jake2`), pass it through to `next` and cover only that host.
+**Scope.** With no flags, the run covers every repo on every online host in the org (offline
+hosts are skipped and reported). Pass any of these the user gave straight through to `next`:
+- `--host <name|id|local>` (for example `--host jake2`): only that host. This Mac's short
+  hostname (`jake1`) also works, even though Superset names it after the ComputerName.
+- `--repo <name>` (for example `--repo woodrow`, or `--repo woodrow,api`): only workspaces whose
+  Superset project matches, case-insensitively. Repeatable. Out-of-scope tabs are filtered
+  inside the helper, before any transcript is read, so never skip them by hand.
 
 State lives in `~/.claude/state/unblock-sessions/`:
 - `skip-forever.json`: question keys Jake muted.
@@ -43,10 +47,10 @@ Keep a `relayed` list (`HOST_ID:WORKSPACE_ID:TERMINAL_ID`) in your head.
 
 ```bash
 python3 -I "$H" next --seen "$SEEN"                 # all online hosts
-python3 -I "$H" next --seen "$SEEN" --host jake2    # only if the user passed --host
+python3 -I "$H" next --seen "$SEEN" --host jake2 --repo woodrow   # whichever the user passed
 ```
 
-This returns one idle or blocked agent tab from **any** workspace on any host in scope (your own
+This returns one idle or blocked agent tab from **any** workspace in scope on any host in scope (your own
 tab is excluded), or `{"done": true}`, which may carry `skipped_hosts` (offline or unreachable
 hosts; mention them in the report). The fields:
 - `host`, `host_id`: which machine the tab runs on (`host_id` is `local` for this Mac)
