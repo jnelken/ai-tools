@@ -131,10 +131,14 @@ Same two entries with `--harness codex`. Codex pins hook trust per entry in `~/.
 
 Posts daily ccusage summaries (Claude + Codex token usage) to a Slack channel via incoming webhook. Triggered on every Claude Code session start; catches up any days missed since the last successful post.
 
+**One post for all machines.** Only the host whose `hostname -s` is `$CCUSAGE_POSTER` (default `jake1`) posts; elsewhere the SessionStart run is a no-op. Before posting a day, the poster collects that day from each Superset host in `$CCUSAGE_PEERS` (default `jake2`) and posts the sum. There is no SSH between the machines, so it opens a throwaway Superset terminal on the peer (`superset terminals create --command`, in any live workspace there), runs this script with `--collect START END`, and reads the result back off the screen: gzipped, base64'd JSON between marker lines with a sha256, so a clipped or garbled screen is rejected instead of misread. `lib/merge-usage.py` sums the ccusage numbers and weight-averages the effort split (dollars for Claude, token weight for Codex). A peer that is offline, has no Superset workspace, or fails **holds the day**: the marker stays, one notification fires, and the next session retries. `CCUSAGE_PEERS=` posts this machine alone; `CCUSAGE_POSTER=` restores one post per machine.
+
+`--dry-run [YYYY-MM-DD]` prints the merged post for that day (default yesterday) without posting, locking or touching state — use it to check a change against real data, never the live webhook (sparky sums same-day posts, so a test post doubles that day).
+
 ### Requirements
 
 - `$SLACK_CCUSAGE_WEBHOOK_URL` exported in your shell env (incoming webhook for the target Slack channel)
-- `npx`, `jq`, `curl` on `PATH`
+- `npx`, `jq`, `curl`, `python3` on `PATH`; on the poster, a logged-in `superset` CLI when it has peers
 - `ccusage >= 20` for Codex usage data (older versions still post Claude-only data)
 - State dir created on first run: `~/.claude/.ccusage-state/` (gitignored from anywhere)
 
@@ -178,7 +182,7 @@ If you already have a `hooks.SessionStart` array, append the new entry rather th
 - **Self-heals a half-installed ccusage.** npx reuses a cache entry that already matches `ccusage@latest`, so a partial install (empty `@ccusage/` native package, error `ccusage native binary is not available for darwin-arm64`) used to fail on every session start with no output — it cost the 2026-10-19 post. The hook now deletes the `ccusage@latest` entry under `$(npm config get cache)/_npx/` and retries once.
 - **Failures are visible, never posted to Slack** (the webhook channel feeds sparky's leaderboard). A failed ccusage run or Slack POST appends to `~/.claude/.ccusage-state/errors.log` (last 200 lines, with the stderr excerpt) and raises one macOS notification per calendar day (`last-notified` holds the date). The marker still advances only on a successful POST, so the next healthy session catches the missed days up.
 
-Tests: `bash hooks/tests/post-yesterdays-ccusage.test.sh` (stubs `npx`/`npm`/`curl`/`osascript` on an isolated `HOME`).
+Tests: `bash hooks/tests/post-yesterdays-ccusage.test.sh` (stubs `npx`/`npm`/`curl`/`osascript`/`superset` on an isolated `HOME`).
 
 ### Disabling
 
