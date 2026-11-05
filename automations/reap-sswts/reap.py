@@ -215,8 +215,8 @@ def sweep(dry, grace_min):
     grace = grace_min * 60
     me = os.environ.get("SUPERSET_TERMINAL_ID")
     snap = sjson("snapshot")
-    meta = {w["id"]: w for w in sjson("workspaces", "list")}
-    roots = {p["id"]: p.get("path") for p in sjson("projects", "list")}
+    meta = {w["id"]: w for w in sjson("workspaces", "list", "--local")}
+    roots = {p["id"]: p.get("path") for p in sjson("projects", "list", "--local")}
     bind = bindings()
 
     for ws in snap.get("workspaces", []):
