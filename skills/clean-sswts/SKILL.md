@@ -1,6 +1,6 @@
 ---
 name: clean-sswts
-description: Survey and clean up Superset workspaces (sswts) across all projects on this machine — classify each by PR state, dirtiness and liveness, then delete the finished ones via the superset CLI and remove the local branches it leaves behind. Use when the user says "clean up my worktrees", "clean sswts", "tidy superset workspaces", "which workspaces can I delete", "my worktrees are piling up", "remove merged worktrees", or after a batch of PRs merge. The worktree-scoped counterpart to cleanup-local-branches.
+description: Survey and clean up Superset workspaces (sswts) across all projects on this machine — classify each by PR state, dirtiness and liveness, then delete the finished ones (workspace, worktree, local branch and tabs) via self-destruct's shared reap script. Use when the user says "clean up my worktrees", "clean sswts", "tidy superset workspaces", "which workspaces can I delete", "my worktrees are piling up", "remove merged worktrees", or after a batch of PRs merge. The worktree-scoped counterpart to cleanup-local-branches.
 ---
 
 # Clean sswts
@@ -17,9 +17,9 @@ Related: the `reap-sswts` automation already reaps sswts whose sessions signed o
 
 ## The one thing that makes this skill necessary
 
-`superset workspaces delete <id>` removes the worktree **directory** and its **git worktree registration** — but **leaves the local branch behind.** Verified empirically; the CLI does not document it.
+`superset workspaces archive <id> --local` (formerly `delete`) removes the worktree **directory** and its **git worktree registration** — but **leaves the local branch behind.** Verified empirically; the CLI's help now says so too. Without `--local` it targets cloud workspaces when the account has any.
 
-So the CLI alone does not tidy anything. It converts worktree sprawl into branch sprawl. **Every workspace delete must be paired with a `git branch -D`** in the owning repo, or you have simply moved the mess.
+So the CLI alone does not tidy anything. It converts worktree sprawl into branch sprawl. **Every workspace removal must be paired with a `git branch -D`** in the owning repo, or you have simply moved the mess. Don't hand-roll that pairing: Phase 3 uses [[self-destruct]]'s `reap-workspace.sh`, which does the archive, branch delete, prune, tab close and recovery log in one call.
 
 ## Safety model
 
@@ -116,17 +116,16 @@ Also note a project name is not a repo. A setup can register two projects (e.g. 
 | **Active** | PR `OPEN` (incl. draft) | **Keep** |
 | **No PR, has work** | no PR, clean, real commits | **Surface** (Phase 4) |
 
-Delete in one batched call, then clean up the branches the CLI left:
+Delete each one with the shared reap script, the same one [[self-destruct]] uses for its own workspace. One call per workspace, run in sequence (each touches the owning clone's git state):
 
 ```bash
-superset workspaces delete <id1> <id2> <id3> ...   # variadic; one call
-# then, per deleted workspace, in the OWNING clone's path:
-git -C <project-path> branch -D <branch>
-# finally, once per clone
-git -C <project-path> worktree prune -v
+REAP=~/.claude/skills/self-destruct/scripts/reap-workspace.sh
+sh "$REAP" <id> <project-path> <worktreePath> <branch>   # project-path = the OWNING clone
 ```
 
-Confirm the delete result rather than assuming: the JSON response carries `deleted[]` and `warnings[]` — report both.
+Per call it archives the workspace with `--local`, force-removes the worktree folder if it survived, prunes worktree registrations, runs `git branch -D` in the owning clone, closes every tab left in the workspace, and appends the recovery command (`git -C <clone> branch <branch> <sha>`) to `~/.claude/state/self-destruct.log`. It refuses if `worktreePath` equals the clone path, but it trusts every other check, so only pass workspaces this phase classified as deletable.
+
+Each call prints one line: `reaped <branch> @ <sha> (recover: …)` or `FAILED <branch>: …`. Report both kinds; a failed archive leaves the worktree and branch untouched.
 
 ## Phase 3.5 — Rename workspaces whose names have drifted
 

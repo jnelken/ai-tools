@@ -153,7 +153,8 @@ Then, in this order:
    Reading or executing the script *through* the symlink is fine; never `rm`, `ln` or write
    to a path inside `~/.claude/skills/self-destruct/` (it resolves into the ai-tools repo).
 
-The script, after a few seconds: archives the workspace with `--local` (removes the worktree
+The script waits a few seconds, then hands off to `scripts/reap-workspace.sh`, the removal
+step it shares with [[clean-sswts]]. That script archives the workspace with `--local` (removes the worktree
 folder, keeps the branch), removes the folder itself if it somehow survived, prunes worktree
 registrations, deletes the local branch with `git branch -D` from the root checkout, and
 closes this terminal's pane (archiving alone can leave a dead, unresponsive tab). Every
@@ -168,7 +169,9 @@ read that file.
 - **`archive`, not `delete`.** Superset CLI 2.x renamed `workspaces delete` to `archive`
   (`delete` still works as a hidden alias). Always pass `--local`; without it the CLI
   targets cloud workspaces.
-- **Single workspace only.** For sweeping many merged workspaces, [[clean-sswts]].
+- **Single workspace only.** For sweeping many merged workspaces, [[clean-sswts]], which calls
+  the same `reap-workspace.sh` once per workspace (inline, with no terminal ID, so it closes
+  every tab in each). Fix removal bugs there once and both skills get them.
 - **History.** This skill replaces `close-sswt` (same single-workspace teardown), updated
   for CLI 2.x, squash-merge-safe unpushed detection and the detached teardown.
 - **Testing the script.** `SELF_DESTRUCT_DRY_RUN=1 SELF_DESTRUCT_DELAY=0
