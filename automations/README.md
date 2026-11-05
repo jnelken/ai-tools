@@ -293,6 +293,31 @@ Limitations:
 - The Keychain token is the Agent CLI's; if it expires the probe gets a 401 until the next `agent`
   run refreshes it.
 
+## `reap-sswts`
+
+Every 10 minutes, `reap.py` looks at this machine's Superset tabs (local host only) and acts
+on Claude tabs whose transcript ends on a ⛏️ sign-off at least an hour old
+(`REAP_SSWTS_GRACE_MIN`), with the agent idle and nothing typed since. Replying to the
+session, even after the glyph, cancels it. No model calls; it is plain checks plus the CLI.
+
+- **sswt (worktree workspace):** runs [`self-destruct`](../skills/self-destruct/SKILL.md)'s
+  `teardown.sh` (archive the workspace, prune, `git branch -D` in the root clone, recovery
+  command in `~/.claude/state/self-destruct.log`) only if every other tab in it is also a
+  reapable ⛏️ Claude tab or an idle shell prompt, the tree is clean, the branch has a
+  MERGED PR and no OPEN one, `HEAD` is a commit that PR carried, and no gitignored
+  `IN_PROGRESS.md` would go with it. It also drops the PR's `pr-review-posted.jsonl` entry.
+- **Root checkout** (non-worktree type, the project's own path, or `main`/`master`): closes
+  the ⛏️ tab's terminal only, like `/done`. The workspace and clone are never touched.
+
+Every skip is logged with its reason to `~/.claude/automations/reap-sswts/logs/reap.log`.
+Preview with `~/.claude/automations/reap-sswts/run.sh --dry-run` (prints to the terminal).
+Tests: `python3 -m unittest discover -s automations/reap-sswts/tests`.
+
+```sh
+ln -s ~/.ai-tools/automations/reap-sswts/com.jake.reap-sswts.plist ~/Library/LaunchAgents/
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.jake.reap-sswts.plist
+```
+
 ## `wrapup-repos`
 
 Off-peak, weekly (Sunday 2:45am local time), picks the dirtiest/most-recently

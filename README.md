@@ -27,7 +27,7 @@ after installing SwiftBar (`brew install --cask swiftbar`).
 | [`datadog-add-log-facets`](skills/datadog-add-log-facets) | Create Datadog Logs facets from a path list via Claude in Chrome, leaving display names empty |
 | [`deploy-koyeb`](skills/deploy-koyeb) | Deploy a local service directory to a Koyeb app/service from a worktree or branch |
 | [`handoff`](skills/handoff) | Close out the session, then spawn a successor agent in the right Superset workspace with state, not transcript; `--cloud` writes the prompt for a claude.ai cloud session instead |
-| [`done`](skills/done) | Close this session's Superset terminal tab after checking for its own uncommitted, unpushed, or background work; Superset terminals only, `/done` or explicit request |
+| [`done`](skills/done) | Close this session's Superset terminal tab after checking for its own uncommitted, unpushed, or background work, signing off ⛏️; Superset terminals only, `/done` or explicit request |
 | [`self-destruct`](skills/self-destruct) | The session deletes its own Superset worktree, local branch, workspace and tab after its PR is confirmed merged (loss check + confirm first), then signs off ⛏️; teardown runs from a detached script so it survives the session. In a root checkout it only closes the tab, like `done`. Replaces `close-sswt` |
 | [`kosha-triage`](skills/kosha-triage) | Migrate stale ClickUp captures into the markdown vault, then delete the originals |
 | [`jnelken-linear`](skills/jnelken-linear) | File or relabel a personal-workspace (DEV-*) Linear issue — refuses to create one without the `repo/<directory>` label advance-roadmap routes on |
@@ -123,6 +123,7 @@ Hooks need extra wiring in `~/.claude/settings.json` — see [`hooks/README.md`]
 | Automation | Schedule | Purpose |
 |---|---|---|
 | [`advance-roadmap`](automations/advance-roadmap) | Every 2 hours at :45 on odd hours (launchd; `ADVANCE_ROADMAP_CADENCE_HOURS` in the plist) | Headlessly ship planned `ROADMAP.md` items via the `advance-roadmap` skill — keeps shipping one after another until a run doesn't ship cleanly or 40 min pass |
+| [`reap-sswts`](automations/reap-sswts) | Every 10 min (launchd) | Tear down sswts whose Claude tabs signed off ⛏️ over an hour ago (PR merged, tree clean, HEAD carried by the PR), and close ⛏️ root-checkout tabs; no model calls |
 | [`wrapup-repos`](automations/wrapup-repos) | Sunday 2:45am, weekly (launchd) | Headlessly wrap up in-progress work in one repo via the `wrapup-repos` skill |
 
 Scheduling (the launchd plist) needs manual per-machine setup — see [`automations/README.md`](automations/README.md).

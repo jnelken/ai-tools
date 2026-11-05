@@ -9,7 +9,8 @@ disable-model-invocation: true
 Closes the one terminal this session lives in, via the local `superset` CLI, and nothing else.
 It is the light sibling of [[self-destruct]] (which also tears down the worktree, branch and
 workspace) and [[close-out]] (which sweeps for orphaned follow-ups). Use those when the work
-needs wrapping up; use this when it already is.
+needs wrapping up; use this when it already is. A session that merely signs off ⛏️ and is
+left open gets the same treatment from the `reap-sswts` automation an hour later.
 
 **This ends the session.** The close disposes the PTY the command runs in, so Claude cannot
 say anything afterwards. The final message must be written *before* the close.
@@ -36,19 +37,28 @@ relay and fails with `Host is not online` (503) when the host shows offline. The
 1. Run the guardrail checks above (`git status --short`, `git log @{u}..` if a branch has an
    upstream, and any tasks you started).
 2. Write the final message: what was done, what is left, and the status line. Nothing after
-   the close can be said, so put everything here.
+   the close can be said, so put everything here. The status line is `⛏️ <label>` (emoji
+   form, U+26CF U+FE0F), e.g. `⛏️ Terminal closing`: the session is ending with nothing
+   left open. One exception: in an sswt whose branch is not merged yet, sign off
+   `✅ <label>` instead, since ⛏️ also promises the sswt is merged.
 3. As the **last tool call of the turn**, close detached so the message can render first:
 
    ```bash
-   nohup sh -c 'sleep 2; superset terminals close --workspace "$0" --terminal "$1" --local' \
+   nohup sh ~/.claude/skills/done/scripts/close-tab.sh \
      "$SUPERSET_WORKSPACE_ID" "$SUPERSET_TERMINAL_ID" >/dev/null 2>&1 &
    ```
 
-4. Write nothing after that call.
+4. Write nothing after that call. If the harness asks for a reply anyway, answer with the
+   status line alone.
 
-## Known quirk
+## Known quirk: the dead tab
 
-Closing from inside the terminal being closed can leave the tab open but frozen in the
-Superset UI even though the session is gone (seen 2026-10-26, with the close run
-synchronously). The detached delay in step 3 is meant to let the exit reach the UI cleanly;
-if the tab still freezes, close it by hand and don't retry the CLI from a new session.
+The close itself works: the host disposes the terminal and ends the Claude session in it
+right away (`terminal_agent_bindings.end_reason = disposed` within a second of the request in
+`~/.superset/host/*/host.db`, checked on three past `/done` runs). What lingers is the **tab** in a desktop app that views this host
+from another machine (e.g. jake2's tabs in the MacBook's app): that app keeps a dead tab after
+the terminal is disposed, and `superset panes` cannot reach it ("This host has no pane layout
+to edit"). `close-tab.sh` uses `panes close` whenever a desktop is attached to this host, which
+removes the tab outright, and falls back to `terminals close` otherwise. In the fallback case
+the dead tab has to be closed by hand; don't retry the CLI from a new session. Each run is
+logged to `~/.claude/state/done-close.log`.

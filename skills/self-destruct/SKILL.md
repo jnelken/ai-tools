@@ -24,8 +24,9 @@ the opposite question: not "what next" but "is it safe to throw this away".
 **Destructive: a git worktree, a local branch, a Superset workspace, and every terminal in
 it, including this one.** That's why model invocation is off. A branch *becomes* merged at
 exactly the moment an agent loop finishes, which is exactly when this must not fire on its
-own. If Jake decides he wants sessions to reap themselves, removing that frontmatter line is
-the deliberate switch.
+own. Unattended reaping exists separately: the `reap-sswts` automation runs this skill's
+`teardown.sh` on sswts whose sessions sat at ⛏️ for an hour, gated by the same merged/clean
+checks in code (`automations/reap-sswts/reap.py`).
 
 ## Guardrails: check before anything else
 

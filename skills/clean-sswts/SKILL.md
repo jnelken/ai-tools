@@ -7,7 +7,7 @@ description: Survey and clean up Superset workspaces (sswts) across all projects
 
 Superset workspaces (sswts) accumulate one per PR and never leave on their own. This is the phased, conservative sweep: survey everything, classify by evidence, delete only what is provably finished, and surface the rest for a human decision.
 
-Related: [[cleanup-local-branches]] cleans *branches* repo-by-repo. This skill cleans *workspaces* across all projects and then cleans up after the CLI. Run this one first — it removes worktrees, which are the thing that blocks branch deletion in that skill.
+Related: the `reap-sswts` automation already reaps sswts whose sessions signed off ⛏️ an hour ago, one at a time; this skill is the full sweep. [[cleanup-local-branches]] cleans *branches* repo-by-repo. This skill cleans *workspaces* across all projects and then cleans up after the CLI. Run this one first — it removes worktrees, which are the thing that blocks branch deletion in that skill.
 
 ## Scope and preconditions
 
