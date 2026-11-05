@@ -551,7 +551,8 @@ print(bool(b.acquire('codex','planner',pid=int(sys.argv[2]))))
         out = io.StringIO()
         args = ['spawn', '--provider', 'codex', '--role', 'planner', '--label', 'test', '--workspace', 'ws',
                 '--prompt-file', str(prompt), '--model', 'test-model', '--effort', 'high', '--dry-run']
-        with contextlib.redirect_stdout(out), patch.object(f.uuid, 'uuid4') as uid:
+        with contextlib.redirect_stdout(out), patch.object(f.uuid, 'uuid4') as uid, \
+                patch.object(f, 'workspace_path', return_value=None):
             uid.return_value.hex = 'job'
             self.assertEqual(f.main(args), 0)
         data = json.loads(out.getvalue())
@@ -563,6 +564,44 @@ print(bool(b.acquire('codex','planner',pid=int(sys.argv[2]))))
             '--label', 'test', '--', 'codex', 'exec', '--json', '--model', 'test-model', '-c',
             'model_reasoning_effort="high"', 'hello $world; `literal`'])
         self.assertFalse(f.state_dir().exists())
+
+    def test_fanout_explicit_workspace_starts_in_its_worktree(self):
+        worktree, elsewhere = self.home / 'wt', self.home / 'root'
+        (worktree / 'src').mkdir(parents=True)
+        elsewhere.mkdir()
+        with patch.object(f, 'workspace_path', return_value=str(worktree)):
+            with patch.object(f.os, 'getcwd', return_value=str(elsewhere)):
+                self.assertEqual(f.job_cwd('ws', explicit=True), str(worktree.resolve()))
+                self.assertEqual(f.job_cwd('ws', explicit=False), str(elsewhere.resolve()))
+            with patch.object(f.os, 'getcwd', return_value=str(worktree / 'src')):
+                self.assertEqual(f.job_cwd('ws', explicit=True), str((worktree / 'src').resolve()))
+        with patch.object(f, 'workspace_path', return_value=None), patch.object(f.os, 'getcwd', return_value=str(elsewhere)):
+            self.assertEqual(f.job_cwd('ws', explicit=True), str(elsewhere.resolve()))
+
+    def test_fanout_status_says_a_job_is_queued_for_budget(self):
+        self.reading['windows']['five_hour']['live'] = 100
+        job = f.state_dir() / 'queued'
+        job.mkdir(parents=True)
+        b.write_json(job / 'meta.json', dict(id='queued', label='w', provider='codex', role='worker'))
+        (job / 'result.json').write_text('')
+        (job / 'stderr').write_text('agent-budget: codex/worker queued; waiting 30s\n' * 3)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(f.main(['status']), 0)
+        self.assertEqual(out.getvalue().strip(), 'queued w: pending, queued for budget (five_hour live=100 cap=70)')
+        (job / 'result.json').write_text('{"type":"thread.started"}\n')
+        self.assertEqual(f.inspect_jobs('queued')[0]['waiting'], '')
+
+    def test_fanout_spawn_warns_when_provider_has_no_headroom(self):
+        self.reading['windows']['five_hour']['live'] = 75
+        err = io.StringIO()
+        with patch.object(b, 'allow', return_value=0), contextlib.redirect_stderr(err):
+            f.warn_if_no_headroom(dict(provider='codex', role='worker'))
+        self.assertIn('no codex headroom now (five_hour live=75 cap=70)', err.getvalue())
+        err = io.StringIO()
+        with patch.object(b, 'allow', return_value=1), contextlib.redirect_stderr(err):
+            f.warn_if_no_headroom(dict(provider='codex', role='worker'))
+        self.assertEqual(err.getvalue(), '')
 
     def test_fanout_resolves_workspace_for_repo_subdirectory_and_worktree(self):
         repo, worktree = self.home / 'repo', self.home / 'worktree'
