@@ -41,7 +41,9 @@ section before a non-trivial Datadog lookup rather than re-learning it.
   environment, so no setup is needed.
 - Always pass `--no-agent` when scripting, so output is the raw payload rather than the
   agent envelope, and use `pup --no-agent <cmd> --help` (agent mode prints a JSON schema
-  instead of usage).
+  instead of usage). `pup logs search` also needs `--storage indexes` when you parse its
+  output: without it, a "Flex log storage is unavailable … retried with indexed logs" notice
+  precedes the JSON and `json.load` fails (2026-11-04).
 - Pass `--read-only` for lookups: pup then refuses create/update/delete. It does **not**
   cover `pup api -X POST|PUT|PATCH|DELETE` (verified 2026-10-12).
 - `pup docs ask "<question>"` queries Datadog's docs AI. Treat answers as leads and confirm

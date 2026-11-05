@@ -146,6 +146,7 @@ Unlike the other categories, installing this also patches `~/.claude/settings.js
 | Tool | Purpose |
 |---|---|
 | [`ai-tools-clone-lock`](bin/ai-tools-clone-lock) | Keep the deploy working tree read-only; `run --` opens a brief update window and re-locks afterward |
+| [`main-push-wait`](bin/main-push-wait) | Sleep until a Koyeb app's last deploy is 20 min old before pushing or merging to an auto-deploying main (`--check` to just report) |
 
 ## Install
 
