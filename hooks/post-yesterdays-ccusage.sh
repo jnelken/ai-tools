@@ -201,26 +201,29 @@ collect_bundle() {
 # returns a frame whose hash does not match. The terminal is always closed.
 fetch_peer() {
   local host=$1 start=$2 end=$3 out=$4 hid ws term screen rc
-  command -v superset >/dev/null 2>&1 || { echo "superset CLI not on PATH" >&2; return 1; }
+  # The CLI installs to ~/.superset/bin, which only an interactive profile puts on PATH.
+  local ss
+  ss=$(command -v superset 2>/dev/null) || ss="$HOME/.superset/bin/superset"
+  [ -x "$ss" ] || { echo "superset CLI not found" >&2; return 1; }
   [ -n "$PY" ] || { echo "no working python3" >&2; return 1; }
   # By id: `--host <name>` has reported a listed-online host as offline.
-  hid=$(superset hosts list --json 2>/dev/null | jq -r --arg h "$host" \
+  hid=$("$ss" hosts list --json 2>/dev/null | jq -r --arg h "$host" \
     'first(.[] | select((.name == $h or .id == $h) and .online == "yes") | .id) // empty' 2>/dev/null)
   [ -n "$hid" ] || { echo "Superset host $host is offline or unknown" >&2; return 1; }
-  ws=$(superset ws list --host "$hid" --json 2>/dev/null | jq -r \
+  ws=$("$ss" ws list --host "$hid" --json 2>/dev/null | jq -r \
     'first(.[] | select(.archivedAt == null and .worktreeExists != false) | .id) // empty' 2>/dev/null)
   [ -n "$ws" ] || { echo "no Superset workspace on $host to open a terminal in" >&2; return 1; }
   # The grep guard keeps a peer still on a script without --collect from running
   # a normal post (its own catch-up) instead.
   local remote="f=~/.claude/hooks/post-yesterdays-ccusage.sh; grep -q -- '--collect)' \$f && bash \$f --collect $start $end"
-  term=$(superset terminals create --host "$hid" --workspace "$ws" --json --command "$remote" 2>/dev/null \
+  term=$("$ss" terminals create --host "$hid" --workspace "$ws" --json --command "$remote" 2>/dev/null \
     | jq -r '.terminalId // empty' 2>/dev/null)
   [ -n "$term" ] || { echo "could not open a terminal on $host" >&2; return 1; }
-  superset terminals wait --host "$hid" --workspace "$ws" --terminal "$term" \
+  "$ss" terminals wait --host "$hid" --workspace "$ws" --terminal "$term" \
     --match 'CCUSAGE-BUNDLE-END [0-9a-f]{64}' --timeout "${CCUSAGE_PEER_TIMEOUT:-200}" >/dev/null 2>&1
-  screen=$(superset terminals read --host "$hid" --workspace "$ws" --terminal "$term" --json 2>/dev/null \
+  screen=$("$ss" terminals read --host "$hid" --workspace "$ws" --terminal "$term" --json 2>/dev/null \
     | jq -r '.text // empty' 2>/dev/null)
-  superset terminals close --host "$hid" --workspace "$ws" --terminal "$term" >/dev/null 2>&1
+  "$ss" terminals close --host "$hid" --workspace "$ws" --terminal "$term" >/dev/null 2>&1
   printf '%s' "$screen" | "$PY" "$lib_dir/merge-usage.py" --unframe > "$out"; rc=$?
   [ "$rc" -eq 0 ] || { echo "no valid data frame from $host; screen tail:" >&2; printf '%s\n' "$screen" | tail -n 5 >&2; }
   return "$rc"
