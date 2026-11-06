@@ -151,6 +151,21 @@ Revive only after step 3 is answered. Start in the original **cwd** on the origi
   - Run the reattach in its own tmux session (`tmux new-session -d -s undead-<slug> -c <cwd>
     "claude remote-control --session-id <id>"`) and read the result with `tmux capture-pane`.
     A success prints `✔ <title>` and the thread's claude.ai URL.
+  Learned on the first real run (2026-11-06):
+  - **The folder must be free.** Any other `claude remote-control` serving the same cwd
+    blocks it with "This folder is already served…". That includes the `claude-rc-daemon`
+    LaunchAgent. Stop it with `launchctl bootout gui/$(id -u)/com.jake.claude-remote-control`
+    and kill the leftover `claude remote-control --spawn` process (killing tmux alone isn't
+    enough). The block can last a minute or two after the kill. Restart the daemon with
+    `bin/claude-rc-daemon install --dir <dir>` once the revived thread is done.
+  - **One process per environment.** Threads from the same dead server share one
+    `env_…`. While one of them is reattached (single-session mode, "exits when complete"),
+    reattaching another fails with "Environment env_… is already being served by … (pid N)".
+    Revive them one at a time, or use the `--resume … --remote-control` fallback for the
+    rest. Never kill a reattach another session started.
+  - Run the reattach in its own tmux session (`tmux new-session -d -s undead-<slug> -c <cwd>
+    "claude remote-control --session-id <id>"`) and read the result with `tmux capture-pane`.
+    A success prints `✔ <title>` and the thread's claude.ai URL.
 - **Terminal or Superset session.** Run `claude --resume <uuid>` in a new tab in that cwd.
 - **OMEN-hosted.** Try launching on the Windows side from SSH, for example
   `ssh omen-wsl "cd /mnt/d/code && powershell.exe -NoProfile -Command \"Start-Process wt.exe -WorkingDirectory 'D:\code' -ArgumentList 'claude','remote-control','--session-id','session_…'\""`.
