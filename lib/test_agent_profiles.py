@@ -43,6 +43,16 @@ class Profiles(unittest.TestCase):
         self.assertNotIn('Above-Sonnet',codex['instructions'])
         self.assertIn('Above-Sonnet',claude['instructions'])
         self.assertNotIn('Post-PR Workflow',codex['instructions'])
+    def test_budgeted_fanout_guidance_is_personal_only(self):
+        mine=self.repo()
+        personal=p.resolve('development/auto',mine,'claude',{})['instructions']
+        work=p.resolve('development/auto',self.repo('Concentro-Inc'),'claude',{})['instructions']
+        codex=p.resolve('development/auto',mine,'codex',{})['instructions']
+        self.assertIn('bin/agent-budget allow',personal)
+        self.assertNotIn('bin/agent-budget',work)
+        self.assertNotIn('bin/fanout',work)
+        self.assertNotIn('bin/agent-budget',codex)
+        self.assertIn('Parallelize with Subagents',work)
     def test_runtime_does_not_contain_dev_guidance(self):
         r=p.resolve('runtime/slackagent',self.base,'codex',{})
         self.assertNotIn('Superset Workspaces',r['instructions'])

@@ -669,6 +669,26 @@ print(bool(b.acquire('codex','planner',pid=int(sys.argv[2]))))
         self.assertIn('bin/fanout', result['hookSpecificOutput']['permissionDecisionReason'])
         self.assertEqual(self.leases(), [])
 
+    def test_hook_skips_work_targets(self):
+        self.reading['windows']['five_hour']['live'] = 70
+        work = self.home / 'work repo'
+        work.mkdir()
+        with patch.object(hook, 'is_work_target', side_effect=lambda cwd: cwd == str(work)):
+            skipped = hook.handle(dict(hook_event_name='PreToolUse', tool_name='Agent', session_id='sid', cwd=str(work)))
+            denied = hook.handle(dict(hook_event_name='PreToolUse', tool_name='Agent', session_id='sid', cwd=str(self.home)))
+        self.assertIsNone(skipped)
+        self.assertEqual(denied['hookSpecificOutput']['permissionDecision'], 'deny')
+        self.assertEqual(self.leases(), [])
+
+    def test_is_work_target_classifies_by_repository_owner(self):
+        for owner, expected in (('Concentro-Inc', True), ('jnelken', False)):
+            repo = self.home / owner
+            repo.mkdir()
+            subprocess.run(['git', 'init', '-q', str(repo)], check=True)
+            subprocess.run(['git', '-C', str(repo), 'remote', 'add', 'origin', f'git@github.com:{owner}/example.git'], check=True)
+            self.assertEqual(hook.is_work_target(str(repo)), expected, owner)
+        self.assertFalse(hook.is_work_target(None))
+
     def invoke_hook(self, payload):
         out, err = io.StringIO(), io.StringIO()
         with patch.object(sys, 'stdin', io.StringIO(payload)), contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):

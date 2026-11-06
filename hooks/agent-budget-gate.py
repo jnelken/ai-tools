@@ -31,6 +31,18 @@ def owner_pid():
     return pid
 
 
+def is_work_target(cwd):
+    """True when cwd classifies as a work repository. Any failure means 'not work' so the gate keeps its old behavior."""
+    if not cwd:
+        return False
+    try:
+        import agent_profiles
+        config, _ = agent_profiles.configuration()
+        return agent_profiles.classify(cwd, config)[0] == 'work'
+    except Exception:
+        return False
+
+
 def deny(reason):
     return {'hookSpecificOutput': {'hookEventName': 'PreToolUse', 'permissionDecision': 'deny',
                                   'permissionDecisionReason': reason + ' Use bin/fanout spawn to queue a Superset terminal without spending model quota while waiting.'}}
@@ -45,6 +57,9 @@ def handle(data):
     session = data.get('session_id')
     if event == 'PreToolUse':
         if data.get('tool_name') not in ('Agent', 'Workflow'):
+            return None
+        if is_work_target(data.get('cwd')):
+            # The shared budget serves the personal roadmap; work sessions never queue behind it.
             return None
         reading = budget.readings('claude')
         # A missing window must never turn the hook into the fanout queue's
