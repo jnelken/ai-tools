@@ -65,10 +65,10 @@ cat_subtext=$'\033[38;2;166;173;200m'
 cat_lavender=$'\033[38;2;180;190;254m'
 cat_yellow=$'\033[38;2;249;226;175m'
 cat_overlay=$'\033[38;2;108;112;134m'
-cat_mauve=$'\033[38;2;203;166;247m'
 latte_green=$'\033[38;2;64;160;43m'
 latte_red=$'\033[38;2;210;15;57m'
 latte_yellow=$'\033[38;2;223;142;29m'
+latte_mauve=$'\033[38;2;136;57;239m'
 
 # ============================================================================
 # Gradient Functions
@@ -322,8 +322,8 @@ fi
 MODEL_COLOR="$cat_teal"
 EFFORT_COLOR="\033[38;2;250;179;135m"
 if [ "$ULTRACODE" = "on" ]; then
-    MODEL_COLOR="$cat_mauve"
-    EFFORT_COLOR="\033[38;2;203;166;247m"
+    MODEL_COLOR="$latte_mauve"
+    EFFORT_COLOR="\033[38;2;136;57;239m"
 fi
 MODEL_DISPLAY="🤖 ${BOLD}${MODEL_COLOR}${MODEL}${RESET}"
 
