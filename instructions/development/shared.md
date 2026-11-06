@@ -86,6 +86,7 @@ When a commit only goes through with `--no-verify` because of lint errors alread
 - **Keep it current:** update it after each finding or agent result.
 - **Close threads visibly:** answer and tick with an annotation, or move the thread to a ticket or `IN_PROGRESS.md` and note where. Never delete one silently.
 - **Commit:** in personal repos, commit and push it under the existing commit rules.
+- **Scratch plans live in the root checkout.** A repo's gitignored `docs/plans/tmp/` belongs to its root checkout (the first entry of `git worktree list`, e.g. `~/code/api`), never to a worktree: deleting a worktree deletes its untracked plans, and agents in other worktrees can't see them. In a worktree, make `docs/plans/tmp` a symlink to the root's: `root=$(dirname "$(git rev-parse --path-format=absolute --git-common-dir)"); mkdir -p "$root/docs/plans/tmp"`, move any files from a real `docs/plans/tmp` there first, then `ln -s "$root/docs/plans/tmp" docs/plans/tmp`. A symlink isn't matched by the `tmp/` ignore rule, so make sure the repo's shared `.git/info/exclude` lists `docs/plans/tmp`. In briefs, handoffs and tickets, reference scratch plans by their root-checkout path.
 
 ## Golden Paths
 
