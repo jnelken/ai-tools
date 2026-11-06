@@ -46,6 +46,7 @@ Keep the HTTP fallback?
 - Numbers (`1 3`): do only those Next items; hold decisions.
 - Letters (`B`, `B D`): apply those choices and do all of Next. Hold unanswered decisions. A letter means its most recent use, so one from an earlier reply still resolves.
 - Mixed (`1 3 B`): those Next items plus those choices.
+- A letter with a question mark (`B?`): a refresher, not a choice. Do not act on that option. Assume the context is forgotten: explain in a few sentences what the decision is about, what led to it, and what each option would change, then re-present that decision with fresh letters that continue the sequence. Other letters or numbers in the same reply still apply as usual.
 - Held decisions come back in the next reply with fresh letters that continue the sequence.
 - `Drop it` on an `[IN_PROGRESS]` item deletes its IN_PROGRESS.md entry.
 
