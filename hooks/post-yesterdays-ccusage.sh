@@ -278,14 +278,15 @@ if [ "$mode" = collect ]; then
   exit 0
 fi
 
-# Who's posting — prefer git global identity, fall back to $USER@hostname.
-# Plain "Name email", never "Name <email>": Slack shows the carets literally.
-# Sparky's parseIdentity strips them either way, and a bare email is linkified
-# to mailto, which sparky already unwraps.
+# Who's posting — prefer the git global email, fall back to $USER@hostname.
+# Bare email only, no name and no angle brackets: Slack shows "<...>" literally,
+# and a name in front of the email rendered as "jnelken mailto:..." in Slack.
+# Sparky keys the engineer on the email; the name is display-only, and it falls
+# back to the email's local part when no post carries a name.
 git_name=$(git config --global user.name 2>/dev/null || true)
 git_email=$(git config --global user.email 2>/dev/null || true)
-if [ -n "$git_name" ] && [ -n "$git_email" ]; then
-  who="$git_name $git_email"
+if [ -n "$git_email" ]; then
+  who="$git_email"
 elif [ -n "$git_email" ]; then
   who="$git_email"
 elif [ -n "$git_name" ]; then
