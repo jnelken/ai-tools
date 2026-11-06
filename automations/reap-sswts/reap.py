@@ -12,7 +12,7 @@ on this machine whose transcript ends on a ⛏️ sign-off that is at least
   IN_PROGRESS.md would be lost. The ⛏️ is a model's claim; these checks are
   what actually gate the delete.
 - root checkout (type != worktree, the project's own path, or main/master):
-  close the tab's terminal only, like /done. The workspace is never touched.
+  close the tab's terminal only, like /self-destruct in a root checkout. The workspace is never touched.
 
 Anything that fails a check is logged and left alone. Local host only.
 

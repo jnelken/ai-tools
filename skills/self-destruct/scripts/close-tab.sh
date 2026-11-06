@@ -1,8 +1,9 @@
 #!/bin/sh
-# Close the Superset tab a /done session runs in. Launch detached, as the last
-# tool call of the turn:
+# Close the Superset tab a /self-destruct session runs in, without touching the
+# workspace (the root-checkout path; formerly the /done skill). Launch detached,
+# as the last tool call of the turn:
 #
-#   nohup sh ~/.claude/skills/done/scripts/close-tab.sh "$SUPERSET_WORKSPACE_ID" "$SUPERSET_TERMINAL_ID" >/dev/null 2>&1 &
+#   nohup sh ~/.claude/skills/self-destruct/scripts/close-tab.sh "$SUPERSET_WORKSPACE_ID" "$SUPERSET_TERMINAL_ID" >/dev/null 2>&1 &
 #
 # Prefers `panes close`, which removes the tab from the desktop layout. That
 # needs a desktop app attached to this host; when the tab is viewed from
@@ -11,13 +12,13 @@
 # dead tab in that app (upstream; close it by hand).
 ws=$1 term=$2
 [ -n "$ws" ] && [ -n "$term" ] || { echo "usage: close-tab.sh WS_ID TERMINAL_ID" >&2; exit 2; }
-log=${DONE_CLOSE_LOG:-$HOME/.claude/state/done-close.log}
+log=${SELF_DESTRUCT_LOG:-$HOME/.claude/state/self-destruct.log}
 mkdir -p "$(dirname "$log")"
 exec >>"$log" 2>&1
 cd / || exit 1
 
 # Let the final message render and the turn end first.
-sleep "${DONE_CLOSE_DELAY:-2}"
+sleep "${SELF_DESTRUCT_DELAY:-2}"
 
 echo "$(date '+%F %T') close terminal $term"
 pane=$(superset panes list --workspace "$ws" --json 2>/dev/null |

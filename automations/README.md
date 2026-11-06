@@ -303,7 +303,7 @@ session, even after the glyph, cancels it. No model calls; it is plain checks pl
   MERGED PR and no OPEN one, `HEAD` is a commit that PR carried, and no gitignored
   `IN_PROGRESS.md` would go with it. It also drops the PR's `pr-review-posted.jsonl` entry.
 - **Root checkout** (non-worktree type, the project's own path, or `main`/`master`): closes
-  the ⛏️ tab's terminal only, like `/done`. The workspace and clone are never touched.
+  the ⛏️ tab's terminal only, like `/self-destruct` in a root checkout. The workspace and clone are never touched.
 
 Every skip is logged with its reason to `~/.claude/automations/reap-sswts/logs/reap.log`.
 Preview with `~/.claude/automations/reap-sswts/run.sh --dry-run` (prints to the terminal).

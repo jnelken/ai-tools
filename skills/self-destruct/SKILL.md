@@ -1,6 +1,6 @@
 ---
 name: self-destruct
-description: The session deletes its own Superset workspace (worktree, local branch, workspace registration, and this terminal tab) once its branch is confirmed merged, then signs off ⛏️. In a project's root checkout it keeps the workspace and only closes the terminal, like /done. Checks IN_PROGRESS.md, unpushed commits and sibling terminals first and puts any loss in front of the user like a delete-confirmation dialog. Use when the user types /self-destruct or explicitly asks this session to clean up after itself. Trigger phrases include "self-destruct", "delete your own worktree", "reap this session", "reap this workspace", "close this workspace", "this PR merged, clean up this workspace", "tear down this superset workspace", "am I safe to close this workspace". Formerly named close-sswt.
+description: The session deletes its own Superset workspace (worktree, local branch, workspace registration, and this terminal tab) once its branch is confirmed merged, then signs off ⛏️. In a project's root checkout it keeps the workspace and only closes the terminal (this is the old /done skill, now folded in). Checks IN_PROGRESS.md, unpushed commits and sibling terminals first and puts any loss in front of the user like a delete-confirmation dialog, which can run /close-out or /pick-up first. This is the one command for ending a session. Use when the user types /self-destruct or explicitly asks this session to clean up after itself or close its terminal. Trigger phrases include "self-destruct", "close this terminal", "we're done, close it", "delete your own worktree", "reap this session", "reap this workspace", "close this workspace", "this PR merged, clean up this workspace", "tear down this superset workspace", "am I safe to close this workspace". Formerly named close-sswt.
 disable-model-invocation: true
 ---
 
@@ -15,7 +15,12 @@ session.
 This skill is `/reap` for the session itself. After a ⛏️ sign-off, a bare "reap" reply
 already authorizes the same teardown; `/self-destruct` is the explicit, guarded form of it.
 
-Siblings: [[done]] closes only the terminal tab. [[clean-sswts]] sweeps many workspaces
+This is the single command for ending a session; the former `/done` (close only the tab) is
+the root-checkout path below. It shares one ecosystem with [[close-out]] and [[pick-up]]:
+`IN_PROGRESS.md` is written by close-out, read and verified here (never edited here), and
+resumed by pick-up. The confirmation dialog in step 3 can run either one first.
+
+Siblings: [[clean-sswts]] sweeps many workspaces
 from the root checkout (it refuses to run from inside one, which is the gap this fills).
 [[cleanup-local-branches]] owns the `~/.claude/local-branch-archive.md` recovery-log
 convention. [[pick-up]] is the method for verifying `IN_PROGRESS.md` items, borrowed here for
@@ -50,12 +55,34 @@ If either of these holds, this is a project's root checkout, not a disposable wo
   the type check.
 
 Deleting it would remove the primary clone, so **never archive the workspace, delete a
-branch or run `teardown.sh`.** The user still wants the session gone, so do what [[done]]
-does instead: run its guardrails (this session's own uncommitted changes, unpushed commits,
-background tasks), write the final message saying the workspace was kept because it is the
-root checkout and only this terminal is closing, then make its detached
-`superset terminals close … --local` call the last tool call of the turn. Skip steps 1–4
-below entirely.
+branch or run `teardown.sh`.** The user still wants the session gone, so close only this
+terminal:
+
+1. Run the loss picture's 2a and 2c, plus 2b's `IN_PROGRESS.md` check, but scoped to *this
+   session's own* work: its uncommitted changes, unpushed commits, background tasks and
+   Monitors. Dirty files that other sessions own (a root checkout is worked by several at
+   once) are one FYI line, not a blocker. Anything of this session's own goes through the
+   step 3 dialog (the "merged" check in step 1 does not apply here).
+2. Write the final message: that the workspace was kept because it is the root checkout and
+   only this terminal is closing. Nothing after the close can be said. Sign-off is `⛏️`
+   unless this is an sswt whose branch is unmerged, then `✅`.
+3. As the **last tool call of the turn**, close detached so the message renders first:
+   ```bash
+   nohup sh ~/.claude/skills/self-destruct/scripts/close-tab.sh \
+     "$SUPERSET_WORKSPACE_ID" "$SUPERSET_TERMINAL_ID" >/dev/null 2>&1 &
+   ```
+   Write nothing after it. Always close `$SUPERSET_TERMINAL_ID` from the environment; never
+   list terminals and close another, and never use the Superset MCP `terminals_close` (it
+   goes through the cloud relay and 503s with `Host is not online`).
+
+Skip steps 1, 2 (beyond the above) and 4 below entirely.
+
+**Known quirk: the dead tab.** The close itself works (the host disposes the terminal and
+ends the session within a second). What lingers is the *tab* in a desktop app that views
+this host from another machine: it keeps a dead tab and `superset panes` can't reach it.
+`close-tab.sh` uses `panes close` whenever a desktop is attached to this host, and falls
+back to `terminals close` otherwise, in which case close the tab by hand. Each run logs to
+`~/.claude/state/self-destruct.log`.
 
 ## 1. Confirm the branch is merged
 
@@ -116,8 +143,13 @@ open questions to Jake; each dies with the session.
   this session's own): print a one-line "nothing at stake, self-destructing" summary and go
   to step 4. Silent destruction is never appropriate, even with nothing to lose.
 - **Anything outstanding**: `AskUserQuestion`, styled like a delete-confirmation dialog,
-  succinct, naming exactly what is at risk. Options: **Close anyway (discard)**, **Run
-  /pick-up first**, **Cancel**.
+  succinct, naming exactly what is at risk. Options: **Run /close-out first** (the first
+  option, and the recommended one when the loose ends are conversation-level: unfiled
+  findings, unanswered questions, deferred promises), **Run /pick-up first** (when
+  `IN_PROGRESS.md` items may already be done), **Close anyway (discard)**, **Cancel**.
+  After either "first" option finishes, redo step 2 and come back to this decision; never
+  proceed straight to step 4 on the stale picture. close-out writes `IN_PROGRESS.md`, so a
+  decision it captures there no longer counts as at stake on the re-check.
 
 ## 4. Self-destruct
 

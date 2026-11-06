@@ -208,6 +208,6 @@ with the status line.
 - **Never relay into a `working` tab.** `next` only returns idle or blocked tabs. If Jake took
   a long time to answer, re-check with `screen` before sending.
 - **`reap` is just text.** The receiving session decides what reaping means: a sswt runs its
-  close-out or reap flow, and a root-checkout `local` tab typically closes itself (`/done`).
+  close-out or reap flow, and a root-checkout `local` tab typically closes itself (`/self-destruct`).
 - **The superset MCP tools are host-scoped and dead here.** Use the `superset` CLI, which the
   helper wraps.
