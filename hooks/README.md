@@ -184,6 +184,8 @@ If you already have a `hooks.SessionStart` array, append the new entry rather th
 
 Tests: `bash hooks/tests/post-yesterdays-ccusage.test.sh` (stubs `npx`/`npm`/`curl`/`osascript`/`superset` on an isolated `HOME`).
 
+**Rule for changing the post body:** test it in `#sandbox-jake` before deploying. Render with `CCUSAGE_PEERS= bash hooks/post-yesterdays-ccusage.sh --dry-run YYYY-MM-DD`, post that exact text to `#sandbox-jake` (Slack channel `C0BAK0N631R`), check it, then commit and push. Never point `SLACK_CCUSAGE_WEBHOOK_URL` at the sandbox to test: the webhook channel feeds sparky's leaderboard, so any test post there counts as real usage.
+
 ### Disabling
 
 Remove the entry from `settings.json` OR `unset SLACK_CCUSAGE_WEBHOOK_URL` to no-op.
