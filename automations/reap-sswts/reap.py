@@ -237,7 +237,7 @@ def sweep(dry, grace_min):
 
         if is_root:
             for t in reapable:
-                log(f"{'DRY ' if dry else ''}close root tab: {ws.get('project')}/{name} [{t.get('title')}]")
+                log(f"{'DRY ' if dry else ''}close root tab: {ws.get('project') or '-'}/{name} [{t.get('title')}]")
                 if not dry:
                     res = run("superset", "terminals", "close", "--workspace", ws["id"], "--terminal", t["id"], "--local")
                     if res.returncode != 0:
@@ -246,14 +246,14 @@ def sweep(dry, grace_min):
 
         blockers = [v[1] for v in verdicts.values() if v[0] == "blocker"]
         if blockers:
-            log(f"skip {ws.get('project')}/{name}: other tab not reapable ({blockers[0]})")
+            log(f"skip {ws.get('project') or '-'}/{name}: other tab not reapable ({blockers[0]})")
             continue
         reason, pr = worktree_blocker(wt, root, branch)
         if reason:
-            log(f"skip {ws.get('project')}/{name}: {reason}")
+            log(f"skip {ws.get('project') or '-'}/{name}: {reason}")
             continue
         sha = run("git", "-C", wt, "rev-parse", "HEAD").stdout.strip()
-        log(f"{'DRY ' if dry else ''}reap {ws.get('project')}/{name}: {branch} (#{pr[1]} merged) @ {sha[:9]}")
+        log(f"{'DRY ' if dry else ''}reap {ws.get('project') or '-'}/{name}: {branch} (#{pr[1]} merged) @ {sha[:9]}")
         drop_ledger_entry(pr[0], pr[1], dry)
         env = dict(os.environ, SELF_DESTRUCT_DELAY="0")
         if dry:

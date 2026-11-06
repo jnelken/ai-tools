@@ -69,7 +69,7 @@ terminal:
 3. As the **last tool call of the turn**, close detached so the message renders first:
    ```bash
    nohup sh ~/.claude/skills/self-destruct/scripts/close-tab.sh \
-     "$SUPERSET_WORKSPACE_ID" "$SUPERSET_TERMINAL_ID" >/dev/null 2>&1 &
+     "$SUPERSET_WORKSPACE_ID" "$SUPERSET_TERMINAL_ID" "$PPID" >/dev/null 2>&1 &
    ```
    Write nothing after it. Always close `$SUPERSET_TERMINAL_ID` from the environment; never
    list terminals and close another, and never use the Superset MCP `terminals_close` (it
@@ -80,9 +80,12 @@ Skip steps 1, 2 (beyond the above) and 4 below entirely.
 **Known quirk: the dead tab.** The close itself works (the host disposes the terminal and
 ends the session within a second). What lingers is the *tab* in a desktop app that views
 this host from another machine: it keeps a dead tab and `superset panes` can't reach it.
-`close-tab.sh` uses `panes close` whenever a desktop is attached to this host, and falls
-back to `terminals close` otherwise, in which case close the tab by hand. Each run logs to
-`~/.claude/state/self-destruct.log`.
+`close-tab.sh` uses `panes close` whenever a desktop is attached to this host, which removes
+the tab outright. Otherwise it hangs up the tab's tty (found through the Claude process,
+`$PPID`), so Claude and the login shell exit as if the tab were closed by hand, and uses
+`terminals close` only if the terminal is still listed after that. Whether a remote app drops
+the tab after a hangup is still being checked; if the dead tab remains, close it by hand and
+don't retry the CLI from a new session. Each run logs to `~/.claude/state/self-destruct.log`.
 
 ## 1. Confirm the branch is merged
 
