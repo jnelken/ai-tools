@@ -2,7 +2,7 @@
 # ============================================================================
 # Awesome Statusline - Legacy 2.0.1
 # ============================================================================
-# Line 1: 🤖 Model 🪪 session-id | ✅ Git | 🐍 Env | 🎨 Style
+# Line 1: 🤖 Model (purple + purple effort while ultracode is on) 🪪 session-id | ✅ Git | 🐍 Env | 🎨 Style
 # Line 2: 📂 full path 🌿(branch) | 💰 cost | ⏰ duration
 # Line 3: 🧠 Context bar 20 blocks % used (tokens)
 # Line 4: 🚀 Usage 5H bar 20 blocks % (Reset time)
@@ -41,6 +41,7 @@ eval "$(jq -r '
     assignment("SEVEN_DAY_PCT"; .rate_limits.seven_day.used_percentage // ""),
     assignment("SEVEN_DAY_RESET"; .rate_limits.seven_day.resets_at // ""),
     assignment("EFFORT"; .effort.level // ""),
+    assignment("TRANSCRIPT"; .transcript_path // ""),
     assignment("THINKING"; .thinking.enabled // ""),
     assignment("HAS_CURRENT_USAGE"; (.context_window.current_usage // null) != null),
     assignment("INPUT_TOKENS"; (.context_window.current_usage // {}).input_tokens // 0),
@@ -64,6 +65,7 @@ cat_subtext=$'\033[38;2;166;173;200m'
 cat_lavender=$'\033[38;2;180;190;254m'
 cat_yellow=$'\033[38;2;249;226;175m'
 cat_overlay=$'\033[38;2;108;112;134m'
+cat_mauve=$'\033[38;2;203;166;247m'
 latte_green=$'\033[38;2;64;160;43m'
 latte_red=$'\033[38;2;210;15;57m'
 latte_yellow=$'\033[38;2;223;142;29m'
@@ -287,11 +289,46 @@ gradient_text() {
 # Line 1: Model | Git Status | Env | Style
 # ============================================================================
 
-# Model (bold)
-MODEL_DISPLAY="🤖 ${BOLD}${cat_teal}${MODEL}${RESET}"
+# Ultracode is not in the statusline JSON (effort.level stays low..max), so read the
+# last explicit `/effort` result from the transcript: "Ultracode on ..." => on, any
+# other /effort output => off. Incremental: only bytes added since the last run are
+# scanned (offset/state/pending cached per session), so long transcripts stay cheap.
+ULTRACODE="off"
+if [[ -n "$TRANSCRIPT" && -n "$SESSION_ID" && -r "$TRANSCRIPT" ]]; then
+    UC_CACHE="${TMPDIR:-/tmp}/awesome-statusline-ultracode-${SESSION_ID}"
+    uc_offset=0 uc_state="off" uc_pending=0
+    [[ -r "$UC_CACHE" ]] && read -r uc_offset uc_state uc_pending < "$UC_CACHE"
+    [[ "$uc_offset" =~ ^[0-9]+$ && "$uc_pending" =~ ^[01]$ ]] || { uc_offset=0; uc_state="off"; uc_pending=0; }
+    uc_size=$(stat -f%z "$TRANSCRIPT" 2>/dev/null || stat -c%s "$TRANSCRIPT" 2>/dev/null || echo 0)
+    [[ "$uc_size" =~ ^[0-9]+$ ]] || uc_size=0
+    (( uc_size < uc_offset )) && { uc_offset=0; uc_state="off"; uc_pending=0; }
+    if (( uc_size > uc_offset )); then
+        read -r uc_offset uc_state uc_pending < <(
+            tail -c +"$((uc_offset + 1))" "$TRANSCRIPT" | LC_ALL=C awk \
+                -v off="$uc_offset" -v state="$uc_state" -v pending="$uc_pending" '
+                { off += length($0) + 1 }
+                /"content":"<command-name>\/effort<\/command-name>/ { pending = 1 }
+                pending && /"content":"<local-command-stdout>/ {
+                    state = ($0 ~ /"content":"<local-command-stdout>Ultracode on/) ? "on" : "off"
+                    pending = 0
+                }
+                END { print off, state, pending }')
+        { printf '%s %s %s\n' "$uc_offset" "$uc_state" "$uc_pending" > "$UC_CACHE"; } 2>/dev/null
+    fi
+    ULTRACODE="$uc_state"
+fi
+
+# Model (bold) — purple while ultracode is on
+MODEL_COLOR="$cat_teal"
+EFFORT_COLOR="\033[38;2;250;179;135m"
+if [ "$ULTRACODE" = "on" ]; then
+    MODEL_COLOR="$cat_mauve"
+    EFFORT_COLOR="\033[38;2;203;166;247m"
+fi
+MODEL_DISPLAY="🤖 ${BOLD}${MODEL_COLOR}${MODEL}${RESET}"
 
 # Reasoning effort + extended thinking (effort.level: low|medium|high|xhigh|max; absent if model lacks effort param)
-[ -n "$EFFORT" ] && MODEL_DISPLAY="${MODEL_DISPLAY} \033[38;2;250;179;135m⚡${EFFORT}${RESET}"
+[ -n "$EFFORT" ] && MODEL_DISPLAY="${MODEL_DISPLAY} ${EFFORT_COLOR}⚡${EFFORT}${RESET}"
 [ "$THINKING" = "true" ] && MODEL_DISPLAY="${MODEL_DISPLAY} \033[38;2;249;226;175m💡${RESET}"
 
 # Git status
@@ -399,7 +436,7 @@ STYLE_DISPLAY=""
 # and lands before any soft-wrap on narrow terminals. Recovery tooling reads this
 # to map a dead terminal buffer back to its resumable session.
 SESSION_DISPLAY=""
-[[ -n "$SESSION_ID" ]] && SESSION_DISPLAY=" ${cat_overlay}🪪${SESSION_ID}${RESET}"
+[[ -n "$SESSION_ID" ]] && SESSION_DISPLAY=" ${cat_overlay}🪪 ${SESSION_ID}${RESET}"
 
 LINE1="${MODEL_DISPLAY}${SESSION_DISPLAY} │ ${GIT_STATUS_DISPLAY} │ ${ENV_DISPLAY} │ ${STYLE_DISPLAY}"
 
