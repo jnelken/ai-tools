@@ -161,12 +161,14 @@ check "chain runs until a link fails to ship" "$(wc -l < "$ROOT/runs.jsonl" | tr
 check "chain's last link is the failure"      "$(last outcome)" error
 grep -q "starting link 3" "$ROOT"/logs/run-*.log && echo "ok   chain logged its links" || { echo "FAIL: no chain log line"; exit 1; }
 check "a feature ship records its kind"     "$(last work_kind)" feature
-# A code-health ship never chains, even well inside the time cap.
+# The code-health fallback is retired: a planner that still asks for one is refused, no worker runs.
 rm -f "$TMP/chain-count"
 CHAIN_MINUTES=40 run health chain
-check "code-health ship does not chain"      "$(wc -l < "$ROOT/runs.jsonl" | tr -d ' ')" 11
-check "code-health kind recorded"            "$(last work_kind)" code_health
-check "code-health ship is still shipped"    "$(last outcome)" shipped
+check "code-health dispatch records one row"  "$(wc -l < "$ROOT/runs.jsonl" | tr -d ' ')" 11
+check "code-health dispatch is refused"       "$(last action)" blocked_no_item
+check "code-health dispatch runs no worker"   "$(last worker)" none
+check "code-health dispatch records no work"  "$(last outcome)" blocked-no-item
+grep -q "no longer runs" "$ROOT/logs/latest.log" && echo "ok   code-health refusal logged" || { echo "FAIL: no code-health refusal line"; exit 1; }
 # Past the time cap, a shipped run does not chain.
 ADVANCE_ROADMAP_CHAIN_START=$(( $(date +%s) - 2401 )) CHAIN_MINUTES=40 run good file
 check "no chain past the time cap"            "$(wc -l < "$ROOT/runs.jsonl" | tr -d ' ')" 12
@@ -198,24 +200,6 @@ kill $holder 2>/dev/null; wait $holder 2>/dev/null || true
 ADVANCE_ROADMAP_LANE=1 ADVANCE_ROADMAP_TARGET_REPO=other run good file
 check "wrong target repo is not dispatched"    "$(last action)" blocked_no_item
 check "wrong target runs no worker"             "$(last worker)" none
-
-# A hygiene fallback uses the same batch barrier and never refills its repo's slot.
-batch_stamp=20990101-000001
-batch_rows_before=$(wc -l < "$ROOT/runs.jsonl" | tr -d ' ')
-ADVANCE_ROADMAP_LANE=1 ADVANCE_ROADMAP_TARGET_REPO=demo ADVANCE_ROADMAP_BATCH_PID=$$ \
-  ADVANCE_ROADMAP_STAMP=$batch_stamp ADVANCE_ROADMAP_BATCH_POLL_S=0.05 CHAIN_MINUTES=40 run health file &
-batch_pid=$!
-for n in {1..200}; do
-  [ -f "$ROOT/runs/$batch_stamp/batch-ready" ] && break
-  sleep .1
-done
-[ -f "$ROOT/runs/$batch_stamp/batch-ready" ] || { echo "FAIL: batch never reached barrier"; exit 1; }
-[ ! -f "$ROOT/runs/$batch_stamp/worker-result.json" ] || { echo "FAIL: worker ran before release"; exit 1; }
-touch "$ROOT/runs/$batch_stamp/batch-release"
-wait $batch_pid
-check "released batch hygiene plan ships" "$(last outcome)" shipped
-check "batch hygiene retains its work kind" "$(last work_kind)" code_health
-check "batch hygiene runs exactly once" "$(wc -l < "$ROOT/runs.jsonl" | tr -d ' ')" $(( batch_rows_before + 1 ))
 
 batch_stamp=20990101-000002
 ADVANCE_ROADMAP_LANE=1 ADVANCE_ROADMAP_TARGET_REPO=demo ADVANCE_ROADMAP_BATCH_PID=$$ \

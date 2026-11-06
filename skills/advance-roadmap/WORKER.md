@@ -25,10 +25,6 @@ The prompt names a request JSON file. Modes:
   tree that would otherwise block Step 3. If `worker_brief` names a recovered-deploy ticket to
   close out, do that alongside your own item's Step 6/7 bookkeeping (comment, `Done`, clear
   `Paused`) — it's a different ticket than the one you're implementing.
-- **code-health** — an implement/resume request whose orchestrator result says
-  `"work_kind": "code_health"`. Read [`CODE_HEALTH.md`](CODE_HEALTH.md) first; its *code-health
-  pass* section amends Steps 3–8 (baseline first, caps, stricter verification, commit trailer, no
-  roadmap edits). The product must behave exactly as before.
 - **bookkeeping** — full orchestrator result with `blocked_no_item` / `nothing_qualified`
   (request field `orchestrator`). Run Step 2b once per entry in `blockers[]`, perform `archives`,
   close out any recovered-deploy ticket `worker_brief` names (comment, `Done`, clear `Paused` —
@@ -327,9 +323,6 @@ Record the review result in JSON; a clean first Cursor round followed by a clean
 
 ## Step 6 — Update the roadmap (and friends)
 
-A code-health pass skips this step: it isn't a roadmap item, and a ticket-backed one is closed in
-Step 7b's close-out like any ticket.
-
 In the roadmap file you located in Step 1 (not necessarily a root `ROADMAP.md`):
 - Move the completed item into the **Shipped (reference)** section, in that section's existing prose
   or list style — don't paste the full planned-item block in.
@@ -404,7 +397,7 @@ gh pr create -R jnelken/<github-repo> --head <branch> --base <default-branch> \
   Linear line from the body. Never create a ticket to fill this template.
 
   Keep it skimmable: no file names or function names unless the change is about them, and no "all
-  tests pass" in Validation. A code-health PR says it preserves behavior.
+  tests pass" in Validation.
 - Merge it right away; Step 5b's review was the gate. Use a merge commit:
 
 ```

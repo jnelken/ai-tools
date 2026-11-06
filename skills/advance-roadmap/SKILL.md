@@ -4,10 +4,10 @@ description: >-
   Ship planned items from personal repos' ROADMAP.md, docs/plans, or repo-labeled Linear issues
   through isolated branches, reviewed PRs, merge, and successful production deploy. Use for
   "advance the roadmap", "ship a roadmap item", or scheduled roadmap runs. Plans independent
-  threads before dispatching workers. With no actionable feature, performs a bounded
-  behavior-preserving code-health pass and logs hygiene observations without creating tickets.
-  Stops with evidenced blockers when work cannot proceed. Unlike unblock-roadmap, implements
-  and merges the work rather than only recording decisions.
+  threads before dispatching workers. With no actionable item, reports that and stops; it never
+  substitutes a code-health or cleanup pass. Stops with evidenced blockers when work cannot
+  proceed. Unlike unblock-roadmap, implements and merges the work rather than only recording
+  decisions.
 ---
 
 > **Personal machines only (OMEN, JXIV).** `install.sh` doesn't link this skill or its automation on
@@ -36,12 +36,12 @@ unavailable, stop before merging. Codex runs only after the initial Cursor cycle
 finds issues, Cursor handles them and gets up to 3 follow-up rounds. `runs.jsonl` records the review
 phases and flags an unreviewed ship.
 
-**Nothing to ship? Clean something up.** When a repo has no dispatchable item, its first thread runs
-one bounded, behavior-preserving refactor (`work_kind: code_health`) — an open `code-health` ticket
-first, otherwise an audit against a shared rubric — instead of stopping. And after every clean ship,
-the worker runs a short retrospective and records structured hygiene observations rather than
-creating tickets. Existing planned tickets rank below feature work. Rubric, retrospective and
-refactor caps: [`CODE_HEALTH.md`](CODE_HEALTH.md). A code-health pass never runs beside a feature thread.
+**Nothing to ship? Say so and stop.** When a repo has no dispatchable item, the run ends
+`blocked_no_item` with its reasons. There is no fallback work: the old code-health pass
+(`work_kind: code_health`) is retired, and `run.sh` refuses a plan that asks for one. Open
+`code-health` tickets are skipped unless Jake labels one `do-next`. After every clean ship, the
+worker still runs a short retrospective and records structured hygiene observations rather than
+creating tickets ([`CODE_HEALTH.md`](CODE_HEALTH.md)).
 
 **One batch a day: 10:30, `daily_batch.py`.** launchd starts it once; it lists the personal repos and
 plans each one in parallel, with a hard ceiling of five active agents across planning, approval,
@@ -82,7 +82,7 @@ fallbacks.
 ships a feature cleanly (`shipped`, deploy green) starts another run — fresh orchestrator pass,
 fresh item — as long as fewer than `ADVANCE_ROADMAP_CHAIN_MINUTES` (default 40; `0` = one item)
 have passed since the first run started. Anything else (blocked, failed, red deploy, no item,
-quota) ends the chain, and so does leaving the sprint window. A code-health ship never chains.
+quota) ends the chain, and so does leaving the sprint window.
 Interactive runs follow the same rule: after the worker reports a
 feature `shipped`, go back to [`../conductor/ORCHESTRATOR.md`](../conductor/ORCHESTRATOR.md) Step 0 if
 under 40 minutes. (For one-off human-driven work, use [[conductor]] instead.)
@@ -150,4 +150,4 @@ For human-driven work on an item you name, call `/conductor` directly.
 2. [`../conductor/ORCHESTRATOR.md`](../conductor/ORCHESTRATOR.md) — Steps 0–2d + JSON protocol (lives in the [[conductor]] skill)
 3. [`PLAN_APPROVAL.md`](PLAN_APPROVAL.md) — only if you are the plan approver
 4. [`WORKER.md`](WORKER.md) — Steps 3–8 (including Step 5b's Cursor/Codex review cycle, Step 7b's deploy watch and Step 7c's retrospective) + worker result fence
-5. [`CODE_HEALTH.md`](CODE_HEALTH.md) — the code-health rubric, retrospective, and refactor pass
+5. [`CODE_HEALTH.md`](CODE_HEALTH.md) — the code-health rubric and Step 7c's retrospective

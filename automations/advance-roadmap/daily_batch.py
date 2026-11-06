@@ -421,8 +421,7 @@ class Batch:
     def spawn_threads(self):
         """Once a thread has planned a feature, queue the repo's next thread (up to --threads).
 
-        Code-health passes and resumes never grow a second thread: the first means the repo has no
-        feature work left, the second is finishing a parked branch nobody should plan around.
+        Resumes never grow a second thread: they finish a parked branch nobody should plan around.
         """
         for item in list(self.state["queue"]):
             plan = item.get("plan")

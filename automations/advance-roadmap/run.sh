@@ -610,7 +610,6 @@ fi
   [ -f "$SKILL_DIR/SAFETY.md" ] || { echo "FATAL: missing SAFETY.md"; exit 1; }
 
   ORCH_PROMPT="Read and follow $CONDUCTOR_DIR/ORCHESTRATOR.md and $SKILL_DIR/SAFETY.md exactly.
-Step 2d's code-health fallback uses the rubric in $SKILL_DIR/CODE_HEALTH.md.
 
 This is an unattended scheduled ORCHESTRATOR run (stamp=$STAMP). You are READ-ONLY.
 Emit one \`\`\`ORCHESTRATOR_RESULT_JSON fence per ORCHESTRATOR.md. Do not implement.
@@ -635,12 +634,7 @@ or include another repo's archives, blockers, directives, or bookkeeping.
 Other batch planners own every other repo. Keep considered and summary scoped to $TARGET_REPO."
     if [ "$THREAD" -le 1 ]; then
       ORCH_PROMPT="$ORCH_PROMPT
-If no feature item is actionable, apply Step 2d's bounded code-health (hygiene) fallback to this repo.
-For this daily batch the fallback is PER REPO: feature work in another repo does not block it.
-Prefer an existing code-health ticket; otherwise queue one ad-hoc pass under CODE_HEALTH.md.
-Keep every Step 2d eligibility gate, including the clean tree and 24-hour cooldown.
-Emit work_kind=code_health for a hygiene pass; if the repo is ineligible, return no work.
-A code-health pass is only for a repo with no feature item; it never runs beside a feature thread.
+If no feature item is actionable, return blocked_no_item (Step 2d): there is no code-health fallback.
 Later threads of this repo are planned after yours and approved against it, so plan yours as if alone."
     else
       ORCH_PROMPT="$ORCH_PROMPT
@@ -648,7 +642,7 @@ Earlier threads of $TARGET_REPO already hold the items in $PEER_PLANS (read it).
 those items or anything that needs their branch. Pick the next-ranked eligible item whose
 touchpoints are as disjoint from theirs as you can make them; if the only candidates collide, say
 so in conflict_notes rather than hiding it, and the plan approver will decide.
-You own NO bookkeeping: no Step 2d code-health pass, no archives, no blockers, no Linear comments,
+You own NO bookkeeping: no archives, no blockers, no Linear comments,
 no directive. If no second independent item exists, return blocked_no_item with the summary
 \"no second thread\" and nothing else."
     fi
@@ -900,9 +894,9 @@ target, thread = sys.argv[4], int(sys.argv[5])
 r = json.load(open(path))
 repo = r.get("repo")
 if thread > 1:
-    # Bookkeeping belongs to a repo's first thread, and a code-health pass never runs beside a feature.
+    # Bookkeeping belongs to a repo's first thread.
     r["blockers"], r["archives"], r["closeouts"] = [], [], []
-    if r.get("action") == "resume_worker" or r.get("work_kind") == "code_health":
+    if r.get("action") == "resume_worker":
         r.update(action="blocked_no_item", outcome_token="blocked-no-item", repo=None, item=None,
                  branch=None, linear_id=None, directive_ticket=None, worker_brief=None,
                  summary="no second thread")
@@ -919,7 +913,10 @@ if target:
                  summary=f"Planner returned bookkeeping outside assigned repo {target}; ignored")
 if r.get("action") in ("dispatch_worker", "resume_worker"):
     why = None
-    if not repo or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", repo) or not os.path.isdir(os.path.join(code, repo)):
+    if r.get("work_kind", "feature") != "feature":
+        # The code-health fallback is retired: a run with nothing actionable reports that and stops.
+        why = f"orchestrator asked for a {r.get('work_kind')!r} pass, which advance-roadmap no longer runs"
+    elif not repo or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", repo) or not os.path.isdir(os.path.join(code, repo)):
         why = f"orchestrator named an invalid repo {repo!r}"
     elif repo in busy:
         why = f"orchestrator picked {repo}, which another lane holds"
@@ -1220,14 +1217,10 @@ fi
 
 # ── Chain ─────────────────────────────────────────────────────────────────────
 # Only a clean feature ship continues: blocked, failed, red deploys and quota
-# skips all mean the next link would likely hit the same wall, and a code-health
-# ship means the queue was empty — chaining would just be a refactor spree. The
-# next link re-picks providers and re-plans from scratch, exactly like a fresh tick.
+# skips all mean the next link would likely hit the same wall. The next link re-picks providers and re-plans from scratch, exactly like a fresh tick.
 last_outcome="$(python3 -c 'import json,sys; r=json.loads(open(sys.argv[1]).readlines()[-1]); print(r.get("outcome",""), r.get("work_kind") or "feature")' "$ROOT/runs.jsonl" 2>/dev/null || true)"
 elapsed=$(( $(date +%s) - CHAIN_START ))
-if [ "$last_outcome" = "shipped code_health" ]; then
-  echo "=== chain: code-health pass shipped — not chaining ===" >> "$LOG"
-elif [ "$last_outcome" = "shipped feature" ] && ! in_window; then
+if [ "$last_outcome" = "shipped feature" ] && ! in_window; then
   echo "=== chain: past the sprint window — not chaining ===" >> "$LOG"
 elif [ "$last_outcome" = "shipped feature" ] && [ "$elapsed" -lt $(( CHAIN_MINUTES * 60 )) ]; then
   echo "=== chain: shipped at $(( elapsed / 60 ))m of ${CHAIN_MINUTES}m — starting link $(( CHAIN_LINK + 1 )) ===" >> "$LOG"

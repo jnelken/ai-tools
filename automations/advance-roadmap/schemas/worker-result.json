@@ -24,7 +24,7 @@
     },
     "work_kind": {
       "type": "string",
-      "enum": ["feature", "code_health"]
+      "enum": ["feature"]
     },
     "limit_text": { "type": ["string", "null"] },
     "deploy": {

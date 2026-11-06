@@ -30,7 +30,6 @@ The contract the builder follows (Steps 2b–8: branch, implement, verify, revie
 update, merge, push, deploy watch) is
 [`../advance-roadmap/WORKER.md`](../advance-roadmap/WORKER.md); the hard rules binding everyone are
 [`../advance-roadmap/SAFETY.md`](../advance-roadmap/SAFETY.md). Read both before dispatching.
-Code-health work follows [`../advance-roadmap/CODE_HEALTH.md`](../advance-roadmap/CODE_HEALTH.md).
 
 ## 1. Choose the item
 
@@ -75,8 +74,8 @@ Write a request file (scratchpad, not the repo) — the same shape `run.sh` prod
 }
 ```
 
-Use `"mode": "resume"` + `"action": "resume_worker"` + the existing branch to finish a parked one,
-and `"work_kind": "code_health"` + a `roadmap/health-<slug>` branch for a refactor pass. Schema:
+Use `"mode": "resume"` + `"action": "resume_worker"` + the existing branch to finish a parked one.
+`work_kind` is always `"feature"`. Schema:
 `~/.claude/automations/advance-roadmap/schemas/orchestrator-result.json`.
 
 Then run (foreground; it can take a long time — use `run_in_background` and wait for completion,

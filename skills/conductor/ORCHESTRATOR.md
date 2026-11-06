@@ -68,9 +68,8 @@ thread's plan, stated plainly; empty when there's nothing.
 Use `"action": "resume_worker"` when Step 0 requires finishing an interrupted run; set
 `branch` to the existing `roadmap/...` branch.
 
-A code-health pass (Step 2d) is an ordinary dispatch with `"work_kind": "code_health"`, a
-`roadmap/health-<slug>` branch, `roadmap_path: null`, and `linear_id` set only when a `code-health`
-ticket is the scope. `run.sh` doesn't chain after one (see SKILL.md).
+`work_kind` is always `"feature"`. The old `code_health` fallback is retired, and `run.sh`
+refuses any dispatch that asks for it.
 
 ### Nothing to implement
 
@@ -148,17 +147,15 @@ A daily batch may run up to a few **threads** of work in one repo: separate plan
 branches, separate Superset workspaces, one item each. Your prompt names your thread number and the
 cap. The rules:
 
-- **Thread 1 plans exactly as above.** It owns everything repo-level: Step 2d's code-health pass,
+- **Thread 1 plans exactly as above.** It owns everything repo-level:
   archives, blockers, Linear comments, a directive. Plan it as if it were the only thread.
 - **A later thread** gets `peer-plans.json` — the earlier threads' items, branches and touchpoints.
   Pick the next-ranked eligible item that is not theirs and doesn't need their branch, preferring
   one whose touchpoints are disjoint. If the only candidates collide, pick the best and say so in
   `conflict_notes` — don't hide it, don't skip a good item to avoid it; the approver rules on it.
   If no second independent item exists, return `blocked_no_item` with the summary `no second
-  thread`. A later thread owns **no bookkeeping**: no code-health pass, no archives, no blockers, no
+  thread`. A later thread owns **no bookkeeping**: no archives, no blockers, no
   comments, no resume. `run.sh` enforces this and blanks those fields.
-- **A code-health pass never runs beside a feature thread.** It exists for a repo with no feature
-  item, so a repo that has a thread-1 feature gets no second thread for hygiene.
 - **Every plan is approved before any worker starts.** For a repo with two or more ready plans,
   [`PLAN_APPROVAL.md`](../advance-roadmap/PLAN_APPROVAL.md)'s approver rules on each later thread:
   run in parallel, run after an earlier thread has merged, or wait for tomorrow. You don't call the
@@ -170,7 +167,7 @@ In a scheduled window, `supervisor.py` runs several of these runs at once, one p
 prompt then names your lane, the **busy repos** (other lanes are working in them right now) and
 the **in-flight run stamps**:
 
-- **Skip every busy repo entirely** — for a feature, a resume, Step 2d's code-health pass and
+- **Skip every busy repo entirely** — for a feature, a resume and
   bookkeeping alike. Don't list it in `blockers` or `considered`; another lane owns it.
 - **An in-flight stamp's log is never an interrupted run.** It has no exit line because it is still
   running. When you look for the previous run below, skip in-flight logs and take the newest one
@@ -293,8 +290,9 @@ passes the safety rules:
    verification in full — never inherit the dead run's results — and continue through Steps 6–8.
    Don't start anything new; the one-item budget is spent. The branch was cut from an `origin/main`
    that has since moved on, so expect Step 3's rebase (or merge, once the branch is pushed) to
-   have real work in it: that's the ordinary path, not a hard stop. A `roadmap/health-*` branch is
-   an interrupted code-health pass: resume it with `"work_kind": "code_health"`.
+   have real work in it: that's the ordinary path, not a hard stop. A leftover `roadmap/health-*`
+   branch is from the retired code-health pass: don't resume it. Report it as a blocker so Jake can
+   decide what to do with it.
 4. If verification fails and the fix isn't clean and contained, stop per the all-or-nothing rule and
    record the outcome as `blocked-branch-left` in Step 8, naming the branch. That token is what
    keeps the *next* run from resuming it: a branch parked on purpose is documented, not retried.
@@ -307,9 +305,9 @@ Work is taken in **one global priority order across every repo** — not repo by
 repos, build a single ranked candidate list:
 
 1. Read the active Linear issues from the snapshot as described in Step 2. Drop `human-only` issues
-   silently, and drop issues whose `blocked_by` contains an issue that is still active. Set aside
-   `code-health` issues without `do-next`: they are Step 2d's queue, not part of this ranking, so
-   feature work always goes first. (`do-next` on one puts it in tier 1 like anything else.)
+   silently, and drop issues whose `blocked_by` contains an issue that is still active. Drop
+   `code-health` issues without `do-next` too: advance-roadmap no longer does hygiene work on its
+   own. (`do-next` on one makes it an ordinary tier-1 item, worked as a feature.)
 2. Add the roadmap items you already know about (from run memory or a quick read of each repo's
    roadmap) with their roadmap tier, if the roadmap uses one.
 3. Sort by this tier table, highest first:
@@ -421,9 +419,9 @@ For each direct child of `$CODE_DIR` that is a git repo, in that order:
    first** if the tree is dirty; see Step 1a before skipping outright. If no directive applies,
    report the dirty-state blocker on the resolved ticket per Step 2b before moving on.
 
-Take the first repo that passes everything. **If no repo qualifies, go to Step 2d** for a
-code-health pass before concluding there's nothing to do. Never invent roadmap items, and never fall
-back to `wrapup-repos` behavior — Step 2d's bounded refactor is the only other work this skill does.
+Take the first repo that passes everything. **If no repo qualifies, go to Step 2d**: there's
+nothing to do, so report it and stop. Never invent roadmap items, never fall back to `wrapup-repos`
+behavior, and never substitute a refactor or cleanup pass for planned work.
 If a dirty repo would otherwise have qualified and has no directive waiting, say so in the final
 summary and point at `/unblock-roadmap` — that's the one thing that ever unblocks it.
 
@@ -516,7 +514,7 @@ tiers. Do not let rank bypass dependencies, safety checks, or the skip rules.
   "name TBD", two alternatives with no pick). Surface it, don't decide it for them.
 
 If every planned item is skippable, that's a legitimate outcome — but not a silent one, and not the
-end of the run: try Step 2d first. If Step 2d dispatches nothing either, before you stop: archive
+end of the run. Before you stop (Step 2d): archive
 any finished plan docs you found (Step 6's archive rule, landed through Step 7 —
 that bookkeeping happens even when nothing ships), write the blockers per Step 2b, report which
 items you considered and why each was skipped, and record it in memory.
@@ -640,56 +638,16 @@ OAuth and do not mutate the repository to create a fallback note. Record the blo
 the failed comment attempt in run memory and the final summary, then continue evaluating other
 repos when safe.
 
-## Step 2d — Nothing to ship? Dispatch one code-health pass
+## Step 2d — Nothing to ship? Report it and stop
 
-You reach this step only when Steps 0–2 found nothing to dispatch **anywhere** — no interrupted run
-to finish and no eligible item in any repo. It's a global fallback, not a per-repo one: if any
-feature item is dispatchable, it wins and you never get here. Instead of stopping, pick one repo for
-a bounded, behavior-preserving refactor. [`CODE_HEALTH.md`](../advance-roadmap/CODE_HEALTH.md) defines the work; your
-job is only to choose where.
+You reach this step when Steps 0–2 found nothing to dispatch: no interrupted run to finish and no
+eligible item. End the run `blocked_no_item`, with one `considered` line per repo saying why it
+wasn't picked, after the bookkeeping Step 2 describes (archives, blockers). That verdict carries
+forward like any other no-work verdict.
 
-**A repo is eligible when all of these hold.** Every Step 1 gate that isn't about having planned work
-still applies:
-
-- It passes Step 1's checks 1–3 (`.noroadmap`, `jnelken` origin, not a linked worktree) and the
-  safety checks in 8 — clean tree, `git-safe-to-autocommit`, no live session. **No directive
-  exception here:** a dirty repo is never refactored.
-- It has opted into this automation: it has a `ROADMAP.md` or `docs/plans/`, the snapshot holds an
-  issue carrying its repo label, or it's on the allowlist. A repo this skill has never had a reason
-  to touch is not a refactor target.
-- Its production deploy isn't red: the deploy snapshot's status is `green` or `none` (Step 0's
-  *A repo left with a red deploy*). That applies to any repo the snapshot shows red, not only
-  ones with a `shipped-deploy-failed` ledger row. A refactor can't be proven safe against a
-  production that already isn't deploying.
-- It has a way to prove behavior was preserved: a test script, or at least a build or typecheck.
-- It isn't cooling down — no code-health commit in the last 24 hours:
-  `git -C <repo> log origin/main --since=24.hours --grep='^Advance-Roadmap: code-health' -1 --format=%h`
-  prints nothing. (You can't fetch, so this reads the last-fetched ref — close enough for a rate
-  limit.) A
-  `blocked-branch-left` ledger row for a `roadmap/health-*` branch in that repo also rules it out
-  until someone looks at that branch.
-
-**Order:**
-
-1. Repos with an open `code-health` ticket in the snapshot, by that ticket's priority (Step 1's
-   tier table), then oldest first. That ticket is the item: set `linear_id`, and
-   `item: "DEV-N Code health: …"`. Ticket rules from Step 2 apply — `Needs Input` and `human-only`
-   are skipped, a missing repo label is a blocker.
-2. Then the remaining eligible repos, most recent commit on `origin/main` first — code that's being
-   built on is where cleanup pays.
-
-For an ad-hoc pass (no ticket) you may run CODE_HEALTH.md's cheap read-only checks (file sizes, the
-escape-hatch grep) and suggest a focus in `worker_brief`; the worker runs the baseline and makes the
-final pick. Set `item: "Code health: <focus, or 'audit'>"`, `branch: "roadmap/health-<slug>"`,
-`roadmap_path: null`, `"work_kind": "code_health"`.
-
-**If no repo is eligible**, end the run `blocked_no_item` exactly as before, with one `considered`
-line per repo saying why it wasn't refactored (cooling down until <time>, dirty, no test or build,
-red deploy). That verdict carries forward like any other no-work verdict, and the 24-hour full
-re-derive picks repos up again as their cooldowns lapse.
-
-One pass per run, and `run.sh` doesn't chain after a code-health ship — so a quiet queue produces at
-most one refactor per tick, never a 40-minute refactor spree.
+There is no fallback work. advance-roadmap used to dispatch a behavior-preserving code-health pass
+here; that pass is retired. Don't pick a refactor, an audit or a hygiene ticket instead, and don't
+emit `"work_kind": "code_health"` (`run.sh` refuses it).
 
 ## Step 2e — Close out `Needs Input` tickets that already landed
 

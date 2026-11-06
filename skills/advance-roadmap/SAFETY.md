@@ -68,7 +68,7 @@ commit, merge, or push (see WORKER.md).
   thread after the first. No approver ruling (it failed, was unavailable or didn't answer) means the
   extra threads wait for tomorrow; the first thread is unaffected. Each thread has its own branch
   and workspace — never two workers in one workspace — and only the first thread does repo-level
-  bookkeeping (archives, blockers, directives, code-health). Never start a thread outside a batch.
+  bookkeeping (archives, blockers, directives). Never start a thread outside a batch.
 - **Never force anything.** No `--force`, no `--force-with-lease`, no `git reset --hard`, no
   `git clean -fd`, no rewriting published history. If a `git push` is rejected as
   non-fast-forward, STOP — leave the branch and its commits in place, and report it.
@@ -102,10 +102,8 @@ commit, merge, or push (see WORKER.md).
   `.next/`, `build/`, `*.log`). Respect `.gitignore`.
 - **Honor `.noroadmap`.** A repo with a `.noroadmap` file at its root has opted out. Never create,
   modify, or delete `.noroadmap` — it is the user's toggle.
-- **Code-health passes preserve behavior.** A `code_health` run is a refactor: no changed UI, copy,
-  URLs, APIs, storage formats or env vars, no new runtime dependencies, never in a dirty repo (no
-  directive exception), and only with a green baseline it can re-prove afterward. Caps and details
-  in [`CODE_HEALTH.md`](CODE_HEALTH.md).
+- **No fallback work.** With nothing actionable, report it and stop. Never substitute a refactor,
+  audit or code-health pass for planned work; `run.sh` refuses a `code_health` dispatch.
 - **All-or-nothing.** If verification fails and you can't fix it cleanly, do NOT merge or push.
   Leave the work on its branch, say so, and stop. A half-shipped roadmap item on `main` is worse
   than no run at all.

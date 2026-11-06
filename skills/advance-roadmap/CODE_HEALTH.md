@@ -1,12 +1,14 @@
-# Code health — rubric, retrospective, and the code-health pass
+# Code health — rubric and retrospective
 
-Three things share this file because they share one definition of "unhealthy":
+Two things share this file because they share one definition of "unhealthy":
 
 - **The rubric** — what counts as a finding and how bad it is.
 - **The retrospective** — after every clean ship, the worker looks at the repo it just worked in and
   records structured observations in the hygiene log. It reports; it never fixes.
-- **The code-health pass** — when the orchestrator finds nothing else to ship, it dispatches one
-  bounded, behavior-preserving refactor instead of stopping (`../conductor/ORCHESTRATOR.md` Step 2d).
+
+There is no code-health pass any more. advance-roadmap used to dispatch a behavior-preserving
+refactor when it found nothing to ship; that fallback is retired, and a run with nothing actionable
+reports that and stops (`../conductor/ORCHESTRATOR.md` Step 2d).
 
 The principles are not news to any model. This file exists because three different providers run
 this unattended, and they need the **same thresholds, the same severity order, and the same
@@ -53,7 +55,7 @@ touches buys little.
 ## The retrospective (worker, after a clean ship)
 
 Run it after WORKER.md Step 7b's close-out, only when the outcome is `shipped` — never let it delay
-or block a ship. It applies to feature runs and code-health runs alike. Budget: a few minutes,
+or block a ship. Budget: a few minutes,
 read-only on the code.
 
 1. **Look at two scopes.** The area this run touched (you just read it closely — that's where your
@@ -76,48 +78,3 @@ read-only on the code.
    for a later branch may still become a future-work ticket under the shared DEV policy.
 
 If logging fails, include the observation in the run summary and continue; never block a ship.
-
-## The code-health pass (worker, when the orchestrator dispatches `work_kind: code_health`)
-
-This is a refactor run: **the product must behave exactly as it did before.** It follows WORKER.md
-Steps 3–8 like any item, with these differences.
-
-**What to work on.** If the request names a `code-health` ticket (`linear_id`), that ticket's
-Proposed change and Acceptance are the scope. If not, audit the repo with the rubric, take the
-single highest-ranked finding that fits the caps below, and log the rest per the
-retrospective (that *is* this run's retrospective — don't run a second one).
-
-**Establish the baseline first.** Run tests, build and lint on the fresh branch before changing
-anything, and keep the output. If the baseline is red, fixing it *is* the finding — S1 outranks the
-brief. If it's red for a reason you can't fix (missing env, external service), stop: there is no
-way to prove a refactor preserved behavior. Report it as a Step 2b blocker on the ticket (or in the
-summary for an ad-hoc pass).
-
-**Caps.**
-
-- **One finding, or one tight theme** (e.g. "dedupe the three date formatters"). Not a sweep.
-- **About 400 changed lines**, counting a pure move (`git diff -M --stat`) as zero. Bigger than that
-  means the finding needs splitting: do the first slice and log the deferred remainder.
-- **Behavior-preserving only.** No changed UI, copy, URLs, public APIs, storage formats, env vars, or
-  dependency majors. No new runtime dependencies.
-- **Tests before restructuring.** Code with no tests gets characterization tests first — pin what it
-  does today, then move it. If you can't write a meaningful test for it, don't restructure it.
-- **Moves stay inside one feature area per run.** Co-locating `editor/` is fine; reorganizing the
-  whole `src/` tree needs explicit planning, not an unattended sweep.
-- **No new escape hatches** (`as any`, `@ts-ignore`) to make a refactor compile.
-
-**Verification is stricter than a feature's.** Everything Step 5 requires, plus: no test removed or
-weakened, lint warnings not increased, and the build output not meaningfully larger. Step 5b's
-cross-model review applies unchanged; tell the reviewer in your commit messages that the change is
-meant to be behavior-preserving, so it reviews for that.
-
-**Commits.** `refactor:` / `test:` / `chore:` in the repo's convention, and every commit of the run
-carries this trailer — it's how the orchestrator's per-repo cooldown sees this run in `git log`:
-
-```
-Advance-Roadmap: code-health
-```
-
-**Bookkeeping.** Skip Step 6's roadmap edits — a refactor isn't a roadmap item. A ticket-backed pass
-closes its ticket in Step 7b's close-out like any other item. `slack_summary` says what got simpler,
-in a sentence ("Split the 1,400-line editor store into three modules; no behavior change.").

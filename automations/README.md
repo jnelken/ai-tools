@@ -21,14 +21,10 @@ makes the deploy clone dirty.
 One finite batch every day at **10:30 local time** (Eastern on Jake's Mac), starting
 with `daily_batch.py`. It queues direct-child personal repos, excluding `.noroadmap`,
 non-`jnelken` origins, aliases, and repos with a worker still in flight. Each repo gets
-its own read-only planner, scoped to **one actionable ticket/roadmap item or one hygiene pass**.
+its own read-only planner, scoped to **one actionable ticket/roadmap item**.
 The existing clean-tree, live-session, directive, dependency, and review gates still apply.
-When a repo has no actionable item, its planner uses the existing Step 2d code-health fallback:
-prefer a code-health ticket, otherwise queue one bounded, behavior-preserving hygiene pass.
-This fallback is evaluated per repo, even when other repos have feature work. All existing
-hygiene eligibility rules apply, including opt-in, a clean tree, verification, and the 24-hour
-cooldown. An ineligible repo is skipped. Each repo gets one feature/resume **or** hygiene run,
-never both in the same daily batch.
+When a repo has no actionable item, its planner reports that and stops (Step 2d). There is no
+code-health or hygiene fallback; `run.sh` refuses a `code_health` plan.
 
 All planners finish before implementation begins. Ready plans are persisted and wait at
 a disk barrier; the controller releases workers together, up to the concurrency limit.
