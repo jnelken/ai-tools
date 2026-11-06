@@ -31,8 +31,9 @@
 # first), columns Model Cost Input Output, then one column per reasoning-effort
 # level used that day (Min Low Med High XHigh Max), each row's cost split by
 # effort as a percentage. Then one total row per provider (Claude, Codex). There
-# are no cache columns: the Claude cache is the line "_Cache: 7.2M written ·
-# 209.7M read_" under the header, which sparky reads for its cache rankings.
+# are no cache columns and no cache line, so sparky's cache rankings have no
+# Claude cache figures for these posts (a week with any such day drops out of
+# them). The post is the header line plus the table; there is no subtotal line.
 # ccusage has no effort field, so lib/effort-mix.py reads it from Claude Code's
 # transcripts and Codex's rollouts; with no data the effort columns are left out.
 # lib/merge-usage.py sums the machines (and weight-averages the effort split).
@@ -387,11 +388,8 @@ render_summary() {
     if ($chas | not) and ($xhas | not) then
       "_\($d) — \($who): no activity_"
     else
-      # Header: grand total, sub-totals beneath
+      # Header: day, who, grand total. The table carries everything else.
       "*\($d) — \($who): \(($ccost + $xcost) | money)*\n" +
-      "_Claude " + (if $chas then ($ccost | money) else "none" end) +
-      " · Codex "  + (if $xhas then ($xcost | money) else "none" end) + "_\n" +
-      (if $chas then "_Cache: \($cr.cacheCreationTokens // 0 | fmt) written · \($cr.cacheReadTokens // 0 | fmt) read_\n" else "" end) +
       "```\n" +
       rowAll("Model"; "Cost"; "Input"; "Output"; (if ($lv | length) > 0 then ($lv | effCells) else "" end)) + "\n" +
       (if ($rows | length) > 0

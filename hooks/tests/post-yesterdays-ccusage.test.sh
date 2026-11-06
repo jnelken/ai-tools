@@ -200,7 +200,7 @@ expect no "codex without rollouts: no percent cells" "$(jq -r .text < "$TEST_DIR
 unset CODEX_JSON
 
 # 10. one table for both providers: models by output tokens, readable names, no cache
-#     columns, a Claude cache line, one total row per provider
+#     columns, no cache line, one total row per provider
 BOTH_CLAUDE='{"daily":[{"totalCost":30,"inputTokens":10,"outputTokens":600,"cacheCreationTokens":5000,"cacheReadTokens":90000,"modelBreakdowns":[
   {"modelName":"claude-opus-5-5","cost":20,"inputTokens":4,"outputTokens":100,"cacheCreationTokens":2000,"cacheReadTokens":50000},
   {"modelName":"claude-sonnet-5-5","cost":10,"inputTokens":6,"outputTokens":500,"cacheCreationTokens":3000,"cacheReadTokens":40000}]}]}'
@@ -214,7 +214,8 @@ order=$(grep -E '^(Opus|Sonnet|Luna|Codex [0-9]|Codex Spark)' <<<"$post" | grep 
 expect "Codex Spark,Sonnet 5.5,Luna 6,Opus 5.5,Codex 5.3," "all models sorted by output (ties keep Claude first), names cut to 12" "$order"
 expect yes "header is Model Cost Input Output only" "$(grep -q '^Model  *Cost  *Input  *Output$' <<<"$post" && echo yes || echo no)"
 expect no "no cache columns anywhere" "$(grep -q 'CacheW\|CacheR' <<<"$post" && echo yes || echo no)"
-expect yes "claude cache line under the header" "$(grep -q '^_Cache: 5.0K written · 90.0K read_$' <<<"$post" && echo yes || echo no)"
+expect no "no cache line in the post" "$(grep -q '^_Cache' <<<"$post" && echo yes || echo no)"
+expect no "no Claude/Codex subtotal line under the header" "$(grep -q '^_Claude ' <<<"$post" && echo yes || echo no)"
 expect yes "one Claude total row" "$(grep -q '^Claude  *\$30.00 .*600$' <<<"$post" && echo yes || echo no)"
 expect yes "one Codex total row, no cache figure" "$(grep -q '^Codex  *\$0.50 .*3.0K .*300$' <<<"$post" && echo yes || echo no)"
 expect 2 "exactly two total rows" "$(grep -cE '^(Claude|Codex) +\$' <<<"$post")"
@@ -238,7 +239,7 @@ expect 1 "peers: one Slack post" "$(count curl-calls)"
 expect "$yesterday" "peers: marker advances" "$(marker)"
 expect yes "peers: header carries the summed total" "$(grep -q ': \$35.00\*$' <<<"$post" && echo yes || echo no)"
 expect yes "peers: shared model rows are summed" "$(grep -q '^Opus 5.5  *\$25.00 .*150$' <<<"$post" && echo yes || echo no)"
-expect yes "peers: cache is summed" "$(grep -q '^_Cache: 6.0K written · 100.0K read_$' <<<"$post" && echo yes || echo no)"
+expect no "peers: no cache line" "$(grep -q '^_Cache' <<<"$post" && echo yes || echo no)"
 expect yes "peers: Claude total row is summed" "$(grep -q '^Claude  *\$35.00 .*650$' <<<"$post" && echo yes || echo no)"
 expect yes "peers: asks jake2 for the day, in a live workspace" "$(grep -q "terminals create --host h2 --workspace ws1 .*--collect $yesterday $yesterday" "$TEST_DIR/superset-calls" && echo yes || echo no)"
 expect 1 "peers: terminal closed" "$(count close-calls)"
