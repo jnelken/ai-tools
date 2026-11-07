@@ -335,6 +335,9 @@ final_rc=1
 used=""
 stopped_on=""   # the provider whose result-only limit_hit ended the run
 last_hit=""     # the last provider stopped by a limit banner
+# A released daily-batch worker is reserved on one provider. We may route past that
+# reservation only when its CLI cannot start (auth/missing); a live limit still ends here.
+LEASED_WORKER="${ADVANCE_ROADMAP_BUDGET_WORKER:-}"
 for provider in "${providers[@]}"; do
   out="$tmpdir/$provider.log"
   # Fresh usage before every attempt — an explicit --providers list included. Exit 3 is the
@@ -376,11 +379,28 @@ for provider in "${providers[@]}"; do
     echo "(limit for $provider — recording and failing over)"
     record_limit "$provider" "$text"
     last_hit="$provider"
+    if [ -n "$LEASED_WORKER" ]; then
+      echo "(batch reserved $LEASED_WORKER — not spending an unleased fallback after a limit)"
+      used="$provider"
+      final_rc=$rc
+      stopped_on="$provider"
+      break
+    fi
     continue
   fi
 
   if [ "$rc" -eq 127 ]; then
     echo "(binary missing for $provider — failing over)"
+    MISSING="$MISSING $provider"
+    continue
+  fi
+
+  # An auth/login rejection happens before the agent starts and cannot produce a result.
+  # Treat it like a missing CLI so a daily batch can use its next eligible provider.
+  if [ "$rc" -ne 0 ] && [ ! -s "$out.last" ] && grep -Eiq \
+    'Authentication required|agent login|set CURSOR_API_KEY|not (logged|signed) in|failed to authenticate|API key is invalid|invalid (API )?key' \
+    "$out" 2>/dev/null; then
+    echo "(auth/startup failure for $provider — failing over)"
     MISSING="$MISSING $provider"
     continue
   fi
