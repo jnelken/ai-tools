@@ -438,15 +438,18 @@ def records_html(rec):
         return (f'<div class=stat><div class=n>{esc(big)}<span class=dim style="font-size:14px;font-weight:500">'
                 f'{esc(small)}</span></div><div class=l>{esc(label)}</div>'
                 f'<div class=dim style="font-size:12px">{esc(note)}</div></div>')
+    def prov(r):
+        return "" if r.get("final", True) else " · provisional"
     tiles = ""
     if best:
         tiles += tile(f'#{best["rank"]:,}', f' / {best["total"]:,}', "best day rank",
-                      f'{fmt_day(best["day"])} · top {best["top_pct"]}% · {fmt_tokens(best["tokens"])} tokens · ${best["usd"]:,.0f}')
+                      f'{fmt_day(best["day"])} · top {best["top_pct"]}% · {fmt_tokens(best["tokens"])} tokens · ${best["usd"]:,.0f}{prov(best)}')
     if busy:
         tiles += tile(fmt_tokens(busy["tokens"]), " tokens", "busiest day",
-                      f'{fmt_day(busy["day"])} · ${busy["usd"]:,.0f} · #{busy["rank"]:,} / {busy["total"]:,}')
+                      f'{fmt_day(busy["day"])} · ${busy["usd"]:,.0f} · #{busy["rank"]:,} / {busy["total"]:,}{prov(busy)}')
     rows = "".join(
-        f'<tr><td>{esc(fmt_day(r["day"]))}</td><td class=num>{fmt_tokens(r["tokens"])}</td>'
+        f'<tr><td>{esc(fmt_day(r["day"]))}{"" if r.get("final", True) else " <span class=dim>(provisional)</span>"}</td>'
+        f'<td class=num>{fmt_tokens(r["tokens"])}</td>'
         f'<td class=num>${r["usd"]:,.0f}</td><td class=num>{r.get("sessions") or 0:,}</td>'
         f'<td class=num>#{r["rank"]:,} / {r["total"]:,}</td><td class=num>{r["top_pct"]}%</td></tr>'
         for r in rec.get("top_days") or [])
@@ -455,7 +458,8 @@ def records_html(rec):
              '<th class=num>Rank</th><th class=num>Top</th></tr></thead>'
              f'<tbody>{rows}</tbody></table></div>') if rows else ""
     return (f'<div class=stats>{tiles}</div>{table}'
-            f'<div class=sub style="margin:6px 0 18px">Final single-day ranks · {rec.get("days_recorded", 0)} days recorded</div>')
+            f'<div class=sub style="margin:6px 0 18px">Single-day ranks · {rec.get("days_recorded", 0)} days recorded'
+            ' · a day is provisional until 48 h after it ends, while late publishes still move it</div>')
 
 
 # ── repos ─────────────────────────────────────────────────────────────────────

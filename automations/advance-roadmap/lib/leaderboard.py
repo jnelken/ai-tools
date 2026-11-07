@@ -29,6 +29,7 @@ Never prints or stores the token. Exits 0 even on failure: leaderboard.json then
 {"ok": false, "error": …} and the dashboard says why.
 """
 import argparse
+import fcntl
 import json
 import os
 import re
@@ -195,11 +196,17 @@ def settled(rec):
         return False
 
 
-def write_daily(store):
+def store_day(rec):
+    """Merge one day into leaderboard-daily.jsonl. Snapshots and backfills can run at once, so
+    the store is re-read under a lock and rewritten atomically."""
     ROOT.mkdir(parents=True, exist_ok=True)
-    tmp = DAILY.with_name(f"{DAILY.name}.{os.getpid()}.tmp")
-    tmp.write_text("".join(json.dumps(store[d]) + "\n" for d in sorted(store)))
-    os.replace(tmp, DAILY)
+    with open(DAILY.with_name(DAILY.name + ".lock"), "w") as lk:
+        fcntl.lockf(lk, fcntl.LOCK_EX)
+        store = daily()
+        store[rec["day"]] = rec
+        tmp = DAILY.with_name(f"{DAILY.name}.{os.getpid()}.tmp")
+        tmp.write_text("".join(json.dumps(store[d]) + "\n" for d in sorted(store)))
+        os.replace(tmp, DAILY)
 
 
 def record_days(days, handle, log=print, budget_s=None):
@@ -217,8 +224,7 @@ def record_days(days, handle, log=print, budget_s=None):
             break
         rec = {**got, "source": "standings", "fetched_at": utc_now().isoformat(timespec="seconds")}
         rec["final"] = settled(rec)
-        store[day] = rec
-        write_daily(store)  # after every day, so a timeout keeps what's done
+        store_day(rec)  # after every day, so a timeout keeps what's done
         wrote += 1
         log(f"{day}: " + (f"#{rec['rank']} / {rec['total']}" if rec["rank"]
                           else f"below #{rec['below']} / {rec['total']}" if rec.get("below")
@@ -237,7 +243,8 @@ def records(store):
         total = r.get("total") or 0
         return {"day": r["day"], "rank": r["rank"], "total": total, "tokens": r.get("tokens", 0),
                 "usd": r.get("usd", 0), "sessions": r.get("sessions"),
-                "top_pct": round(100 * r["rank"] / total, 1) if total else None}
+                "top_pct": round(100 * r["rank"] / total, 1) if total else None,
+                "final": bool(r.get("final"))}  # provisional until SETTLE_HOURS after the day
     best = min(active, key=lambda r: (r["rank"], -(r.get("total") or 0)))
     busiest = max(active, key=lambda r: r.get("tokens", 0))
     top = sorted(active, key=lambda r: -r.get("tokens", 0))[:10]

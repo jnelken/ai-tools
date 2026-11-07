@@ -216,6 +216,21 @@ class LeaderboardTest(unittest.TestCase):
         self.assertEqual([r["day"] for r in rec["top_days"]], ["2026-11-03", "2026-09-03", "2026-09-10"])
         self.assertEqual(rec["days_recorded"], 4)
 
+    def test_records_mark_provisional_days(self):
+        store = {"2026-11-06": {"day": "2026-11-06", "rank": 9, "total": 100, "tokens": 5, "usd": 1, "final": False},
+                 "2026-10-01": {"day": "2026-10-01", "rank": 50, "total": 100, "tokens": 4, "usd": 1, "final": True}}
+        rec = self.lb.records(store)
+        self.assertEqual((rec["best_rank"]["day"], rec["best_rank"]["final"]), ("2026-11-06", False))
+        self.assertTrue([r for r in rec["top_days"] if r["day"] == "2026-10-01"][0]["final"])
+
+    def test_concurrent_writers_keep_each_others_days(self):
+        self.lb.store_day({"day": "2026-10-01", "rank": 1, "fetched_at": "2026-10-05T00:00:00+00:00"})
+        stale = self.lb.daily()                    # a writer that read before the next store…
+        self.lb.store_day({"day": "2026-10-02", "rank": 2, "fetched_at": "2026-10-05T00:00:00+00:00"})
+        stale["2026-10-03"] = {"day": "2026-10-03", "rank": 3, "fetched_at": "2026-10-05T00:00:00+00:00"}
+        self.lb.store_day(stale["2026-10-03"])     # …still merges into the current file
+        self.assertEqual(sorted(self.lb.daily()), ["2026-10-01", "2026-10-02", "2026-10-03"])
+
     def test_profile_days_reads_escaped_and_plain_payloads(self):
         html = (r'..{\"daily\":[{\"day\":\"2026-11-03\",\"tokens\":\"1400181221\",\"usd\":\"1051.8\"},'
                 r'{\"day\":\"2026-09-10\",\"tokens\":\"1161675798\",\"usd\":\"678.6\"}]}..'
