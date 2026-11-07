@@ -28,7 +28,8 @@ class TailnetIndexTest(unittest.TestCase):
         got = ti.handlers(STATUS)
         self.assertEqual([e["path"] for e in got], ["/notes", "/paradev", "/roadmap", "/", "/grafana"])
         self.assertEqual(got[1], {"host": "jmiv.tailc1d3f0.ts.net", "path": "/paradev",
-                                  "target": "http://127.0.0.1:8422", "kind": "proxy", "href": "/paradev/"})
+                                  "target": "http://127.0.0.1:8422", "kind": "proxy",
+                                  "href": "https://jmiv.tailc1d3f0.ts.net/paradev/"})
         self.assertEqual(got[4]["href"], "https://jmiv.tailc1d3f0.ts.net:8443/grafana/")   # other port keeps its origin
         self.assertEqual(got[3]["href"], "https://jmiv.tailc1d3f0.ts.net:8443/")   # another port's root isn't this index
         self.assertEqual(got[0]["kind"], "files")
@@ -37,7 +38,7 @@ class TailnetIndexTest(unittest.TestCase):
         import tempfile
         with tempfile.NamedTemporaryFile(suffix=".html") as f:
             got = ti.handlers({"Web": {"h.ts.net:443": {"Handlers": {"/report.html": {"Path": f.name}}}}})
-        self.assertEqual(got[0]["href"], "/report.html")
+        self.assertEqual(got[0]["href"], "https://h.ts.net/report.html")
 
     def test_an_http_listener_gets_an_http_link(self):
         status = {"TCP": {"80": {"HTTP": True}, "8080": {"HTTP": True}},
@@ -54,14 +55,35 @@ class TailnetIndexTest(unittest.TestCase):
     def test_no_web_config_means_no_entries(self):
         self.assertEqual(ti.handlers({}), [])
 
+    def test_null_serve_config_is_empty_not_a_crash(self):
+        done = mock.Mock(returncode=0, stdout="null\n", stderr="")
+        with mock.patch.object(ti.subprocess, "run", return_value=done):
+            self.assertEqual(ti.handlers(ti.serve_status()), [])
+
+    def test_foreground_mounts_are_listed(self):
+        status = {"Foreground": {"sess1": {"TCP": {"443": {"HTTPS": True}},
+                                           "Web": {"h.ts.net:443": {"Handlers": {"/live": {"Proxy": "http://127.0.0.1:5000"}}}}}}}
+        self.assertEqual([e["href"] for e in ti.handlers(status)], ["https://h.ts.net/live/"])
+
+    def test_insecure_https_targets_are_probed_over_https(self):
+        seen = {}
+
+        def fake(req, timeout, context):
+            seen["url"], seen["ctx"] = req.full_url, context
+            raise OSError("no server")
+        with mock.patch.object(ti.urllib.request, "urlopen", side_effect=fake):
+            ti.probe("https+insecure://127.0.0.1:9443")
+        self.assertEqual(seen["url"], "https://127.0.0.1:9443")
+        self.assertIsNotNone(seen["ctx"])
+
     def test_page_shows_titles_links_and_down_targets(self):
         probes = {"http://127.0.0.1:8421": (True, "Roadmap automation"), "http://127.0.0.1:5173": (True, "Vite"),
                   "http://127.0.0.1:8422": (False, None), "http://127.0.0.1:3000": (True, "Grafana")}
         with mock.patch.object(ti, "probe", side_effect=lambda t: probes[t]):
             page = ti.build(ti.handlers(STATUS), now=datetime(2026, 11, 7, 13, 0, 0))
-        self.assertIn('href="/roadmap/"', page)
+        self.assertIn('href="https://jmiv.tailc1d3f0.ts.net/roadmap/"', page)
         self.assertIn("Roadmap automation", page)
-        self.assertIn('href="/paradev/"', page)
+        self.assertIn('href="https://jmiv.tailc1d3f0.ts.net/paradev/"', page)
         self.assertIn("· down", page)                 # paradev isn't answering
         self.assertIn("5 page(s)", page)
         self.assertIn('href="https://jmiv.tailc1d3f0.ts.net:8443/grafana/"', page)

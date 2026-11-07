@@ -14,6 +14,7 @@ import html
 import json
 import os
 import re
+import ssl
 import subprocess
 import sys
 import threading
@@ -35,7 +36,7 @@ def serve_status():
     p = subprocess.run([TAILSCALE, "serve", "status", "--json"], capture_output=True, text=True, timeout=15)
     if p.returncode != 0:
         raise RuntimeError((p.stderr or p.stdout).strip()[:300] or f"exit {p.returncode}")
-    return json.loads(p.stdout or "{}")
+    return json.loads(p.stdout or "{}") or {}  # no config at all prints `null`
 
 
 def is_self(target, port=None):
@@ -49,13 +50,22 @@ def handlers(status, port=None):
     """[{host, path, target, kind, href}] for every web handler except the index itself. href
     keeps the handler's own origin when it's served on a port other than 443."""
     out = []
+    # Mounts made with --bg live at the top level; ones still attached to a foreground
+    # `tailscale serve` session live under Foreground, one config per session.
+    configs = [status] + [c for c in (status.get("Foreground") or {}).values() if isinstance(c, dict)]
+    for cfg in configs:
+        out += _handlers(cfg, port)
+    return sorted(out, key=lambda e: (e["host"], e["path"]))
+
+
+def _handlers(status, port):
+    out = []
     tcp = status.get("TCP") or {}
     for hostport, web in (status.get("Web") or {}).items():
         name, _, lport = hostport.rpartition(":")
         https = bool((tcp.get(lport) or {}).get("HTTPS", lport == "443"))  # an --http listener isn't TLS
         scheme = "https" if https else "http"
         default_port = (https and lport == "443") or (not https and lport == "80")
-        same_origin = https and lport == "443"  # where this index itself is mounted
         origin = f"{scheme}://{name if default_port else hostport}"
         host = name if default_port else hostport
         for path, h in (web.get("Handlers") or {}).items():
@@ -65,16 +75,21 @@ def handlers(status, port=None):
                            ("files", h["Path"]) if h.get("Path") else ("text", None)
             # A file mount matches its path exactly, so no trailing slash there.
             link = path if kind == "files" and os.path.isfile(target) else path.rstrip("/") + "/"
+            # Absolute, so the cards work from http://127.0.0.1:8420/ as well as the tailnet.
             out.append({"host": host, "path": path, "target": target, "kind": kind,
-                        "href": link if same_origin else f"{origin}{link}"})
-    return sorted(out, key=lambda e: (e["host"], e["path"]))
+                        "href": f"{origin}{link}"})
+    return out
 
 
 def probe(target, timeout=3):
     """(up, title) for a proxied local URL."""
+    ctx = None
+    if target.startswith("https+insecure://"):  # Serve's "HTTPS, don't verify the cert" target
+        target = "https://" + target[len("https+insecure://"):]
+        ctx = ssl._create_unverified_context()
     try:
         req = urllib.request.Request(target, headers={"User-Agent": "tailnet-index"})
-        with urllib.request.urlopen(req, timeout=timeout) as r:
+        with urllib.request.urlopen(req, timeout=timeout, context=ctx) as r:
             body = r.read(200_000).decode("utf-8", "replace")
             m = re.search(r"<title[^>]*>(.*?)</title>", body, re.I | re.S)
             return True, html.unescape(m.group(1).strip()) if m else None
@@ -151,7 +166,7 @@ def render():
             return _cache["page"]
         try:
             page = build(handlers(serve_status()))
-        except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as e:
+        except (OSError, ValueError, RuntimeError, AttributeError, subprocess.SubprocessError) as e:
             page = build([], error=str(e))
         _cache.update(at=time.time(), page=page)
         return page
