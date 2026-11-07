@@ -126,7 +126,7 @@ class LeaderboardTest(unittest.TestCase):
 
     def board(self, me_rank, total=250, me_tokens="900", me_usd="5.5"):
         """standings(day, offset) for a 100-per-page board with jnelken at me_rank (None = absent)."""
-        def page(day, offset):
+        def page(day, offset, timeout=None):
             rows = []
             for rank in range(offset + 1, min(offset + 100, total) + 1):
                 handle = "jnelken" if rank == me_rank else f"user{rank}"
@@ -149,14 +149,50 @@ class LeaderboardTest(unittest.TestCase):
         self.assertIsNone(rec["rank"])
         self.assertEqual(rec["total"], 250)
 
-    def test_record_days_skips_recorded_days_and_today(self):
+    def at(self, iso):
+        now = datetime.fromisoformat(iso).replace(tzinfo=timezone.utc)
+        return mock.patch.object(self.lb, "utc_now", return_value=now)
+
+    def test_record_days_skips_settled_days_and_today(self):
         board = self.board(me_rank=7)
-        with mock.patch.object(self.lb, "standings", board), \
-             mock.patch.object(self.lb, "utc_today", return_value="2026-11-07"):
-            self.assertEqual(self.lb.record_days(["2026-11-05", "2026-11-07"], "jnelken", log=lambda m: None), 1)
-            self.assertEqual(self.lb.record_days(["2026-11-05", "2026-11-06"], "jnelken", log=lambda m: None), 1)
-        days = [json.loads(l)["day"] for l in (self.root / "leaderboard-daily.jsonl").read_text().splitlines()]
-        self.assertEqual(days, ["2026-11-05", "2026-11-06"])   # 11-05 once; today (11-07) never
+        with mock.patch.object(self.lb, "standings", board), self.at("2026-11-07T12:00:00"):
+            self.assertEqual(self.lb.record_days(["2026-10-01", "2026-11-07"], "jnelken", log=lambda m: None), 1)
+            self.assertEqual(self.lb.record_days(["2026-10-01", "2026-10-02"], "jnelken", log=lambda m: None), 1)
+        store = self.lb.daily()
+        self.assertEqual(sorted(store), ["2026-10-01", "2026-10-02"])   # 10-01 once; today never
+        self.assertTrue(store["2026-10-01"]["final"])
+
+    def test_recent_days_stay_provisional_until_settled(self):
+        with mock.patch.object(self.lb, "standings", self.board(me_rank=50)), self.at("2026-11-07T12:00:00"):
+            self.lb.record_days(["2026-11-06"], "jnelken", log=lambda m: None)
+        self.assertFalse(self.lb.daily()["2026-11-06"]["final"])
+        # A day later the late publishes moved the rank; the provisional record is refreshed.
+        with mock.patch.object(self.lb, "standings", self.board(me_rank=45)), self.at("2026-11-08T12:00:00"):
+            self.assertEqual(self.lb.record_days(["2026-11-06"], "jnelken", log=lambda m: None), 1)
+        self.assertEqual(self.lb.daily()["2026-11-06"]["rank"], 45)
+        # Once 48 h past the day's end it settles, and is never fetched again.
+        with mock.patch.object(self.lb, "standings", self.board(me_rank=40)), self.at("2026-11-09T01:00:00"):
+            self.lb.record_days(["2026-11-06"], "jnelken", log=lambda m: None)
+        board = self.board(me_rank=1)
+        with mock.patch.object(self.lb, "standings", board), self.at("2026-11-10T12:00:00"):
+            self.assertEqual(self.lb.record_days(["2026-11-06"], "jnelken", log=lambda m: None), 0)
+        self.assertEqual(self.lb.daily()["2026-11-06"]["rank"], 40)
+        board.assert_not_called()
+
+    def test_day_below_the_reachable_range_is_not_absent(self):
+        board = self.board(me_rank=None, total=2000)
+        with mock.patch.object(self.lb, "standings", board):
+            rec = self.lb.day_rank("2026-11-03", "jnelken")
+        self.assertEqual((rec["rank"], rec["below"], rec["total"]), (None, 1100, 2000))
+        self.assertEqual(max(c.args[1] for c in board.call_args_list), 1000)   # never past the API's cap
+
+    def test_deadline_mid_day_stores_nothing_for_that_day(self):
+        clock = iter([0.0, 0.0, 0.0, 5.0, 5.0, 5.0])
+        with mock.patch.object(self.lb, "standings", self.board(me_rank=250, total=300)), \
+             mock.patch.object(self.lb.time, "monotonic", side_effect=lambda: next(clock)), \
+             self.at("2026-11-07T12:00:00"):
+            self.assertEqual(self.lb.record_days(["2026-11-06"], "jnelken", log=lambda m: None, budget_s=1), 0)
+        self.assertEqual(self.lb.daily(), {})
 
     def test_best_7d_prefers_final_ranks(self):
         rows = [{"day": "2026-11-05", "today": {"rank": 50, "total": 90}},    # mid-day snapshot
@@ -228,7 +264,7 @@ class LeaderboardTest(unittest.TestCase):
     def test_snapshot_saves_today_before_finalizing(self):
         seen = []
 
-        def slow(day, offset):  # by the time past days are fetched, today's ranks are on disk
+        def slow(day, offset, timeout=None):  # by the time past days are fetched, today's ranks are on disk
             seen.append(json.loads((self.root / "leaderboard.json").read_text())["today"]["rank"])
             return {"rows": [], "hasMore": False, "total": 0}
         with mock.patch.object(self.lb, "token", return_value="t"), \
@@ -239,15 +275,15 @@ class LeaderboardTest(unittest.TestCase):
         self.assertTrue(seen and all(r == 300 for r in seen))
 
     def test_finalize_budget_stops_starting_new_days(self):
-        self.lb.FINALIZE_BUDGET_S = 0
+        self.lb.FINALIZE_BUDGET_S = 10
+        clock = iter([0.0, 0.0] + [20.0] * 50)   # deadline at 10 s; the first day fits, then time's up
         with mock.patch.object(self.lb, "token", return_value="t"), \
              mock.patch.object(self.lb, "me", side_effect=self.ranks(day="2026-11-07")), \
              mock.patch.object(self.lb, "standings", self.board(me_rank=3)), \
              mock.patch.object(self.lb, "utc_today", return_value="2026-11-07"), \
-             mock.patch.object(self.lb.time, "monotonic", side_effect=[0.0, 0.0] + [1.0] * 50):
+             mock.patch.object(self.lb.time, "monotonic", side_effect=lambda: next(clock)):
             self.snapshot()
-        days = [json.loads(l)["day"] for l in (self.root / "leaderboard-daily.jsonl").read_text().splitlines()]
-        self.assertEqual(days, ["2026-11-06"])   # newest first, then out of budget
+        self.assertEqual(sorted(self.lb.daily()), ["2026-11-06"])   # newest first, then out of budget
 
     def test_snapshot_survives_a_standings_outage(self):
         with mock.patch.object(self.lb, "token", return_value="t"), \

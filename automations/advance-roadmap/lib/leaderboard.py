@@ -16,8 +16,11 @@ with the Superset CLI's own login (~/.superset/config.json). Periods are UTC day
         print leaderboard.json.
 
 `leaderboard.me` only ever reports today, and a snapshot catches it mid-day. A finished day's
-final rank comes from the public standings for that single day (`leaderboard.public.standings`
-with from = to = day, no login), recorded once in leaderboard-daily.jsonl and never refetched.
+rank comes from the public standings for that single day (`leaderboard.public.standings` with
+from = to = day, no login), stored in leaderboard-daily.jsonl. Machines keep republishing past
+days, so a record stays provisional (and is refreshed) until SETTLE_HOURS after the day ends.
+The API pages only to offset 1000: a day where Jake isn't in the top 1100 is stored as
+`rank: null, below: 1100` — below the reachable range, which is not the same as absent.
 The 7-day best and the personal records are built from those final ranks; today's rank is the
 latest snapshot. launchd snapshots once a day near the end of the UTC day
 (com.jake.advance-roadmap-leaderboard), and every dashboard regeneration snapshots too.
@@ -56,6 +59,12 @@ FINALIZE_DAYS = 7  # how far back a snapshot fills in missing final ranks
 # A snapshot runs inside the dashboard's 90 s budget: finalizing stops after this long and the
 # next snapshot picks up where it left off.
 FINALIZE_BUDGET_S = float(os.environ.get("LEADERBOARD_FINALIZE_BUDGET_S", "40"))
+SETTLE_HOURS = 48     # other machines republish past days on a 2-hour cadence for a while
+MAX_OFFSET = 1000     # the standings API refuses a larger offset
+
+
+class OutOfTime(Exception):
+    """The time budget ran out partway through a day; nothing was stored for it."""
 
 
 def token(refresh=False):
@@ -101,8 +110,12 @@ def fetch():
     return out
 
 
+def utc_now():
+    return datetime.now(timezone.utc)
+
+
 def utc_today():
-    return datetime.now(timezone.utc).date().isoformat()
+    return utc_now().date().isoformat()
 
 
 def get(url, timeout=30):
@@ -111,18 +124,27 @@ def get(url, timeout=30):
         return r.read()
 
 
-def standings(day, offset):
+def standings(day, offset, timeout=30):
     """One page (100 rows) of the public ranking for a single UTC day. No login."""
     inp = json.dumps({"0": {"json": {"from": day, "to": day, "limit": 100, "offset": offset}}})
-    raw = get(f"{API}/api/trpc/leaderboard.public.standings?batch=1&input={urllib.parse.quote(inp)}")
+    raw = get(f"{API}/api/trpc/leaderboard.public.standings?batch=1&input={urllib.parse.quote(inp)}",
+              timeout=timeout)
     return json.loads(raw)[0]["result"]["data"]["json"]
 
 
-def day_rank(day, handle):
-    """The handle's final rank for one ended UTC day; rank None when it wasn't on the board."""
+def day_rank(day, handle, deadline=None):
+    """The handle's rank for one ended UTC day. rank None with `below` set when it isn't in the
+    top 1100 the API can reach; rank None without it when the whole board was read and it wasn't
+    there. Raises OutOfTime when `deadline` (a time.monotonic() value) passes mid-day."""
     offset = 0
     while True:
-        page = standings(day, offset)
+        timeout = 30
+        if deadline is not None:
+            left = deadline - time.monotonic()
+            if left <= 0:
+                raise OutOfTime(day)
+            timeout = max(1, min(30, left))
+        page = standings(day, offset, timeout)
         rows = page.get("rows") or []
         for row in rows:
             if row.get("handle") == handle:
@@ -133,6 +155,9 @@ def day_rank(day, handle):
             return {"day": day, "rank": None, "total": page.get("total"), "tokens": 0, "usd": 0.0,
                     "sessions": 0}
         offset += len(rows)
+        if offset > MAX_OFFSET:
+            return {"day": day, "rank": None, "below": offset, "total": page.get("total"),
+                    "tokens": None, "usd": None, "sessions": None}
         time.sleep(PAGE_SLEEP_S)
 
 
@@ -161,23 +186,44 @@ def daily():
     return out
 
 
+def settled(rec):
+    """Fetched at least SETTLE_HOURS after its day ended, so late publishes are in."""
+    try:
+        day_end = datetime.fromisoformat(rec["day"]).replace(tzinfo=timezone.utc) + timedelta(days=1)
+        return datetime.fromisoformat(rec["fetched_at"]) >= day_end + timedelta(hours=SETTLE_HOURS)
+    except (KeyError, TypeError, ValueError):
+        return False
+
+
+def write_daily(store):
+    ROOT.mkdir(parents=True, exist_ok=True)
+    tmp = DAILY.with_name(f"{DAILY.name}.{os.getpid()}.tmp")
+    tmp.write_text("".join(json.dumps(store[d]) + "\n" for d in sorted(store)))
+    os.replace(tmp, DAILY)
+
+
 def record_days(days, handle, log=print, budget_s=None):
-    """Fetch and store final ranks for ended days not yet recorded, newest first; with budget_s,
-    stop starting new days once that much time has passed. Returns how many it wrote."""
-    have, today, wrote = daily(), utc_today(), 0
-    start = time.monotonic()
+    """Fetch and store ranks for ended days that are missing or still provisional, newest first.
+    With budget_s, give up once that much time has passed (a day is stored only when complete).
+    Returns how many days it wrote."""
+    store, today, wrote = daily(), utc_today(), 0
+    deadline = time.monotonic() + budget_s if budget_s is not None else None
     for day in sorted(set(days), reverse=True):
-        if day in have or day >= today:
-            continue  # recorded already, or not over yet
-        if budget_s is not None and time.monotonic() - start > budget_s:
+        if day >= today or (day in store and settled(store[day])):
+            continue  # not over yet, or already final
+        try:
+            got = day_rank(day, handle, deadline)
+        except OutOfTime:
             break
-        rec = {**day_rank(day, handle), "source": "standings",
-               "fetched_at": datetime.now(timezone.utc).isoformat(timespec="seconds")}
-        ROOT.mkdir(parents=True, exist_ok=True)
-        with open(DAILY, "a") as f:
-            f.write(json.dumps(rec) + "\n")
+        rec = {**got, "source": "standings", "fetched_at": utc_now().isoformat(timespec="seconds")}
+        rec["final"] = settled(rec)
+        store[day] = rec
+        write_daily(store)  # after every day, so a timeout keeps what's done
         wrote += 1
-        log(f"{day}: " + (f"#{rec['rank']} / {rec['total']}" if rec["rank"] else f"not ranked ({rec['total']} ranked)"))
+        log(f"{day}: " + (f"#{rec['rank']} / {rec['total']}" if rec["rank"]
+                          else f"below #{rec['below']} / {rec['total']}" if rec.get("below")
+                          else f"not ranked ({rec['total']} ranked)")
+            + ("" if rec["final"] else " (provisional)"))
     return wrote
 
 
