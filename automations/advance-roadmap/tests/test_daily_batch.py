@@ -955,42 +955,26 @@ else:
         self.assertGreaterEqual(posts[0]['time'], max(e['time'] for e in events if e['kind'] == 'work-end'))
         self.assertTrue(self.state()['summary_posted'])
 
-    def test_bot_summary_appends_one_hold_line_without_posting_twice(self):
+    def test_bot_summary_does_not_append_context_after_the_bulletin(self):
         if not shutil.which('node'):
             self.skipTest('node is not installed')
         slack = self.root / 'slackagent'
-        for path in ('scripts', 'src', 'node_modules/dotenv', 'node_modules/@slack/web-api'):
-            (slack / path).mkdir(parents=True)
-        (slack / 'package.json').write_text('{"type":"module"}')
-        (slack / 'scripts/post-roadmap-summary.mjs').write_text('throw new Error("adapter required");')
-        (slack / 'node_modules/dotenv/index.js').write_text('exports.config = () => {};')
+        (slack / 'scripts').mkdir(parents=True)
         posts = self.root / 'bot-posts.jsonl'
-        (slack / 'node_modules/@slack/web-api/index.js').write_text(
-            "const fs = require('node:fs'); exports.WebClient = class { constructor() { this.chat = {"
-            f"postMessage: async args => fs.appendFileSync({json.dumps(str(posts))}, JSON.stringify(args)+'\\n')"
-            "}; } };")
-        (slack / 'src/roadmap-summary.js').write_text("""import {readFileSync} from 'node:fs';
-export const DEFAULT_ROADMAP_CHANNEL = 'fake-channel';
-export const loadBatchState = path => JSON.parse(readFileSync(path));
-export const loadRunRecords = () => new Map();
-export const formatBatchSummary = () => 'Batch summary';
-export const postBatchSummary = ({client, channel, state, records}) =>
-  client.chat.postMessage({channel, text: formatBatchSummary(state, records)});
-""")
+        (slack / 'scripts/post-roadmap-summary.mjs').write_text(
+            "import { appendFileSync } from 'node:fs';\n"
+            f"appendFileSync({json.dumps(str(posts))}, JSON.stringify({{text:'Batch summary'}})+'\\n');\n")
         directory = self.root / 'summary'
         directory.mkdir()
         (directory / 'batch.json').write_text(json.dumps({'queue': [],
             'review_fallback': 'review fallback: cross-provider (cursor gated until reset)', 'budget': {
             'held': [{'repo':'a', 'reason':'shared headroom'}]}}))
-        with self.budget_context(), patch.object(daily_batch, 'ROOT', self.root), patch.object(
-                daily_batch, 'slackagent_script', return_value=slack / 'scripts/post-roadmap-summary.mjs'), patch.dict(
-                os.environ, {'SLACK_BOT_TOKEN': 'test-only'}):
+        with patch.object(daily_batch, 'ROOT', self.root), patch.object(
+                daily_batch, 'slackagent_script', return_value=slack / 'scripts/post-roadmap-summary.mjs'):
             self.assertTrue(daily_batch.post_slack_summary(directory))
         records = [json.loads(line) for line in posts.read_text().splitlines()]
         self.assertEqual(len(records), 1)
-        self.assertEqual(records[0]['text'],
-                         'Batch summary\nreview fallback: cross-provider (cursor gated until reset)'
-                         '\nBudget hold: a: shared headroom.')
+        self.assertEqual(records[0]['text'], 'Batch summary')
         self.assertIn('review fallback: cross-provider (cursor gated until reset)',
                       daily_batch.quota_line(json.loads((directory / 'batch.json').read_text())))
 

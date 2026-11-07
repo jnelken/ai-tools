@@ -758,10 +758,6 @@ def budget_hold_line(state):
     return ("Budget hold: " + "; ".join(f'{i["repo"]}: {i["reason"]}' for i in held) + ".") if held else ""
 
 
-def summary_note_line(state):
-    return "\n".join(filter(None, (state.get("review_fallback"), budget_hold_line(state))))
-
-
 def slackagent_script():
     code = shared.code_dir() or ""
     base = Path(os.environ.get("ADVANCE_ROADMAP_SLACKAGENT_DIR", str(Path(code) / "slackagent")))
@@ -789,12 +785,7 @@ def post_slack_summary(directory):
     node = shutil.which("node")
     args = ["--batch", str(directory / "batch.json"), "--runs", str(ROOT / "runs.jsonl")]
     text = ""
-    state = shared.read_json(directory / "batch.json") or {}
-    hold_line = summary_note_line(state)
     command = [node, str(script)]
-    if hold_line:
-        command = [node, str(Path(__file__).resolve().parent / "lib/post_batch_summary.mjs"),
-                   "--script", str(script), "--hold-line", hold_line]
     if node and script.exists():
         try:
             done = subprocess.run([*command, *args], capture_output=True, text=True,
