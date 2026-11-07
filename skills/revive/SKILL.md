@@ -142,7 +142,9 @@ Revive only after step 3 is answered. Start in the original **cwd** on the origi
      That loads the whole conversation into a **new** claude.ai thread. Success shows the
      transcript and `/remote-control is active · … https://claude.ai/code/session_…`. Give
      the user that URL. Once they confirm it works, offer to archive the old cshk thread
-     (thread menu ▾ → Archive; ask first). The fallback runs fine alongside other servers in
+     (thread menu ▾ → Archive; ask first). Archiving a Remote Control thread needs a verified
+     device: without one, `POST /v1/code/sessions/<id>/archive` returns 403 and the page says
+     "Couldn't archive this session". Ask the user to sign in on that page first, then archive. The fallback runs fine alongside other servers in
      the same folder; it was verified on 2026-11-07 while another reattach held it.
 
   Reattach failures seen so far, all of which go straight to the fallback:
