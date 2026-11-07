@@ -49,9 +49,15 @@ def handlers(status, port=None):
     """[{host, path, target, kind, href}] for every web handler except the index itself. href
     keeps the handler's own origin when it's served on a port other than 443."""
     out = []
+    tcp = status.get("TCP") or {}
     for hostport, web in (status.get("Web") or {}).items():
-        default_port = hostport.endswith(":443")
-        host = hostport.rsplit(":", 1)[0] if default_port else hostport
+        name, _, lport = hostport.rpartition(":")
+        https = bool((tcp.get(lport) or {}).get("HTTPS", lport == "443"))  # an --http listener isn't TLS
+        scheme = "https" if https else "http"
+        default_port = (https and lport == "443") or (not https and lport == "80")
+        same_origin = https and lport == "443"  # where this index itself is mounted
+        origin = f"{scheme}://{name if default_port else hostport}"
+        host = name if default_port else hostport
         for path, h in (web.get("Handlers") or {}).items():
             if h.get("Proxy") and is_self(h["Proxy"], port):
                 continue  # that's this page
@@ -60,7 +66,7 @@ def handlers(status, port=None):
             # A file mount matches its path exactly, so no trailing slash there.
             link = path if kind == "files" and os.path.isfile(target) else path.rstrip("/") + "/"
             out.append({"host": host, "path": path, "target": target, "kind": kind,
-                        "href": link if default_port else f"https://{hostport}{link}"})
+                        "href": link if same_origin else f"{origin}{link}"})
     return sorted(out, key=lambda e: (e["host"], e["path"]))
 
 
@@ -174,6 +180,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--port", type=int, default=int(os.environ.get("TAILNET_INDEX_PORT", "8420")))
     a = ap.parse_args()
+    global PORT
+    PORT = a.port  # so the index recognises its own handler whatever port it's on
     srv = ThreadingHTTPServer(("127.0.0.1", a.port), Handler)
     print(f"tailnet index on http://127.0.0.1:{a.port}/", flush=True)
     srv.serve_forever()

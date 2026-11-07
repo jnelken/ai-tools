@@ -12,7 +12,7 @@ ti = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(ti)
 
 STATUS = {
-    "TCP": {"443": {"HTTPS": True}},
+    "TCP": {"443": {"HTTPS": True}, "8443": {"HTTPS": True}},
     "Web": {"jmiv.tailc1d3f0.ts.net:443": {"Handlers": {
         "/": {"Proxy": "http://127.0.0.1:8420"},
         "/roadmap": {"Proxy": "http://127.0.0.1:8421"},
@@ -38,6 +38,18 @@ class TailnetIndexTest(unittest.TestCase):
         with tempfile.NamedTemporaryFile(suffix=".html") as f:
             got = ti.handlers({"Web": {"h.ts.net:443": {"Handlers": {"/report.html": {"Path": f.name}}}}})
         self.assertEqual(got[0]["href"], "/report.html")
+
+    def test_an_http_listener_gets_an_http_link(self):
+        status = {"TCP": {"80": {"HTTP": True}, "8080": {"HTTP": True}},
+                  "Web": {"h.ts.net:80": {"Handlers": {"/docs": {"Proxy": "http://127.0.0.1:4000"}}},
+                          "h.ts.net:8080": {"Handlers": {"/api": {"Proxy": "http://127.0.0.1:4001"}}}}}
+        hrefs = sorted(e["href"] for e in ti.handlers(status))
+        self.assertEqual(hrefs, ["http://h.ts.net/docs/", "http://h.ts.net:8080/api/"])
+
+    def test_self_detection_follows_the_bound_port(self):
+        status = {"Web": {"h.ts.net:443": {"Handlers": {"/": {"Proxy": "http://127.0.0.1:9000"}}}}}
+        self.assertEqual(ti.handlers(status, port=9000), [])
+        self.assertEqual(len(ti.handlers(status, port=8420)), 1)
 
     def test_no_web_config_means_no_entries(self):
         self.assertEqual(ti.handlers({}), [])
