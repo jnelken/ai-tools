@@ -412,7 +412,50 @@ def leaderboard_html():
     stale = "" if lb.get("ok") else f' · <span style="color:var(--fail)">last fetch failed: {esc(lb.get("error") or "?")}</span>'
     return (f'<div class=stats>{tiles}</div>'
             f'<div class=sub style="margin:4px 0 18px">Superset Production Run · @{esc(lb.get("handle") or "?")}'
-            f' · fetched {esc(when[:16].replace("T", " "))} UTC{stale}</div>')
+            f' · fetched {esc(when[:16].replace("T", " "))} UTC{stale}</div>'
+            + records_html(lb.get("records")))
+
+
+def fmt_tokens(n):
+    n = int(n or 0)
+    return f"{n / 1e9:.2f}B" if n >= 1e9 else f"{n / 1e6:.1f}M" if n >= 1e6 else f"{n:,}"
+
+
+def fmt_day(day):
+    try:
+        return datetime.fromisoformat(day).strftime("%a %b %-d")
+    except (TypeError, ValueError):
+        return day or "?"
+
+
+def records_html(rec):
+    """Personal records from final single-day ranks (lib/leaderboard.py backfill / snapshot)."""
+    if not rec:
+        return ""
+    best, busy = rec.get("best_rank") or {}, rec.get("busiest") or {}
+
+    def tile(big, small, label, note):
+        return (f'<div class=stat><div class=n>{esc(big)}<span class=dim style="font-size:14px;font-weight:500">'
+                f'{esc(small)}</span></div><div class=l>{esc(label)}</div>'
+                f'<div class=dim style="font-size:12px">{esc(note)}</div></div>')
+    tiles = ""
+    if best:
+        tiles += tile(f'#{best["rank"]:,}', f' / {best["total"]:,}', "best day rank",
+                      f'{fmt_day(best["day"])} · top {best["top_pct"]}% · {fmt_tokens(best["tokens"])} tokens · ${best["usd"]:,.0f}')
+    if busy:
+        tiles += tile(fmt_tokens(busy["tokens"]), " tokens", "busiest day",
+                      f'{fmt_day(busy["day"])} · ${busy["usd"]:,.0f} · #{busy["rank"]:,} / {busy["total"]:,}')
+    rows = "".join(
+        f'<tr><td>{esc(fmt_day(r["day"]))}</td><td class=num>{fmt_tokens(r["tokens"])}</td>'
+        f'<td class=num>${r["usd"]:,.0f}</td><td class=num>{r.get("sessions") or 0:,}</td>'
+        f'<td class=num>#{r["rank"]:,} / {r["total"]:,}</td><td class=num>{r["top_pct"]}%</td></tr>'
+        for r in rec.get("top_days") or [])
+    table = ('<div class=tablewrap style="margin-top:12px"><table><thead><tr><th>Top days</th>'
+             '<th class=num>Tokens</th><th class=num>Cost</th><th class=num>Sessions</th>'
+             '<th class=num>Rank</th><th class=num>Top</th></tr></thead>'
+             f'<tbody>{rows}</tbody></table></div>') if rows else ""
+    return (f'<div class=stats>{tiles}</div>{table}'
+            f'<div class=sub style="margin:6px 0 18px">Final single-day ranks · {rec.get("days_recorded", 0)} days recorded</div>')
 
 
 # ── repos ─────────────────────────────────────────────────────────────────────

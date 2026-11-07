@@ -8,12 +8,19 @@ with the Superset CLI's own login (~/.superset/config.json). Periods are UTC day
         fetch all-time, 7d and today; append one line to leaderboard-history.jsonl and write
         leaderboard.json (what gen-dashboard.py renders). Without --force, a snapshot younger
         than --max-age-min is kept as is.
+        Also finalizes the last week's ended days that aren't in leaderboard-daily.jsonl yet.
+    leaderboard.py backfill (--top N | --all | --days D [D ...])
+        record final single-day ranks for past UTC days: the N busiest days on the public
+        profile, every active day, or the days given. Days already recorded are skipped.
     leaderboard.py show
         print leaderboard.json.
 
-The API has no per-day history (`day` is always today), so the 7-day best is built here:
-each UTC day's latest recorded rank, best of the last 7 days. It covers only days a snapshot
-was taken — whenever the dashboard regenerates, so on every run and every page refresh.
+`leaderboard.me` only ever reports today, and a snapshot catches it mid-day. A finished day's
+final rank comes from the public standings for that single day (`leaderboard.public.standings`
+with from = to = day, no login), recorded once in leaderboard-daily.jsonl and never refetched.
+The 7-day best and the personal records are built from those final ranks; today's rank is the
+latest snapshot. launchd snapshots once a day near the end of the UTC day
+(com.jake.advance-roadmap-leaderboard), and every dashboard regeneration snapshots too.
 
 Never prints or stores the token. Exits 0 even on failure: leaderboard.json then carries
 {"ok": false, "error": …} and the dashboard says why.
@@ -21,6 +28,7 @@ Never prints or stores the token. Exits 0 even on failure: leaderboard.json then
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -38,8 +46,13 @@ API = os.environ.get("SUPERSET_API_URL", "https://api.superset.sh")
 # Cloudflare in front of the API rejects urllib's default agent (error 1010); look like the app.
 UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) "
       "Superset/1.30.2 Chrome/138.0.0.0 Electron/37.0.0 Safari/537.36")
+WEB = os.environ.get("PARADEV_WEB_URL", "https://paradev.com")
 OUT = ROOT / "leaderboard.json"
 HISTORY = ROOT / "leaderboard-history.jsonl"
+DAILY = ROOT / "leaderboard-daily.jsonl"
+DEFAULT_HANDLE = "jnelken"
+PAGE_SLEEP_S = float(os.environ.get("LEADERBOARD_PAGE_SLEEP_S", "0.5"))
+FINALIZE_DAYS = 7  # how far back a snapshot fills in missing final ranks
 
 
 def token(refresh=False):
@@ -85,6 +98,104 @@ def fetch():
     return out
 
 
+def utc_today():
+    return datetime.now(timezone.utc).date().isoformat()
+
+
+def get(url, timeout=30):
+    req = urllib.request.Request(url, headers={"User-Agent": UA})
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return r.read()
+
+
+def standings(day, offset):
+    """One page (100 rows) of the public ranking for a single UTC day. No login."""
+    inp = json.dumps({"0": {"json": {"from": day, "to": day, "limit": 100, "offset": offset}}})
+    raw = get(f"{API}/api/trpc/leaderboard.public.standings?batch=1&input={urllib.parse.quote(inp)}")
+    return json.loads(raw)[0]["result"]["data"]["json"]
+
+
+def day_rank(day, handle):
+    """The handle's final rank for one ended UTC day; rank None when it wasn't on the board."""
+    offset = 0
+    while True:
+        page = standings(day, offset)
+        rows = page.get("rows") or []
+        for row in rows:
+            if row.get("handle") == handle:
+                return {"day": day, "rank": row.get("rank"), "total": page.get("total"),
+                        "tokens": int(row.get("tokens") or 0), "usd": float(row.get("usd") or 0),
+                        "sessions": row.get("sessions")}
+        if not page.get("hasMore") or not rows:
+            return {"day": day, "rank": None, "total": page.get("total"), "tokens": 0, "usd": 0.0,
+                    "sessions": 0}
+        offset += len(rows)
+        time.sleep(PAGE_SLEEP_S)
+
+
+def profile_days(handle):
+    """{day: tokens} for every active day, from the public profile page's contributions data."""
+    html = get(f"{WEB}/{urllib.parse.quote(handle)}", timeout=60).decode("utf-8", "replace")
+    days = {d: int(t) for d, t in re.findall(
+        r'\\?"day\\?":\\?"(\d{4}-\d\d-\d\d)\\?",\\?"tokens\\?":\\?"(\d+)\\?"', html)}
+    if not days:
+        raise RuntimeError(f"no daily contributions found on {WEB}/{handle} — the page layout changed")
+    return days
+
+
+def daily():
+    """Final per-day records, {day: record}."""
+    out = {}
+    try:
+        for line in DAILY.read_text().splitlines():
+            try:
+                r = json.loads(line)
+                out[r["day"]] = r
+            except (ValueError, KeyError):
+                pass
+    except OSError:
+        pass
+    return out
+
+
+def record_days(days, handle, log=print):
+    """Fetch and store final ranks for ended days not yet recorded. Returns how many it wrote."""
+    have, today, wrote = daily(), utc_today(), 0
+    for day in sorted(set(days)):
+        if day in have or day >= today:
+            continue  # recorded already, or not over yet
+        rec = {**day_rank(day, handle), "source": "standings",
+               "fetched_at": datetime.now(timezone.utc).isoformat(timespec="seconds")}
+        ROOT.mkdir(parents=True, exist_ok=True)
+        with open(DAILY, "a") as f:
+            f.write(json.dumps(rec) + "\n")
+        wrote += 1
+        log(f"{day}: " + (f"#{rec['rank']} / {rec['total']}" if rec["rank"] else f"not ranked ({rec['total']} ranked)"))
+    return wrote
+
+
+def records(store):
+    """Personal records from final daily ranks: best rank, busiest day, top 10 days by tokens."""
+    active = [r for r in store.values() if r.get("rank")]
+    if not active:
+        return None
+
+    def view(r):
+        total = r.get("total") or 0
+        return {"day": r["day"], "rank": r["rank"], "total": total, "tokens": r.get("tokens", 0),
+                "usd": r.get("usd", 0), "sessions": r.get("sessions"),
+                "top_pct": round(100 * r["rank"] / total, 1) if total else None}
+    best = min(active, key=lambda r: (r["rank"], -(r.get("total") or 0)))
+    busiest = max(active, key=lambda r: r.get("tokens", 0))
+    top = sorted(active, key=lambda r: -r.get("tokens", 0))[:10]
+    return {"best_rank": view(best), "busiest": view(busiest), "top_days": [view(r) for r in top],
+            "days_recorded": len(store)}
+
+
+def handle_of(prior):
+    return (prior or {}).get("handle") or DEFAULT_HANDLE
+
+
 def history():
     rows = []
     try:
@@ -98,14 +209,21 @@ def history():
     return rows
 
 
-def best_7d(rows, today):
-    """Best (lowest) of each UTC day's latest recorded rank over the last 7 days, today included."""
+def best_7d(rows, today, final=None):
+    """Best (lowest) daily rank over the last 7 days, today included: a day's final rank when
+    recorded, else its latest snapshot (today's is always a snapshot)."""
     since = (datetime.fromisoformat(today) - timedelta(days=6)).date().isoformat()
     latest = {}
     for r in rows:
         day = r.get("day")
         if day and since <= day <= today and (r.get("today") or {}).get("rank"):
             latest[day] = r["today"]  # rows are in time order, so the last one per day wins
+    for day, r in (final or {}).items():
+        if since <= day < today:
+            if r.get("rank"):
+                latest[day] = {"rank": r["rank"], "total": r.get("total")}
+            else:
+                latest.pop(day, None)  # not on the board that day
     if not latest:
         return None
     day, best = min(latest.items(), key=lambda kv: kv[1]["rank"])
@@ -143,7 +261,37 @@ def cmd_snapshot(a):
     ROOT.mkdir(parents=True, exist_ok=True)
     with open(HISTORY, "a") as f:
         f.write(json.dumps(row) + "\n")
-    write({"ok": True, **row, "best_7d": best_7d(history(), day)})
+    # Fill in the last week's final ranks the store is missing (normally just yesterday).
+    finalize_error = None
+    recent = [(datetime.fromisoformat(day) - timedelta(days=n)).date().isoformat()
+              for n in range(1, FINALIZE_DAYS + 1)]
+    try:
+        record_days(recent, handle_of(got), log=lambda m: None)
+    except Exception as e:  # the ranks for today still stand; the next snapshot retries
+        finalize_error = f"finalizing past days: {e}"[:200]
+    final = daily()
+    write({"ok": True, **row, "best_7d": best_7d(history(), day, final), "records": records(final),
+           **({"finalize_error": finalize_error} if finalize_error else {})})
+    return 0
+
+
+def cmd_backfill(a):
+    try:
+        prior = json.loads(OUT.read_text())
+    except (OSError, ValueError):
+        prior = {}
+    handle = handle_of(prior)
+    if a.days:
+        days = a.days
+    else:
+        busiest = sorted(profile_days(handle).items(), key=lambda kv: -kv[1])
+        days = [d for d, _ in (busiest if a.all else busiest[:a.top])]
+    wrote = record_days(days, handle)
+    final = daily()
+    if prior:
+        today = prior.get("day") or utc_today()
+        write({**prior, "best_7d": best_7d(history(), today, final), "records": records(final)})
+    print(f"backfill: {wrote} day(s) recorded, {len(final)} in {DAILY.name}")
     return 0
 
 
@@ -153,11 +301,18 @@ def main(argv=None):
     s = sub.add_parser("snapshot")
     s.add_argument("--force", action="store_true")
     s.add_argument("--max-age-min", type=float, default=10)
+    b = sub.add_parser("backfill")
+    which = b.add_mutually_exclusive_group(required=True)
+    which.add_argument("--top", type=int, help="the N busiest days on the public profile")
+    which.add_argument("--all", action="store_true", help="every active day on the public profile")
+    which.add_argument("--days", nargs="+", help="these UTC days (YYYY-MM-DD)")
     sub.add_parser("show")
     a = p.parse_args(argv)
     if a.cmd == "show":
         print(OUT.read_text() if OUT.exists() else "{}")
         return 0
+    if a.cmd == "backfill":
+        return cmd_backfill(a)
     return cmd_snapshot(a)
 
 
