@@ -354,9 +354,13 @@ def cmd_backfill(a):
         days = [d for d, _ in (busiest if a.all else busiest[:a.top])]
     wrote = record_days(days, handle)
     final = daily()
-    if prior:
-        today = prior.get("day") or utc_today()
-        write({**prior, "best_7d": best_7d(history(), today, final), "records": records(final)})
+    try:  # re-read: a snapshot may have written newer ranks while this was fetching
+        current = json.loads(OUT.read_text())
+    except (OSError, ValueError):
+        current = {}
+    if current:
+        today = current.get("day") or utc_today()
+        write({**current, "best_7d": best_7d(history(), today, final), "records": records(final)})
     print(f"backfill: {wrote} day(s) recorded, {len(final)} in {DAILY.name}")
     return 0
 

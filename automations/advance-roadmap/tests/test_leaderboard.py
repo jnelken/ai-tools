@@ -310,6 +310,21 @@ class LeaderboardTest(unittest.TestCase):
                 self.lb.record_days(week, "jnelken", log=lambda m: None, budget_s=10)
         self.assertEqual(sorted(self.lb.daily()), week)   # every day reached, oldest to newest
 
+    def test_backfill_keeps_a_snapshot_written_meanwhile(self):
+        (self.root / "leaderboard.json").write_text(json.dumps({"ok": True, "handle": "jnelken", "day": "2026-11-07",
+                                                                "fetched_at": "old"}))
+
+        def page(day, offset, timeout=None):  # a snapshot lands while backfill is fetching
+            (self.root / "leaderboard.json").write_text(json.dumps(
+                {"ok": True, "handle": "jnelken", "day": "2026-11-07", "fetched_at": "new"}))
+            return {"total": 1, "hasMore": False, "rows": [{"handle": "jnelken", "rank": 1, "tokens": "1", "usd": "1"}]}
+        with mock.patch.object(self.lb, "standings", side_effect=page), \
+             mock.patch.object(self.lb, "utc_today", return_value="2026-11-07"):
+            self.lb.main(["backfill", "--days", "2026-10-01"])
+        out = json.loads((self.root / "leaderboard.json").read_text())
+        self.assertEqual(out["fetched_at"], "new")
+        self.assertEqual(out["records"]["best_rank"]["day"], "2026-10-01")
+
     def test_snapshot_survives_a_standings_outage(self):
         with mock.patch.object(self.lb, "token", return_value="t"), \
              mock.patch.object(self.lb, "me", side_effect=self.ranks(day="2026-11-07")), \
