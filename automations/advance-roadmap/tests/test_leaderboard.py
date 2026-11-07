@@ -298,7 +298,17 @@ class LeaderboardTest(unittest.TestCase):
              mock.patch.object(self.lb, "utc_today", return_value="2026-11-07"), \
              mock.patch.object(self.lb.time, "monotonic", side_effect=lambda: next(clock)):
             self.snapshot()
-        self.assertEqual(sorted(self.lb.daily()), ["2026-11-06"])   # newest first, then out of budget
+        self.assertEqual(sorted(self.lb.daily()), ["2026-10-31"])   # oldest first, then out of budget
+
+    def test_budget_limited_runs_never_starve_older_days(self):
+        week = [f"2026-10-{d}" for d in (31,)] + [f"2026-11-0{d}" for d in range(1, 7)]
+        for run in range(len(week)):           # each run has time for exactly one day
+            clock = iter([0.0, 0.0] + [20.0] * 50)
+            with mock.patch.object(self.lb, "standings", self.board(me_rank=3)), \
+                 mock.patch.object(self.lb.time, "monotonic", side_effect=lambda: next(clock)), \
+                 self.at("2026-11-07T12:00:00"):
+                self.lb.record_days(week, "jnelken", log=lambda m: None, budget_s=10)
+        self.assertEqual(sorted(self.lb.daily()), week)   # every day reached, oldest to newest
 
     def test_snapshot_survives_a_standings_outage(self):
         with mock.patch.object(self.lb, "token", return_value="t"), \

@@ -210,12 +210,14 @@ def store_day(rec):
 
 
 def record_days(days, handle, log=print, budget_s=None):
-    """Fetch and store ranks for ended days that are missing or still provisional, newest first.
+    """Fetch and store ranks for ended days that are missing or still provisional: missing days
+    first, then provisional refreshes, each oldest first (the oldest leaves the retry window
+    soonest), so a budget-limited run always makes progress and never starves a missing day.
     With budget_s, give up once that much time has passed (a day is stored only when complete).
     Returns how many days it wrote."""
     store, today, wrote = daily(), utc_today(), 0
     deadline = time.monotonic() + budget_s if budget_s is not None else None
-    for day in sorted(set(days), reverse=True):
+    for day in sorted(set(days), key=lambda d: (d in store, d)):
         if day >= today or (day in store and settled(store[day])):
             continue  # not over yet, or already final
         try:
@@ -324,7 +326,7 @@ def cmd_snapshot(a):
     # Today's ranks are saved before anything slower runs, so a timeout can't lose them.
     final = daily()
     write({"ok": True, **row, "best_7d": best_7d(history(), day, final), "records": records(final)})
-    # Then fill in the last week's final ranks the store is missing (normally just yesterday).
+    # Then fill in the last week's days that are missing or still provisional.
     finalize_error = None
     recent = [(datetime.fromisoformat(day) - timedelta(days=n)).date().isoformat()
               for n in range(1, FINALIZE_DAYS + 1)]
