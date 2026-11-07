@@ -376,6 +376,12 @@ def migrate_legacy():
     if not LEGACY_ROOT.is_dir() or LEGACY_ROOT.resolve() == ROOT.resolve():
         return
     ROOT.mkdir(parents=True, exist_ok=True)
+    with open(ROOT / ".migrate.lock", "w") as lk:  # two first runs at once mustn't both migrate
+        fcntl.lockf(lk, fcntl.LOCK_EX)
+        _migrate_locked()
+
+
+def _migrate_locked():
     old_hist = LEGACY_ROOT / HISTORY.name
     if old_hist.exists():
         new_lines = HISTORY.read_text().splitlines() if HISTORY.exists() else []

@@ -1,5 +1,5 @@
 {
-  "updated_at": "2026-11-07T17:02:00-05:00",
+  "updated_at": "2026-11-07T17:04:59-05:00",
   "providers": {
     "claude": {
       "five_hour": {
@@ -26,7 +26,7 @@
     },
     "codex": {
       "five_hour": {
-        "used_pct": 8.0,
+        "used_pct": 12.0,
         "reset_at": "2026-11-07T21:56:16-05:00",
         "reset_epoch": 1794106576,
         "source": "app_server"
@@ -42,8 +42,8 @@
       "last_limit_hit": null,
       "rate_limit_reached": null,
       "plan": "plus",
-      "observed_epoch": 1794088920.07569,
-      "observed_at": "2026-11-07T17:02:00-05:00",
+      "observed_epoch": 1794089099.215241,
+      "observed_at": "2026-11-07T17:04:59-05:00",
       "source": "app_server",
       "gate": {
         "state": "ok",
@@ -59,7 +59,7 @@
         "reset_at": "2026-11-23T20:44:05-05:00",
         "reset_epoch": 1795484645,
         "source": "dashboard_api",
-        "observed_at": "2026-11-07T17:02:00-05:00"
+        "observed_at": "2026-11-07T17:04:59-05:00"
       },
       "available_for_worker": true,
       "source": "dashboard_api",
