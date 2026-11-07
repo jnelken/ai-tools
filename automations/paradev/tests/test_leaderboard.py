@@ -15,8 +15,9 @@ from unittest import mock
 SCRIPT = Path(__file__).resolve().parents[1] / "leaderboard.py"
 
 
-def load(root):
+def load(root, legacy=None):
     os.environ["PARADEV_ROOT"] = str(root)
+    os.environ["PARADEV_LEGACY_ROOT"] = str(legacy or Path(root) / "no-legacy")
     spec = importlib.util.spec_from_file_location("leaderboard_under_test", SCRIPT)
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
@@ -121,6 +122,29 @@ class LeaderboardTest(unittest.TestCase):
         out = json.loads((self.root / "leaderboard.json").read_text())
         self.assertFalse(out["ok"])
         self.assertIn("login", out["error"])
+
+    def test_migrates_files_left_in_the_advance_roadmap_folder(self):
+        legacy = self.root / "advance-roadmap"
+        legacy.mkdir()
+        (legacy / "leaderboard-history.jsonl").write_text('{"day": "2026-10-07"}\n')
+        (legacy / "leaderboard-daily.jsonl").write_text(
+            '{"day": "2026-09-10", "rank": 124}\n{"day": "2026-11-03", "rank": 999}\n')
+        (legacy / "leaderboard.json").write_text('{"handle": "jnelken", "old": true}')
+        new = self.root / "paradev"
+        new.mkdir()
+        (new / "leaderboard-history.jsonl").write_text('{"day": "2026-11-07"}\n')
+        (new / "leaderboard-daily.jsonl").write_text('{"day": "2026-11-03", "rank": 178}\n')
+        lb = load(new, legacy)
+        lb.migrate_legacy()
+        self.assertEqual([json.loads(l)["day"] for l in (new / "leaderboard-history.jsonl").read_text().splitlines()],
+                         ["2026-10-07", "2026-11-07"])                      # older lines first
+        self.assertEqual({d: r["rank"] for d, r in lb.daily().items()},
+                         {"2026-09-10": 124, "2026-11-03": 178})            # newer record wins
+        self.assertTrue(json.loads((new / "leaderboard.json").read_text())["old"])
+        self.assertFalse((legacy / "leaderboard-daily.jsonl").exists())
+        self.assertTrue((legacy / "leaderboard-daily.jsonl.migrated").exists())
+        lb.migrate_legacy()                                                 # a second run is a no-op
+        self.assertEqual(len(lb.daily()), 2)
 
     # ── final single-day ranks ────────────────────────────────────────────────
 

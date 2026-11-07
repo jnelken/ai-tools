@@ -71,7 +71,8 @@ class Handler(BaseHTTPRequestHandler):
             with open(PAGE, "rb") as f:
                 self._send(200, f.read(), "text/html; charset=utf-8")
         except OSError:
-            self._send(503, "paradev.html not generated yet — POST /refresh", "text/plain")
+            self._send(503, '<meta http-equiv=refresh content=10><p>Building the Paradev page for the first '
+                       'time; this reloads in 10 seconds.</p>', "text/html; charset=utf-8")
 
     def do_POST(self):
         # Tailscale Serve strips its mount prefix; accept any …/refresh (see advance-roadmap/serve.py).
@@ -92,11 +93,20 @@ class Handler(BaseHTTPRequestHandler):
         sys.stderr.write("%s %s\n" % (time.strftime("%H:%M:%S"), fmt % args))
 
 
+def ensure_page():
+    """A fresh install has no page yet: build one in the background instead of serving 503
+    until the 18:50 snapshot."""
+    if not os.path.exists(PAGE):
+        threading.Thread(target=lambda: REFRESH.acquire() and (refresh(), REFRESH.release()),
+                         daemon=True).start()
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--port", type=int, default=int(os.environ.get("PARADEV_PORT", "8422")))
     a = ap.parse_args()
     srv = ThreadingHTTPServer(("127.0.0.1", a.port), Handler)
+    ensure_page()
     print(f"paradev page on http://127.0.0.1:{a.port}/", flush=True)
     srv.serve_forever()
 

@@ -302,7 +302,8 @@ Tailscale Serve, at `/paradev` on the tailnet.
   after it ends; ranks below about #1,100 are out of the API's reach and show as "below".
 - `gen-page.py` builds `paradev.html`; `serve.py` serves it with a ↻ refresh.
 - Data lives in `~/.claude/automations/paradev/` (`leaderboard.json`, `leaderboard-daily.jsonl`,
-  `leaderboard-history.jsonl`).
+  `leaderboard-history.jsonl`). Files left in the old `advance-roadmap` folder are merged in on the
+  first run and renamed `*.migrated`. The server builds the page on start if it doesn't exist yet.
 
 ```sh
 for p in com.jake.paradev com.jake.paradev-snapshot; do
@@ -312,6 +313,7 @@ for p in com.jake.paradev com.jake.paradev-snapshot; do
 done
 tailscale serve --bg --set-path /paradev http://127.0.0.1:8422
 python3 ~/.claude/automations/paradev/leaderboard.py backfill --top 10   # first time only
+python3 ~/.claude/automations/paradev/gen-page.py                         # build the page now
 ```
 
 `com.jake.paradev` keeps the server up; `com.jake.paradev-snapshot` records the day at 18:50

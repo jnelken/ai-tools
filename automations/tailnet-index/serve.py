@@ -38,16 +38,20 @@ def serve_status():
 
 
 def handlers(status):
-    """[{host, path, target, kind}] for every web handler except the index itself."""
+    """[{host, path, target, kind, href}] for every web handler except the index itself. href
+    keeps the handler's own origin when it's served on a port other than 443."""
     out = []
     for hostport, web in (status.get("Web") or {}).items():
-        host = hostport.rsplit(":", 1)[0] if hostport.endswith(":443") else hostport
+        default_port = hostport.endswith(":443")
+        host = hostport.rsplit(":", 1)[0] if default_port else hostport
         for path, h in (web.get("Handlers") or {}).items():
             if path == "/":
                 continue  # that's this page
             kind, target = ("proxy", h["Proxy"]) if h.get("Proxy") else \
                            ("files", h["Path"]) if h.get("Path") else ("text", None)
-            out.append({"host": host, "path": path, "target": target, "kind": kind})
+            link = path.rstrip("/") + "/"
+            out.append({"host": host, "path": path, "target": target, "kind": kind,
+                        "href": link if default_port else f"https://{hostport}{link}"})
     return sorted(out, key=lambda e: (e["host"], e["path"]))
 
 
@@ -70,7 +74,7 @@ def build(entries, error=None, now=None):
     cards = []
     for e in entries:
         up, title = (probe(e["target"]) if e["kind"] == "proxy" else (True, None))
-        href = e["path"].rstrip("/") + "/"
+        href = e.get("href") or e["path"].rstrip("/") + "/"
         name = title or e["path"].strip("/") or e["path"]
         cards.append(
             f'<a class=card href="{html.escape(href)}"><div class=top><span class="dot {"up" if up else "down"}"'

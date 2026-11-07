@@ -56,6 +56,9 @@ OUT = ROOT / "leaderboard.json"
 HISTORY = ROOT / "leaderboard-history.jsonl"
 DAILY = ROOT / "leaderboard-daily.jsonl"
 DEFAULT_HANDLE = "jnelken"
+# Where these files lived before the Paradev page got its own automation; merged in once.
+LEGACY_ROOT = Path(os.environ.get("PARADEV_LEGACY_ROOT",
+                                  Path.home() / ".claude" / "automations" / "advance-roadmap"))
 PAGE_SLEEP_S = float(os.environ.get("LEADERBOARD_PAGE_SLEEP_S", "0.5"))
 FINALIZE_DAYS = 7  # how far back a snapshot fills in missing final ranks
 # A snapshot runs inside the page generator's 90 s budget: finalizing stops after this long and the
@@ -366,6 +369,40 @@ def cmd_backfill(a):
     return 0
 
 
+def migrate_legacy():
+    """Merge leaderboard files left in the advance-roadmap folder into ROOT, once: history lines
+    go first (they're older), daily records fill days ROOT lacks, leaderboard.json is copied
+    only when ROOT has none. Each migrated file is renamed *.migrated so this runs once."""
+    if not LEGACY_ROOT.is_dir() or LEGACY_ROOT.resolve() == ROOT.resolve():
+        return
+    ROOT.mkdir(parents=True, exist_ok=True)
+    old_hist = LEGACY_ROOT / HISTORY.name
+    if old_hist.exists():
+        new_lines = HISTORY.read_text().splitlines() if HISTORY.exists() else []
+        old_lines = [l for l in old_hist.read_text().splitlines() if l not in set(new_lines)]
+        tmp = HISTORY.with_name(f"{HISTORY.name}.{os.getpid()}.tmp")
+        tmp.write_text("".join(l + "\n" for l in old_lines + new_lines))
+        os.replace(tmp, HISTORY)
+        old_hist.rename(old_hist.with_name(old_hist.name + ".migrated"))
+    old_daily = LEGACY_ROOT / DAILY.name
+    if old_daily.exists():
+        have = daily()
+        for line in old_daily.read_text().splitlines():
+            try:
+                rec = json.loads(line)
+            except ValueError:
+                continue
+            if rec.get("day") and rec["day"] not in have:
+                store_day(rec)
+        old_daily.rename(old_daily.with_name(old_daily.name + ".migrated"))
+    old_out = LEGACY_ROOT / OUT.name
+    if old_out.exists():
+        if not OUT.exists():
+            os.replace(old_out, OUT)
+        else:
+            old_out.rename(old_out.with_name(old_out.name + ".migrated"))
+
+
 def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -379,6 +416,7 @@ def main(argv=None):
     which.add_argument("--days", nargs="+", help="these UTC days (YYYY-MM-DD)")
     sub.add_parser("show")
     a = p.parse_args(argv)
+    migrate_legacy()
     if a.cmd == "show":
         print(OUT.read_text() if OUT.exists() else "{}")
         return 0
