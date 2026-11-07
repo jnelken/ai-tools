@@ -140,12 +140,26 @@ Revive only after step 3 is answered. Start in the original **cwd** on the origi
      processes or wait for the folder to free up:
      `tmux new-session -d -s revive-<slug> -c <cwd> "claude --resume <uuid> --remote-control '<title>'"`.
      That loads the whole conversation into a **new** claude.ai thread. Success shows the
-     transcript and `/remote-control is active · … https://claude.ai/code/session_…`. Give
-     the user that URL. Once they confirm it works, offer to archive the old cshk thread
-     (thread menu ▾ → Archive; ask first). Archiving a Remote Control thread needs a verified
-     device: without one, `POST /v1/code/sessions/<id>/archive` returns 403 and the page says
-     "Couldn't archive this session". Ask the user to sign in on that page first, then archive. The fallback runs fine alongside other servers in
-     the same folder; it was verified on 2026-11-07 while another reattach held it.
+     transcript and `/remote-control is active · … https://claude.ai/code/session_…`. The
+     fallback runs fine alongside other servers in the same folder; it was verified on
+     2026-11-07 while another reattach held it.
+  3. **Archive the old thread automatically once the new one is verified.** Don't ask; the
+     user asked for this (2026-11-07), and archiving can be undone from claude.ai's archived
+     list. "Verified" means the pane shows `/remote-control is active` with the new
+     `session_…` URL, and that URL differs from the old one. Never archive before that. In
+     Claude in Chrome, open the old cshk link and click **Not now** on the device prompt.
+     Then open the title menu ▾ and choose **Archive**. Two identical titles sit in the
+     sidebar, so use the header menu of the old thread's own page, not a sidebar row.
+     If real clicks don't open the menu, dispatching `pointerdown`/`mousedown`/`pointerup`/
+     `mouseup`/`click` on `button[aria-label="More options for <title>"]` (the one in the
+     header, y < 40) and then on the `Archive` menuitem works. Call `read_network_requests`
+     once *before* archiving (it only records from its first call), then confirm `POST /v1/code/sessions/<old session_ id>/archive` returned
+     200.
+     - **403** ("Couldn't archive this session"): this browser isn't a verified device for
+       Remote Control. Ask the user to sign in on that page, then retry once. If they would
+       rather do it themselves, give them the old link and say which thread to keep.
+     - Skip this step when reattach (step 1) succeeded. There the old thread *is* the live
+       one.
 
   Reattach failures seen so far, all of which go straight to the fallback:
   - "This folder is already served by a terminal `claude remote-control`": a server for that
@@ -170,4 +184,4 @@ interrupted at `<last tool/prompt>` by `<cause>`, and that it should check the c
 
 Report the session (title, host, cwd, UUID), the cause and its confidence, what happened to
 the guardrail (applied with commit, filed with ticket link, or skipped), where it is running
-now and how to reach it, and the old thread's state. End with the status line.
+now and how to reach it, and the old thread's state (archived, or why not). End with the status line.
