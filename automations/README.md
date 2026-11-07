@@ -109,8 +109,10 @@ Skipped runs never reach the Slack step, so only completed runs post.
    limit banner instead of a plan is recorded and the tick fails over to the next planner still
    under its gate.
 3. Parses `ORCHESTRATOR_RESULT_JSON`, then dispatches `worker.sh` along
-   **Cursor Auto → Codex Sol → Claude Opus**, skipping any provider over its usage gate and failing
-   over on a limit banner within the same tick.
+   **Cursor Auto → Codex Luna (high) → Claude Sonnet (high)**, skipping any provider over its usage
+   gate and failing over on a limit banner within the same tick. Worker models and efforts are
+   `*_WORKER_*_DEFAULT` in `lib/models.sh`; override with `ADVANCE_ROADMAP_{CLAUDE,CODEX}_WORKER_MODEL`
+   and `_WORKER_EFFORT`.
 4. Records provider limits so the **next** run routes differently.
 
 **A failed plan dispatches nothing.** When no planner returns a valid `ORCHESTRATOR_RESULT_JSON`

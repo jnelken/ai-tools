@@ -28,8 +28,10 @@ CLAUDE="${ADVANCE_ROADMAP_CLAUDE_BIN:-/Users/jake/.local/bin/claude}"
 AGENT="${ADVANCE_ROADMAP_AGENT_BIN:-/Users/jake/.local/bin/agent}"
 CODEX="${ADVANCE_ROADMAP_CODEX_BIN:-/opt/homebrew/bin/codex}"
 
-CLAUDE_WORKER_MODEL="${ADVANCE_ROADMAP_CLAUDE_WORKER_MODEL:-claude-opus-5}"
-CODEX_WORKER_MODEL="${ADVANCE_ROADMAP_CODEX_WORKER_MODEL:-$CODEX_MODEL_DEFAULT}"
+CLAUDE_WORKER_MODEL="${ADVANCE_ROADMAP_CLAUDE_WORKER_MODEL:-$CLAUDE_WORKER_MODEL_DEFAULT}"
+CLAUDE_WORKER_EFFORT="${ADVANCE_ROADMAP_CLAUDE_WORKER_EFFORT:-$CLAUDE_WORKER_EFFORT_DEFAULT}"
+CODEX_WORKER_MODEL="${ADVANCE_ROADMAP_CODEX_WORKER_MODEL:-$CODEX_WORKER_MODEL_DEFAULT}"
+CODEX_WORKER_EFFORT="${ADVANCE_ROADMAP_CODEX_WORKER_EFFORT:-$CODEX_WORKER_EFFORT_DEFAULT}"
 CURSOR_WORKER_MODEL="${ADVANCE_ROADMAP_CURSOR_WORKER_MODEL:-auto}"
 
 export PATH="/opt/homebrew/bin:/opt/homebrew/opt/node@22/bin:/usr/bin:/bin:/usr/sbin:/sbin:/Users/jake/.local/bin"
@@ -278,7 +280,7 @@ run_codex() {
   "$CODEX" exec \
     -o "$out.last" \
     -m "$CODEX_WORKER_MODEL" \
-    -c model_reasoning_effort=high \
+    -c model_reasoning_effort="$CODEX_WORKER_EFFORT" \
     -C "$WORKDIR" \
     --add-dir "$CODE_DIR" \
     --add-dir "$ROOT" \
@@ -298,7 +300,7 @@ run_claude() {
   [ -x "$CLAUDE" ] || return 127
   python3 "${AI_TOOLS_HOME:-$HOME/.ai-tools}/bin/claude-session" run --label "roadmap:worker:${STAMP:-unknown}" -- "$CLAUDE" -p "$prompt" \
     --model "$CLAUDE_WORKER_MODEL" \
-    --effort high \
+    --effort "$CLAUDE_WORKER_EFFORT" \
     --dangerously-skip-permissions \
     --add-dir "$CODE_DIR" \
     --add-dir "$ROOT" \
