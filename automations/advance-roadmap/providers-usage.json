@@ -1,0 +1,75 @@
+{
+  "updated_at": "2026-11-07T13:05:36-05:00",
+  "providers": {
+    "claude": {
+      "five_hour": {
+        "used_pct": 44.0,
+        "reset_at": "2026-11-07T16:39:59-05:00",
+        "reset_epoch": 1794087599.954802,
+        "source": "probe"
+      },
+      "seven_day": {
+        "used_pct": 24.0,
+        "reset_at": "2026-11-09T10:59:59-05:00",
+        "reset_epoch": 1794239999.954819,
+        "source": "probe"
+      },
+      "available_for_orchestrator": true,
+      "available_for_worker": true,
+      "last_limit_hit": null,
+      "observed_epoch": 1794074734.965698,
+      "gate": {
+        "state": "ok",
+        "reason": null,
+        "reset_epoch": null
+      }
+    },
+    "codex": {
+      "five_hour": {
+        "used_pct": 42.0,
+        "reset_at": "2026-11-07T16:52:34-05:00",
+        "reset_epoch": 1794088354,
+        "source": "app_server"
+      },
+      "weekly": {
+        "used_pct": 29.0,
+        "reset_at": "2026-11-11T10:38:51-05:00",
+        "reset_epoch": 1794411531,
+        "source": "app_server"
+      },
+      "available_for_orchestrator": true,
+      "available_for_worker": true,
+      "last_limit_hit": null,
+      "rate_limit_reached": null,
+      "plan": "plus",
+      "observed_epoch": 1794074736.658116,
+      "observed_at": "2026-11-07T13:05:36-05:00",
+      "source": "app_server",
+      "gate": {
+        "state": "ok",
+        "reason": null,
+        "reset_epoch": null
+      }
+    },
+    "cursor": {
+      "included": {
+        "auto_pct": 0.0,
+        "api_pct": 0.0,
+        "total_pct": 0.0,
+        "reset_at": "2026-11-23T20:44:05-05:00",
+        "reset_epoch": 1795484645,
+        "source": "dashboard_api",
+        "observed_at": "2026-11-07T13:05:36-05:00"
+      },
+      "available_for_worker": true,
+      "source": "dashboard_api",
+      "last_limit_hit": null,
+      "gate": {
+        "state": "ok",
+        "reason": null,
+        "reset_epoch": null
+      }
+    }
+  },
+  "history": []
+}
