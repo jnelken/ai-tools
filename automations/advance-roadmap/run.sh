@@ -994,16 +994,21 @@ PY
     done
     # The first plan may have waited for slower planners: route on the current pool state.
     WORKERS="$(python3 "$USAGE_PY" --root "$ROOT" pick-worker-chain 2>/dev/null | tr -d '\r' || true)"
-    # Release is an atomic budget conversion. Use exactly its worker/review route;
-    # later live gates may stop it, but may never spill into an unleased provider.
+    # Release reserves one worker. Try that provider first; keep the eligible chain for
+    # auth/missing failover. worker.sh still stops at a live limit so it cannot spend an
+    # unleased fallback.
     if [ -n "${ADVANCE_ROADMAP_BUDGET_PLANNER:-}" ]; then
-      WORKERS="$(jq -r '.worker // empty' "$RUN_DIR/batch-budget.json")"
+      reserved="$(jq -r '.worker // empty' "$RUN_DIR/batch-budget.json")"
+      export ADVANCE_ROADMAP_BUDGET_WORKER="$reserved"
       export ADVANCE_ROADMAP_BUDGET_REVIEWERS="$(jq -r '.reviewers | join(" ")' "$RUN_DIR/batch-budget.json")"
       export ADVANCE_ROADMAP_BUDGET_REVIEW_STRATEGY="$(jq -r '.review_strategy // empty' "$RUN_DIR/batch-budget.json")"
       export ADVANCE_ROADMAP_BUDGET_REVIEW_FALLBACK_REASON="$(jq -r '.review_fallback_reason // empty' "$RUN_DIR/batch-budget.json")"
-      if [ -z "$WORKERS" ]; then
+      if [ -z "$reserved" ]; then
         record skipped-quota "batch release has no worker reservation"; exit 0
       fi
+      WORKERS="$(python3 -c 'import sys
+reserved, chain = sys.argv[1], sys.argv[2].split()
+print(" ".join([reserved] + [p for p in chain if p != reserved]))' "$reserved" "$WORKERS")"
     fi
   fi
 
