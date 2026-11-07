@@ -291,6 +291,36 @@ Limitations:
 - The Keychain token is the Agent CLI's; if it expires the probe gets a 401 until the next `agent`
   run refreshes it.
 
+## `paradev`
+
+Jake's standing on Paradev's (formerly Superset's) Production Run leaderboard, on its own page:
+all-time / 7-day best / today / rolling-7-day ranks, personal records (best single-day rank,
+busiest day), the top days, and every recorded day. Served at `http://127.0.0.1:8422/` and, through
+Tailscale Serve, at `/paradev` on the tailnet.
+
+- `leaderboard.py`: `snapshot` reads today's ranks from `leaderboard.me` (the Superset CLI's login)
+  and fills in recent days' single-day ranks from the public `leaderboard.public.standings`;
+  `backfill --top N | --all | --days …` records past days. A day stays provisional until 48 h
+  after it ends; ranks below about #1,100 are out of the API's reach and show as "below".
+- `gen-page.py` builds `paradev.html`; `serve.py` serves it with a ↻ refresh.
+- Data lives in `~/.claude/automations/paradev/` (`leaderboard.json`, `leaderboard-daily.jsonl`,
+  `leaderboard-history.jsonl`). Files left in the old `advance-roadmap` folder are merged in on the
+  first run and renamed `*.migrated`. The server builds the page on start if it doesn't exist yet.
+
+```sh
+for p in com.jake.paradev com.jake.paradev-snapshot; do
+  ln -sf ~/.ai-tools/automations/paradev/$p.plist ~/Library/LaunchAgents/$p.plist
+  launchctl bootout gui/$(id -u)/$p 2>/dev/null
+  launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/$p.plist
+done
+tailscale serve --bg --set-path /paradev http://127.0.0.1:8422
+python3 ~/.claude/automations/paradev/leaderboard.py backfill --top 10   # first time only
+python3 ~/.claude/automations/paradev/gen-page.py                         # build the page now
+```
+
+`com.jake.paradev` keeps the server up; `com.jake.paradev-snapshot` records the day at 18:50
+local, just before the UTC day ends. Tests: `python3 -m unittest discover -s automations/paradev/tests`.
+
 ## `reap-sswts`
 
 Every 10 minutes, `reap.py` looks at this machine's Superset tabs (local host only) and acts
@@ -315,6 +345,20 @@ Tests: `python3 -m unittest discover -s automations/reap-sswts/tests`.
 ln -s ~/.ai-tools/automations/reap-sswts/com.jake.reap-sswts.plist ~/Library/LaunchAgents/
 launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.jake.reap-sswts.plist
 ```
+
+## `tailnet-index`
+
+The tailnet's front page: every page this Mac serves over Tailscale Serve, with each page's title
+and whether it's answering. It reads `tailscale serve status --json` on each visit (cached 20 s),
+so a newly mounted page appears on its own. Served at `http://127.0.0.1:8420/` and mounted at `/`.
+
+```sh
+ln -sf ~/.ai-tools/automations/tailnet-index/com.jake.tailnet-index.plist ~/Library/LaunchAgents/
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.jake.tailnet-index.plist
+tailscale serve --bg --set-path / http://127.0.0.1:8420
+```
+
+Tests: `python3 -m unittest discover -s automations/tailnet-index/tests`.
 
 ## `wrapup-repos`
 

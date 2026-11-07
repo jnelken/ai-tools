@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>com.jake.tailnet-index</string>
+
+	<!-- The tailnet's front page: lists every page this Mac serves over Tailscale Serve.
+	     Serves http://127.0.0.1:8420/; Tailscale Serve mounts it at the root:
+	       tailscale serve --bg --set-path / http://127.0.0.1:8420
+	     Install / reload:
+	       ln -sf ~/.ai-tools/automations/tailnet-index/com.jake.tailnet-index.plist ~/Library/LaunchAgents/
+	       launchctl bootout gui/$(id -u)/com.jake.tailnet-index
+	       launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.jake.tailnet-index.plist -->
+	<key>ProgramArguments</key>
+	<array>
+		<string>/opt/homebrew/bin/python3</string>
+		<string>/Users/jake/.claude/automations/tailnet-index/serve.py</string>
+	</array>
+
+	<key>RunAtLoad</key>
+	<true/>
+	<key>KeepAlive</key>
+	<true/>
+	<key>ProcessType</key>
+	<string>Background</string>
+
+	<key>StandardOutPath</key>
+	<string>/Users/jake/.claude/automations/tailnet-index/server.log</string>
+	<key>StandardErrorPath</key>
+	<string>/Users/jake/.claude/automations/tailnet-index/server.log</string>
+</dict>
+</plist>

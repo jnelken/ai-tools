@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>com.jake.paradev-snapshot</string>
+
+	<!-- Records Jake's Paradev standing (leaderboard.me) once a day and rebuilds the Paradev page,
+	     filling in any recent day's single-day rank that's missing or still provisional.
+	     18:50 local is just before the UTC day ends (00:00 UTC is 19:00 EST / 20:00 EDT), so
+	     "today" is close to its final value. If the Mac is asleep then, launchd runs it on wake.
+	     Install / reload:
+	       ln -sf ~/.ai-tools/automations/paradev/com.jake.paradev-snapshot.plist ~/Library/LaunchAgents/
+	       launchctl bootout gui/$(id -u)/com.jake.paradev-snapshot
+	       launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.jake.paradev-snapshot.plist -->
+	<key>ProgramArguments</key>
+	<array>
+		<string>/opt/homebrew/bin/python3</string>
+		<string>/Users/jake/.claude/automations/paradev/gen-page.py</string>
+		<string>--force-snapshot</string>
+	</array>
+
+	<key>StartCalendarInterval</key>
+	<dict>
+		<key>Hour</key><integer>18</integer>
+		<key>Minute</key><integer>50</integer>
+	</dict>
+
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>PATH</key>
+		<string>/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin:/Users/jake/.local/bin</string>
+	</dict>
+
+	<key>RunAtLoad</key>
+	<false/>
+
+	<key>ProcessType</key>
+	<string>Background</string>
+
+	<key>StandardOutPath</key>
+	<string>/Users/jake/.claude/automations/paradev/snapshot.log</string>
+	<key>StandardErrorPath</key>
+	<string>/Users/jake/.claude/automations/paradev/snapshot.log</string>
+</dict>
+</plist>

@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-"""Jake's standing on Superset's Production Run leaderboard, for the dashboard header.
+"""Jake's standing on Paradev's (formerly Superset's) Production Run leaderboard — the data
+behind the Paradev page (gen-page.py, served at /paradev on the tailnet).
 
 Reads `leaderboard.me` from Superset's API — the same read-only query the desktop app makes —
 with the Superset CLI's own login (~/.superset/config.json). Periods are UTC days.
 
     leaderboard.py snapshot [--force] [--max-age-min 10]
         fetch all-time, 7d and today; append one line to leaderboard-history.jsonl and write
-        leaderboard.json (what gen-dashboard.py renders). Without --force, a snapshot younger
+        leaderboard.json (what gen-page.py renders). Without --force, a snapshot younger
         than --max-age-min is kept as is.
         Also finalizes the last week's ended days that aren't in leaderboard-daily.jsonl yet.
     leaderboard.py backfill (--top N | --all | --days D [D ...])
@@ -23,7 +24,7 @@ The API pages only to offset 1000: a day where Jake isn't in the top 1100 is sto
 `rank: null, below: 1100` — below the reachable range, which is not the same as absent.
 The 7-day best and the personal records are built from those final ranks; today's rank is the
 latest snapshot. launchd snapshots once a day near the end of the UTC day
-(com.jake.advance-roadmap-leaderboard), and every dashboard regeneration snapshots too.
+(com.jake.paradev-snapshot), and every page regeneration snapshots too.
 
 Never prints or stores the token. Exits 0 even on failure: leaderboard.json then carries
 {"ok": false, "error": …} and the dashboard says why.
@@ -42,7 +43,7 @@ import urllib.request
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-ROOT = Path(os.environ.get("ADVANCE_ROADMAP_ROOT", "/Users/jake/.claude/automations/advance-roadmap"))
+ROOT = Path(os.environ.get("PARADEV_ROOT", Path.home() / ".claude" / "automations" / "paradev"))
 CONFIG = Path(os.environ.get("SUPERSET_CONFIG", Path.home() / ".superset" / "config.json"))
 SUPERSET = os.environ.get("ADVANCE_ROADMAP_SUPERSET_BIN",
                           "/Applications/Superset.app/Contents/Resources/resources/bin/superset")
@@ -55,9 +56,12 @@ OUT = ROOT / "leaderboard.json"
 HISTORY = ROOT / "leaderboard-history.jsonl"
 DAILY = ROOT / "leaderboard-daily.jsonl"
 DEFAULT_HANDLE = "jnelken"
+# Where these files lived before the Paradev page got its own automation; merged in once.
+LEGACY_ROOT = Path(os.environ.get("PARADEV_LEGACY_ROOT",
+                                  Path.home() / ".claude" / "automations" / "advance-roadmap"))
 PAGE_SLEEP_S = float(os.environ.get("LEADERBOARD_PAGE_SLEEP_S", "0.5"))
 FINALIZE_DAYS = 7  # how far back a snapshot fills in missing final ranks
-# A snapshot runs inside the dashboard's 90 s budget: finalizing stops after this long and the
+# A snapshot runs inside the page generator's 90 s budget: finalizing stops after this long and the
 # next snapshot picks up where it left off.
 FINALIZE_BUDGET_S = float(os.environ.get("LEADERBOARD_FINALIZE_BUDGET_S", "40"))
 SETTLE_HOURS = 48     # other machines republish past days on a 2-hour cadence for a while
@@ -365,6 +369,46 @@ def cmd_backfill(a):
     return 0
 
 
+def migrate_legacy():
+    """Merge leaderboard files left in the advance-roadmap folder into ROOT, once: history lines
+    go first (they're older), daily records fill days ROOT lacks, leaderboard.json is copied
+    only when ROOT has none. Each migrated file is renamed *.migrated so this runs once."""
+    if not LEGACY_ROOT.is_dir() or LEGACY_ROOT.resolve() == ROOT.resolve():
+        return
+    ROOT.mkdir(parents=True, exist_ok=True)
+    with open(ROOT / ".migrate.lock", "w") as lk:  # two first runs at once mustn't both migrate
+        fcntl.lockf(lk, fcntl.LOCK_EX)
+        _migrate_locked()
+
+
+def _migrate_locked():
+    old_hist = LEGACY_ROOT / HISTORY.name
+    if old_hist.exists():
+        new_lines = HISTORY.read_text().splitlines() if HISTORY.exists() else []
+        old_lines = [l for l in old_hist.read_text().splitlines() if l not in set(new_lines)]
+        tmp = HISTORY.with_name(f"{HISTORY.name}.{os.getpid()}.tmp")
+        tmp.write_text("".join(l + "\n" for l in old_lines + new_lines))
+        os.replace(tmp, HISTORY)
+        old_hist.rename(old_hist.with_name(old_hist.name + ".migrated"))
+    old_daily = LEGACY_ROOT / DAILY.name
+    if old_daily.exists():
+        have = daily()
+        for line in old_daily.read_text().splitlines():
+            try:
+                rec = json.loads(line)
+            except ValueError:
+                continue
+            if rec.get("day") and rec["day"] not in have:
+                store_day(rec)
+        old_daily.rename(old_daily.with_name(old_daily.name + ".migrated"))
+    old_out = LEGACY_ROOT / OUT.name
+    if old_out.exists():
+        if not OUT.exists():
+            os.replace(old_out, OUT)
+        else:
+            old_out.rename(old_out.with_name(old_out.name + ".migrated"))
+
+
 def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -378,6 +422,7 @@ def main(argv=None):
     which.add_argument("--days", nargs="+", help="these UTC days (YYYY-MM-DD)")
     sub.add_parser("show")
     a = p.parse_args(argv)
+    migrate_legacy()
     if a.cmd == "show":
         print(OUT.read_text() if OUT.exists() else "{}")
         return 0
