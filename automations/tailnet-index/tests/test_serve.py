@@ -18,24 +18,32 @@ STATUS = {
         "/roadmap": {"Proxy": "http://127.0.0.1:8421"},
         "/paradev": {"Proxy": "http://127.0.0.1:8422"},
         "/notes": {"Path": "/Users/jake/notes"},
-    }}, "jmiv.tailc1d3f0.ts.net:8443": {"Handlers": {"/grafana": {"Proxy": "http://127.0.0.1:3000"}}}},
+    }}, "jmiv.tailc1d3f0.ts.net:8443": {"Handlers": {"/grafana": {"Proxy": "http://127.0.0.1:3000"},
+                                                       "/": {"Proxy": "http://127.0.0.1:5173"}}}},
 }
 
 
 class TailnetIndexTest(unittest.TestCase):
     def test_handlers_skip_the_index_and_keep_every_other_mount(self):
         got = ti.handlers(STATUS)
-        self.assertEqual([e["path"] for e in got], ["/notes", "/paradev", "/roadmap", "/grafana"])
+        self.assertEqual([e["path"] for e in got], ["/notes", "/paradev", "/roadmap", "/", "/grafana"])
         self.assertEqual(got[1], {"host": "jmiv.tailc1d3f0.ts.net", "path": "/paradev",
                                   "target": "http://127.0.0.1:8422", "kind": "proxy", "href": "/paradev/"})
-        self.assertEqual(got[3]["href"], "https://jmiv.tailc1d3f0.ts.net:8443/grafana/")   # other port keeps its origin
+        self.assertEqual(got[4]["href"], "https://jmiv.tailc1d3f0.ts.net:8443/grafana/")   # other port keeps its origin
+        self.assertEqual(got[3]["href"], "https://jmiv.tailc1d3f0.ts.net:8443/")   # another port's root isn't this index
         self.assertEqual(got[0]["kind"], "files")
+
+    def test_a_file_mount_links_to_its_exact_path(self):
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix=".html") as f:
+            got = ti.handlers({"Web": {"h.ts.net:443": {"Handlers": {"/report.html": {"Path": f.name}}}}})
+        self.assertEqual(got[0]["href"], "/report.html")
 
     def test_no_web_config_means_no_entries(self):
         self.assertEqual(ti.handlers({}), [])
 
     def test_page_shows_titles_links_and_down_targets(self):
-        probes = {"http://127.0.0.1:8421": (True, "Roadmap automation"),
+        probes = {"http://127.0.0.1:8421": (True, "Roadmap automation"), "http://127.0.0.1:5173": (True, "Vite"),
                   "http://127.0.0.1:8422": (False, None), "http://127.0.0.1:3000": (True, "Grafana")}
         with mock.patch.object(ti, "probe", side_effect=lambda t: probes[t]):
             page = ti.build(ti.handlers(STATUS), now=datetime(2026, 11, 7, 13, 0, 0))
@@ -43,7 +51,7 @@ class TailnetIndexTest(unittest.TestCase):
         self.assertIn("Roadmap automation", page)
         self.assertIn('href="/paradev/"', page)
         self.assertIn("· down", page)                 # paradev isn't answering
-        self.assertIn("4 page(s)", page)
+        self.assertIn("5 page(s)", page)
         self.assertIn('href="https://jmiv.tailc1d3f0.ts.net:8443/grafana/"', page)
         self.assertIn("jmiv.tailc1d3f0.ts.net", page)
 

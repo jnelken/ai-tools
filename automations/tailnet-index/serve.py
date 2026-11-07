@@ -24,6 +24,7 @@ from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 TAILSCALE = os.environ.get("TAILSCALE_BIN", "/usr/local/bin/tailscale")
+PORT = int(os.environ.get("TAILNET_INDEX_PORT", "8420"))
 CACHE_S = 20
 _cache = {"at": 0.0, "page": None}
 _lock = threading.Lock()
@@ -37,7 +38,14 @@ def serve_status():
     return json.loads(p.stdout or "{}")
 
 
-def handlers(status):
+def is_self(target, port=None):
+    """Whether a proxy target is this index server (it shouldn't list itself)."""
+    port = port or PORT
+    t = (target or "").rstrip("/")
+    return t in (f"http://127.0.0.1:{port}", f"http://localhost:{port}", f"http://[::1]:{port}")
+
+
+def handlers(status, port=None):
     """[{host, path, target, kind, href}] for every web handler except the index itself. href
     keeps the handler's own origin when it's served on a port other than 443."""
     out = []
@@ -45,11 +53,12 @@ def handlers(status):
         default_port = hostport.endswith(":443")
         host = hostport.rsplit(":", 1)[0] if default_port else hostport
         for path, h in (web.get("Handlers") or {}).items():
-            if path == "/":
+            if h.get("Proxy") and is_self(h["Proxy"], port):
                 continue  # that's this page
             kind, target = ("proxy", h["Proxy"]) if h.get("Proxy") else \
                            ("files", h["Path"]) if h.get("Path") else ("text", None)
-            link = path.rstrip("/") + "/"
+            # A file mount matches its path exactly, so no trailing slash there.
+            link = path if kind == "files" and os.path.isfile(target) else path.rstrip("/") + "/"
             out.append({"host": host, "path": path, "target": target, "kind": kind,
                         "href": link if default_port else f"https://{hostport}{link}"})
     return sorted(out, key=lambda e: (e["host"], e["path"]))

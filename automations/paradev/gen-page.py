@@ -239,19 +239,26 @@ def main(argv=None):
     ap.add_argument("--no-snapshot", action="store_true", help="render from the files as they are")
     a = ap.parse_args(argv)
     os.makedirs(ROOT, exist_ok=True)
+    snap_error = None
     if not a.no_snapshot:
         try:
-            subprocess.run([sys.executable, os.path.join(HERE, "leaderboard.py"), "snapshot",
-                            *(["--force"] if a.force_snapshot else [])],
-                           capture_output=True, timeout=90, env={**os.environ, "PARADEV_ROOT": ROOT})
-        except subprocess.SubprocessError:
-            pass  # render what's on disk; leaderboard.json records any failure
+            p = subprocess.run([sys.executable, os.path.join(HERE, "leaderboard.py"), "snapshot",
+                                *(["--force"] if a.force_snapshot else [])],
+                               capture_output=True, text=True, timeout=90, env={**os.environ, "PARADEV_ROOT": ROOT})
+            if p.returncode != 0:
+                snap_error = f"snapshot exited {p.returncode}: {(p.stderr or p.stdout).strip()[-300:]}"
+        except subprocess.SubprocessError as e:
+            snap_error = f"snapshot: {e}"
+        # Still render what's on disk, but exit non-zero so ↻ says the ranks weren't refreshed.
     page = build(load_json(os.path.join(ROOT, "leaderboard.json"), {}), load_daily())
     tmp = f"{OUT}.{os.getpid()}.tmp"
     with open(tmp, "w", encoding="utf-8") as f:
         f.write(page)
     os.replace(tmp, OUT)
     print(f"wrote {OUT}")
+    if snap_error:
+        print(snap_error, file=sys.stderr)
+        return 1
     return 0
 
 

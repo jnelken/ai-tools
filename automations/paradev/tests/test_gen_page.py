@@ -64,6 +64,14 @@ class GenPageTest(unittest.TestCase):
         page = self.gp.build({"handle": "jnelken"}, [])
         self.assertIn("backfill --top 10", page)
 
+    def test_a_crashed_snapshot_still_renders_but_fails(self):
+        from unittest import mock
+        (self.root / "leaderboard.json").write_text(json.dumps(LB))
+        crashed = mock.Mock(returncode=1, stdout="", stderr="Traceback: boom")
+        with mock.patch.object(self.gp.subprocess, "run", return_value=crashed):
+            self.assertEqual(self.gp.main([]), 1)
+        self.assertIn("#527", (self.root / "paradev.html").read_text())
+
     def test_main_writes_the_page_from_disk(self):
         (self.root / "leaderboard.json").write_text(json.dumps(LB))
         (self.root / "leaderboard-daily.jsonl").write_text("".join(json.dumps(d) + "\n" for d in DAYS))
