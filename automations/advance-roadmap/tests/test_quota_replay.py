@@ -250,8 +250,8 @@ class QuotaReplayTest(unittest.TestCase):
         proc = subprocess.Popen(["/bin/zsh", str(self.root / "run.sh")], env=env,
                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         self.reached_barrier = False
-        deadline = time.time() + 90
-        while proc.poll() is None and time.time() < deadline:
+        deadline = time.monotonic() + 90  # monotonic: a sleeping Mac must not look like a hung run.sh
+        while proc.poll() is None and time.monotonic() < deadline:
             if (run / "batch-ready").exists() and not (run / "batch-release").exists():
                 self.reached_barrier = True
                 if budget_route:
@@ -418,12 +418,12 @@ class QuotaReplayTest(unittest.TestCase):
         proc = subprocess.Popen(["/bin/zsh", str(self.root / "run.sh")], env=env,
                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
         calls = self.dir / "calls.jsonl"
-        deadline = time.time() + 20
-        while not calls.exists() and time.time() < deadline:
+        deadline = time.monotonic() + 20
+        while not calls.exists() and time.monotonic() < deadline:
             time.sleep(0.02)
         self.assertTrue(calls.exists(), "fake Codex did not start")
         stdout = self.root / "runs" / self.stamp / "orchestrator-stdout.txt"
-        while (not stdout.exists() or "session id: codex-timeout-id" not in stdout.read_text()) and time.time() < deadline:
+        while (not stdout.exists() or "session id: codex-timeout-id" not in stdout.read_text()) and time.monotonic() < deadline:
             time.sleep(0.02)
         self.assertIn("session id: codex-timeout-id", stdout.read_text())
         rollout = self.dir / "codex-sessions" / "2026" / "10" / "rollout-fixture-codex-timeout-id.jsonl"
