@@ -53,6 +53,9 @@ DAILY = ROOT / "leaderboard-daily.jsonl"
 DEFAULT_HANDLE = "jnelken"
 PAGE_SLEEP_S = float(os.environ.get("LEADERBOARD_PAGE_SLEEP_S", "0.5"))
 FINALIZE_DAYS = 7  # how far back a snapshot fills in missing final ranks
+# A snapshot runs inside the dashboard's 90 s budget: finalizing stops after this long and the
+# next snapshot picks up where it left off.
+FINALIZE_BUDGET_S = float(os.environ.get("LEADERBOARD_FINALIZE_BUDGET_S", "40"))
 
 
 def token(refresh=False):
@@ -158,12 +161,16 @@ def daily():
     return out
 
 
-def record_days(days, handle, log=print):
-    """Fetch and store final ranks for ended days not yet recorded. Returns how many it wrote."""
+def record_days(days, handle, log=print, budget_s=None):
+    """Fetch and store final ranks for ended days not yet recorded, newest first; with budget_s,
+    stop starting new days once that much time has passed. Returns how many it wrote."""
     have, today, wrote = daily(), utc_today(), 0
-    for day in sorted(set(days)):
+    start = time.monotonic()
+    for day in sorted(set(days), reverse=True):
         if day in have or day >= today:
             continue  # recorded already, or not over yet
+        if budget_s is not None and time.monotonic() - start > budget_s:
+            break
         rec = {**day_rank(day, handle), "source": "standings",
                "fetched_at": datetime.now(timezone.utc).isoformat(timespec="seconds")}
         ROOT.mkdir(parents=True, exist_ok=True)
@@ -261,12 +268,15 @@ def cmd_snapshot(a):
     ROOT.mkdir(parents=True, exist_ok=True)
     with open(HISTORY, "a") as f:
         f.write(json.dumps(row) + "\n")
-    # Fill in the last week's final ranks the store is missing (normally just yesterday).
+    # Today's ranks are saved before anything slower runs, so a timeout can't lose them.
+    final = daily()
+    write({"ok": True, **row, "best_7d": best_7d(history(), day, final), "records": records(final)})
+    # Then fill in the last week's final ranks the store is missing (normally just yesterday).
     finalize_error = None
     recent = [(datetime.fromisoformat(day) - timedelta(days=n)).date().isoformat()
               for n in range(1, FINALIZE_DAYS + 1)]
     try:
-        record_days(recent, handle_of(got), log=lambda m: None)
+        record_days(recent, handle_of(got), log=lambda m: None, budget_s=FINALIZE_BUDGET_S)
     except Exception as e:  # the ranks for today still stand; the next snapshot retries
         finalize_error = f"finalizing past days: {e}"[:200]
     final = daily()
@@ -284,7 +294,8 @@ def cmd_backfill(a):
     if a.days:
         days = a.days
     else:
-        busiest = sorted(profile_days(handle).items(), key=lambda kv: -kv[1])
+        today = utc_today()  # only finished days have a final rank
+        busiest = sorted(((d, t) for d, t in profile_days(handle).items() if d < today), key=lambda kv: -kv[1])
         days = [d for d, _ in (busiest if a.all else busiest[:a.top])]
     wrote = record_days(days, handle)
     final = daily()

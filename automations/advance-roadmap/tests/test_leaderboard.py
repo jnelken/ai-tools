@@ -209,11 +209,45 @@ class LeaderboardTest(unittest.TestCase):
              mock.patch.object(self.lb, "standings", self.board(me_rank=33)), \
              mock.patch.object(self.lb, "utc_today", return_value="2026-11-07"):
             self.snapshot()
-        days = [json.loads(l)["day"] for l in (self.root / "leaderboard-daily.jsonl").read_text().splitlines()]
-        self.assertEqual(days, [f"2026-10-{d:02d}" for d in range(31, 32)] + [f"2026-11-0{d}" for d in range(1, 7)])
+        days = sorted(json.loads(l)["day"] for l in (self.root / "leaderboard-daily.jsonl").read_text().splitlines())
+        self.assertEqual(days, ["2026-10-31"] + [f"2026-11-0{d}" for d in range(1, 7)])
         out = json.loads((self.root / "leaderboard.json").read_text())
         self.assertEqual(out["records"]["best_rank"]["rank"], 33)
         self.assertNotIn("finalize_error", out)
+
+    def test_backfill_top_ignores_today(self):
+        (self.root / "leaderboard.json").write_text(json.dumps({"ok": True, "handle": "jnelken", "day": "2026-11-07"}))
+        profile = {"2026-11-07": 9999, "2026-11-03": 1400, "2026-09-10": 1100}
+        with mock.patch.object(self.lb, "profile_days", return_value=profile), \
+             mock.patch.object(self.lb, "standings", self.board(me_rank=12)), \
+             mock.patch.object(self.lb, "utc_today", return_value="2026-11-07"):
+            self.lb.main(["backfill", "--top", "1"])
+        days = [json.loads(l)["day"] for l in (self.root / "leaderboard-daily.jsonl").read_text().splitlines()]
+        self.assertEqual(days, ["2026-11-03"])   # the busiest *finished* day, not today
+
+    def test_snapshot_saves_today_before_finalizing(self):
+        seen = []
+
+        def slow(day, offset):  # by the time past days are fetched, today's ranks are on disk
+            seen.append(json.loads((self.root / "leaderboard.json").read_text())["today"]["rank"])
+            return {"rows": [], "hasMore": False, "total": 0}
+        with mock.patch.object(self.lb, "token", return_value="t"), \
+             mock.patch.object(self.lb, "me", side_effect=self.ranks(day="2026-11-07")), \
+             mock.patch.object(self.lb, "standings", side_effect=slow), \
+             mock.patch.object(self.lb, "utc_today", return_value="2026-11-07"):
+            self.snapshot()
+        self.assertTrue(seen and all(r == 300 for r in seen))
+
+    def test_finalize_budget_stops_starting_new_days(self):
+        self.lb.FINALIZE_BUDGET_S = 0
+        with mock.patch.object(self.lb, "token", return_value="t"), \
+             mock.patch.object(self.lb, "me", side_effect=self.ranks(day="2026-11-07")), \
+             mock.patch.object(self.lb, "standings", self.board(me_rank=3)), \
+             mock.patch.object(self.lb, "utc_today", return_value="2026-11-07"), \
+             mock.patch.object(self.lb.time, "monotonic", side_effect=[0.0, 0.0] + [1.0] * 50):
+            self.snapshot()
+        days = [json.loads(l)["day"] for l in (self.root / "leaderboard-daily.jsonl").read_text().splitlines()]
+        self.assertEqual(days, ["2026-11-06"])   # newest first, then out of budget
 
     def test_snapshot_survives_a_standings_outage(self):
         with mock.patch.object(self.lb, "token", return_value="t"), \
