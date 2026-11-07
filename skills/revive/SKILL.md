@@ -1,19 +1,19 @@
 ---
-name: undead
-description: Revive a dead Claude Code session (a Remote Control thread whose host went offline, a terminal session that crashed, a Superset tab whose claude process died), but first find out why it died and propose a guardrail so it doesn't happen again. Takes a claude.ai/code/cshk_ link, a session_ id, a local session UUID, a local_<uuid> desktop id or a title fragment; with no argument it looks for unarchived dead sessions and asks which one. Works across machines (this Mac and the OMEN via `ssh omen-wsl`). Trigger phrases include "/undead", "revive this session", "resume this dead thread", "this remote session died", "bring this claude.ai session back", "why did this session die", "find my dead sessions".
+name: revive
+description: Revive a dead Claude Code session (a Remote Control thread whose host went offline, a terminal session that crashed, a Superset tab whose claude process died), but first find out why it died and propose a guardrail so it doesn't happen again. Takes a claude.ai/code/cshk_ link, a session_ id, a local session UUID, a local_<uuid> desktop id or a title fragment; with no argument it looks for unarchived dead sessions and asks which one. Works across machines (this Mac and the OMEN via `ssh omen-wsl`). Trigger phrases include "/revive", "/undead", "revive this session", "resume this dead thread", "this remote session died", "bring this claude.ai session back", "why did this session die", "find my dead sessions".
 ---
 
-# undead
+# revive
 
 Three steps, always in this order: **find it → autopsy → guardrail → revive.** Never resume
 first and diagnose later: a resumed session overwrites the evidence (its transcript tail,
 "last active" time, the claude.ai connection state).
 
-Helper: `scripts/undead.py`. It is read-only, stdlib-only Python, and prints JSON. It runs
+Helper: `scripts/revive.py`. It is read-only, stdlib-only Python, and prints JSON. It runs
 remotely through stdin, so the remote host doesn't need ai-tools installed:
 
 ```bash
-S=~/.claude/skills/undead/scripts/undead.py
+S=~/.claude/skills/revive/scripts/revive.py
 python3 $S <cmd> ...                          # this machine
 ssh omen-wsl python3 - <cmd> ... < $S        # OMEN (WSL; also reads C:\Users\*\.claude)
 ```
@@ -25,11 +25,11 @@ Subcommands: `parse <arg>`, `locate <uuid>`, `match --created ISO [--updated ISO
 
 - **A cshk link carries the API session id.** In `claude.ai/code/cshk_<X>`, the first 24
   characters of `<X>` are the `session_` id (`cshk_01B3LiTcBTrJso1eFknbVf334Rj…` →
-  `session_01B3LiTcBTrJso1eFknbVf33`). `undead.py parse` does this.
+  `session_01B3LiTcBTrJso1eFknbVf33`). `revive.py parse` does this.
 - **No file maps a dead bridge session back to its local UUID.** While the process is alive,
   `~/.claude/sessions/<pid>.json` records `bridgeSessionId`. The file is gone once the
   process dies. Map the session instead by the claude.ai title plus its created/updated
-  times: `undead.py match` takes the transcript whose first and last timestamps fall within a
+  times: `revive.py match` takes the transcript whose first and last timestamps fall within a
   few seconds of them. A score under about 60s with `title_in_file: true` is a confident match.
 - **The transcript lives on the machine that hosted the session.** Remote Control
   (`entrypoint: sdk-cli`) and terminal (`cli`) sessions write `~/.claude/projects/*/<uuid>.jsonl`
@@ -46,7 +46,7 @@ Subcommands: `parse <arg>`, `locate <uuid>`, `match --created ISO [--updated ISO
 
 ## 1. Find the session
 
-**With an argument.** Run `undead.py parse <arg>`, then branch on `kind`:
+**With an argument.** Run `revive.py parse <arg>`, then branch on `kind`:
 
 | kind | how to find the transcript |
 |---|---|
@@ -61,7 +61,7 @@ Subcommands: `parse <arg>`, `locate <uuid>`, `match --created ISO [--updated ISO
    `environment_kind: bridge` with a status other than RUNNING and no live process. In Chrome
    they are sidebar rows with the Remote Control badge whose page says the computer is no
    longer connected. Skip anything archived, and skip `cloud` sessions, which can't die this way.
-2. `undead.py scan --days 14`, here and on `omen-wsl`. It returns sessions with more than one
+2. `revive.py scan --days 14`, here and on `omen-wsl`. It returns sessions with more than one
    turn and no live process that died mid-turn (`last_entry` is `tool_result` or
    `user_prompt`) or ended on an API error.
 3. Superset tabs whose claude died in a crash: `resume-sswts`'s `detect-and-resume.sh` in
@@ -77,7 +77,7 @@ and stop.
 
 ## 2. Autopsy: why did it die?
 
-Run `undead.py autopsy <uuid>` on the host. Then add the host's own evidence for the window
+Run `revive.py autopsy <uuid>` on the host. Then add the host's own evidence for the window
 from `last_ts` to roughly 12h after:
 
 - **Mac.** `power_events` (pmset keeps about a week; `covers_death: false` means no data, not
@@ -129,47 +129,34 @@ coverage on that host).
 
 Revive only after step 3 is answered. Start in the original **cwd** on the original **host**:
 
-- **Remote Control thread.** Run `claude remote-control --session-id <session_…>`. It is a
-  long-running server, so put it somewhere that outlives this turn: a new Superset tab (as
-  `handoff` does), a Desktop terminal tab (`mcp__terminal__open_terminal_tab`), or Terminal via
-  `osascript`. Then reload the cshk link in Chrome. The "no longer connected" banner should be
-  gone. If reattach errors or the banner stays, fall back to `claude --resume <uuid>
-  --remote-control "<title>"`. That makes a new claude.ai thread, so after confirming it works,
-  offer to archive the old one (thread menu ▾ → Archive; ask first).
-  Learned on the first real run (2026-11-06):
-  - **The folder must be free.** Any other `claude remote-control` serving the same cwd
-    blocks it with "This folder is already served…". That includes the `claude-rc-daemon`
-    LaunchAgent. Stop it with `launchctl bootout gui/$(id -u)/com.jake.claude-remote-control`
-    and kill the leftover `claude remote-control --spawn` process (killing tmux alone isn't
-    enough). The block can last a minute or two after the kill. Restart the daemon with
-    `bin/claude-rc-daemon install --dir <dir>` once the revived thread is done.
-  - **One process per environment.** Threads from the same dead server share one
-    `env_…`. While one of them is reattached (single-session mode, "exits when complete"),
-    reattaching another fails with "Environment env_… is already being served by … (pid N)".
-    Revive them one at a time, or use the `--resume … --remote-control` fallback for the
-    rest. Never kill a reattach another session started.
-  - Run the reattach in its own tmux session (`tmux new-session -d -s undead-<slug> -c <cwd>
-    "claude remote-control --session-id <id>"`) and read the result with `tmux capture-pane`.
-    A success prints `✔ <title>` and the thread's claude.ai URL.
-  Learned on the first real run (2026-11-06):
-  - **The folder must be free.** Any other `claude remote-control` serving the same cwd
-    blocks it with "This folder is already served…". That includes the `claude-rc-daemon`
-    LaunchAgent. Stop it with `launchctl bootout gui/$(id -u)/com.jake.claude-remote-control`
-    and kill the leftover `claude remote-control --spawn` process (killing tmux alone isn't
-    enough). The block can last a minute or two after the kill. Restart the daemon with
-    `bin/claude-rc-daemon install --dir <dir>` once the revived thread is done.
-  - **One process per environment.** Threads from the same dead server share one
-    `env_…`. While one of them is reattached (single-session mode, "exits when complete"),
-    reattaching another fails with "Environment env_… is already being served by … (pid N)".
-    Revive them one at a time, or use the `--resume … --remote-control` fallback for the
-    rest. Never kill a reattach another session started.
-  - Run the reattach in its own tmux session (`tmux new-session -d -s undead-<slug> -c <cwd>
-    "claude remote-control --session-id <id>"`) and read the result with `tmux capture-pane`.
-    A success prints `✔ <title>` and the thread's claude.ai URL.
+- **Remote Control thread: try reattach once, then fall back to a new thread.** Run each
+  in its own tmux session in the original cwd so it outlives this turn, and read the result
+  with `tmux capture-pane`:
+  1. **Reattach (keeps the original link):**
+     `tmux new-session -d -s revive-<slug> -c <cwd> "claude remote-control --session-id <session_…>"`.
+     Success prints `✔ <title>` and the thread's claude.ai URL. Reload the cshk link in Chrome;
+     the "no longer connected" banner should be gone.
+  2. **If that fails for any reason, fall back right away.** Don't stop servers, kill
+     processes or wait for the folder to free up:
+     `tmux new-session -d -s revive-<slug> -c <cwd> "claude --resume <uuid> --remote-control '<title>'"`.
+     That loads the whole conversation into a **new** claude.ai thread. Success shows the
+     transcript and `/remote-control is active · … https://claude.ai/code/session_…`. Give
+     the user that URL. Once they confirm it works, offer to archive the old cshk thread
+     (thread menu ▾ → Archive; ask first). The fallback runs fine alongside other servers in
+     the same folder; it was verified on 2026-11-07 while another reattach held it.
+
+  Reattach failures seen so far, all of which go straight to the fallback:
+  - "This folder is already served by a terminal `claude remote-control`": a server for that
+    cwd is already running, such as the `claude-rc-daemon` LaunchAgent or another reattach.
+    Leave it running.
+  - "Environment env_… is already being served by … (pid N)": threads from the same dead
+    server share one environment, and only one process can serve it. Never kill a reattach
+    another session started.
 - **Terminal or Superset session.** Run `claude --resume <uuid>` in a new tab in that cwd.
 - **OMEN-hosted.** Try launching on the Windows side from SSH, for example
   `ssh omen-wsl "cd /mnt/d/code && powershell.exe -NoProfile -Command \"Start-Process wt.exe -WorkingDirectory 'D:\code' -ArgumentList 'claude','remote-control','--session-id','session_…'\""`.
-  Verify it by the claude.ai banner. If the launch doesn't reach the desktop (SSH can't
+  Verify it by the claude.ai banner. If reattach fails, fall back to `'claude','--resume','<uuid>','--remote-control','<title>'`
+  the same way. If the launch doesn't reach the desktop (SSH can't
   always start GUI processes), give the user the exact command to run at the PC.
 
 **If it died mid-turn** (`last_entry` is `tool_result` or `user_prompt`), don't let it

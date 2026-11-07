@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""undead: find dead Claude Code sessions and gather evidence of why they died.
+"""revive: find dead Claude Code sessions and gather evidence of why they died.
 
 Read-only. Stdlib only, so it also runs on a remote host through stdin:
-    ssh omen-wsl python3 - autopsy <uuid> < undead.py
+    ssh omen-wsl python3 - autopsy <uuid> < revive.py
 
 Subcommands (all print JSON):
   parse <arg>                 classify a session id / claude.ai link
