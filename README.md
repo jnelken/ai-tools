@@ -123,8 +123,10 @@ Hooks need extra wiring in `~/.claude/settings.json` — see [`hooks/README.md`]
 
 | Automation | Schedule | Purpose |
 |---|---|---|
-| [`advance-roadmap`](automations/advance-roadmap) | Every 2 hours at :45 on odd hours (launchd; `ADVANCE_ROADMAP_CADENCE_HOURS` in the plist) | Headlessly ship planned `ROADMAP.md` items via the `advance-roadmap` skill — keeps shipping one after another until a run doesn't ship cleanly or 40 min pass |
+| [`advance-roadmap`](automations/advance-roadmap) | Daily at 10:30 (launchd) | Headlessly ship planned roadmap / Linear items in a parallel batch, one per repo, each as a merged PR from its own Superset workspace |
+| [`paradev`](automations/paradev) | Daily at 18:50, plus a page server (launchd) | Jake's Paradev Production Run standing — ranks, personal records and every day's single-day rank — on its own page at `/paradev` on the tailnet |
 | [`reap-sswts`](automations/reap-sswts) | Every 10 min (launchd) | Tear down sswts whose Claude tabs signed off ⛏️ over an hour ago (PR merged, tree clean, HEAD carried by the PR), and close ⛏️ root-checkout tabs; no model calls |
+| [`tailnet-index`](automations/tailnet-index) | Always on (launchd) | The tailnet's front page: lists every page this Mac serves over Tailscale Serve, live |
 | [`wrapup-repos`](automations/wrapup-repos) | Sunday 2:45am, weekly (launchd) | Headlessly wrap up in-progress work in one repo via the `wrapup-repos` skill |
 
 Scheduling (the launchd plist) needs manual per-machine setup — see [`automations/README.md`](automations/README.md).

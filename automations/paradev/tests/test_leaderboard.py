@@ -12,11 +12,11 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock
 
-SCRIPT = Path(__file__).resolve().parents[1] / "lib" / "leaderboard.py"
+SCRIPT = Path(__file__).resolve().parents[1] / "leaderboard.py"
 
 
 def load(root):
-    os.environ["ADVANCE_ROADMAP_ROOT"] = str(root)
+    os.environ["PARADEV_ROOT"] = str(root)
     spec = importlib.util.spec_from_file_location("leaderboard_under_test", SCRIPT)
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)

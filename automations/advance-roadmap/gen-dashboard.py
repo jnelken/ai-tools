@@ -375,91 +375,13 @@ def missed_slots(runs):
     return [s for s in expected if s not in covered]
 
 
-# ── leaderboard ───────────────────────────────────────────────────────────────
+# ── paradev link ──────────────────────────────────────────────────────────────
 
-def leaderboard_html():
-    """Jake's Production Run ranks, refreshed by lib/leaderboard.py when older than 10 minutes."""
-    script = os.path.join(os.path.dirname(os.path.realpath(__file__)), "lib", "leaderboard.py")
-    if os.path.exists(script):
-        try:
-            subprocess.run([sys.executable, script, "snapshot"], capture_output=True, timeout=90,
-                           env={**os.environ, "ADVANCE_ROADMAP_ROOT": ROOT})
-        except subprocess.SubprocessError:
-            pass
-    try:
-        lb = json.load(open(os.path.join(ROOT, "leaderboard.json")))
-    except (OSError, ValueError):
-        return ""
-
-    def tile(label, r, note=""):
-        if not r or not r.get("rank"):
-            return (f'<div class=stat><div class="n dim">—</div><div class=l>{esc(label)}</div></div>')
-        total = f'{r["total"]:,}' if isinstance(r.get("total"), int) else "?"
-        return (f'<div class=stat><div class=n>#{r["rank"]:,}<span class=dim style="font-size:14px;font-weight:500">'
-                f' / {total}</span></div><div class=l>{esc(label)}</div>'
-                + (f'<div class=dim style="font-size:12px">{esc(note)}</div>' if note else "") + '</div>')
-
-    best = lb.get("best_7d") or {}
-    best_note = ""
-    if best.get("day"):
-        best_note = f'{best["day"]} · {best.get("days_recorded", 0)} of 7 days recorded'
-    roll = lb.get("rolling_7d") or {}
-    tiles = (tile("all-time rank", lb.get("all_time"))
-             + tile("7-day best (daily)", best, best_note)
-             + tile("today (UTC day)", lb.get("today"))
-             + tile("rolling 7 days", roll))
-    when = lb.get("fetched_at") or ""
-    stale = "" if lb.get("ok") else f' · <span style="color:var(--fail)">last fetch failed: {esc(lb.get("error") or "?")}</span>'
-    return (f'<div class=stats>{tiles}</div>'
-            f'<div class=sub style="margin:4px 0 18px">Superset Production Run · @{esc(lb.get("handle") or "?")}'
-            f' · fetched {esc(when[:16].replace("T", " "))} UTC{stale}</div>'
-            + records_html(lb.get("records")))
-
-
-def fmt_tokens(n):
-    n = int(n or 0)
-    return f"{n / 1e9:.2f}B" if n >= 1e9 else f"{n / 1e6:.1f}M" if n >= 1e6 else f"{n:,}"
-
-
-def fmt_day(day):
-    try:
-        return datetime.fromisoformat(day).strftime("%a %b %-d")
-    except (TypeError, ValueError):
-        return day or "?"
-
-
-def records_html(rec):
-    """Personal records from final single-day ranks (lib/leaderboard.py backfill / snapshot)."""
-    if not rec:
-        return ""
-    best, busy = rec.get("best_rank") or {}, rec.get("busiest") or {}
-
-    def tile(big, small, label, note):
-        return (f'<div class=stat><div class=n>{esc(big)}<span class=dim style="font-size:14px;font-weight:500">'
-                f'{esc(small)}</span></div><div class=l>{esc(label)}</div>'
-                f'<div class=dim style="font-size:12px">{esc(note)}</div></div>')
-    def prov(r):
-        return "" if r.get("final", True) else " · provisional"
-    tiles = ""
-    if best:
-        tiles += tile(f'#{best["rank"]:,}', f' / {best["total"]:,}', "best day rank",
-                      f'{fmt_day(best["day"])} · top {best["top_pct"]}% · {fmt_tokens(best["tokens"])} tokens · ${best["usd"]:,.0f}{prov(best)}')
-    if busy:
-        tiles += tile(fmt_tokens(busy["tokens"]), " tokens", "busiest day",
-                      f'{fmt_day(busy["day"])} · ${busy["usd"]:,.0f} · #{busy["rank"]:,} / {busy["total"]:,}{prov(busy)}')
-    rows = "".join(
-        f'<tr><td>{esc(fmt_day(r["day"]))}{"" if r.get("final", True) else " <span class=dim>(provisional)</span>"}</td>'
-        f'<td class=num>{fmt_tokens(r["tokens"])}</td>'
-        f'<td class=num>${r["usd"]:,.0f}</td><td class=num>{r.get("sessions") or 0:,}</td>'
-        f'<td class=num>#{r["rank"]:,} / {r["total"]:,}</td><td class=num>{r["top_pct"]}%</td></tr>'
-        for r in rec.get("top_days") or [])
-    table = ('<div class=tablewrap style="margin-top:12px"><table><thead><tr><th>Top days</th>'
-             '<th class=num>Tokens</th><th class=num>Cost</th><th class=num>Sessions</th>'
-             '<th class=num>Rank</th><th class=num>Top</th></tr></thead>'
-             f'<tbody>{rows}</tbody></table></div>') if rows else ""
-    return (f'<div class=stats>{tiles}</div>{table}'
-            f'<div class=sub style="margin:6px 0 18px">Single-day ranks · {rec.get("days_recorded", 0)} days recorded'
-            ' · a day is provisional until 48 h after it ends, while late publishes still move it</div>')
+# The Paradev leaderboard has its own page now (automations/paradev): /paradev on the
+# tailnet, http://127.0.0.1:8422/ on this Mac. "/paradev/" resolves on the tailnet host; on
+# 127.0.0.1:8421 it doesn't, so the local link sits beside it.
+PARADEV_LINK = ('<div class=sub style="margin:-8px 0 18px">Paradev leaderboard standing: '
+                '<a href="/paradev/">tailnet page</a> · <a href="http://127.0.0.1:8422/">on this Mac</a></div>')
 
 
 # ── repos ─────────────────────────────────────────────────────────────────────
@@ -1083,7 +1005,7 @@ def build():
                  if last else '<span class=dim>no runs yet</span>')
 
     return TEMPLATE.format(
-        gen=esc(datetime.now().strftime("%Y-%m-%d %H:%M:%S")), rank_html=leaderboard_html(),
+        gen=esc(datetime.now().strftime("%Y-%m-%d %H:%M:%S")), rank_html=PARADEV_LINK,
         cadence=base_cadence(), windows=esc(BATCH_DESCRIPTION),
         total=n, shipped=shipped, blocked=blocked, skipped=skipped, errored=errored,
         last_line=last_line, run_cards=run_cards, run_panels=run_panels, repo_cards=repo_cards,

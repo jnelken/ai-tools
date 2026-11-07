@@ -429,7 +429,7 @@ update_ai_tools_home() {
 # an earlier install are removed.
 # dotfiles' is-personal-machine decides; without it (a cloud env, a machine with
 # no dotfiles) the machine counts as personal, same as hygiene-scan-all.sh.
-PERSONAL_ONLY="advance-roadmap wrapup-repos unblock-roadmap jnelken-linear lunchmoney-hygiene"
+PERSONAL_ONLY="advance-roadmap wrapup-repos unblock-roadmap jnelken-linear lunchmoney-hygiene paradev tailnet-index"
 IS_WORK_MACHINE=0
 if [ -x "$HOME/dotfiles/bin/is-personal-machine" ]; then
   # Only exit 1 means "work": a guard that can't run (no zsh) must not hide them.

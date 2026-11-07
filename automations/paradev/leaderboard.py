@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-"""Jake's standing on Superset's Production Run leaderboard, for the dashboard header.
+"""Jake's standing on Paradev's (formerly Superset's) Production Run leaderboard — the data
+behind the Paradev page (gen-page.py, served at /paradev on the tailnet).
 
 Reads `leaderboard.me` from Superset's API — the same read-only query the desktop app makes —
 with the Superset CLI's own login (~/.superset/config.json). Periods are UTC days.
 
     leaderboard.py snapshot [--force] [--max-age-min 10]
         fetch all-time, 7d and today; append one line to leaderboard-history.jsonl and write
-        leaderboard.json (what gen-dashboard.py renders). Without --force, a snapshot younger
+        leaderboard.json (what gen-page.py renders). Without --force, a snapshot younger
         than --max-age-min is kept as is.
         Also finalizes the last week's ended days that aren't in leaderboard-daily.jsonl yet.
     leaderboard.py backfill (--top N | --all | --days D [D ...])
@@ -23,7 +24,7 @@ The API pages only to offset 1000: a day where Jake isn't in the top 1100 is sto
 `rank: null, below: 1100` — below the reachable range, which is not the same as absent.
 The 7-day best and the personal records are built from those final ranks; today's rank is the
 latest snapshot. launchd snapshots once a day near the end of the UTC day
-(com.jake.advance-roadmap-leaderboard), and every dashboard regeneration snapshots too.
+(com.jake.paradev-snapshot), and every page regeneration snapshots too.
 
 Never prints or stores the token. Exits 0 even on failure: leaderboard.json then carries
 {"ok": false, "error": …} and the dashboard says why.
@@ -42,7 +43,7 @@ import urllib.request
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-ROOT = Path(os.environ.get("ADVANCE_ROADMAP_ROOT", "/Users/jake/.claude/automations/advance-roadmap"))
+ROOT = Path(os.environ.get("PARADEV_ROOT", Path.home() / ".claude" / "automations" / "paradev"))
 CONFIG = Path(os.environ.get("SUPERSET_CONFIG", Path.home() / ".superset" / "config.json"))
 SUPERSET = os.environ.get("ADVANCE_ROADMAP_SUPERSET_BIN",
                           "/Applications/Superset.app/Contents/Resources/resources/bin/superset")
@@ -57,7 +58,7 @@ DAILY = ROOT / "leaderboard-daily.jsonl"
 DEFAULT_HANDLE = "jnelken"
 PAGE_SLEEP_S = float(os.environ.get("LEADERBOARD_PAGE_SLEEP_S", "0.5"))
 FINALIZE_DAYS = 7  # how far back a snapshot fills in missing final ranks
-# A snapshot runs inside the dashboard's 90 s budget: finalizing stops after this long and the
+# A snapshot runs inside the page generator's 90 s budget: finalizing stops after this long and the
 # next snapshot picks up where it left off.
 FINALIZE_BUDGET_S = float(os.environ.get("LEADERBOARD_FINALIZE_BUDGET_S", "40"))
 SETTLE_HOURS = 48     # other machines republish past days on a 2-hour cadence for a while
