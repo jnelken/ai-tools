@@ -3,15 +3,19 @@
 
     serve.py [--port 8420]
 
-GET /   lists each Tailscale Serve handler (read live from `tailscale serve status --json`, so a
-        newly mounted page shows up on its own), with the page's own <title> and whether it
-        answers right now. Mounted at / on the tailnet:
-          tailscale serve --bg --set-path / http://127.0.0.1:8420
+GET /            lists each Tailscale Serve handler (read live from `tailscale serve status
+                 --json`, so a newly mounted page shows up on its own), with the page's own <title>
+                 and whether it answers right now; then the library from library.json: reports,
+                 claude.ai artifacts and, near the bottom, the sketchpad (see library.py).
+GET /lib/<id>/   a library file (markdown rendered), and /lib/<id>/<file> a file beside it.
+Mounted at / on the tailnet:
+    tailscale serve --bg --set-path / http://127.0.0.1:8420
 Read-only and bound to 127.0.0.1; Tailscale Serve only accepts tailnet peers.
 """
 import argparse
 import html
 import json
+import mimetypes
 import os
 import re
 import ssl
@@ -20,9 +24,13 @@ import sys
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))  # library.py, beside the real file
+import library  # noqa: E402
 
 TAILSCALE = os.environ.get("TAILSCALE_BIN", "/usr/local/bin/tailscale")
 PORT = int(os.environ.get("TAILNET_INDEX_PORT", "8420"))
@@ -99,7 +107,35 @@ def probe(target, timeout=3):
         return False, None
 
 
-def build(entries, error=None, now=None):
+def lib_card(e):
+    return (f'<a class=card href="/lib/{e["id"]}/"><div class=top><span class=name>{html.escape(e["title"])}</span></div>'
+            f'<div class=target>{html.escape(e["group"])} · {library.when(e["mtime"])}</div></a>')
+
+
+def link_card(l):
+    meta = " · ".join(x for x in (l.get("note"), l.get("updated")) if x)
+    return (f'<a class="card ext" href="{html.escape(l["url"])}" target=_blank rel=noopener>'
+            f'<div class=top><span class=name>{html.escape(l["title"])}</span><span class=arrow>↗</span></div>'
+            + (f'<div class=target>{html.escape(meta)}</div>' if meta else "") + '</a>')
+
+
+def library_sections(lib):
+    if not lib:
+        return ""
+    out = []
+    if lib["reports"]:
+        out.append(f'<h2>Reports</h2><div class=grid>{"".join(lib_card(e) for e in lib["reports"])}</div>')
+    if lib["claude"]:
+        out.append('<h2>On claude.ai</h2><p class=sub>Published artifacts; they open on claude.ai, signed in.</p>'
+                   f'<div class=grid>{"".join(link_card(l) for l in lib["claude"])}</div>')
+    sketch = "".join(lib_card(e) for e in lib["sketchpad"]) + "".join(link_card(l) for l in lib["sketch_links"])
+    if sketch:
+        out.append('<h2>Sketchpad</h2><p class=sub>Boards, mocks, prototypes and handoffs: work in progress.</p>'
+                   f'<div class="grid small">{sketch}</div>')
+    return "".join(out)
+
+
+def build(entries, error=None, now=None, lib=None):
     now = now or datetime.now()
     cards = []
     for e in entries:
@@ -116,7 +152,8 @@ def build(entries, error=None, now=None):
     if error:
         body = f'<p class=err>Couldn\'t read Tailscale Serve: {html.escape(error)}</p>'
     host = f' · {html.escape(entries[0]["host"])}' if entries else ""
-    return PAGE.format(cards=body, host=host, when=now.strftime("%H:%M:%S"), n=len(entries))
+    return PAGE.format(cards=body, host=host, when=now.strftime("%H:%M:%S"), n=len(entries),
+                       library=library_sections(lib))
 
 
 PAGE = """<!doctype html>
@@ -148,6 +185,11 @@ PAGE = """<!doctype html>
   .path {{ font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:13px; margin-top:4px; }}
   .target {{ color:var(--dim); font-size:12px; margin-top:2px; overflow-wrap:anywhere; }}
   .err {{ color:var(--down); }}
+  h2 {{ font-size:14px; text-transform:uppercase; letter-spacing:.05em; color:var(--dim); margin:32px 0 6px; }}
+  h2 + .grid {{ margin-top:12px; }}
+  .arrow {{ margin-left:auto; color:var(--dim); }}
+  .grid.small {{ grid-template-columns:repeat(auto-fill,minmax(200px,1fr)); }}
+  .grid.small .name {{ font-size:14px; font-weight:600; }}
 </style>
 </head>
 <body>
@@ -155,6 +197,7 @@ PAGE = """<!doctype html>
   <h1>Tailnet pages</h1>
   <div class=sub>{n} page(s) served from this Mac over Tailscale Serve{host} · checked {when}</div>
   <div class=grid>{cards}</div>
+  {library}
 </div>
 </body>
 </html>"""
@@ -165,27 +208,87 @@ def render():
         if _cache["page"] and time.time() - _cache["at"] < CACHE_S:
             return _cache["page"]
         try:
-            page = build(handlers(serve_status()))
+            lib = library.library()
+        except OSError:
+            lib = None
+        try:
+            page = build(handlers(serve_status()), lib=lib)
         except (OSError, ValueError, RuntimeError, AttributeError, subprocess.SubprocessError) as e:
-            page = build([], error=str(e))
+            page = build([], error=str(e), lib=lib)
         _cache.update(at=time.time(), page=page)
         return page
 
 
+DOC = """<!doctype html>
+<html lang=en><head><meta charset=utf-8><meta name=viewport content="width=device-width, initial-scale=1">
+<title>{title}</title>
+<style>
+  :root {{ --bg:#f7f7f8; --card:#fff; --fg:#1a1a1e; --dim:#6b6b76; --line:#e3e3e8; }}
+  @media (prefers-color-scheme: dark) {{ :root {{ --bg:#141417; --card:#1d1d21; --fg:#ececf0; --dim:#9a9aa6; --line:#2c2c33; }} }}
+  * {{ box-sizing:border-box; }}
+  body {{ margin:0; background:var(--bg); color:var(--fg); font:16px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; padding:24px 16px; }}
+  .wrap {{ max-width:780px; margin:0 auto; }}
+  a {{ color:inherit; }}
+  .back {{ font-size:13px; color:var(--dim); }}
+  h1 {{ font-size:26px; line-height:1.25; }} h2 {{ font-size:19px; margin-top:28px; }} h3 {{ font-size:16px; }}
+  code {{ font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:.88em; background:var(--card);
+          border:1px solid var(--line); border-radius:4px; padding:0 4px; }}
+  pre {{ background:var(--card); border:1px solid var(--line); border-radius:8px; padding:12px; overflow-x:auto; }}
+  pre code {{ border:0; padding:0; background:none; }}
+  blockquote {{ margin:0; padding-left:14px; border-left:3px solid var(--line); color:var(--dim); }}
+  .tablewrap {{ overflow-x:auto; border:1px solid var(--line); border-radius:8px; background:var(--card); margin:12px 0; }}
+  table {{ border-collapse:collapse; width:100%; font-size:14px; }}
+  th, td {{ text-align:left; padding:7px 10px; border-bottom:1px solid var(--line); vertical-align:top; }}
+  th {{ font-size:12px; text-transform:uppercase; letter-spacing:.04em; color:var(--dim); }}
+  tr:last-child td {{ border-bottom:0; }}
+  hr {{ border:0; border-top:1px solid var(--line); margin:24px 0; }}
+</style></head>
+<body><div class=wrap><a class=back href="/">← Tailnet pages</a>
+{body}
+</div></body></html>"""
+
+
 class Handler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        if self.path.split("?")[0] not in ("/", "/index.html"):
-            data = b"not found"
-            self.send_response(404)
-            self.send_header("Content-Type", "text/plain")
-        else:
-            data = render().encode()
-            self.send_response(200)
-            self.send_header("Content-Type", "text/html; charset=utf-8")
+    def _send(self, code, data, ctype):
+        data = data if isinstance(data, bytes) else data.encode()
+        self.send_response(code)
+        self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(data)))
         self.send_header("Cache-Control", "no-store")
         self.end_headers()
         self.wfile.write(data)
+
+    def _lib(self, path):
+        parts = path[len("/lib/"):].split("/", 1)
+        eid, rel = parts[0], (parts[1] if len(parts) > 1 else None)
+        if rel is None:  # /lib/<id> → /lib/<id>/, so the page's relative links resolve in its folder
+            self.send_response(301)
+            self.send_header("Location", f"/lib/{eid}/")
+            self.end_headers()
+            return
+        target = library.resolve(eid, urllib.parse.unquote(rel))
+        if not target:
+            return self._send(404, "not found", "text/plain")
+        try:
+            raw = open(target, "rb").read()
+        except OSError:
+            return self._send(404, "not found", "text/plain")
+        if target.endswith(".md"):
+            text = raw.decode("utf-8", "replace")
+            return self._send(200, DOC.format(title=html.escape(library.title_of(target)),
+                                              body=library.md_to_html(text)), "text/html; charset=utf-8")
+        ctype = mimetypes.guess_type(target)[0] or "application/octet-stream"
+        if ctype.startswith("text/"):
+            ctype += "; charset=utf-8"
+        self._send(200, raw, ctype)
+
+    def do_GET(self):
+        path = self.path.split("?")[0]
+        if path in ("/", "/index.html"):
+            return self._send(200, render(), "text/html; charset=utf-8")
+        if path.startswith("/lib/"):
+            return self._lib(path)
+        self._send(404, "not found", "text/plain")
 
     def log_message(self, fmt, *args):
         sys.stderr.write("%s %s\n" % (time.strftime("%H:%M:%S"), fmt % args))
@@ -198,6 +301,7 @@ def main():
     global PORT
     PORT = a.port  # so the index recognises its own handler whatever port it's on
     srv = ThreadingHTTPServer(("127.0.0.1", a.port), Handler)
+    threading.Thread(target=library.library, daemon=True).start()  # warm the ~2 s file scan
     print(f"tailnet index on http://127.0.0.1:{a.port}/", flush=True)
     srv.serve_forever()
 
