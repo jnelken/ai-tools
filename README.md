@@ -124,6 +124,7 @@ Hooks need extra wiring in `~/.claude/settings.json` — see [`hooks/README.md`]
 | Automation | Schedule | Purpose |
 |---|---|---|
 | [`advance-roadmap`](automations/advance-roadmap) | Daily at 10:30 (launchd) | Headlessly ship planned roadmap / Linear items in a parallel batch, one per repo, each as a merged PR from its own Superset workspace |
+| [`machine-status`](automations/machine-status) | Always on (launchd) | A read-only page of this Mac's health — the dotfiles daemons, Tailscale, Superset, disk, uptime, power, sleep and AI provider gates — at `/status` on the tailnet |
 | [`paradev`](automations/paradev) | Daily at 18:50, plus a page server (launchd) | Jake's Paradev Production Run standing — ranks, personal records and every day's single-day rank — on its own page at `/paradev` on the tailnet |
 | [`reap-sswts`](automations/reap-sswts) | Every 10 min (launchd) | Tear down sswts whose Claude tabs signed off ⛏️ over an hour ago (PR merged, tree clean, HEAD carried by the PR), and close ⛏️ root-checkout tabs; no model calls |
 | [`tailnet-index`](automations/tailnet-index) | Always on (launchd) | The tailnet's front page: lists every page this Mac serves over Tailscale Serve, live |
