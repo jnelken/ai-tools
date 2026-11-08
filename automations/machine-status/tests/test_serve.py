@@ -27,6 +27,9 @@ class ParseTest(unittest.TestCase):
     def test_remote_control(self):
         self.assertEqual(ms.parse_rc(RC_OK)[0], "ok")
         self.assertEqual(ms.parse_rc(RC_OK.replace("Connected", "Reconnecting"))[0], "problem")
+        later_drop = RC_OK + "·✘· Reconnecting · code\n"
+        self.assertEqual(ms.parse_rc(later_drop)[0], "problem")     # the latest state wins
+        self.assertEqual(ms.parse_rc(later_drop + "·✔︎· Connected\n")[0], "ok")
         down = "launchd: loaded\ntmux:    no session\n"
         state, summary = ms.parse_rc(down)
         self.assertEqual(state, "problem")
@@ -84,15 +87,34 @@ class CheckTest(unittest.TestCase):
         with mock.patch.object(ms, "USAGE", "/nonexistent/providers-usage.json"):
             self.assertEqual(ms.check_providers()["state"], "absent")
         with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as f:
-            json.dump({"providers": {"codex": {"gate": {"state": "quota-paused"}, "five_hour": {"used_pct": 91.0}},
-                                     "claude": {"gate": {"state": "ok"}}}}, f)
+            json.dump({"providers": {"codex": {"gate": {"state": "quota-paused"}, "five_hour": {"used_pct": 91.0},
+                                               "weekly": {"used_pct": 34.0}},
+                                     "claude": {"gate": {"state": "ok"}, "seven_day": {"used_pct": 43.0}},
+                                     "cursor": {"gate": {"state": "ok"}, "included": {"total_pct": 12.0}}}}, f)
         try:
             with mock.patch.object(ms, "USAGE", f.name):
                 c = ms.check_providers()
             self.assertEqual(c["state"], "warn")
-            self.assertIn(("codex", "gate quota-paused · 5 h 91%"), c["lines"])
+            self.assertIn(("codex", "gate quota-paused · 5 h 91% · week 34%"), c["lines"])
+            self.assertIn(("claude", "gate ok · 7 d 43%"), c["lines"])
+            self.assertIn(("cursor", "gate ok · month 12%"), c["lines"])
         finally:
             os.unlink(f.name)
+
+    def test_superset_needs_sign_in_and_the_local_host(self):
+        def fake(answer_host):
+            def run(argv, **kw):
+                if "whoami" in argv:
+                    return mock.Mock(returncode=0, stdout='{"email": "j@x"}', stderr="")
+                return mock.Mock(returncode=0 if answer_host else 1, stdout="[]" if answer_host else "",
+                                 stderr="" if answer_host else "host service not running")
+            return run
+        with mock.patch.object(ms.subprocess, "run", side_effect=fake(True)):
+            self.assertEqual(ms.check_superset()["state"], "ok")
+        with mock.patch.object(ms.subprocess, "run", side_effect=fake(False)):
+            c = ms.check_superset()
+        self.assertEqual(c["state"], "problem")
+        self.assertIn("not answering", dict(c["lines"])["local host"])
 
     def test_one_broken_check_does_not_take_the_page_down(self):
         boom = mock.Mock(side_effect=RuntimeError("kaput"), __name__="check_host")

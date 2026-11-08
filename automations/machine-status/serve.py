@@ -58,7 +58,9 @@ def card(title, state, lines=(), raw=None):
 def parse_rc(out):
     running = re.search(r"launchd:\s*loaded \(running", out) is not None
     tmux = re.search(r"tmux:\s*session '[^']+' running", out) is not None
-    connected = "Connected" in out[-3000:]
+    # The latest connection message decides, so an old "Connected" can't mask a later drop.
+    states = re.findall(r"\b(Connected|Reconnecting|Disconnected|Connecting|Connection lost)\b", out)
+    connected = bool(states) and states[-1] == "Connected"
     if re.search(r"launchd:\s*not loaded", out):
         return "absent", "not installed"
     if running and tmux and connected:
@@ -123,14 +125,19 @@ def check_tailscale():
 
 
 def check_superset():
+    """Signed in (a cloud call) and the local host service answering (a --local listing, which
+    the CLI can only serve through it). `superset status` describes a standalone `superset
+    start` host, which this Mac doesn't use — the app runs the host itself — so it isn't asked."""
     rc, out = run([SUPERSET, "auth", "whoami", "--json"])
-    if rc == 0:
-        try:
-            who = json.loads(out)
-            return card("Superset", "ok", [("state", "CLI and host answering"), ("signed in", who.get("email") or "?")])
-        except ValueError:
-            pass
-    return card("Superset", "problem", [("state", out.strip()[:200] or f"exit {rc}")])
+    try:
+        who = json.loads(out) if rc == 0 else None
+    except ValueError:
+        who = None
+    rc2, out2 = run([SUPERSET, "projects", "list", "--local", "--json"])
+    host_ok = rc2 == 0
+    lines = [("signed in", (who or {}).get("email") or f"no ({out.strip()[:120] or f'exit {rc}'})"),
+             ("local host", "answering" if host_ok else f"not answering ({out2.strip()[:120] or f'exit {rc2}'})")]
+    return card("Superset", "ok" if who and host_ok else "problem", lines)
 
 
 # ── host ─────────────────────────────────────────────────────────────────────
@@ -214,10 +221,13 @@ def check_providers():
     for name, p in sorted((data.get("providers") or {}).items()):
         gate = (p.get("gate") or {}).get("state") or "?"
         parts = [f"gate {gate}"]
-        for win, label in (("five_hour", "5 h"), ("seven_day", "7 d")):
+        # Each provider reports its own windows: Claude five_hour/seven_day, Codex five_hour/weekly,
+        # Cursor an `included` monthly pool.
+        for win, label, key in (("five_hour", "5 h", "used_pct"), ("seven_day", "7 d", "used_pct"),
+                                ("weekly", "week", "used_pct"), ("included", "month", "total_pct")):
             w = p.get(win) or {}
-            if w.get("used_pct") is not None:
-                parts.append(f"{label} {w['used_pct']:.0f}%")
+            if isinstance(w, dict) and w.get(key) is not None:
+                parts.append(f"{label} {w[key]:.0f}%")
         lines.append((name, " · ".join(parts)))
         if gate not in ("ok", "?"):
             worst = "warn"
