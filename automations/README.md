@@ -291,6 +291,26 @@ Limitations:
 - The Keychain token is the Agent CLI's; if it expires the probe gets a 401 until the next `agent`
   run refreshes it.
 
+## `machine-status`
+
+A read-only page of this Mac's health at `http://127.0.0.1:8423/`, mounted at `/status` on the
+tailnet. Each card is one check, with its own timeout, run in parallel and cached 30 s:
+
+- **Daemons:** `claude-rc-daemon`, `superset-host-daemon` and `crash-session-check` `status`
+  (from `~/dotfiles/bin`), parsed to ok / problem / not installed, raw output collapsed.
+- **Tailscale** (online, name, addresses, served pages) and **Superset** (CLI and host answering).
+- **This Mac:** disk free (warns under 10%), uptime, load, power and battery, last sleep and wake,
+  and what's holding the Mac awake.
+- **AI providers:** each gate and usage window from advance-roadmap's `providers-usage.json`.
+
+```sh
+ln -sf ~/.ai-tools/automations/machine-status/com.jake.machine-status.plist ~/Library/LaunchAgents/
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.jake.machine-status.plist
+tailscale serve --bg --set-path /status http://127.0.0.1:8423
+```
+
+Tests: `python3 -m unittest discover -s automations/machine-status/tests`.
+
 ## `paradev`
 
 Jake's standing on Paradev's (formerly Superset's) Production Run leaderboard, on its own page:

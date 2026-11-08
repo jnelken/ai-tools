@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>com.jake.machine-status</string>
+
+	<!-- Serves the read-only machine-status page at http://127.0.0.1:8423/. Tailscale Serve
+	     mounts it at /status on the tailnet:
+	       tailscale serve --bg --set-path /status http://127.0.0.1:8423
+	     Install / reload:
+	       ln -sf ~/.ai-tools/automations/machine-status/com.jake.machine-status.plist ~/Library/LaunchAgents/
+	       launchctl bootout gui/$(id -u)/com.jake.machine-status
+	       launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.jake.machine-status.plist -->
+	<key>ProgramArguments</key>
+	<array>
+		<string>/opt/homebrew/bin/python3</string>
+		<string>/Users/jake/.claude/automations/machine-status/serve.py</string>
+	</array>
+
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>PATH</key>
+		<string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:/Users/jake/.local/bin</string>
+	</dict>
+
+	<key>RunAtLoad</key>
+	<true/>
+	<key>KeepAlive</key>
+	<true/>
+	<key>ProcessType</key>
+	<string>Background</string>
+
+	<key>StandardOutPath</key>
+	<string>/Users/jake/.claude/automations/machine-status/server.log</string>
+	<key>StandardErrorPath</key>
+	<string>/Users/jake/.claude/automations/machine-status/server.log</string>
+</dict>
+</plist>
