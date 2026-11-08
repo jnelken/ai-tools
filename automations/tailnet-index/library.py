@@ -161,6 +161,7 @@ def when(ts):
 def _inline(s):
     # Code spans and links are cut out first and put back last, so emphasis rules never touch
     # a URL (`exports/_draft_/x.md`) or code.
+    s = s.replace("\x00", "\ufffd")  # NUL marks held fragments below; never take one from the source
     held = []
 
     def hold(fragment):
@@ -184,7 +185,9 @@ def _inline(s):
     s = re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", s)
     s = re.sub(r"(?<![\w*])\*(?!\s)(.+?)(?<!\s)\*(?![\w*])", r"<em>\1</em>", s)
     s = re.sub(r"(?<![\w_])_(?!\s)(.+?)(?<!\s)_(?![\w_])", r"<em>\1</em>", s)
-    while "\x00" in s:  # held fragments can hold others (a link label with code in it)
+    for _ in range(len(held) + 1):  # held fragments can hold others (a link label with code in it)
+        if "\x00" not in s:
+            break
         s = re.sub(r"\x00(\d+)\x00", lambda m: held[int(m.group(1))], s)
     return s
 

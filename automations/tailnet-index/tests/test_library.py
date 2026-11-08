@@ -99,6 +99,11 @@ class LibraryTest(unittest.TestCase):
         self.assertIn('href="https://example.com/a_(b)"', out)
         self.assertNotIn("\x00", out)
 
+    def test_nul_bytes_in_the_source_cant_hang_rendering(self):
+        out = self.lib.md_to_html("plain \x00 text and `code \x00 span` and \x001\x00")
+        self.assertNotIn("\x00", out)
+        self.assertIn("<code>", out)
+
     def test_globs_prune_dependency_folders(self):
         found = self.lib.expand(f"{self.code}/**/.impeccable/mocks/**/*.html")
         self.assertTrue(found and not any("node_modules" in p for p in found))
