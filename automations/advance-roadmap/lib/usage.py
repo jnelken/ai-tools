@@ -108,7 +108,7 @@ CURSOR_MODEL_ENV = {"worker": "ADVANCE_ROADMAP_CURSOR_WORKER_MODEL",
 # (ORCHESTRATOR.md and old logs say "session limit" too). Same pattern as the rg calls in
 # run.sh, worker.sh and review.sh.
 LIMIT_BANNER = re.compile(
-    r"^(?:you.?ve hit your (?:session |usage )?limit|hit your session limit|rate limit exceeded"
+    r"^(?:ActionRequiredError:\s*)?(?:you.?ve hit your (?:session |usage )?limit|hit your session limit|rate limit exceeded"
     r"|quota exceeded|out of (?:usage|credits|quota)\b)", re.I | re.M)
 
 LIMIT_PATTERNS = [

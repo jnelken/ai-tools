@@ -490,6 +490,11 @@ class LimitBannerTests(unittest.TestCase):
         self.assertIsNone(usage.limit_banner("The doc says you've hit your session limit sometimes."))
         self.assertIsNone(usage.limit_banner(""))
 
+    def test_cursor_actionrequired_usage_limit_is_a_live_banner(self):
+        banner = "ActionRequiredError: You've hit your usage limit Get Cursor Pro for more Agent usage, unlimited Tab, and more."
+        self.assertEqual(usage.limit_banner(banner), banner)
+        self.assertEqual(usage.live_limit_banner(banner, exit_code=1, final_answer=""), banner)
+
     def test_live_limit_ignores_echoed_banner_when_final_answer_succeeded(self):
         banner = "You've hit your usage limit. Resets 5pm."
         transcript = f"echoed from a prior log:\n{banner}\nthen the real answer"

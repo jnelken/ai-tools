@@ -239,5 +239,9 @@ got="$(python3 "$TMP_ROOT/real-usage.py" live-limit --text ok --exit 0 --final "
   || fail "live-limit missed zero-exit is_error JSON"
 [ "$got" = "You've hit your usage limit. Resets 5pm." ] \
   || fail "live-limit is_error text wrong: $got"
+cursor_banner="ActionRequiredError: You've hit your usage limit Get Cursor Pro for more Agent usage, unlimited Tab, and more."
+got="$(python3 "$TMP_ROOT/real-usage.py" live-limit --text "$cursor_banner" --exit 1 --final "")" \
+  || fail "live-limit missed Cursor's prefixed usage-limit banner"
+[ "$got" = "$cursor_banner" ] || fail "live-limit changed Cursor's usage-limit text: $got"
 
 print -- "worker usage gate: ok"
