@@ -61,8 +61,8 @@ def parse_rc(out):
     running = re.search(r"launchd:\s*loaded \(running", out) is not None
     tmux = re.search(r"tmux:\s*session '[^']+' running", out) is not None
     # The latest connection message decides, so an old "Connected" can't mask a later drop.
-    states = re.findall(r"\b(Connected|Reconnecting|Disconnected|Connecting|Connection lost)\b", out)
-    connected = bool(states) and states[-1] == "Connected"
+    states = re.findall(r"\b(Connected|Reconnected|Ready|Reconnecting|Disconnected|Connecting|Connection lost)\b", out)
+    connected = bool(states) and states[-1] in ("Connected", "Reconnected", "Ready")
     if re.search(r"launchd:\s*not loaded", out):
         # Not loaded with no plist is "not installed"; with a plist, it's installed but down.
         if re.search(r"plist:\s*\(none\)", out):
@@ -76,6 +76,8 @@ def parse_rc(out):
 
 def parse_superset_host(out):
     if re.search(r"launchd:\s*not loaded", out):
+        if not re.search(r"plist:\s*\(none\)", out):
+            return "problem", "installed but not loaded"
         return "absent", "not installed (the Superset app runs the host service itself)"
     if re.search(r"launchd:\s*loaded \(running", out):
         return "ok", "running"

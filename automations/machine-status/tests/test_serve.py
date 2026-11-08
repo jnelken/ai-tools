@@ -30,6 +30,8 @@ class ParseTest(unittest.TestCase):
         later_drop = RC_OK + "·✘· Reconnecting · code\n"
         self.assertEqual(ms.parse_rc(later_drop)[0], "problem")     # the latest state wins
         self.assertEqual(ms.parse_rc(later_drop + "·✔︎· Connected\n")[0], "ok")
+        self.assertEqual(ms.parse_rc(later_drop + "·✔︎· Reconnected\n")[0], "ok")
+        self.assertEqual(ms.parse_rc(RC_OK + "Ready\n")[0], "ok")
         down = "launchd: loaded\ntmux:    no session\n"
         state, summary = ms.parse_rc(down)
         self.assertEqual(state, "problem")
@@ -39,7 +41,8 @@ class ParseTest(unittest.TestCase):
                          ("problem", "installed but not loaded"))
 
     def test_superset_host_and_crash_check(self):
-        self.assertEqual(ms.parse_superset_host("launchd: not loaded\n")[0], "absent")
+        self.assertEqual(ms.parse_superset_host("launchd: not loaded\nplist:   (none)\n")[0], "absent")
+        self.assertEqual(ms.parse_superset_host("launchd: not loaded\nplist:   /x/y.plist\n")[0], "problem")
         self.assertEqual(ms.parse_superset_host("launchd: loaded (running\npid 4 )\n")[0], "ok")
         self.assertEqual(ms.parse_superset_host("launchd: loaded\n")[0], "problem")
         self.assertEqual(ms.parse_crash_check("launchd: loaded\nRESUME candidates found: 0\n", boot=0)[0], "ok")
