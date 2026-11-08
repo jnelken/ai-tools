@@ -36,6 +36,14 @@ class Profiles(unittest.TestCase):
     def test_unknown_and_invalid_mapping(self):
         self.assertEqual(p.resolve('development/auto',self.base,'codex',{})['profile'],'development/unknown')
         with self.assertRaises(ValueError):p.resolve('development/auto',self.base,'codex',{'roots':{str(self.base):'other'}})
+    def test_unknown_profile_gets_no_personal_or_work_specific_guidance(self):
+        for harness in ('claude', 'codex'):
+            result=p.resolve('development/unknown',self.base,harness,{})
+            self.assertNotIn('development/personal.md',result['sources'])
+            self.assertNotIn('development/work.md',result['sources'])
+            self.assertNotIn('providers/claude-personal.md',result['sources'])
+            self.assertNotIn('bin/agent-budget',result['instructions'])
+            self.assertNotIn('bin/fanout',result['instructions'])
     def test_provider_specific_fragments(self):
         r=self.repo()
         codex=p.resolve('development/auto',r,'codex',{})

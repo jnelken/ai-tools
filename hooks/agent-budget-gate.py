@@ -31,15 +31,17 @@ def owner_pid():
     return pid
 
 
-def is_work_target(cwd):
-    """True when cwd classifies as a work repository. Any failure means 'not work' so the gate keeps its old behavior."""
+def is_personal_target(cwd):
+    """True only when cwd positively classifies as a personal repository."""
     if not cwd:
         return False
     try:
         import agent_profiles
         config, _ = agent_profiles.configuration()
-        return agent_profiles.classify(cwd, config)[0] == 'work'
+        return agent_profiles.classify(cwd, config)[0] == 'personal'
     except Exception:
+        # Budget admission is personal-only. Unknown or unclassifiable targets
+        # must keep the shared cross-profile behavior and pass through.
         return False
 
 
@@ -58,8 +60,8 @@ def handle(data):
     if event == 'PreToolUse':
         if data.get('tool_name') not in ('Agent', 'Workflow'):
             return None
-        if is_work_target(data.get('cwd')):
-            # The shared budget serves the personal roadmap; work sessions never queue behind it.
+        if not is_personal_target(data.get('cwd')):
+            # Only personal targets reserve from the personal shared budget.
             return None
         reading = budget.readings('claude')
         # A missing window must never turn the hook into the fanout queue's

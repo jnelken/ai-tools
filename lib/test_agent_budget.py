@@ -42,6 +42,13 @@ class BudgetTests(unittest.TestCase):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(''.join(json.dumps(r) + '\n' for r in records))
 
+    def repo(self, name, owner):
+        path = self.home / name
+        path.mkdir()
+        subprocess.run(['git', 'init', '-q', str(path)], check=True)
+        subprocess.run(['git', '-C', str(path), 'remote', 'add', 'origin', f'git@github.com:{owner}/example.git'], check=True)
+        return path
+
     def leases(self):
         with b.lock():
             return b.reap()
@@ -664,30 +671,27 @@ print(bool(b.acquire('codex','planner',pid=int(sys.argv[2]))))
 
     def test_hook_denies_at_zero(self):
         self.reading['windows']['five_hour']['live'] = 70
-        result = hook.handle(dict(hook_event_name='PreToolUse', tool_name='Agent', session_id='sid'))
+        personal = self.repo('personal repo', 'jnelken')
+        result = hook.handle(dict(hook_event_name='PreToolUse', tool_name='Agent', session_id='sid', cwd=str(personal)))
         self.assertEqual(result['hookSpecificOutput']['permissionDecision'], 'deny')
         self.assertIn('bin/fanout', result['hookSpecificOutput']['permissionDecisionReason'])
         self.assertEqual(self.leases(), [])
 
-    def test_hook_skips_work_targets(self):
+    def test_hook_skips_work_and_unknown_targets(self):
         self.reading['windows']['five_hour']['live'] = 70
-        work = self.home / 'work repo'
-        work.mkdir()
-        with patch.object(hook, 'is_work_target', side_effect=lambda cwd: cwd == str(work)):
-            skipped = hook.handle(dict(hook_event_name='PreToolUse', tool_name='Agent', session_id='sid', cwd=str(work)))
-            denied = hook.handle(dict(hook_event_name='PreToolUse', tool_name='Agent', session_id='sid', cwd=str(self.home)))
-        self.assertIsNone(skipped)
-        self.assertEqual(denied['hookSpecificOutput']['permissionDecision'], 'deny')
+        work = self.repo('work repo', 'Concentro-Inc')
+        unknown = self.repo('unknown repo', 'some-org')
+        for target in (work, unknown):
+            with self.subTest(target=target.name):
+                skipped = hook.handle(dict(hook_event_name='PreToolUse', tool_name='Agent', session_id='sid', cwd=str(target)))
+                self.assertIsNone(skipped)
         self.assertEqual(self.leases(), [])
 
-    def test_is_work_target_classifies_by_repository_owner(self):
-        for owner, expected in (('Concentro-Inc', True), ('jnelken', False)):
-            repo = self.home / owner
-            repo.mkdir()
-            subprocess.run(['git', 'init', '-q', str(repo)], check=True)
-            subprocess.run(['git', '-C', str(repo), 'remote', 'add', 'origin', f'git@github.com:{owner}/example.git'], check=True)
-            self.assertEqual(hook.is_work_target(str(repo)), expected, owner)
-        self.assertFalse(hook.is_work_target(None))
+    def test_is_personal_target_only_accepts_personal_repositories(self):
+        for owner, expected in (('Concentro-Inc', False), ('jnelken', True), ('some-org', False)):
+            repo = self.repo(owner, owner)
+            self.assertEqual(hook.is_personal_target(str(repo)), expected, owner)
+        self.assertFalse(hook.is_personal_target(None))
 
     def invoke_hook(self, payload):
         out, err = io.StringIO(), io.StringIO()
@@ -697,7 +701,8 @@ print(bool(b.acquire('codex','planner',pid=int(sys.argv[2]))))
 
     def test_hook_fails_open_on_null_leases_filesystem_error_and_bad_stdin(self):
         b.write_json(b.budget_dir() / 'leases.json', None)
-        payload = json.dumps(dict(hook_event_name='PreToolUse', tool_name='Agent'))
+        personal = self.repo('personal repo', 'jnelken')
+        payload = json.dumps(dict(hook_event_name='PreToolUse', tool_name='Agent', cwd=str(personal)))
         out, err = self.invoke_hook(payload)
         self.assertEqual(out, '')
         self.assertIn('allowing tool', err)
@@ -775,7 +780,8 @@ b.cached_estimates = lambda: b.estimates([], [])
 sys.exit(hook.main())
 """
         state = self.home / 'slow-probe'
-        payload = json.dumps(dict(hook_event_name='PreToolUse', tool_name='Agent'))
+        personal = self.repo('personal repo', 'jnelken')
+        payload = json.dumps(dict(hook_event_name='PreToolUse', tool_name='Agent', cwd=str(personal)))
         result = subprocess.run([sys.executable, '-c', script, str(b.ROOT / 'lib'), str(state)],
                                 input=payload, capture_output=True, text=True, timeout=2)
         self.assertTrue((state / 'probe-started').exists())
@@ -801,10 +807,11 @@ sys.exit(hook.main())
 
     def test_hook_reuses_models_and_quota_five_second_cache(self):
         self.readings.stop()
+        personal = self.repo('personal repo', 'jnelken')
         with patch.object(b.claude_quota, 'state_dir', return_value=self.home / 'quota'), patch.object(b.claude_quota, 'token', return_value='fixture'), patch.object(b.claude_quota, 'probe', return_value=({'five_hour': {'used_percentage': 10}, 'seven_day': {'used_percentage': 10}}, None)) as probe, patch.object(b, 'history', return_value=([], [])) as history, patch.object(hook, 'owner_pid', return_value=os.getpid()):
             started = time.monotonic()
             for tool in ('Agent', 'Workflow'):
-                self.assertIsNone(hook.handle(dict(hook_event_name='PreToolUse', tool_name=tool, session_id='sid')))
+                self.assertIsNone(hook.handle(dict(hook_event_name='PreToolUse', tool_name=tool, session_id='sid', cwd=str(personal))))
             self.assertLess(time.monotonic() - started, 1)
             self.assertEqual(probe.call_count, 1)
             self.assertEqual(history.call_count, 1)
@@ -819,9 +826,11 @@ sys.exit(hook.main())
         self.assertEqual(b.allow('claude', 'subagent'), 0)  # fanout/batch retain one lease
 
     def test_hook_releases_exact_subagent_out_of_order(self):
+        personal = self.repo('personal repo', 'jnelken')
         with patch.object(hook, 'owner_pid', return_value=os.getpid()):
             for tool in ('first', 'second'):
-                self.assertIsNone(hook.handle(dict(hook_event_name='PreToolUse', tool_name='Agent', session_id='sid', tool_use_id=tool)))
+                self.assertIsNone(hook.handle(dict(hook_event_name='PreToolUse', tool_name='Agent', session_id='sid', tool_use_id=tool,
+                                                   cwd=str(personal))))
         path = self.home / 'agent-child.jsonl'
         b.write_json(path.with_suffix('.meta.json'), {'toolUseId': 'second'})
         hook.handle(dict(hook_event_name='SubagentStop', session_id='sid', agent_transcript_path=str(path)))
