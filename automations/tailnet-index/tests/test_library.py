@@ -93,6 +93,12 @@ class LibraryTest(unittest.TestCase):
         self.assertIn("<em>em</em>", out)
         self.assertNotIn("<em>draft</em>", out)
 
+    def test_code_in_a_link_label_and_parentheses_in_a_url(self):
+        out = self.lib.md_to_html("[`report.md`](report.md) and [doc](https://example.com/a_(b))")
+        self.assertIn('<a href="report.md"><code>report.md</code></a>', out)
+        self.assertIn('href="https://example.com/a_(b)"', out)
+        self.assertNotIn("\x00", out)
+
     def test_globs_prune_dependency_folders(self):
         found = self.lib.expand(f"{self.code}/**/.impeccable/mocks/**/*.html")
         self.assertTrue(found and not any("node_modules" in p for p in found))

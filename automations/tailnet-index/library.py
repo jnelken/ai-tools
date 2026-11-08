@@ -178,12 +178,15 @@ def _inline(s):
         if scheme and scheme.group(1).lower() not in ("http", "https", "mailto"):
             return hold(text)
         return hold(f'<a href="{html.escape(href)}">{text}</a>')
-    s = re.sub(r"\[([^\]]+)\]\(([^)\s]+)\)", link, s)
+    # The destination may hold one level of balanced parentheses: [doc](https://x/a_(b)).
+    s = re.sub(r"\[([^\]]+)\]\(((?:[^()\s]|\([^()\s]*\))+)\)", link, s)
     s = html.escape(s, quote=False)
     s = re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", s)
     s = re.sub(r"(?<![\w*])\*(?!\s)(.+?)(?<!\s)\*(?![\w*])", r"<em>\1</em>", s)
     s = re.sub(r"(?<![\w_])_(?!\s)(.+?)(?<!\s)_(?![\w_])", r"<em>\1</em>", s)
-    return re.sub(r"\x00(\d+)\x00", lambda m: held[int(m.group(1))], s)
+    while "\x00" in s:  # held fragments can hold others (a link label with code in it)
+        s = re.sub(r"\x00(\d+)\x00", lambda m: held[int(m.group(1))], s)
+    return s
 
 
 def md_to_html(text):

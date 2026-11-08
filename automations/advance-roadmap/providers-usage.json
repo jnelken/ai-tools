@@ -1,23 +1,23 @@
 {
-  "updated_at": "2026-11-08T01:30:14-05:00",
+  "updated_at": "2026-11-08T01:33:05-05:00",
   "providers": {
     "claude": {
       "five_hour": {
-        "used_pct": 39.0,
+        "used_pct": 40.0,
         "reset_at": "2026-11-08T06:10:00-05:00",
-        "reset_epoch": 1794136200.976379,
+        "reset_epoch": 1794136200.945684,
         "source": "probe"
       },
       "seven_day": {
         "used_pct": 44.0,
         "reset_at": "2026-11-09T11:00:00-05:00",
-        "reset_epoch": 1794240000.976398,
+        "reset_epoch": 1794240000.945702,
         "source": "probe"
       },
       "available_for_orchestrator": true,
       "available_for_worker": true,
       "last_limit_hit": null,
-      "observed_epoch": 1794119409.9932811,
+      "observed_epoch": 1794119583.9509308,
       "gate": {
         "state": "ok",
         "reason": null,
@@ -26,13 +26,13 @@
     },
     "codex": {
       "five_hour": {
-        "used_pct": 7.0,
+        "used_pct": 9.0,
         "reset_at": "2026-11-08T04:27:08-05:00",
         "reset_epoch": 1794130028,
         "source": "app_server"
       },
       "weekly": {
-        "used_pct": 34.0,
+        "used_pct": 35.0,
         "reset_at": "2026-11-11T10:38:51-05:00",
         "reset_epoch": 1794411531,
         "source": "app_server"
@@ -42,8 +42,8 @@
       "last_limit_hit": null,
       "rate_limit_reached": null,
       "plan": "plus",
-      "observed_epoch": 1794119413.434674,
-      "observed_at": "2026-11-08T01:30:13-05:00",
+      "observed_epoch": 1794119585.297778,
+      "observed_at": "2026-11-08T01:33:05-05:00",
       "source": "app_server",
       "gate": {
         "state": "ok",
@@ -59,7 +59,7 @@
         "reset_at": "2026-11-23T20:44:05-05:00",
         "reset_epoch": 1795484645,
         "source": "dashboard_api",
-        "observed_at": "2026-11-08T01:30:14-05:00"
+        "observed_at": "2026-11-08T01:33:05-05:00"
       },
       "available_for_worker": true,
       "source": "dashboard_api",
