@@ -35,6 +35,8 @@ class ParseTest(unittest.TestCase):
         self.assertEqual(state, "problem")
         self.assertIn("tmux session", summary)
         self.assertEqual(ms.parse_rc("launchd: not loaded\nplist:   (none)\n")[0], "absent")
+        self.assertEqual(ms.parse_rc("launchd: not loaded\nplist:   /x/com.jake.claude-remote-control.plist\n"),
+                         ("problem", "installed but not loaded"))
 
     def test_superset_host_and_crash_check(self):
         self.assertEqual(ms.parse_superset_host("launchd: not loaded\n")[0], "absent")
@@ -42,7 +44,18 @@ class ParseTest(unittest.TestCase):
         self.assertEqual(ms.parse_superset_host("launchd: loaded\n")[0], "problem")
         self.assertEqual(ms.parse_crash_check("launchd: loaded\nRESUME candidates found: 0\n")[0], "ok")
         state, summary = ms.parse_crash_check("launchd: loaded\nRESUME candidates found: 2\n")
-        self.assertEqual((state, "2 dead" in summary), ("warn", True))
+        self.assertEqual((state, "2 in Superset tabs" in summary), ("warn", True))
+        import tempfile
+        with tempfile.NamedTemporaryFile("w", suffix=".log", delete=False) as f:
+            f.write("== Workspace: x ==\n== Global sweep: sessions outside Superset tabs ==\n"
+                    "  session e7b1c30a-cd68-5686-b7c5-56b680023a9c\n    manual resume: ...\n"
+                    "  session 61badfd3-5621-4d90-b16d-0a579fba13cb\n== Summary ==\nRESUME candidates found: 0\n")
+        try:
+            state, summary = ms.parse_crash_check(f"launchd: loaded\nlatest:  {f.name}\nRESUME candidates found: 0\n")
+        finally:
+            os.unlink(f.name)
+        self.assertEqual(state, "warn")                      # zero in tabs, but two outside Superset
+        self.assertIn("2 outside Superset", summary)
 
     def test_host_parsers(self):
         self.assertEqual(ms.parse_boottime("{ sec = 1793579792, usec = 671044 } Sun Nov  1"), 1793579792)
@@ -98,6 +111,15 @@ class CheckTest(unittest.TestCase):
             self.assertIn(("codex", "gate quota-paused · 5 h 91% · week 34%"), c["lines"])
             self.assertIn(("claude", "gate ok · 7 d 43%"), c["lines"])
             self.assertIn(("cursor", "gate ok · month 12%"), c["lines"])
+
+        finally:
+            os.unlink(f.name)
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as f:
+            json.dump({"providers": {"codex": {"gate": {"state": "quota-paused", "reset_epoch": 1.0}}}}, f)
+        try:
+            with mock.patch.object(ms, "USAGE", f.name):
+                c = ms.check_providers()
+            self.assertEqual(c["state"], "ok")              # a gate whose reset has passed isn't blocking
         finally:
             os.unlink(f.name)
 
@@ -130,6 +152,7 @@ class CheckTest(unittest.TestCase):
         self.assertIn("Needs a look", page)
         self.assertIn("&lt;b&gt;raw&lt;/b&gt;", page)        # raw output escaped
         self.assertIn("<title>Machine status</title>", page)
+        self.assertIn('<a href="">reload</a>', page)       # reloads /status itself, not the index
 
 
 if __name__ == "__main__":

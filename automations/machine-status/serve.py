@@ -62,7 +62,10 @@ def parse_rc(out):
     states = re.findall(r"\b(Connected|Reconnecting|Disconnected|Connecting|Connection lost)\b", out)
     connected = bool(states) and states[-1] == "Connected"
     if re.search(r"launchd:\s*not loaded", out):
-        return "absent", "not installed"
+        # Not loaded with no plist is "not installed"; with a plist, it's installed but down.
+        if re.search(r"plist:\s*\(none\)", out):
+            return "absent", "not installed"
+        return "problem", "installed but not loaded"
     if running and tmux and connected:
         return "ok", "running · tmux session up · connected"
     missing = [n for n, ok in (("launchd job running", running), ("tmux session", tmux), ("connected", connected)) if not ok]
@@ -77,15 +80,37 @@ def parse_superset_host(out):
     return "problem", "loaded but not running"
 
 
+def global_sweep_count(report_text):
+    """Sessions the report's global sweep found dead outside Superset tabs."""
+    i = report_text.find("== Global sweep")
+    if i < 0:
+        return 0
+    section = report_text[i:report_text.find("== Summary", i) if "== Summary" in report_text[i:] else None]
+    return len(re.findall(r"^\s+session [0-9a-f-]{8,}", section, re.M))
+
+
 def parse_crash_check(out):
     if re.search(r"launchd:\s*not loaded", out):
-        return "absent", "not installed"
+        if re.search(r"plist:\s*\(none\)", out):
+            return "absent", "not installed"
+        return "problem", "installed but not loaded"
     m = re.search(r"RESUME candidates found:\s*(\d+)", out)
-    if m and int(m.group(1)) == 0:
+    if not m:
+        return "warn", "no report yet this boot"
+    # The summary counts Superset tabs only; the same report's global sweep covers the rest.
+    outside = 0
+    latest = re.search(r"latest:\s*(\S+\.log)", out)
+    if latest:
+        try:
+            with open(latest.group(1), encoding="utf-8", errors="replace") as f:
+                outside = global_sweep_count(f.read())
+        except OSError:
+            pass
+    tabs = int(m.group(1))
+    if tabs == 0 and outside == 0:
         return "ok", "no dead sessions after the last boot"
-    if m:
-        return "warn", f"{m.group(1)} dead session(s) to resume (see the latest log)"
-    return "warn", "no report yet this boot"
+    parts = ([f"{tabs} in Superset tabs"] if tabs else []) + ([f"{outside} outside Superset"] if outside else [])
+    return "warn", "dead sessions to look at: " + ", ".join(parts) + " (see the latest report)"
 
 
 DAEMONS = (("claude-rc-daemon", "Claude Remote Control", parse_rc),
@@ -219,7 +244,10 @@ def check_providers():
         return card("AI providers", "absent", [("status", "no usage file (advance-roadmap not run here)")])
     lines, worst = [], "ok"
     for name, p in sorted((data.get("providers") or {}).items()):
-        gate = (p.get("gate") or {}).get("state") or "?"
+        g = p.get("gate") or {}
+        gate = g.get("state") or "?"
+        if gate not in ("ok", "?") and g.get("reset_epoch") and g["reset_epoch"] < time.time():
+            gate = "ok (its reset has passed)"  # what routing would conclude; the file updates next run
         parts = [f"gate {gate}"]
         # Each provider reports its own windows: Claude five_hour/seven_day, Codex five_hour/weekly,
         # Cursor an `included` monthly pool.
@@ -229,7 +257,7 @@ def check_providers():
             if isinstance(w, dict) and w.get(key) is not None:
                 parts.append(f"{label} {w[key]:.0f}%")
         lines.append((name, " · ".join(parts)))
-        if gate not in ("ok", "?"):
+        if not gate.startswith("ok") and gate != "?":
             worst = "warn"
     updated = data.get("updated_at")
     if updated:
@@ -301,7 +329,7 @@ PAGE = """<!doctype html>
 <body>
 <div class=wrap>
   <h1>Machine status</h1>
-  <div class=sub>This Mac, checked {when} · <a href="./">reload</a></div>
+  <div class=sub>This Mac, checked {when} · <a href="">reload</a></div>
   <div class="banner {worst}">{summary}</div>
   <div class=grid>{cards}</div>
 </div>
