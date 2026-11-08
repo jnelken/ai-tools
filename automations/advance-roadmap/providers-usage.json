@@ -1,23 +1,23 @@
 {
-  "updated_at": "2026-11-08T01:45:25-05:00",
+  "updated_at": "2026-11-08T01:48:05-05:00",
   "providers": {
     "claude": {
       "five_hour": {
-        "used_pct": 47.0,
-        "reset_at": "2026-11-08T06:09:59-05:00",
-        "reset_epoch": 1794136199.629406,
+        "used_pct": 50.0,
+        "reset_at": "2026-11-08T06:10:00-05:00",
+        "reset_epoch": 1794136200.010817,
         "source": "probe"
       },
       "seven_day": {
         "used_pct": 46.0,
-        "reset_at": "2026-11-09T10:59:59-05:00",
-        "reset_epoch": 1794239999.629429,
+        "reset_at": "2026-11-09T11:00:00-05:00",
+        "reset_epoch": 1794240000.010833,
         "source": "probe"
       },
       "available_for_orchestrator": true,
       "available_for_worker": true,
       "last_limit_hit": null,
-      "observed_epoch": 1794120323.661472,
+      "observed_epoch": 1794120484.0635421,
       "gate": {
         "state": "ok",
         "reason": null,
@@ -26,13 +26,13 @@
     },
     "codex": {
       "five_hour": {
-        "used_pct": 18.0,
+        "used_pct": 21.0,
         "reset_at": "2026-11-08T04:27:08-05:00",
         "reset_epoch": 1794130028,
         "source": "app_server"
       },
       "weekly": {
-        "used_pct": 36.0,
+        "used_pct": 37.0,
         "reset_at": "2026-11-11T10:38:51-05:00",
         "reset_epoch": 1794411531,
         "source": "app_server"
@@ -42,8 +42,8 @@
       "last_limit_hit": null,
       "rate_limit_reached": null,
       "plan": "plus",
-      "observed_epoch": 1794120325.2043068,
-      "observed_at": "2026-11-08T01:45:25-05:00",
+      "observed_epoch": 1794120485.500437,
+      "observed_at": "2026-11-08T01:48:05-05:00",
       "source": "app_server",
       "gate": {
         "state": "ok",
@@ -59,7 +59,7 @@
         "reset_at": "2026-11-23T20:44:05-05:00",
         "reset_epoch": 1795484645,
         "source": "dashboard_api",
-        "observed_at": "2026-11-08T01:45:25-05:00"
+        "observed_at": "2026-11-08T01:48:05-05:00"
       },
       "available_for_worker": true,
       "source": "dashboard_api",

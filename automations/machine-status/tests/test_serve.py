@@ -105,7 +105,7 @@ class CheckTest(unittest.TestCase):
                                      "claude": {"gate": {"state": "ok"}, "seven_day": {"used_pct": 43.0}},
                                      "cursor": {"gate": {"state": "ok"}, "included": {"total_pct": 12.0}}}}, f)
         try:
-            with mock.patch.object(ms, "USAGE", f.name):
+            with mock.patch.object(ms, "USAGE", f.name), mock.patch.object(ms, "live_gate", return_value=None):
                 c = ms.check_providers()
             self.assertEqual(c["state"], "warn")
             self.assertIn(("codex", "gate quota-paused · 5 h 91% · week 34%"), c["lines"])
@@ -115,11 +115,17 @@ class CheckTest(unittest.TestCase):
         finally:
             os.unlink(f.name)
         with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as f:
-            json.dump({"providers": {"codex": {"gate": {"state": "quota-paused", "reset_epoch": 1.0}}}}, f)
+            json.dump({"providers": {"codex": {"gate": {"state": "limited", "reset_epoch": 1.0}}}}, f)
         try:
-            with mock.patch.object(ms, "USAGE", f.name):
-                c = ms.check_providers()
-            self.assertEqual(c["state"], "ok")              # a gate whose reset has passed isn't blocking
+            # The live gate (advance-roadmap's provider_gate) decides, not the stored one.
+            live = mock.Mock(return_value={"state": "ok", "reason": None, "reset_epoch": None})
+            with mock.patch.object(ms, "USAGE", f.name), mock.patch.object(ms, "live_gate", return_value=live):
+                self.assertEqual(ms.check_providers()["state"], "ok")
+            blocked = mock.Mock(return_value={"state": "quota-paused", "reason": "weekly 99%", "reset_epoch": None})
+            with mock.patch.object(ms, "USAGE", f.name), mock.patch.object(ms, "live_gate", return_value=blocked):
+                self.assertEqual(ms.check_providers()["state"], "warn")   # an expired limit, but weekly still blocks
+            with mock.patch.object(ms, "USAGE", f.name), mock.patch.object(ms, "live_gate", return_value=None):
+                self.assertEqual(ms.check_providers()["state"], "warn")   # no router: the stored gate stands
         finally:
             os.unlink(f.name)
 

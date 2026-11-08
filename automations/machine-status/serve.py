@@ -29,6 +29,8 @@ TAILSCALE = os.environ.get("TAILSCALE_BIN", "/usr/local/bin/tailscale")
 SUPERSET = os.environ.get("SUPERSET_BIN", "/Applications/Superset.app/Contents/Resources/resources/bin/superset")
 USAGE = os.environ.get("MACHINE_STATUS_USAGE",
                        os.path.join(HOME, ".claude/automations/advance-roadmap/providers-usage.json"))
+USAGE_PY = os.environ.get("MACHINE_STATUS_USAGE_PY",
+                          os.path.join(HOME, ".claude/automations/advance-roadmap/lib/usage.py"))
 CACHE_S = 30
 TIMEOUT_S = 8
 _cache = {"at": 0.0, "page": None}
@@ -237,17 +239,33 @@ def check_host():
 
 # ── AI providers ─────────────────────────────────────────────────────────────
 
+def live_gate():
+    """advance-roadmap's own gate function (a pure function of the usage state), so this page
+    shows what routing would decide right now; None if it can't be loaded."""
+    try:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("advance_roadmap_usage", USAGE_PY)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod.provider_gate
+    except Exception:
+        return None
+
 def check_providers():
     try:
         data = json.load(open(USAGE))
     except (OSError, ValueError):
         return card("AI providers", "absent", [("status", "no usage file (advance-roadmap not run here)")])
     lines, worst = [], "ok"
+    gate_fn = live_gate()
     for name, p in sorted((data.get("providers") or {}).items()):
         g = p.get("gate") or {}
+        if gate_fn:
+            try:
+                g = gate_fn(data, name, "worker", time.time())
+            except Exception:
+                pass  # keep the stored gate
         gate = g.get("state") or "?"
-        if gate not in ("ok", "?") and g.get("reset_epoch") and g["reset_epoch"] < time.time():
-            gate = "ok (its reset has passed)"  # what routing would conclude; the file updates next run
         parts = [f"gate {gate}"]
         # Each provider reports its own windows: Claude five_hour/seven_day, Codex five_hour/weekly,
         # Cursor an `included` monthly pool.
@@ -257,7 +275,7 @@ def check_providers():
             if isinstance(w, dict) and w.get(key) is not None:
                 parts.append(f"{label} {w[key]:.0f}%")
         lines.append((name, " · ".join(parts)))
-        if not gate.startswith("ok") and gate != "?":
+        if gate not in ("ok", "?"):
             worst = "warn"
     updated = data.get("updated_at")
     if updated:
