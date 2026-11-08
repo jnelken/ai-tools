@@ -358,6 +358,13 @@ launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.jake.tailnet-index.p
 tailscale serve --bg --set-path / http://127.0.0.1:8420
 ```
 
+Below the live pages it lists a **library** from `~/.claude/automations/tailnet-index/library.json`
+(kept local: it holds private claude.ai artifact links and personal paths; copy
+`library.example.json` to start): **Reports** (markdown, rendered), **On claude.ai** (links to
+published artifacts) and, at the bottom, the **Sketchpad** (logo-gestalt boards, design mocks,
+prototypes, handoffs). Only files the config's globs find are served, at `/lib/<id>/`, plus files
+beside them so a board's images load.
+
 Tests: `python3 -m unittest discover -s automations/tailnet-index/tests`.
 
 ## `wrapup-repos`
