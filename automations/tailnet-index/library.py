@@ -44,6 +44,8 @@ def expand(pattern):
     """Files matching a glob where `**` spans any number of folders, without descending into
     dependency or build folders (a plain recursive glob would crawl every node_modules)."""
     pattern = os.path.expanduser(pattern)
+    if not os.path.isabs(pattern):
+        return []  # a relative glob would be walked from wherever the server runs; refuse it
     parts = pattern.split(os.sep)
     i = next((n for n, p in enumerate(parts) if any(c in p for c in "*?[")), len(parts))
     root = os.sep.join(parts[:i]) or os.sep
@@ -111,13 +113,16 @@ def build_library(cfg=None):
             if not isinstance(src, dict) or not src.get("glob"):
                 continue
             for path in expand(src["glob"]):
-                eid = entry_id(path)
-                if eid in files:
-                    continue
-                e = {"id": eid, "section": section, "path": path, "title": title_of(path),
-                     "group": src.get("group") or repo_of(path),
-                     "kind": "md" if path.endswith(".md") else "html",
-                     "mtime": os.path.getmtime(path)}
+                try:
+                    eid = entry_id(path)
+                    if eid in files:
+                        continue
+                    e = {"id": eid, "section": section, "path": path, "title": title_of(path),
+                         "group": src.get("group") or repo_of(path),
+                         "kind": "md" if path.endswith(".md") else "html",
+                         "mtime": os.path.getmtime(path)}
+                except OSError:
+                    continue  # vanished mid-scan, or a dangling symlink: skip just this file
                 files[eid] = e
                 sections[section].append(e)
         sections[section].sort(key=lambda e: -e["mtime"])
@@ -154,21 +159,31 @@ def when(ts):
 # ── markdown ────────────────────────────────────────────────────────────────
 
 def _inline(s):
-    s = html.escape(s, quote=False)
-    s = re.sub(r"`([^`]+)`", r"<code>\1</code>", s)
-    s = re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", s)
-    s = re.sub(r"(?<![\w*])\*(?!\s)(.+?)(?<!\s)\*(?![\w*])", r"<em>\1</em>", s)
-    s = re.sub(r"(?<![\w_])_(?!\s)(.+?)(?<!\s)_(?![\w_])", r"<em>\1</em>", s)
+    # Code spans and links are cut out first and put back last, so emphasis rules never touch
+    # a URL (`exports/_draft_/x.md`) or code.
+    held = []
+
+    def hold(fragment):
+        held.append(fragment)
+        return f"\x00{len(held) - 1}\x00"
+
+    s = re.sub(r"`([^`]+)`", lambda m: hold(f"<code>{html.escape(m.group(1), quote=False)}</code>"), s)
 
     def link(m):
         # Browsers drop control characters and spaces inside a URL, so check the scheme of what
         # they'd actually see, and allow only web, mail and relative links.
         href = re.sub(r"[\x00-\x20\x7f]", "", html.unescape(m.group(2)))
         scheme = re.match(r"^([a-zA-Z][a-zA-Z0-9+.-]*):", href)
+        text = html.escape(m.group(1), quote=False)
         if scheme and scheme.group(1).lower() not in ("http", "https", "mailto"):
-            return m.group(1)
-        return f'<a href="{html.escape(href)}">{m.group(1)}</a>'
-    return re.sub(r"\[([^\]]+)\]\(([^)\s]+)\)", link, s)
+            return hold(text)
+        return hold(f'<a href="{html.escape(href)}">{text}</a>')
+    s = re.sub(r"\[([^\]]+)\]\(([^)\s]+)\)", link, s)
+    s = html.escape(s, quote=False)
+    s = re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", s)
+    s = re.sub(r"(?<![\w*])\*(?!\s)(.+?)(?<!\s)\*(?![\w*])", r"<em>\1</em>", s)
+    s = re.sub(r"(?<![\w_])_(?!\s)(.+?)(?<!\s)_(?![\w_])", r"<em>\1</em>", s)
+    return re.sub(r"\x00(\d+)\x00", lambda m: held[int(m.group(1))], s)
 
 
 def md_to_html(text):

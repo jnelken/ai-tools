@@ -75,6 +75,24 @@ class LibraryTest(unittest.TestCase):
         self.assertEqual(hrefs, ["https://ok.example/x", "notes.md"])   # no javascript: link survives
         self.assertIn('href="notes.md"', out)
 
+    def test_relative_globs_are_refused(self):
+        self.assertEqual(self.lib.expand("**/report.md"), [])
+
+    def test_a_dangling_symlink_is_skipped_not_fatal(self):
+        dead = self.code / "brand" / ".logo-gestalt" / "size-ladder.html"
+        os.symlink(self.code / "gone.html", dead)
+        cfg = json.loads(self.cfg.read_text())
+        cfg["sketchpad"].append({"glob": f"{self.code}/**/.logo-gestalt/size-ladder.html"})
+        lib = self.lib.build_library(cfg)
+        self.assertEqual(len(lib["sketchpad"]), 2)   # the two real sketches, without the dead link
+
+    def test_link_urls_and_code_keep_markdown_punctuation(self):
+        out = self.lib.md_to_html("[download](exports/_draft_/report.md) and `a_b_c` and _em_")
+        self.assertIn('href="exports/_draft_/report.md"', out)
+        self.assertIn("<code>a_b_c</code>", out)
+        self.assertIn("<em>em</em>", out)
+        self.assertNotIn("<em>draft</em>", out)
+
     def test_globs_prune_dependency_folders(self):
         found = self.lib.expand(f"{self.code}/**/.impeccable/mocks/**/*.html")
         self.assertTrue(found and not any("node_modules" in p for p in found))
