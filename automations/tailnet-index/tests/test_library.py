@@ -59,6 +59,22 @@ class LibraryTest(unittest.TestCase):
         self.assertEqual([l["title"] for l in lib["claude"]], ["Brew Radar"])
         self.assertEqual([l["title"] for l in lib["sketch_links"]], ["Bike handoff"])
 
+    def test_globs_match_by_segment(self):
+        m = self.lib.match_segments
+        self.assertTrue(m(["a", "b", ".logo-gestalt", "board.html"], ["**", ".logo-gestalt", "board.html"]))
+        self.assertTrue(m([".logo-gestalt", "board.html"], ["**", ".logo-gestalt", "board.html"]))
+        self.assertFalse(m(["not.logo-gestalt", "board.html"], ["**", ".logo-gestalt", "board.html"]))
+        self.assertTrue(m(["prototype", "index.html"], ["prototype", "*.html"]))
+        self.assertFalse(m(["prototype", "deep", "index.html"], ["prototype", "*.html"]))   # * stays in one folder
+        self.assertTrue(m(["mocks", "x", "y", "z.html"], ["mocks", "**", "*.html"]))
+
+    def test_link_scheme_check_sees_through_control_characters(self):
+        out = self.lib.md_to_html("[a](\x01javascript:alert(1)) [b]( JaVaScRiPt:alert(2)) [c](https://ok.example/x) [d](notes.md)")
+        import re
+        hrefs = re.findall(r'href="([^"]*)"', out)
+        self.assertEqual(hrefs, ["https://ok.example/x", "notes.md"])   # no javascript: link survives
+        self.assertIn('href="notes.md"', out)
+
     def test_globs_prune_dependency_folders(self):
         found = self.lib.expand(f"{self.code}/**/.impeccable/mocks/**/*.html")
         self.assertTrue(found and not any("node_modules" in p for p in found))

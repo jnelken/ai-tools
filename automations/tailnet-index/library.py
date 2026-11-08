@@ -50,8 +50,7 @@ def expand(pattern):
     rel_pattern = os.sep.join(parts[i:])
     if not rel_pattern:
         return [root] if os.path.isfile(root) else []
-    # fnmatch's `*` already crosses `/`, so `**/` becomes "any (possibly empty) prefix".
-    rel_pattern = rel_pattern.replace("**/", "*").replace("**", "*")
+    segs = rel_pattern.split(os.sep)
     out = []
     base_depth = root.rstrip(os.sep).count(os.sep)
     for dirpath, dirnames, filenames in os.walk(root):
@@ -60,9 +59,19 @@ def expand(pattern):
             dirnames[:] = []
         for f in filenames:
             full = os.path.join(dirpath, f)
-            if fnmatch.fnmatch(os.path.relpath(full, root), rel_pattern):
+            if match_segments(os.path.relpath(full, root).split(os.sep), segs):
                 out.append(full)
     return sorted(out)
+
+
+def match_segments(parts, segs):
+    """Glob match by path segment: `**` spans zero or more folders; any other segment (with
+    `*`, `?`, `[…]`) matches exactly one name, so `*` never crosses a `/`."""
+    if not segs:
+        return not parts
+    if segs[0] == "**":
+        return any(match_segments(parts[k:], segs[1:]) for k in range(len(parts) + 1))
+    return bool(parts) and fnmatch.fnmatchcase(parts[0], segs[0]) and match_segments(parts[1:], segs[1:])
 
 
 def entry_id(path):
@@ -152,8 +161,11 @@ def _inline(s):
     s = re.sub(r"(?<![\w_])_(?!\s)(.+?)(?<!\s)_(?![\w_])", r"<em>\1</em>", s)
 
     def link(m):
-        href = html.unescape(m.group(2))
-        if href.lower().startswith(("javascript:", "data:", "vbscript:")):
+        # Browsers drop control characters and spaces inside a URL, so check the scheme of what
+        # they'd actually see, and allow only web, mail and relative links.
+        href = re.sub(r"[\x00-\x20\x7f]", "", html.unescape(m.group(2)))
+        scheme = re.match(r"^([a-zA-Z][a-zA-Z0-9+.-]*):", href)
+        if scheme and scheme.group(1).lower() not in ("http", "https", "mailto"):
             return m.group(1)
         return f'<a href="{html.escape(href)}">{m.group(1)}</a>'
     return re.sub(r"\[([^\]]+)\]\(([^)\s]+)\)", link, s)
