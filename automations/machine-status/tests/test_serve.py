@@ -42,8 +42,8 @@ class ParseTest(unittest.TestCase):
         self.assertEqual(ms.parse_superset_host("launchd: not loaded\n")[0], "absent")
         self.assertEqual(ms.parse_superset_host("launchd: loaded (running\npid 4 )\n")[0], "ok")
         self.assertEqual(ms.parse_superset_host("launchd: loaded\n")[0], "problem")
-        self.assertEqual(ms.parse_crash_check("launchd: loaded\nRESUME candidates found: 0\n")[0], "ok")
-        state, summary = ms.parse_crash_check("launchd: loaded\nRESUME candidates found: 2\n")
+        self.assertEqual(ms.parse_crash_check("launchd: loaded\nRESUME candidates found: 0\n", boot=0)[0], "ok")
+        state, summary = ms.parse_crash_check("launchd: loaded\nRESUME candidates found: 2\n", boot=0)
         self.assertEqual((state, "2 in Superset tabs" in summary), ("warn", True))
         import tempfile
         with tempfile.NamedTemporaryFile("w", suffix=".log", delete=False) as f:
@@ -51,9 +51,12 @@ class ParseTest(unittest.TestCase):
                     "  session e7b1c30a-cd68-5686-b7c5-56b680023a9c\n    manual resume: ...\n"
                     "  session 61badfd3-5621-4d90-b16d-0a579fba13cb\n== Summary ==\nRESUME candidates found: 0\n")
         try:
-            state, summary = ms.parse_crash_check(f"launchd: loaded\nlatest:  {f.name}\nRESUME candidates found: 0\n")
+            state, summary = ms.parse_crash_check(f"launchd: loaded\nlatest:  {f.name}\nRESUME candidates found: 0\n", boot=1)
+            stale = ms.parse_crash_check(f"launchd: loaded\nlatest:  {f.name}\nRESUME candidates found: 0\n",
+                                         boot=os.path.getmtime(f.name) + 60)
         finally:
             os.unlink(f.name)
+        self.assertEqual(stale, ("warn", "pending: no report since this boot yet"))   # last boot's report
         self.assertEqual(state, "warn")                      # zero in tabs, but two outside Superset
         self.assertIn("2 outside Superset", summary)
 

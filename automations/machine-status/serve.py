@@ -91,7 +91,12 @@ def global_sweep_count(report_text):
     return len(re.findall(r"^\s+session [0-9a-f-]{8,}", section, re.M))
 
 
-def parse_crash_check(out):
+def boot_epoch():
+    rc, out = run(["sysctl", "-n", "kern.boottime"])
+    return parse_boottime(out) if rc == 0 else None
+
+
+def parse_crash_check(out, boot=None):
     if re.search(r"launchd:\s*not loaded", out):
         if re.search(r"plist:\s*\(none\)", out):
             return "absent", "not installed"
@@ -102,6 +107,14 @@ def parse_crash_check(out):
     # The summary counts Superset tabs only; the same report's global sweep covers the rest.
     outside = 0
     latest = re.search(r"latest:\s*(\S+\.log)", out)
+    boot = boot if boot is not None else boot_epoch()
+    if latest and boot:
+        # The report persists across boots; one written before this boot says nothing about it.
+        try:
+            if os.path.getmtime(latest.group(1)) < boot:
+                return "warn", "pending: no report since this boot yet"
+        except OSError:
+            pass
     if latest:
         try:
             with open(latest.group(1), encoding="utf-8", errors="replace") as f:
