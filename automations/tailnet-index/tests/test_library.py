@@ -99,6 +99,13 @@ class LibraryTest(unittest.TestCase):
         self.assertIn('href="https://example.com/a_(b)"', out)
         self.assertNotIn("\x00", out)
 
+    def test_an_entry_symlinked_out_of_its_folder_is_refused(self):
+        lib = self.lib.library()
+        board = next(e for e in lib["sketchpad"] if e["title"] == "Logo board")
+        os.replace(board["path"], board["path"] + ".bak")
+        os.symlink(self.code / "secret.txt", board["path"])
+        self.assertIsNone(self.lib.resolve(board["id"]))
+
     def test_nul_bytes_in_the_source_cant_hang_rendering(self):
         out = self.lib.md_to_html("plain \x00 text and `code \x00 span` and \x001\x00")
         self.assertNotIn("\x00", out)
@@ -112,7 +119,7 @@ class LibraryTest(unittest.TestCase):
         lib = self.lib.library()
         report = lib["reports"][0]
         board = next(e for e in lib["sketchpad"] if e["title"] == "Logo board")
-        self.assertEqual(self.lib.resolve(report["id"]), report["path"])
+        self.assertEqual(self.lib.resolve(report["id"]), os.path.realpath(report["path"]))
         self.assertTrue(self.lib.resolve(report["id"], "data.json").endswith("data.json"))
         self.assertTrue(self.lib.resolve(board["id"], "previews/hero.png").endswith("hero.png"))
         self.assertIsNone(self.lib.resolve(board["id"], "../../secret.txt"))

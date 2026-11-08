@@ -143,9 +143,12 @@ def resolve(eid, rel=""):
     e = library()["files"].get(eid)
     if not e:
         return None
-    if not rel:
-        return e["path"]
     base = os.path.realpath(os.path.dirname(e["path"]))
+    if not rel:
+        # Checked on every request: an entry that is (or became) a symlink out of its own
+        # folder is refused like any other escape.
+        target = os.path.realpath(e["path"])
+        return target if target.startswith(base + os.sep) and os.path.isfile(target) else None
     target = os.path.realpath(os.path.join(base, rel))
     if not target.startswith(base + os.sep) or not os.path.isfile(target):
         return None
