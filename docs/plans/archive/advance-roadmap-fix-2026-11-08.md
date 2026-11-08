@@ -2,7 +2,7 @@
 
 ## Status
 
-Root cause fixed and validated; ready to merge and push.
+Root cause fixed, validated, merged and pushed; the installer synced the deployed source.
 
 ## Decisions
 
@@ -20,7 +20,7 @@ Root cause fixed and validated; ready to merge and push.
 
 - [x] Add regression coverage for the prefixed Cursor banner.
 - [x] Run the relevant advance-roadmap tests.
-- [ ] Merge and push the fix; deploy from the maintained installer.
+- [x] Merge and push the fix; deploy from the maintained installer.
 
 ## Approach
 
