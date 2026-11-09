@@ -83,9 +83,11 @@ this host from another machine: it keeps a dead tab and `superset panes` can't r
 `close-tab.sh` uses `panes close` whenever a desktop is attached to this host, which removes
 the tab outright. Otherwise it hangs up the tab's tty (found through the Claude process,
 `$PPID`), so Claude and the login shell exit as if the tab were closed by hand, and uses
-`terminals close` only if the terminal is still listed after that. Whether a remote app drops
-the tab after a hangup is still being checked; if the dead tab remains, close it by hand and
-don't retry the CLI from a new session. Each run logs to `~/.claude/state/self-destruct.log`.
+`terminals close` only if the terminal is still listed after that. A remote app keeps the tab
+either way. After a hangup it starts a fresh shell in the same tab within seconds and disposes
+the exited terminal (QA'd on 2026-11-09). After a dispose it keeps a dead tab instead. So on a
+remote viewer, the tab has to be closed by hand; don't retry the CLI from a new session. Each
+run logs to `~/.claude/state/self-destruct.log`.
 
 ## 1. Confirm the branch is merged
 
