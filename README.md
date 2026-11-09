@@ -39,7 +39,7 @@ after installing SwiftBar (`brew install --cask swiftbar`).
 | [`move-diff`](skills/move-diff) | Relocate uncommitted changes to a different branch/worktree |
 | [`fix-stale-docs`](skills/fix-stale-docs) | Scan for dead doc references, fix or delete them, push to an open (preferably approved) branch |
 | [`peer-review`](skills/peer-review) | Review with Claude for Codex-authored changes, Codex otherwise |
-| [`pick-up`](skills/pick-up) | Resume open work from `IN_PROGRESS.md`, running plan docs, and recent harness plans; offer to copy harness plans into the repo; `sweep` flags only evidence-backed done/tracked plan threads |
+| [`pick-up`](skills/pick-up) | Resume open work from `IN_PROGRESS.md`, running plan docs, and recent harness plans, each open item put to the user as a Zen-format decision (no plan mode), then `/compact` before the work; offer to copy harness plans into the repo; `sweep` flags only evidence-backed done/tracked plan threads |
 | [`post-pr`](skills/post-pr) | Take a finished PR the rest of the way: review until clean, watch CI, post to `#pr-review`, badge + undraft |
 | [`pr-review-gaps`](skills/pr-review-gaps) | Find sswt PRs never posted to `#pr-review`, with a hold-list for deliberately parked ones |
 | [`prod-query`](skills/prod-query) | Read-only production customer-tenant data questions via the api repo's audited `query:prod-readonly` script — CLI contract, RUM id → tenant mapping, safe query cookbook, PII rules |
