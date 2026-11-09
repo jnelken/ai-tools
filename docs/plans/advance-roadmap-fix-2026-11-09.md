@@ -2,7 +2,7 @@
 
 ## Status
 
-Triage complete; implementation and verification pass; ready to merge.
+Complete: implementation and verification passed; merged and pushed to `main`; local deploy synced.
 
 ## Decisions
 
@@ -14,7 +14,7 @@ Triage complete; implementation and verification pass; ready to merge.
 ## Findings
 
 - Digest entries 1 and 2: run status shows Cursor worker exit 1, no result, and usage limit; Codex and Claude were under gate. The worker chain puts Cursor first.
-- Digest entry 5 and Jake report R1: both named workers hit Cursor's usage limit; source selects Cursor for worker and default review routes.
+- Digest entry 5 and Jake report R1: Cursor usage-limit errors appear in the two named lane runs (and one additional run); source selected Cursor as a worker candidate.
 - Digest entries 3 and 4: repeated xcrun temp-cache failures are warnings in Git output; subsequent commands completed.
 - Extra log errors: Notion MCP emits OAuth `AuthRequired`; lane results do not depend on it.
 
@@ -23,7 +23,7 @@ Triage complete; implementation and verification pass; ready to merge.
 - [x] Verify reported lane errors and all matching batch logs.
 - [x] Remove Cursor from worker selection and add regression tests.
 - [x] Run advance-roadmap and ai-tools tests.
-- [ ] Review, merge and push.
+- [x] Review, merge and push.
 
 ## Approach
 
