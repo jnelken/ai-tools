@@ -318,6 +318,16 @@ If the merge was blocked, replace the `Merged` line with `Merge: blocked — con
 
 If the run stopped at a different gate (unconverged review, failing check), say which gate and what is outstanding — don't bury it.
 
+### 8. Pick up in a new tab
+
+After a run that merged a PR (a sub-PR into its trunk, step 3.6) or otherwise finished the branch's work, if the repo's gitignored `.claude/IN_PROGRESS.md` has open items, **start `/pick-up` yourself in a new terminal tab; never offer it or leave it to Jake.** A new tab in an existing workspace, not a new sswt, and not the terminal this run is in:
+
+```bash
+superset agents create --workspace "$WS" --agent claude --prompt "/pick-up" --json
+```
+
+`$WS` is a workspace that survives the run: the current one, unless step 3.7 reaps it, in which case the trunk's workspace or the project's root checkout. The file is gitignored and lives in the root checkout, so a worktree tab sees no `IN_PROGRESS.md`; name the root checkout's path in the prompt when `$WS` is a worktree. Spawn it before step 3.7's reap, report it as `- Pick-up: tab spawned (N open items)`, and skip silently when the file is absent or empty.
+
 ## When it fires on its own
 
 The global CLAUDE.md instructs this to run **automatically, without asking**, once a task's work is complete. Concretely, all of:
