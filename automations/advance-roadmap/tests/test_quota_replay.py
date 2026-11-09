@@ -107,6 +107,13 @@ elif name == "agent":
               open(path, "w"))
     print(json.dumps({{"type": "result", "result": "done", "usage": {{"inputTokens": 1, "outputTokens": 1}}}}))
 elif name == "codex":
+    if role == "worker" and mode == "plan":
+        path = next(l.split(": ", 1)[1] for l in prompt.splitlines()
+                    if l.startswith("(raw JSON, no fence) to: "))
+        json.dump({{"outcome": "bookkeeping", "provider": "codex", "repo": "demo",
+                   "summary": "bookkeeping done"}}, open(path, "w"))
+        print("codex done")
+        sys.exit(0)
     if session_id:
         print("session id: " + session_id, flush=True)
     out = args[args.index("-o") + 1] if "-o" in args else None
@@ -156,7 +163,14 @@ elif name == "claude":
         path = next(l.split(": ", 1)[1] for l in prompt.splitlines() if l.startswith("(raw JSON, no fence) to: "))
         json.dump({{"outcome": "limit_hit", "provider": "claude", "repo": "demo",
                     "limit_text": os.environ["FAKE_RESULT_LIMIT"]}}, open(path, "w"))
-    result = fence if mode == "plan" else "I looked around and decided nothing."
+    if role == "worker" and mode == "plan":
+        path = next(l.split(": ", 1)[1] for l in prompt.splitlines()
+                    if l.startswith("(raw JSON, no fence) to: "))
+        json.dump({{"outcome": "bookkeeping", "provider": "claude", "repo": "demo",
+                   "summary": "bookkeeping done"}}, open(path, "w"))
+        result = "done"
+    else:
+        result = fence if mode == "plan" else "I looked around and decided nothing."
     reply = {{"type": "result", "subtype": "success", "is_error": False, "result": result, "modelUsage": {{}}}}
     if session_id:
         reply["session_id"] = session_id
@@ -767,7 +781,7 @@ exec(compile(open(__file__).read(), __file__, "exec"))
         plan = {**NO_WORK, "blockers": [{"repo": "demo", "linear_id": "DEV-7", "detail": "needs a decision"}]}
         self.run_lane(FAKE_CLAUDE="plan", FAKE_PLAN=json.dumps(plan))
         self.assertTrue(self.reached_barrier)
-        self.assertEqual([c["bin"] for c in self.calls() if c["role"] == "worker"], ["agent"])
+        self.assertEqual([c["bin"] for c in self.calls() if c["role"] == "worker"], ["claude"])
         self.assertEqual(self.record()["outcome"], "blocked-no-item")
         self.assertEqual(json.loads(self.verdict.read_text())["summary"], NO_WORK["summary"])
         self.assertFalse((self.root / "memory").exists(), "the worker owns the ledger row, not run.sh")

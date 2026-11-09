@@ -473,7 +473,7 @@ def quota():
             def ok(name, role):
                 return (providers.get(name) or {}).get(f"available_for_{role}", role == "worker")
             orch = next((n for n in ("codex", "claude") if ok(n, "orchestrator")), None)
-            workers = [n for n in ("cursor", "codex", "claude") if ok(n, "worker")]
+            workers = [n for n in ("codex", "claude") if ok(n, "worker")]
 
         updated = p.get("updated_at")
         age = 0

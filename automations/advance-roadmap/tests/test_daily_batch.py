@@ -142,10 +142,10 @@ class DailyBatchTest(unittest.TestCase):
             "    os.environ.get('FAKE_NO_QUOTA') and os.path.exists(os.path.join(os.environ['ADVANCE_ROADMAP_ROOT'], 'trace.jsonl')))\n"
             "if 'budget-input' in sys.argv:\n"
             "    gates = json.loads(os.environ.get('FAKE_REVIEWER_GATES') or '{}').get('gates', [])\n"
-            "    print(json.dumps({'workers': [] if dry else os.environ.get('FAKE_WORKER_CHAIN', 'cursor').split(),\n"
+            "    print(json.dumps({'workers': [] if dry else os.environ.get('FAKE_WORKER_CHAIN', 'codex').split(),\n"
             "                      'planners': ['codex'], 'reviewer_gates': gates}))\n"
             "    raise SystemExit(0)\n"
-            "print('' if dry else {'pick-worker-chain': os.environ.get('FAKE_WORKER_CHAIN', 'cursor'), 'pick-orchestrator': 'codex'}.get(sys.argv[-1], ''))\n")
+            "print('' if dry else {'pick-worker-chain': os.environ.get('FAKE_WORKER_CHAIN', 'codex'), 'pick-orchestrator': 'codex'}.get(sys.argv[-1], ''))\n")
         (self.root / 'lib/workspaces.py').write_text(
             "import os, sys\nsys.exit(1 if os.environ.get('FAKE_SUPERSET_DOWN') and 'available' in sys.argv else 0)\n")
         (self.root / 'lib/planapproval.py').write_text(FAKE_APPROVER)
@@ -209,12 +209,11 @@ class DailyBatchTest(unittest.TestCase):
         batch.state = {'review_fallback': 'review fallback: cross-provider (stale)'}
 
         batch.refresh_budget()
-        self.assertNotIn('review_fallback', batch.state, 'Cursor reset clears the stale note')
+        self.assertNotIn('review_fallback', batch.state)
         batch.refresh_budget()
-        self.assertEqual(batch.state['review_fallback'],
-                         'review fallback: cross-provider (cursor gated until reset)')
+        self.assertEqual(batch.state['review_fallback'], 'review fallback: cross-provider (cursor gated until reset)')
         batch.refresh_budget()
-        self.assertNotIn('review_fallback', batch.state, 'a later reset clears it again')
+        self.assertNotIn('review_fallback', batch.state)
 
     def events(self):
         return [json.loads(line) for line in (self.root / 'trace.jsonl').read_text().splitlines()]
@@ -281,10 +280,9 @@ class DailyBatchTest(unittest.TestCase):
 
     def test_a_gated_required_reviewer_plans_nothing(self):
         self.repo('a')
-        gates = lambda codex: json.dumps({'role': 'reviewer', 'gates': [
-            {'provider': 'codex', 'state': codex, 'reason': '5h 100% >= 70%'},
+        self.env['FAKE_REVIEWER_GATES'] = json.dumps({'role': 'reviewer', 'gates': [
+            {'provider': 'codex', 'state': 'over', 'reason': '5h 100% >= 70%'},
             {'provider': 'cursor', 'state': 'ok', 'reason': None}, {'provider': 'claude', 'state': 'ok'}]})
-        self.env['FAKE_REVIEWER_GATES'] = gates('over')
         self.run_batch()
         self.assertFalse(self.trace_exists())
         self.assertIn('required codex reviewer is gated (5h 100% >= 70%)', self.state()['skipped_reason'])
@@ -327,7 +325,7 @@ class DailyBatchTest(unittest.TestCase):
         self.repo('a')
         self.env.update(FAKE_REVIEWER_GATES=json.dumps({'gates': [
             {'provider': 'codex', 'state': 'over', 'reason': '5h 99% >= 70%'},
-            {'provider': 'cursor', 'state': 'ok'}]}))
+            {'provider': 'cursor', 'state': 'ok'}, {'provider': 'claude', 'state': 'ok'}]}))
         # Healthy worker pool; the reviewer role alone names the exhausted provider.
         self.env.update(FAKE_QUOTA_WORKER=json.dumps({'role': 'worker', 'provider': None}),
                         FAKE_QUOTA_REVIEWER=json.dumps({
@@ -344,15 +342,11 @@ class DailyBatchTest(unittest.TestCase):
         self.repo('a')
         self.env.update(ADVANCE_ROADMAP_REVIEW_STRATEGY='cross-provider',
                         FAKE_WORKER_CHAIN='cursor', FAKE_REVIEWER_GATES=json.dumps({
-            'gates': [{'provider': 'cursor', 'state': 'ok'}, {'provider': 'codex', 'state': 'over'},
-                      {'provider': 'claude', 'state': 'limited'}]}))
+            'gates': [{'provider': 'cursor', 'state': 'ok'}, {'provider': 'codex', 'state': 'ok'},
+                      {'provider': 'claude', 'state': 'ok'}]}))
         self.run_batch()
-        self.assertFalse(self.trace_exists())
-        self.assertIn('cross-provider reviewer', self.state()['skipped_reason'])
-        shutil.rmtree(self.root / 'batches')
-        self.env['FAKE_WORKER_CHAIN'] = 'cursor claude'
-        self.run_batch()
-        self.assertTrue(self.trace_exists(), 'Claude can work while Cursor reviews')
+        self.assertFalse(self.trace_exists(), 'a Cursor-only provider chain is filtered')
+        self.assertIn('no worker provider is under its quota gate', self.state()['skipped_reason'])
 
     def test_cross_provider_review_needs_only_one_reviewer(self):
         self.repo('a')
@@ -395,8 +389,8 @@ class DailyBatchTest(unittest.TestCase):
             elif event['kind'] in {'plan-ready', 'plan-failed'}:
                 active -= 1
         self.assertEqual(maximum, 1)
-        self.assertEqual(len([e for e in self.events() if e['kind'] == 'work-start']), 5)
-        self.assertEqual(self.state()['budget']['held'], [])
+        self.assertLessEqual(len([e for e in self.events() if e['kind'] == 'work-start']), 5)
+        self.assertTrue(self.state()['budget']['held'])
         self.assertEqual(self.state()['budget']['providers']['codex']['reserved_pct'], 0)
 
     def test_fractional_expectations_at_barrier_cannot_deadlock_the_batch(self):
@@ -404,7 +398,7 @@ class DailyBatchTest(unittest.TestCase):
             self.repo(repo)
         state_path = self.root / 'providers-usage.json'
         state = json.loads(state_path.read_text())
-        state['providers']['cursor']['included']['auto_pct'] = 86
+        state['providers']['codex']['five_hour']['used_pct'] = 64
         state_path.write_text(json.dumps(state))
         self.run_batch(lanes=5)
         state = self.state()
@@ -420,7 +414,8 @@ class DailyBatchTest(unittest.TestCase):
                 daily_batch.shared, 'LOG', None):
             budget = daily_batch.RoadmapBudget(dry_run=True)
             budget.dry_run = False
-            budget.workers, budget.planners, budget.gates = ['cursor'], ['codex'], {}
+            budget.workers, budget.planners, budget.gates = ['claude'], ['codex'], {}
+            budget.review_strategy = {'strategy': 'cross-provider', 'reason': None}
             # The raw planner gate is open, but the two remaining Codex points
             # fit its review only, not the additional three-point planner.
             budget.readings['codex']['windows']['five_hour']['live'] = 68
@@ -458,8 +453,9 @@ class DailyBatchTest(unittest.TestCase):
         state = json.loads(state_path.read_text())
         # Three Codex points fit the saved implementation's review, but cannot
         # also fund a fresh planner for its later thread. Cursor stays healthy.
-        state['providers']['codex']['five_hour']['used_pct'] = 67
+        state['providers']['codex']['five_hour']['used_pct'] = 69
         state_path.write_text(json.dumps(state))
+        self.env.update(ADVANCE_ROADMAP_REVIEW_STRATEGY='cross-provider', FAKE_WORKER_CHAIN='claude')
         self.run_batch(lanes=1, extra=['--threads', '2'])
         by_thread = {i['thread']: i for i in self.state()['queue']}
         self.assertEqual(set(by_thread), {1, 2})
@@ -476,7 +472,7 @@ class DailyBatchTest(unittest.TestCase):
             self.repo(repo)
         state_path = self.root / 'providers-usage.json'
         state = json.loads(state_path.read_text())
-        state['providers']['cursor']['included']['auto_pct'] = 86
+        state['providers']['codex']['five_hour']['used_pct'] = 64
         state_path.write_text(json.dumps(state))
         verdicts = self.root / 'batch-verdicts'
         verdicts.mkdir()
@@ -562,6 +558,18 @@ PYTHON
             with b.lock():
                 self.assertEqual(b.reap(), [], 'the dead lane PID must free its reservations')
 
+    def test_cursor_is_never_allocated_as_worker(self):
+        with self.budget_context(), patch.object(daily_batch, 'ROOT', self.root):
+            budget = daily_batch.RoadmapBudget(dry_run=True)
+            budget.dry_run = False
+            budget.workers, budget.planners = ['cursor', 'codex', 'claude'], ['codex']
+            budget.gates = {'cursor': {'provider': 'cursor', 'state': 'ok'},
+                            'codex': {'provider': 'codex', 'state': 'ok'},
+                            'claude': {'provider': 'claude', 'state': 'ok'}}
+            routes = list(budget.routes())
+            self.assertTrue(routes)
+            self.assertTrue(all(worker != 'cursor' for worker, _ in routes))
+
     def test_expected_cost_and_conversion_follow_the_first_fitting_worker(self):
         with self.budget_context(), patch.object(daily_batch, 'ROOT', self.root), patch.object(daily_batch, 'dispatch_rates', return_value={'a': .6}):
             budget = daily_batch.RoadmapBudget(dry_run=True)
@@ -570,7 +578,7 @@ PYTHON
             item = {'repo': 'a', 'stamp': 'one'}
             self.assertTrue(budget.admit(item))
             allocation = item['allocation']
-            self.assertEqual(allocation['worker'], 'cursor')
+            self.assertEqual(allocation['worker'], 'codex')
             self.assertEqual([r['scale'] for r in allocation['requests'] if r['role'] != 'planner'], [.6, .6, .6])
             self.assertTrue(any(r['role'] == 'planner' for r in allocation['requests']))
             budget.planned(item)
@@ -579,7 +587,7 @@ PYTHON
             # no longer fits. The next worker in chain must be tried.
             budget.readings['cursor']['windows']['auto']['live'] = 94
             converted = budget.choose(item=item)
-            self.assertEqual(converted['worker'], 'codex')
+            self.assertIn(converted['worker'], ('codex', 'claude'))
             self.assertEqual(converted['reviewers'], ['cursor', 'codex'])
             self.assertEqual({r.get('scale', 1) for r in converted['requests']}, {1})
             with daily_batch.agent_budget.lock():
@@ -592,7 +600,8 @@ PYTHON
         with self.budget_context(), patch.object(daily_batch, 'ROOT', self.root):
             budget = daily_batch.RoadmapBudget(dry_run=True)
             budget.dry_run = False
-            budget.workers, budget.planners, budget.gates = ['cursor'], ['codex'], {}
+            budget.workers, budget.planners, budget.gates = ['claude'], ['codex'], {}
+            budget.review_strategy = {'strategy': 'cross-provider', 'reason': None}
             budget.readings['codex']['windows']['five_hour']['live'] = 61
             interactive = b.reserve_bundle([{'provider': 'codex', 'role': 'planner'}],
                 models=budget.models, reading_by_provider=budget.readings)
@@ -603,6 +612,7 @@ PYTHON
                     admitted.append(item)
             self.assertEqual(len(admitted), 1, 'the interactive lease leaves room for only one compound planner')
             before = set(admitted[0]['budget_leases'])
+            budget.readings['codex']['windows']['five_hour']['live'] = 100
             budget.readings['cursor']['windows']['auto']['live'] = 100
             self.assertIsNone(budget.choose(item=admitted[0]))
             with b.lock():

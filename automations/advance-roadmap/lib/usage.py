@@ -103,6 +103,8 @@ ROLE_PROVIDERS = {
     "worker": ("cursor", "codex", "claude"),
     "reviewer": ("codex", "cursor", "claude"),
 }
+# Cursor remains eligible for quota-aware review fallback, but not new worker assignments.
+ROUTED_PROVIDERS = {"worker": ("codex", "claude")}
 # Cursor draws on a different pool per role: Auto, or the API pool for a named model.
 CURSOR_MODEL_ENV = {"worker": "ADVANCE_ROADMAP_CURSOR_WORKER_MODEL",
                     "reviewer": "ADVANCE_ROADMAP_CURSOR_REVIEW_MODEL"}
@@ -787,8 +789,8 @@ def pick_orchestrator(state: dict[str, Any]) -> str | None:
 
 
 def pick_worker_chain(state: dict[str, Any]) -> list[str]:
-    """Cursor → Codex → Claude, skipping providers over their gates."""
-    return [n for n in ROLE_PROVIDERS["worker"] if state["providers"][n].get("available_for_worker")]
+    """Codex → Claude, skipping providers over their gates."""
+    return [n for n in ROUTED_PROVIDERS["worker"] if state["providers"][n].get("available_for_worker")]
 
 
 _CLOCK_RESET = re.compile(

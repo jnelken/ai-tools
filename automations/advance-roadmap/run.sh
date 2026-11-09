@@ -4,7 +4,7 @@
 # Architecture:
 #   1. Refresh providers-usage.json (lib/usage.py — Claude/Codex/Cursor quota probes ∪ prior limits).
 #   2. Read-only orchestrator: Codex Sol (high) default; Claude Sonnet (medium) fallback.
-#   3. Parse ORCHESTRATOR_RESULT_JSON; dispatch worker.sh (Cursor → Codex → Claude) in the
+#   3. Parse ORCHESTRATOR_RESULT_JSON; dispatch worker.sh (Codex → Claude) in the
 #      item's own Superset workspace terminal, so the PR it merges is credited (lib/workspaces.py).
 #   4. Record limit hits for the next tick.
 #   5. Append exactly one row to runs.jsonl (lib/runrecord.py) — the run record the

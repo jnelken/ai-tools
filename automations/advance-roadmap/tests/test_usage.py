@@ -189,6 +189,11 @@ class RoutingTests(unittest.TestCase):
             self.assertFalse(self.flags()["cursor"]["available_for_worker"])
         self.assertEqual(usage.pick_worker_chain(self.state), ["codex", "claude"])
 
+    def test_available_cursor_is_not_in_worker_route(self):
+        for provider in ("cursor", "codex", "claude"):
+            self.state["providers"][provider]["available_for_worker"] = True
+        self.assertEqual(usage.pick_worker_chain(self.state), ["codex", "claude"])
+
     def test_cursor_pinned_model_gates_on_api_pool(self):
         usage.apply_cursor(self.state, probed(usage.parse_cursor_usage(cursor_response(auto=100, api=5)), "dashboard_api"))
         with mock.patch.dict(os.environ, {"ADVANCE_ROADMAP_CURSOR_WORKER_MODEL": "claude-sonnet-4-6"}):
@@ -896,7 +901,7 @@ class CliTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         out = json.loads(result.stdout)
         self.assertEqual(out["orchestrator"], "codex")
-        self.assertEqual(out["workers"], ["cursor", "codex", "claude"])
+        self.assertEqual(out["workers"], ["codex", "claude"])
 
     def test_record_limit_still_gates_with_probe_data_absent(self):
         self.run_usage("record-limit", "--provider", "codex", "--text", "usage limit, resets in 2h 5m")

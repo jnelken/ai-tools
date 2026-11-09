@@ -198,7 +198,7 @@ class RoadmapBudget:
             usage.recompute_flags(state)
             options = {"workers": usage.pick_worker_chain(state), "planners": usage.pick_orchestrators(state),
                        "reviewer_gates": usage.role_gates(state, "reviewer")}
-        self.workers = [p for p in options.get("workers", []) if p in agent_budget.PROVIDERS]
+        self.workers = [p for p in options.get("workers", []) if p in usage.ROUTED_PROVIDERS["worker"]]
         self.planners = [p for p in options.get("planners", []) if p in ("codex", "claude")]
         self.gates = {g["provider"]: g for g in options.get("reviewer_gates", []) if isinstance(g, dict)}
         self.review_strategy = options.get("review_strategy") or usage.effective_review_strategy(
@@ -215,6 +215,8 @@ class RoadmapBudget:
     def routes(self):
         decision = self.review_decision()
         for worker in self.workers:
+            if worker not in usage.ROUTED_PROVIDERS["worker"]:
+                continue
             if decision.get("strategy") == "cross-provider":
                 order = {"cursor": ["codex", "claude"], "codex": ["cursor", "claude"],
                          "claude": ["codex", "cursor"]}[worker]
