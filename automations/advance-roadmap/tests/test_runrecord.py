@@ -81,6 +81,23 @@ class RunRecordTest(unittest.TestCase):
         self.assertEqual(rec["quota"], status["quota"])
         self.assertEqual((rec["quota"]["provider"], rec["quota"]["reset_epoch"]), ("codex", 1791910000))
 
+    def test_leased_worker_limit_without_result_is_a_quota_pause(self):
+        limited = [{"provider": "cursor", "state": "limited",
+                    "cause": "ActionRequiredError: You've hit your usage limit"}]
+        status = {"used": "cursor", "exit": 1, "fatal": None, "missing": [], "limited": limited,
+                  "quota": quota("worker", limited, "cursor")}
+        rec = self.append({"action": "dispatch_worker", "repo": "demo"}, status)
+        self.assertEqual(rec["outcome"], "quota-paused")
+        self.assertIn("no unleased fallback", rec["detail"])
+        self.assertEqual(rec["quota"], status["quota"])
+
+    def test_failure_after_a_different_provider_limit_remains_an_error(self):
+        status = {"used": "codex", "exit": 1, "fatal": None, "missing": [],
+                  "limited": [{"provider": "cursor", "state": "limited", "cause": "usage limit"}]}
+        rec = self.append({"action": "dispatch_worker", "repo": "demo"}, status)
+        self.assertEqual(rec["outcome"], "error")
+        self.assertEqual(rec["detail"], "worker exited 1 without a result")
+
     def test_worker_quota_pause_with_no_known_reset_still_names_a_provider(self):
         limited = [{"provider": "cursor", "state": "over", "reason": "auto pool 96% >= 95%"},
                    {"provider": "codex", "state": "limited", "cause": "usage limit"}]

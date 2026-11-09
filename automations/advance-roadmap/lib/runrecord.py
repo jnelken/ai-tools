@@ -71,6 +71,14 @@ def derive(a, orch, wstatus, wresult):
         return "error", "worker.sh left no status"
     if wstatus.get("fatal"):
         return "error", f"worker.sh: {wstatus['fatal']}"
+    # A leased provider can hit a live limit and stop without writing a result: worker.sh
+    # records it as `used` so the batch does not spend an unleased fallback. Preserve that
+    # quota pause instead of treating its non-zero exit as a worker crash.
+    if w_exit not in (0, None) and not wresult:
+        used = wstatus.get("used")
+        if used and any(limit.get("provider") == used and limit.get("state") == "limited"
+                        for limit in wstatus.get("limited") or () if isinstance(limit, dict)):
+            return "quota-paused", f"worker {used} hit its usage limit; no unleased fallback was used"
     if not wstatus.get("used"):
         if wstatus.get("limited") and not wstatus.get("missing"):
             names = ", ".join(l.get("provider") or "?" for l in wstatus["limited"])
