@@ -85,9 +85,12 @@ def _pct_env(name: str, default: float) -> float:
 # plan approver): stop routing to a provider well before its hard limit, not at it.
 MAX_FIVE_HOUR_PCT = _pct_env("ADVANCE_ROADMAP_MAX_FIVE_HOUR_PCT", 70)
 MAX_SEVEN_DAY_PCT = _pct_env("ADVANCE_ROADMAP_MAX_WEEKLY_PCT", 90)
-# Cursor quotas are monthly and worker.sh fails over within the tick, so gate
-# only when the pool is fully spent (Jake, 2026-10-19: use Cursor to 100%).
+# Cursor's dashboard pool is monthly; use it through 100%, while observed CLI limits
+# keep it gated through the next daily batch when no reset time is available.
 MAX_CURSOR_PCT = _pct_env("ADVANCE_ROADMAP_MAX_CURSOR_PCT", 100)
+# If Cursor reports a limit without a reset time, keep it out of the next daily batch.
+# The one-hour generic cooldown expires before the next 10:30 run and repeated the same failure.
+UNKNOWN_CURSOR_LIMIT_COOLDOWN_S = 24 * 60 * 60
 
 # `gate`'s exit code for "over its gate". Not 1 (a crash) or 2 (bad arguments): callers skip a
 # provider only on this code, so a broken usage.py never silently skips every provider.
@@ -277,8 +280,8 @@ def cursor_gate(prov: dict[str, Any], now: float, role: str = "worker") -> dict[
                                            "reset_epoch": inc.get("reset_epoch")}, MAX_CURSOR_PCT)], now)
 
 
-def limit_gate(prov: dict[str, Any], now: float) -> dict[str, Any] | None:
-    if provider_available_from_limit(prov, now):
+def limit_gate(prov: dict[str, Any], now: float, provider: str | None = None) -> dict[str, Any] | None:
+    if provider_available_from_limit(prov, now, provider):
         return None
     reset = _num((prov.get("last_limit_hit") or {}).get("reset_epoch"))
     when = epoch_to_iso(reset)
@@ -295,7 +298,7 @@ def provider_gate(state: dict[str, Any], name: str, role: str, now: float | None
         return {"available": False, "state": "n/a", "reason": f"{name} does not fill the {role} role",
                 "reset_epoch": None}
     prov = state["providers"][name]
-    gate = limit_gate(prov, now)
+    gate = limit_gate(prov, now, name)
     if gate is None:
         if name == "cursor":
             gate = cursor_gate(prov, now, role)
@@ -306,7 +309,7 @@ def provider_gate(state: dict[str, Any], name: str, role: str, now: float | None
     return {"available": gate["state"] in ("ok", "unknown"), **gate}
 
 
-def provider_available_from_limit(prov: dict[str, Any], now: float) -> bool:
+def provider_available_from_limit(prov: dict[str, Any], now: float, provider: str | None = None) -> bool:
     hit = prov.get("last_limit_hit") or {}
     reset_epoch = hit.get("reset_epoch")
     if reset_epoch:
@@ -318,7 +321,8 @@ def provider_available_from_limit(prov: dict[str, Any], now: float) -> bool:
     if hit.get("observed_at") and not reset_epoch:
         try:
             observed = datetime.fromisoformat(hit["observed_at"]).timestamp()
-            if now - observed < 3600:
+            cooldown = UNKNOWN_CURSOR_LIMIT_COOLDOWN_S if provider == "cursor" else 3600
+            if now - observed < cooldown:
                 return False
         except (TypeError, ValueError):
             pass

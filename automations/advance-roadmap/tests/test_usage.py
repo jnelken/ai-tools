@@ -213,6 +213,25 @@ class RoutingTests(unittest.TestCase):
         self.assertFalse(usage.apply_cursor(self.state, None))
         self.assertFalse(self.flags()["cursor"]["available_for_worker"])
 
+    def test_cursor_limit_without_reset_is_held_through_next_daily_batch(self):
+        observed = time.time() - 23 * 60 * 60
+        self.state["providers"]["cursor"]["last_limit_hit"] = {
+            "observed_at": datetime.fromtimestamp(observed).astimezone().isoformat(),
+            "reset_epoch": None}
+        gate = usage.provider_gate(self.state, "cursor", "worker", now=observed + 23 * 60 * 60)
+        self.assertFalse(gate["available"], gate)
+        self.assertEqual(gate["state"], "limited")
+        gate = usage.provider_gate(self.state, "cursor", "worker", now=observed + 25 * 60 * 60)
+        self.assertTrue(gate["available"], gate)
+
+    def test_other_provider_unknown_limit_keeps_one_hour_cooldown(self):
+        observed = time.time() - 23 * 60 * 60
+        self.state["providers"]["codex"]["last_limit_hit"] = {
+            "observed_at": datetime.fromtimestamp(observed).astimezone().isoformat(),
+            "reset_epoch": None}
+        gate = usage.provider_gate(self.state, "codex", "worker", now=observed + 23 * 60 * 60)
+        self.assertTrue(gate["available"], gate)
+
     def test_failed_probe_keeps_stored_values(self):
         usage.apply_codex(self.state, probed(usage.parse_codex_rate_limits(app_server_result(weekly=85)), "app_server"))
         self.assertFalse(usage.apply_codex(self.state, None))
