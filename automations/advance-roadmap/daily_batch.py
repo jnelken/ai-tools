@@ -652,6 +652,8 @@ class Batch:
         self.sync_review_fallback()
         with workqueue.Store(ROOT) as store:
             workqueue.sync(store, shared.code_dir())
+            self.limit = max(0, self.limit - workqueue.active_count(store))
+            self.state['lanes_available'] = self.limit
             workqueue.wake_humans(store, workqueue.read(self.directory / 'linear-snapshot.json', {}))
             for item in self.state['queue']:
                 hold = store.hold(item['repo'])
@@ -661,6 +663,14 @@ class Batch:
         for item in self.state["queue"]:
             item["verdict_check"] = repo_priority(item["repo"], self.directory / "linear-snapshot.json")
         self.state["queue"].sort(key=lambda i: i["verdict_check"]["priority"])
+        if self.limit == 0:
+            for item in self.state['queue']:
+                if item['status'] == 'queued':
+                    item.update(status='deferred', reason='surviving workers occupy the agent cap')
+            self.state['phase'] = 'done'
+            self.write()
+            self.post_summary()
+            return 0
         self.write()
         ok, reason, blocking_role = implementation_headroom(self.budget)
         if not ok:

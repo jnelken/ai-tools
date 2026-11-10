@@ -176,6 +176,16 @@ class QueueTest(unittest.TestCase):
         self.assertEqual(self.store.list()[0]['phase'], 'reviewing')
         self.assertEqual(self.store.list()[0]['checkpoint']['next_action'], 'Finish review')
 
+    def test_surviving_wrappers_and_detached_workers_share_the_same_agent_cap(self):
+        with patch.object(q, 'process_start', return_value='birth'):
+            self.store.attempt('20261110-103001', 'a', plan(), pid=12)
+            folder = self.root / 'inflight/a'
+            folder.mkdir(parents=True)
+            (folder / 'one.pid').write_text('13')
+            self.assertEqual(q.active_count(self.store), 1)
+            (folder / 'two.pid').write_text('14')
+            self.assertEqual(q.active_count(self.store), 2)
+
     def test_saved_plan_can_resume_after_age_and_retry_limits_with_checkpoint(self):
         self.register()
         self.store.checkpoint(q.identity(plan()), '20261110-103001', 'reviewing', {'next_action': 'Fix finding 2'})

@@ -159,7 +159,10 @@ def advance_rollout(store, decisions, now=None):
         # Pilot the repos with the largest measured no-work planning cost.
         assigned = {r['stamp']: r['assigned_repo'] for r in store.db.execute('SELECT * FROM attempts')}
         waste = {}
+        since = datetime.fromtimestamp(now - 7 * DAY).strftime('%Y%m%d-%H%M%S')
         for row in rows(store.root / 'runs.jsonl'):
+            if (row.get('stamp') or '') < since:
+                continue
             repo = row.get('assigned_repo') or assigned.get(row.get('stamp'))
             if row.get('outcome') == 'blocked-no-item':
                 waste[repo] = waste.get(repo, 0) + sum(c.get('total', 0) for c in

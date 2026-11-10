@@ -286,6 +286,27 @@ def alive(attempt):
     return bool(attempt.get('pid_start') and process_start(attempt.get('pid')) == attempt['pid_start'])
 
 
+def active_count(store):
+    """Count surviving roadmap lanes once, including workers detached from a dead controller."""
+    attempts = {}
+    for row in store.db.execute('SELECT * FROM attempts WHERE pid IS NOT NULL AND outcome IS NULL'):
+        if alive(dict(row)):
+            attempts.setdefault(row['assigned_repo'], set()).add(row['pid'])
+    detached = {}
+    base = store.root / 'inflight'
+    for path in [*base.glob('*/*.pid'), *base.glob('*.pid')]:
+        repo = path.parent.name if path.parent != base else path.name.split('--', 1)[0]
+        try:
+            pid = int(path.read_text().strip())
+        except (OSError, ValueError):
+            continue
+        if process_start(pid):
+            detached.setdefault(repo, set()).add(pid)
+    # A run.sh wrapper and its workspace worker are the same lane, not two agents.
+    return sum(max(len(attempts.get(repo, [])), len(detached.get(repo, [])))
+               for repo in set(attempts) | set(detached))
+
+
 def capture(store, stamp, repo, plan=None, phase='implementing', code=None):
     run = store.root / 'runs' / stamp
     plan = plan or read(run / 'orchestrator-result.json', {})

@@ -88,7 +88,7 @@ audit. Checkpoints are updated at phase transitions and worker milestones. Dynam
 folded into the existing scheduled summary, not posted per tick. Rollback preserves all work history.
 
 The approved rollout is enabled with `scheduler.py --enable-rollout <ai-tools-dev-checkout>`.
-It automatically selects up to two eligible pilot repos with the largest measured no-work cost
+It automatically selects up to two eligible pilot repos with the largest measured no-work cost in the recent week
 after the shadow gate passes. Expansion requires a full measured trial week with token
 coverage, at least 50% fewer no-work planning tokens, no lost ships and no increased errors.
 `--status` reports the baseline/trial totals and limitations; token totals are not quota percentages
