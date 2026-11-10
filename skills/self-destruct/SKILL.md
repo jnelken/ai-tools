@@ -1,6 +1,6 @@
 ---
 name: self-destruct
-description: The session deletes its own Superset workspace (worktree, local branch, workspace registration, and this terminal tab) once its branch is confirmed merged, then signs off ⛏️. In a project's root checkout it keeps the workspace and only closes the terminal (this is the old /done skill, now folded in). Checks IN_PROGRESS.md, unpushed commits and sibling terminals first and puts any loss in front of the user like a delete-confirmation dialog, which can run /close-out or /pick-up first. This is the one command for ending a session. Use when the user types /self-destruct or explicitly asks this session to clean up after itself or close its terminal. Trigger phrases include "self-destruct", "close this terminal", "we're done, close it", "delete your own worktree", "reap this session", "reap this workspace", "close this workspace", "this PR merged, clean up this workspace", "tear down this superset workspace", "am I safe to close this workspace". Formerly named close-sswt.
+description: The session deletes its own Superset workspace (worktree, local branch, workspace registration, and this terminal tab) once its branch is confirmed merged, then signs off ⛏️. In a project's root checkout it keeps the workspace, reaps the merged sswts that session spawned (workspaces it created for dispatched agents), and closes the terminal (the terminal-closing part is the old /done skill, now folded in). Checks IN_PROGRESS.md, unpushed commits and sibling terminals first and puts any loss in front of the user like a delete-confirmation dialog, which can run /close-out or /pick-up first. This is the one command for ending a session. Use when the user types /self-destruct or explicitly asks this session to clean up after itself or close its terminal. Trigger phrases include "self-destruct", "close this terminal", "we're done, close it", "delete your own worktree", "reap this session", "reap this workspace", "close this workspace", "this PR merged, clean up this workspace", "tear down this superset workspace", "am I safe to close this workspace". Formerly named close-sswt.
 disable-model-invocation: true
 ---
 
@@ -54,19 +54,26 @@ If either of these holds, this is a project's root checkout, not a disposable wo
 - The current branch is `main`/`master` (`git branch --show-current`). Belt and braces over
   the type check.
 
-Deleting it would remove the primary clone, so **never archive the workspace, delete a
-branch or run `teardown.sh`.** The user still wants the session gone, so close only this
-terminal:
+Deleting it would remove the primary clone, so **never archive this session's own
+workspace, delete its branch or run `teardown.sh`.** The user still wants the session gone,
+so reap the workspaces it spawned (step 2), then close only this terminal:
 
 1. Run the loss picture's 2a and 2c, plus 2b's `IN_PROGRESS.md` check, but scoped to *this
    session's own* work: its uncommitted changes, unpushed commits, background tasks and
    Monitors. Dirty files that other sessions own (a root checkout is worked by several at
    once) are one FYI line, not a blocker. Anything of this session's own goes through the
    step 3 dialog (the "merged" check in step 1 does not apply here).
-2. Write the final message: that the workspace was kept because it is the root checkout and
-   only this terminal is closing. Nothing after the close can be said. Sign-off is `⛏️`
-   unless this is an sswt whose branch is unmerged, then `✅`.
-3. As the **last tool call of the turn**, close detached so the message renders first:
+2. **Reap the sswts this session spawned.** A root-checkout session usually ships work by
+   creating a workspace, dispatching an agent into it and watching the PR (the `superset`
+   skill's flow). Those workspaces are this session's loose ends: leaving them behind is the
+   gap this step closes. The "never archive" rule above covers only the root workspace
+   itself. See [Reaping spawned workspaces](#reaping-spawned-workspaces) below.
+3. Write the final message: that the workspace was kept because it is the root checkout,
+   which spawned workspaces were reaped (or left, and why), and that only this terminal is
+   closing. Nothing after the close can be said. Sign-off is `⛏️` when every spawned
+   workspace is reaped or none existed, and nothing else is open. Otherwise `✅`, or `⏳`
+   if a Monitor is still waiting on a spawned workspace's PR.
+4. As the **last tool call of the turn**, close detached so the message renders first:
    ```bash
    nohup sh ~/.claude/skills/self-destruct/scripts/close-tab.sh \
      "$SUPERSET_WORKSPACE_ID" "$SUPERSET_TERMINAL_ID" "$PPID" >/dev/null 2>&1 &
@@ -88,6 +95,58 @@ either way. After a hangup it starts a fresh shell in the same tab within second
 the exited terminal (QA'd on 2026-11-09). After a dispose it keeps a dead tab instead. So on a
 remote viewer, the tab has to be closed by hand; don't retry the CLI from a new session. Each
 run logs to `~/.claude/state/self-destruct.log`.
+
+### Reaping spawned workspaces
+
+Used by the root-checkout path (step 2 above). A session in a worktree may also have spawned
+workspaces; run this section for those before step 4, the same way.
+
+**Which workspaces count: only ones this session created.** Take the ids from this
+conversation's own `superset workspaces create` output (or the branch and PR it dispatched).
+Never discover them by listing every workspace and filtering by merged state: that is
+[[clean-sswts]]'s job, and the rest belong to other sessions. If the ids are gone (the
+session was compacted or resumed), match the PRs this session opened (`gh pr list --author
+@me`) against `superset workspaces list --local --json` branches, name the matches in the
+step 3 dialog, and skip any that are ambiguous. No spawned workspaces: say so in one line and
+move on.
+
+**Each spawned workspace is reapable only if all of these hold**, checked the way steps 1 and
+2 check the session's own:
+
+1. Its PR is `MERGED`, and the worktree's `HEAD` is the merged PR's head or carried by the PR
+   (step 2a's `pulls/<N>/commits` check; squash merges never show as ancestors).
+2. Its tree is clean and nothing is unpushed: `git -C "$WT" status --porcelain` is empty.
+3. Its agents are done. List the terminals
+   (`superset terminals list --workspace <id> --local --json`) and look at any bound to a
+   Claude or Codex session. A session that finished (at rest on its last message, ⛏️ or ✅) is
+   fine, since reaping closes it; one still mid-turn means the agent is still working, so the
+   workspace is not reapable.
+
+A workspace that fails any check is **left alone and named in the final message** with the
+reason (PR still open, agent still running); it never blocks closing this terminal. It is a
+loose end of this session, though: a Monitor or watcher waiting on it goes through the step 3
+dialog like any other.
+
+**Reap each reapable workspace inline**, one at a time (each touches the owning clone's git
+state), before writing the final message. Inline, not detached: unlike the session's own
+workspace, these are not under the running shell. Use the shared script with no terminal id,
+so every tab in the workspace closes, the dispatched agent's included:
+
+```bash
+CHILD=<workspace id>
+read -r WT BRANCH < <(superset workspaces list --local --json |
+  jq -r --arg id "$CHILD" '.[] | select(.id == $id) | [.worktreePath, .branch] | @tsv')
+ROOT=$(git -C "$WT" rev-parse --path-format=absolute --git-common-dir | sed 's#/\.git$##')  # the child's own project, which may differ from this session's
+SHA=$(git -C "$WT" rev-parse HEAD)
+sh ~/.claude/skills/self-destruct/scripts/reap-workspace.sh "$CHILD" "$ROOT" "$WT" "$BRANCH" "" "$SHA"
+```
+
+Confirm it worked: the workspace is gone from `superset workspaces list --local`, the branch
+is gone from `git -C "$ROOT" branch --list "$BRANCH"`, and the folder at `$WT` no longer
+exists. Report each as branch, PR number and recovery command
+(`git -C "$ROOT" branch <branch> <sha>`), never the workspace id. If the script prints
+`FAILED`, report it and stop reaping further workspaces. The log is
+`~/.claude/state/self-destruct.log`.
 
 ## 1. Confirm the branch is merged
 

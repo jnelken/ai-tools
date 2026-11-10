@@ -9,7 +9,7 @@ End every final message of a turn with one status line — `<glyph> <label, ≤8
 | ⏳ | Watching | Idle now, but a Monitor, ScheduleWakeup, background agent or CI watch is armed and the session resumes on its own. Label names what and a rough ETA. |
 | 💡 | Follow-ups | Asked-for work done and verified; recommended follow-ups or open questions worth a look. |
 | ✅ | Done | Everything asked for is complete and verified; nothing pending. |
-| ⛏️ | Reapable | ✅ plus nothing keeps this session alive: no open questions, no in-progress work, no pending follow-up that needs this context, and any sswt it owns is merged (or already reaped). Applies with or without an sswt. A bare "reap" reply authorizes `/self-destruct`; left alone for an hour, the `reap-sswts` automation tears the sswt down (after its own merged/clean checks) or closes a root-checkout tab, so only sign off ⛏️ when that would be fine. |
+| ⛏️ | Reapable | ✅ plus nothing keeps this session alive: no open questions, no in-progress work, no pending follow-up that needs this context, and any sswt it owns is merged (or already reaped). Applies with or without an sswt. A bare "reap" reply authorizes `/self-destruct` (from a root checkout that means reaping the merged sswts the session spawned, then closing its own tab); left alone for an hour, the `reap-sswts` automation tears the sswt down (after its own merged/clean checks) or closes a root-checkout tab, so only sign off ⛏️ when that would be fine. |
 | 💬 | Answer only | Informational reply; no task was requested. |
 
 - One primary glyph, by priority: 🛑 > ⚠️ > ⏳ > 💡 > ⛏️ > ✅ > 💬. At most one secondary when both are true (`⏳💡`). Never pair ⛏️ with 💡, 🛑 or ⚠️ — ⛏️ already means nothing is open.
