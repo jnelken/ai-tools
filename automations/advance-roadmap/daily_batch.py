@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
-"""One daily batch: plan the personal repos, approve the plans, then run them in parallel.
+"""One scheduled batch: resume carried work first, then plan and run new work.
 
 Each repo starts with one thread. Once a repo's first thread has planned a feature, a second
 planner for the same repo may be started (--threads, at most three per repo) and told what the
 earlier threads will touch. Before any worker starts, a plan approver (lib/planapproval.py) rules
 on every extra thread: run in parallel, run only after an earlier thread has merged, or wait for
-tomorrow. The first thread of a repo is never deferred or serialized by that ruling; it waits
+the next scheduled batch. The first thread of a repo is never deferred or serialized by that ruling; it waits
 at the barrier only for the slowest approval (rulings for different repos run side by side).
 
 --lanes bounds both planning and implementation to between one and five threads at once. Ready
-planners wait without using a model. No repo refills, quota retries, or second batch on the same
-calendar day. One Slack summary is posted when the batch ends; individual runs post nothing.
+planners wait without using a model. No new-work refills or quota retries within a slot.
+The two local-time slots are 10:30 and 15:30; each can start at most once. One Slack summary is posted when the batch ends; individual runs post nothing.
 """
 import argparse
 import fcntl
@@ -24,7 +24,7 @@ import sys
 import time
 import tempfile
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import supervisor as shared
@@ -112,6 +112,29 @@ def implementation_headroom(budget=None):
     return True, "", None
 
 
+def scheduled_slot(now):
+    """The most recent scheduled local wall-clock slot, including wake-up catch-up."""
+    morning = now.replace(hour=10, minute=30, second=0, microsecond=0)
+    afternoon = now.replace(hour=15, minute=30, second=0, microsecond=0)
+    if now >= afternoon:
+        return afternoon
+    if now >= morning:
+        return morning
+    return afternoon - timedelta(days=1)
+
+
+def pending_action(repo):
+    pending = Path(shared.code_dir()) / ".advance-roadmap"
+    for path in sorted(pending.glob(f"pending-plan-{repo}*.json")):
+        if path.name != f"pending-plan-{repo}.json" and not path.name.startswith(f"pending-plan-{repo}.t"):
+            continue
+        saved = shared.read_json(path) or {}
+        action = (saved.get("orchestrator") or saved).get("action")
+        if action in WORK_ACTIONS:
+            return action
+    return None
+
+
 def repo_priority(repo, snapshot=None, dry_run=False):
     """Inspect carried state without changing it; run.sh owns the actual skip/reuse.
 
@@ -119,14 +142,9 @@ def repo_priority(repo, snapshot=None, dry_run=False):
     verdict. A dry run uses saved snapshots only and never calls Linear/GitHub.
     """
     code = Path(shared.code_dir())
-    pending = code / ".advance-roadmap"
-    for path in sorted(pending.glob(f"pending-plan-{repo}*.json")):
-        if path.name != f"pending-plan-{repo}.json" and not path.name.startswith(f"pending-plan-{repo}.t"):
-            continue
-        saved = shared.read_json(path) or {}
-        action = (saved.get("orchestrator") or saved).get("action")
-        if action in WORK_ACTIONS:
-            return {"priority": 0, "result": "pending", "action": action}
+    action = pending_action(repo)
+    if action:
+        return {"priority": 0, "result": "pending", "action": action}
     verdict = ROOT / "batch-verdicts" / f"{repo}.json"
     if not verdict.exists():
         return {"priority": 2, "result": "no-verdict"}
@@ -425,6 +443,8 @@ class Batch:
 
         Resumes never grow a second thread: they finish a parked branch nobody should plan around.
         """
+        if self.state.get("recovery_first"):
+            return
         for item in list(self.state["queue"]):
             plan = item.get("plan")
             if (item["status"] != "ready" or item.get("spawned") or not plan
@@ -628,6 +648,37 @@ class Batch:
             self.write()
             self.post_summary()
             return 0
+        carried = [i for i in self.state["queue"]
+                   if i["verdict_check"]["priority"] == 0
+                   or i.get("reason") == "previous worker is still running"]
+        fresh = [i for i in self.state["queue"] if i not in carried and i["status"] == "queued"]
+        if carried:
+            self.state["recovery_first"] = True
+            for item in fresh:
+                item["status"] = "waiting-for-recovery"
+            self.write()
+            self.run_work()
+            unfinished = [i["repo"] for i in carried
+                          if i.get("outcome") != "shipped" or pending_action(i["repo"])]
+            for item in fresh:
+                if unfinished:
+                    item.update(status="deferred", reason="carried work is unfinished: " + ", ".join(unfinished))
+                else:
+                    item["status"] = "queued"
+            self.state["recovery_first"] = False
+            self.write()
+            if not unfinished and fresh:
+                self.run_work()
+        else:
+            self.run_work()
+        self.state["phase"] = "done"
+        self.state["quota_paused"] = quota_paused(self.state)
+        self.write()
+        self.post_summary()
+        return 0
+
+    def run_work(self):
+        """Plan, approve and finish the currently queued wave under the existing caps."""
         self.state["phase"] = "planning"
         # A ready lane is only a shell waiting on disk: free its planning slot so the
         # whole finite queue can reach the barrier even when repos outnumber the cap.
@@ -677,7 +728,7 @@ class Batch:
                 for item in chosen:
                     allocation = self.budget.choose(item=item)
                     if allocation is None:
-                        reason = "worker plus required review no longer fits shared headroom; saved plan waits for the next daily batch"
+                        reason = "worker plus required review no longer fits shared headroom; saved plan waits for the next scheduled batch"
                         item["budget_hold"] = reason
                         held.append(item)
                         continue
@@ -699,18 +750,13 @@ class Batch:
                     reserved = [i for i in ready if i.get("budget_leases")]
                     item = reserved[-1] if reserved else held[-1]
                     item.setdefault("budget_hold", "shared headroom is needed for higher priority plans; "
-                                    "saved plan waits for the next daily batch")
+                                    "saved plan waits for the next scheduled batch")
                     quota = self.quota_record()
                     if quota:
                         (ROOT / "runs" / item["stamp"] / "quota-gates.json").write_text(quota)
                     self.cancel(item, item["budget_hold"])
             self.write()
             time.sleep(POLL_S)
-        self.state["phase"] = "done"
-        self.state["quota_paused"] = quota_paused(self.state)
-        self.write()
-        self.post_summary()
-        return 0
 
     def post_summary(self):
         """The batch's only Slack post, sent once every thread has stopped (or the batch failed)."""
@@ -857,7 +903,7 @@ def main():
         print(json.dumps({"repos": repos, "concurrency": args.lanes, "lanes": lanes,
                           "verdict_checks": [{"repo": i["repo"], **i["verdict_check"]} for i in queue],
                           "budget": budget.snapshot(queue),
-                          "schedule": "daily at 10:30 local time", "threads_per_repo": args.threads}, indent=2))
+                          "schedule": "10:30 and 15:30 local time; carried work first", "threads_per_repo": args.threads}, indent=2))
         return 0
     ROOT.mkdir(parents=True, exist_ok=True)
     with open(ROOT / "run.lock.f", "a") as lock:
@@ -866,20 +912,20 @@ def main():
         except OSError:
             shared.log("another roadmap scheduler is running; no second batch")
             return 0
-        directory = ROOT / "batches" / datetime.now().date().isoformat()
-        if directory.exists():
-            shared.log("today's batch already started; no automatic repeat")
+        slot = scheduled_slot(datetime.now())
+        directory = ROOT / "batches" / slot.strftime("%Y-%m-%d-%H%M")
+        legacy_morning = ROOT / "batches" / slot.date().isoformat()
+        if directory.exists() or slot.hour == 10 and legacy_morning.exists():
+            shared.log("this scheduled batch already started; no automatic repeat")
             return 0
         (ROOT / "logs").mkdir(exist_ok=True)
         shared.LOG = ROOT / "logs" / f"batch-{directory.name}.log"
-        # Preflight first, and the date directory only after it passes: that directory is what says
-        # "today's batch already started", so an outage (Superset down, Linear unreachable) used to
-        # use up the day. Nothing but the snapshot's temp file is written until here.
+        # Claim a slot only after preflight succeeds. An outage must not consume its slot.
         snapshot = ROOT / f"linear-snapshot.preflight.{os.getpid()}.json"
         try:
             preflight(snapshot)
         except (OSError, RuntimeError, subprocess.TimeoutExpired) as error:
-            shared.log(f"preflight failed, no batch started today: {error}")
+            shared.log(f"preflight failed, no batch started in this slot: {error}")
             snapshot.unlink(missing_ok=True)
             notify_preflight_failure(directory.name, str(error))
             return 1
@@ -888,7 +934,7 @@ def main():
             directory.mkdir()
         except FileExistsError:
             snapshot.unlink(missing_ok=True)
-            shared.log("today's batch already started; no automatic repeat")
+            shared.log("this scheduled batch already started; no automatic repeat")
             return 0
         os.replace(snapshot, directory / "linear-snapshot.json")
         (ROOT / "batch-verdicts").mkdir(exist_ok=True)
@@ -898,7 +944,7 @@ def main():
         shutil.rmtree(marker_dir, ignore_errors=True)  # stale marker; we hold the kernel lock
         marker_dir.mkdir()
         (marker_dir / "pid").write_text(str(os.getpid()) + "\n")
-        # Legacy timed-out workers can outlive their scheduler. Omit their repos today.
+        # Detached workers can outlive their scheduler; hold new work behind them too.
         busy = shared.Supervisor(argparse.Namespace(lanes=args.lanes)).busy_repos()
         for item in batch.state["queue"]:
             if item["repo"] in busy:
@@ -930,11 +976,11 @@ def main():
 
 
 def preflight(snapshot):
-    """Everything the batch needs from the outside world, checked before it claims the day.
+    """Everything the batch needs from the outside world, checked before it claims the slot.
 
     Raises RuntimeError (or a subprocess error) when Superset is down, the Linear snapshot cannot be
     taken or the usage readings cannot be refreshed. The snapshot lands at `snapshot`; the caller
-    moves it into the batch directory, where it stays immutable for the day's planners."""
+    moves it into the batch directory, where it stays immutable for the slot's planners."""
     if os.environ.get("ADVANCE_ROADMAP_SUPERSET", "1") == "1":
         if shared.py("workspaces.py", "available", timeout=60).returncode:
             raise RuntimeError("Superset is unavailable")

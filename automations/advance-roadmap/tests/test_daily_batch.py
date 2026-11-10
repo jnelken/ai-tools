@@ -72,6 +72,10 @@ while not (run / 'batch-release').exists():
 event('work-start')
 time.sleep(.2)
 event('work-end')
+if not os.environ.get('FAKE_KEEP_PENDING'):
+    pending = Path(os.environ['PERSONAL_CODE_DIR']) / '.advance-roadmap'
+    for saved in pending.glob(f'pending-plan-{repo}*.json'):
+        saved.unlink()
 with open(root / 'runs.jsonl', 'a') as f:
     f.write(json.dumps({'stamp': stamp, 'repo': repo, 'outcome': 'shipped'}) + '\n')
 PY
@@ -442,7 +446,7 @@ class DailyBatchTest(unittest.TestCase):
             finally:
                 budget.release(item)
 
-    def test_second_thread_of_pending_dispatch_still_requires_planner_budget(self):
+    def test_pending_dispatch_does_not_expand_into_fresh_threads(self):
         self.repo('a')
         pending = self.code / '.advance-roadmap'
         pending.mkdir()
@@ -451,20 +455,15 @@ class DailyBatchTest(unittest.TestCase):
             'planned_at': datetime.now().isoformat(), 'attempts': 0}))
         state_path = self.root / 'providers-usage.json'
         state = json.loads(state_path.read_text())
-        # Three Codex points fit the saved implementation's review, but cannot
-        # also fund a fresh planner for its later thread. Cursor stays healthy.
+        # Recovery needs only its saved implementation and review, even with extra threads enabled.
         state['providers']['codex']['five_hour']['used_pct'] = 69
         state_path.write_text(json.dumps(state))
         self.env.update(ADVANCE_ROADMAP_REVIEW_STRATEGY='cross-provider', FAKE_WORKER_CHAIN='claude')
         self.run_batch(lanes=1, extra=['--threads', '2'])
         by_thread = {i['thread']: i for i in self.state()['queue']}
-        self.assertEqual(set(by_thread), {1, 2})
+        self.assertEqual(set(by_thread), {1})
         self.assertIsNone(by_thread[1]['allocation']['planner'])
         self.assertEqual(by_thread[1]['outcome'], 'shipped')
-        self.assertEqual(by_thread[2]['verdict_check']['result'], 'pending',
-                         'ordering metadata is inherited, but saved-plan admission must not be')
-        self.assertEqual(by_thread[2]['outcome'], 'skipped-quota')
-        self.assertNotIn('allocation', by_thread[2])
         self.assertEqual([e['thread'] for e in self.events() if e['kind'] == 'plan-start'], [1])
 
     def test_single_lane_barrier_preserves_changed_repo_over_all_reservations(self):
@@ -731,6 +730,72 @@ else:
         self.assertEqual(peak, 2)
         self.assertEqual(sorted(starts), list('abcde'))
 
+    def test_recovery_work_finishes_before_any_new_planning(self):
+        self.repo('a'); self.repo('z')
+        pending = self.code / '.advance-roadmap'; pending.mkdir()
+        (pending / 'pending-plan-z.json').write_text(json.dumps({'action': 'resume_worker'}))
+        self.run_batch(lanes=2)
+        events = self.events()
+        finished = next(e['time'] for e in events if e['repo'] == 'z' and e['kind'] == 'work-end')
+        fresh = next(e['time'] for e in events if e['repo'] == 'a' and e['kind'] == 'plan-start')
+        self.assertGreaterEqual(fresh, finished)
+        self.assertEqual(self.state()['phase'], 'done')
+
+    def test_blocked_recovery_does_not_bypass_it_with_new_work(self):
+        self.repo('a'); self.repo('z')
+        pending = self.code / '.advance-roadmap'; pending.mkdir()
+        (pending / 'pending-plan-z.json').write_text(json.dumps({'action': 'resume_worker'}))
+        self.env['FAKE_PLANNER_GATED'] = 'z'
+        self.run_batch(lanes=2)
+        self.assertFalse(any(e['repo'] == 'a' for e in self.events()))
+        fresh = next(i for i in self.state()['queue'] if i['repo'] == 'a')
+        self.assertEqual(fresh['status'], 'deferred')
+        self.assertIn('carried work is unfinished', fresh['reason'])
+
+    def test_remaining_pending_plan_keeps_new_work_deferred(self):
+        self.repo('a'); self.repo('z')
+        pending = self.code / '.advance-roadmap'; pending.mkdir()
+        (pending / 'pending-plan-z.json').write_text(json.dumps({'action': 'dispatch_worker'}))
+        self.env['FAKE_KEEP_PENDING'] = '1'
+        self.run_batch(lanes=2)
+        self.assertFalse(any(e['repo'] == 'a' for e in self.events()))
+
+    def test_slots_cover_morning_afternoon_and_wake_up_without_extra_runs(self):
+        for now, expected in [
+            (datetime(2026, 11, 10, 10, 29), datetime(2026, 11, 9, 15, 30)),
+            (datetime(2026, 11, 10, 10, 30), datetime(2026, 11, 10, 10, 30)),
+            (datetime(2026, 11, 10, 15, 29), datetime(2026, 11, 10, 10, 30)),
+            (datetime(2026, 11, 10, 15, 30), datetime(2026, 11, 10, 15, 30)),
+            (datetime(2026, 11, 10, 23), datetime(2026, 11, 10, 15, 30)),
+        ]:
+            self.assertEqual(daily_batch.scheduled_slot(now), expected)
+
+    def test_each_scheduled_slot_can_start_once_and_legacy_morning_is_respected(self):
+        self.repo('a')
+        def preflight(snapshot):
+            snapshot.write_text('{"ok":true}')
+        with patch.dict(os.environ, self.env), patch.object(daily_batch, 'ROOT', self.root), patch.object(
+                daily_batch.shared, 'code_dir', return_value=str(self.code)), patch.object(
+                daily_batch.shared, 'log'), patch.object(daily_batch, 'preflight', side_effect=preflight), patch.object(
+                daily_batch, 'Batch') as batch, patch.object(daily_batch, 'datetime') as clock, patch.object(
+                daily_batch.shared.Supervisor, 'busy_repos', return_value={}), patch.object(
+                daily_batch.shutil, 'which', return_value=None), patch.object(sys, 'argv', ['daily_batch.py']):
+            batch.return_value.run.return_value = 0
+            batch.return_value.budget = None
+            batch.return_value.state = {'queue': []}
+            clock.now.return_value = datetime(2026, 11, 10, 10, 30)
+            self.assertEqual(daily_batch.main(), 0)
+            self.assertEqual(daily_batch.main(), 0)
+            self.assertEqual(batch.call_count, 1)
+            clock.now.return_value = datetime(2026, 11, 10, 15, 30)
+            self.assertEqual(daily_batch.main(), 0)
+            self.assertEqual(daily_batch.main(), 0)
+            self.assertEqual(batch.call_count, 2)
+            (self.root / 'batches' / '2026-11-11').mkdir()
+            clock.now.return_value = datetime(2026, 11, 11, 10, 30)
+            self.assertEqual(daily_batch.main(), 0)
+            self.assertEqual(batch.call_count, 2)
+
     def test_duplicate_tick_cannot_start_second_batch(self):
         self.repo('a')
         self.run_batch()
@@ -836,12 +901,12 @@ else:
         self.assertEqual(self.state()['queue'], [])
         self.assertEqual(self.state()['phase'], 'done')
 
-    def test_live_prior_worker_repo_is_deferred(self):
-        self.repo('a')
+    def test_live_prior_worker_defers_new_work_too(self):
+        self.repo('a'); self.repo('b')
         (self.root / 'inflight').mkdir()
         (self.root / 'inflight/a--old.pid').write_text(str(os.getpid()))
         self.run_batch()
-        self.assertEqual(self.state()['queue'][0]['status'], 'deferred')
+        self.assertTrue(all(i['status'] == 'deferred' for i in self.state()['queue']))
         self.assertFalse((self.root / 'trace.jsonl').exists())
 
     # ── threads ───────────────────────────────────────────────────────────────
@@ -1003,7 +1068,7 @@ else:
         self.assertEqual(self.state()['phase'], 'done')
 
 
-    def test_dashboard_schedule_preserves_history_and_uses_one_daily_slot(self):
+    def test_dashboard_schedule_preserves_history_and_uses_two_current_slots(self):
         with patch.dict(os.environ, self.env):
             spec = importlib.util.spec_from_file_location('batch_dashboard', HERE / 'gen-dashboard.py')
             dashboard = importlib.util.module_from_spec(spec)
@@ -1011,6 +1076,11 @@ else:
         with patch.object(dashboard, 'base_cadence', return_value=1):
             self.assertEqual(len(dashboard.slots_on(datetime(2026, 10, 8))), 10)
             self.assertEqual(dashboard.slots_on(datetime(2026, 10, 10)), [datetime(2026, 10, 10, 10, 30)])
+            self.assertEqual(dashboard.slots_on(datetime(2026, 11, 10)),
+                             [datetime(2026, 11, 10, 10, 30), datetime(2026, 11, 10, 15, 30)])
+        import plistlib
+        schedule = plistlib.loads((HERE / 'com.jake.advance-roadmap.plist').read_bytes())
+        self.assertEqual(schedule['StartCalendarInterval'], [{'Hour': 10, 'Minute': 30}, {'Hour': 15, 'Minute': 30}])
 
 
 if __name__ == '__main__':

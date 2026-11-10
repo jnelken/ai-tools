@@ -80,7 +80,8 @@ GRID_BASE = 2  # the :45 grid's base cadence, for judging that era's history
 SPRINT_SINCE = datetime(2026, 10, 7, 0, 0)
 SPRINT_TICKS = [(10, 30), (11, 30), (12, 30), (13, 30), (14, 30), (16, 0), (17, 0), (18, 0), (19, 0), (20, 0)]
 BATCH_SINCE = datetime(2026, 10, 10, 0, 0)
-BATCH_DESCRIPTION = "10:30 daily; one item per repo"
+TWO_BATCHES_SINCE = datetime(2026, 11, 10, 0, 0)
+BATCH_DESCRIPTION = "10:30 and 15:30 daily; carried work first"
 
 
 def slots_on(day):
@@ -100,6 +101,8 @@ def slots_on(day):
             out.append(day.replace(hour=h, minute=m))
     if day.replace(hour=10, minute=30) >= BATCH_SINCE:
         out.append(day.replace(hour=10, minute=30))
+    if day.replace(hour=15, minute=30) >= TWO_BATCHES_SINCE:
+        out.append(day.replace(hour=15, minute=30))
     return sorted(out)
 
 QUOTA_RE = re.compile(r"skipping — (\S+) usage (\d+)% >= (\d+)%")
@@ -981,7 +984,7 @@ def build():
         except (TypeError, ValueError):
             checked_html = '<span class=dim>unknown</span>'
         cad_html = (f'<div class=checkline style="border-bottom:0;padding-bottom:0;margin-bottom:0">'
-                    '<strong>Schedule:</strong> one batch daily at 10:30'
+                    '<strong>Schedule:</strong> batches at 10:30 and 15:30; carried work first'
                     ' <span class=dim>— one item per repo; no automatic refill</span></div>')
         quota_html = (f'<div class=card><div class=checkline>{verdict} &nbsp;{route}</div>'
                       f'<div class=provs>{provider_rows(q["providers"])}</div>'

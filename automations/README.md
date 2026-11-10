@@ -18,7 +18,7 @@ makes the deploy clone dirty.
 
 ## `advance-roadmap`
 
-One finite batch every day at **10:30 local time** (Eastern on Jake's Mac), starting
+Two finite batches every day at **10:30 and 15:30 local time** (Eastern on Jake's Mac), starting
 with `daily_batch.py`. It queues direct-child personal repos, excluding `.noroadmap`,
 non-`jnelken` origins, aliases, and repos with a worker still in flight. Each repo gets
 its own read-only planner, scoped to **one actionable ticket/roadmap item**.
@@ -33,10 +33,15 @@ PR merge flow. A repo's finished slot never queues another ticket from that repo
 
 ### Schedule, concurrency, and recovery
 
-`com.jake.advance-roadmap.plist` has one `StartCalendarInterval`: 10:30 daily, with
-`RunAtLoad=false`. It replaces the two continuously refilled sprint windows and their
-hourly watchdog ticks. macOS may deliver a missed tick after waking; the dated manifest
-prevents a second batch that day. A batch already in progress can finish after 10:30.
+`com.jake.advance-roadmap.plist` has two `StartCalendarInterval` entries: **10:30 AM and
+3:30 PM local time**, with `RunAtLoad=false`. macOS may deliver a missed tick after waking;
+a slot-specific manifest prevents starting the same slot twice. A running batch can finish
+past the next scheduled time; the shared kernel lock prevents overlapping schedulers.
+
+Carried dispatch/resume plans run first, without planning new work or expanding to extra
+threads. New work starts only after those workers ship and their pending plans are cleared.
+If any carried work is still running, blocked, failed or deferred for budget, new work waits
+for a later scheduled batch. Existing repo/in-flight locks and worker freshness checks remain.
 
 `ADVANCE_ROADMAP_LANES=5` caps the total number of active agents in a batch. Planning, approval,
 and implementation run in sequence, so no more than **five agents at once** can be active across
@@ -49,18 +54,17 @@ Planning times out after 30 minutes (`ADVANCE_ROADMAP_PLAN_TIMEOUT_S`); an indiv
 failed or skipped planner does not block the rest. Worker timeouts remain in `run.sh`.
 
 The shared kernel lock prevents overlapping schedulers. The durable queue and selected
-ticket IDs are in `~/.claude/automations/advance-roadmap/batches/YYYY-MM-DD/batch.json`;
+ticket IDs are in `~/.claude/automations/advance-roadmap/batches/YYYY-MM-DD-HHMM/batch.json`;
 that directory also holds the batch's immutable Linear snapshot. Logs and lane run records
 remain in the usual `logs/`, `runs/`, and `runs.jsonl` paths. Plans not implemented remain
-in the existing per-repo pending-plan files for the next daily batch.
+in the existing per-repo pending-plan files for the next scheduled batch.
 
 Quota is checked before each implementation wave. Exhaustion defers the remaining plans
 and finishes the batch; there is **no 30-minute quota retry loop, refilling, chaining, or
-second batch that day**. A crashed controller is not automatically rerun that day either:
+second batch in the same scheduled slot**. A crashed controller is not automatically rerun in the same slot either:
 waiting lanes exit when it disappears, while already dispatched workers can finish and
-remain protected by the existing repo/in-flight locks. A failed preflight is recorded in
-the manifest and waits for the next daily tick. Legacy cadence/backoff calculations apply
-only to manual `run.sh` use, not this daily schedule.
+remain protected by the existing repo/in-flight locks. A failed preflight does not claim a slot; the next invocation can retry it. Legacy cadence/backoff calculations apply
+only to manual `run.sh` use, not this twice-daily schedule.
 
 Install the maintained source after committing/pushing and running `~/.ai-tools/install.sh`.
 Preserve any existing local plist before replacing it, then symlink the maintained plist
@@ -220,7 +224,7 @@ than posting to an absolute `/refresh`, which the `/roadmap` prefix would otherw
 Turn tailnet access off with `tailscale serve reset`. That leaves the local server running on
 `127.0.0.1:8421`.
 
-The 10:30 batch stays separate from the Sunday 02:45 `wrapup-repos` schedule.
+The 10:30 and 15:30 batches stay separate from the Sunday 02:45 `wrapup-repos` schedule.
 
 ### Token accounting
 
