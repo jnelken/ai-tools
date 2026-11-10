@@ -173,6 +173,7 @@ class SchedulerTest(unittest.TestCase):
         s.archive_completed_plan(self.store)
         self.assertTrue(source.exists())
         self.store.set('rollout_complete', {'at': time.time()})
+        self.store.set('mode', 'dynamic')
         dirty = checkout / 'unrelated.txt'
         dirty.write_text('keep this')
         s.archive_completed_plan(self.store)
@@ -193,6 +194,13 @@ class SchedulerTest(unittest.TestCase):
         published = git('--git-dir', str(remote), 'rev-parse', 'refs/heads/main').stdout
         self.assertEqual(head, published)
         self.assertEqual(git('-C', str(checkout), 'status', '--porcelain').stdout, '')
+        # Simulate interruption after the Git action but before its durable completion marker.
+        with self.store.db:
+            self.store.db.execute("DELETE FROM settings WHERE key IN ('plan_archived','archive_commit')")
+        with patch.object(s.subprocess, 'run', side_effect=local_git_only):
+            s.archive_completed_plan(self.store)
+        self.assertEqual(git('-C', str(checkout), 'rev-parse', 'HEAD').stdout, head)
+        self.assertIsNotNone(self.store.get('plan_archived'))
 
     def test_expansion_requires_measured_trial_and_preserves_ship_count(self):
         start = time.mktime(time.strptime('2026-11-10 10:00:00', '%Y-%m-%d %H:%M:%S'))
@@ -226,6 +234,18 @@ class SchedulerTest(unittest.TestCase):
         self.assertNotIn('<script>Which account?', result)
         self.assertIn('DEV-unrouted', result)
         self.assertIn('repo/* label', result)
+
+    def test_resumed_workers_also_consume_the_daily_attempt_cap(self):
+        day = time.strftime('%Y%m%d')
+        for sec in ('103001', '153001'):
+            stamp = day + '-' + sec
+            self.store.attempt(stamp, 'a')
+            self.store.finish({'stamp': stamp, 'orchestrator': 'pending-plan',
+                               'worker': 'codex', 'outcome': 'quota-paused'})
+        self.assertEqual(s.daily_admission(self.store, ['a', 'b']), ['b'])
+        decision = self.decide()
+        self.assertEqual(decision['decision'], 'wait')
+        self.assertIn('midnight', decision['reason'])
 
     def test_waiting_item_does_not_dispatch_or_create_batch(self):
         s.dispatch(self.store, [{'repo': 'a', 'decision': 'wait'}], self.snapshot, ['a'])

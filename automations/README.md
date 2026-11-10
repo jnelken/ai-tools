@@ -81,7 +81,8 @@ python3 ~/.claude/automations/advance-roadmap/scheduler.py --restart-shadow
 In trial/dynamic mode, the scheduled job excludes those repos. The new controller shares its kernel
 lock and budget leases; it never runs beside the legacy controller. It streams one item per repo
 without a global planning barrier, caps all active phases at five, reserves full implementation plus
-review capacity before planning, and admits at most two fresh planning attempts per repo per day.
+review capacity before planning, and admits at most two model attempts per repo per day, including resumptions. More frequent
+ticks cannot multiply retry spending; repeated failures back off up to six hours.
 Quota waits have a `not_before`; unchanged no-work inputs wait for a change or the 72-hour safety
 audit. Checkpoints are updated at phase transitions and worker milestones. Dynamic attempts are
 folded into the existing scheduled summary, not posted per tick. Rollback preserves all work history.
@@ -100,6 +101,9 @@ is retried using the recorded archive commit. Rollback disables automatic promot
 Install the shadow agent by symlinking the maintained deploy-clone plist into `~/Library/LaunchAgents/`,
 then `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.jake.advance-roadmap-shadow.plist`.
 It has `RunAtLoad=false`; a bootstrap does not start a model or force a roadmap batch.
+A local `session-hold.json` under the automation root pauses live dispatch and promotion without
+claiming a scheduled slot; shadow observations may continue. Remove it when the implementation
+session finishes. An unloaded/disabled LaunchAgent must also be enabled and bootstrapped again.
 
 ### Schedule, concurrency, and recovery
 

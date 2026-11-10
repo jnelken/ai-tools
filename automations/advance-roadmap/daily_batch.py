@@ -999,6 +999,9 @@ def main():
                           "budget": budget.snapshot(queue),
                           "schedule": "10:30 and 15:30 local time; carried work first", "threads_per_repo": args.threads}, indent=2))
         return 0
+    if (ROOT / 'session-hold.json').exists():
+        shared.log('roadmap work is paused for the active implementation session; slot remains unclaimed')
+        return 0
     ROOT.mkdir(parents=True, exist_ok=True)
     with open(ROOT / "run.lock.f", "a") as lock:
         try:

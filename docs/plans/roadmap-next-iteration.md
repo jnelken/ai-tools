@@ -2,7 +2,7 @@
 
 ## Status
 
-Implementation verified; deployment next. Durable queue/checkpoint support, the shadow controller and guarded automatic rollout/archival are built. The live 10:30 AM / 3:30 PM Eastern job retains authority while shadow observations accumulate.
+Durable recovery and the shadow controller are deployed. Automatic rollout and archival are enabled, with the required observation gates. The live 10:30 AM / 3:30 PM Eastern job retains authority until pilot promotion; its November 10 morning run was temporarily held at Jake's request during final verification.
 
 ## Decisions
 
@@ -112,8 +112,9 @@ Acceptance criteria:
 - [x] Separate explicit human blockers from recoverable failures; wake on relevant input, and retain a documented manual release.
 - [x] Build model-free eligibility, streaming trial dispatch, shared-lock authority, full-job reservations, daily planning caps and rollback.
 - [x] Add dashboard visibility and gated promotion/expansion with a reproducible baseline/trial comparison.
-- [x] Verification: 378 roadmap Python tests passed, followed by the final 63 batch, 14 queue and 16 scheduler/rollout tests. All four shell suites passed; plist/syntax and diff checks passed.
-- [ ] Push and deploy durable recovery, enable guarded rollout, and install the 15-minute shadow agent.
+- [x] Verification: 378 roadmap Python tests passed, followed by the final 64 batch, 15 queue and 17 scheduler/rollout tests. All four shell suites passed; plist/syntax and diff checks passed.
+- [x] Pushed and installed durable recovery, enabled guarded rollout, and bootstrapped the 15-minute shadow agent. The first live shadow check had no errors/model calls, imported 730 assigned attempts and preserved two pending assignments. The dashboard serves the queue panel and shadow status over the existing local interface.
+- [x] Honored Jake's temporary 10:30 AM pause: disabled/unloaded the live job before its tick, with the slot left unclaimed. Restore and release it only after verification is finished.
 - [ ] Observe seven shadow days; the enabled rollout promotes up to two eligible repos only after the saved guard passes. Status and operator overrides are documented in `automations/README.md`.
 - [ ] Observe a comparable trial week; automatic expansion is gated by recorded efficiency, ships, errors and accounting coverage.
 - [ ] Move this plan to `docs/plans/archive/` after the rollout is finished, as Jake requested. The controller archives and pushes only from a clean, up-to-date main checkout; otherwise it retains a visible wait reason and retries. Keep the plan active while live evidence is pending.

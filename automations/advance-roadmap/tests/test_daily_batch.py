@@ -824,7 +824,7 @@ raise SystemExit(daily_batch.main())
             snapshot.write_text('{"ok":true}')
         with patch.dict(os.environ, self.env), patch.object(daily_batch, 'ROOT', self.root), patch.object(
                 daily_batch.shared, 'code_dir', return_value=str(self.code)), patch.object(
-                daily_batch.shared, 'log'), patch.object(daily_batch, 'preflight', side_effect=preflight), patch.object(
+                daily_batch.shared, 'log'), patch.object(daily_batch.shared, 'LOG', None), patch.object(daily_batch, 'preflight', side_effect=preflight), patch.object(
                 daily_batch, 'Batch') as batch, patch.object(daily_batch, 'datetime') as clock, patch.object(
                 daily_batch.shared.Supervisor, 'busy_repos', return_value={}), patch.object(
                 daily_batch.shutil, 'which', return_value=None), patch.object(sys, 'argv', ['daily_batch.py']):
@@ -843,6 +843,17 @@ raise SystemExit(daily_batch.main())
             clock.now.return_value = datetime(2026, 11, 11, 10, 30)
             self.assertEqual(daily_batch.main(), 0)
             self.assertEqual(batch.call_count, 2)
+
+    def test_session_pause_preserves_unclaimed_slot_without_preflight_or_models(self):
+        (self.root / 'session-hold.json').write_text('{}')
+        with patch.dict(os.environ, self.env), patch.object(daily_batch, 'ROOT', self.root), patch.object(
+                daily_batch.shared, 'code_dir', return_value=str(self.code)), patch.object(
+                daily_batch, 'preflight', side_effect=AssertionError('paused')), patch.object(
+                daily_batch, 'Batch', side_effect=AssertionError('paused')), patch.object(
+                daily_batch.shared, 'LOG', None), patch.object(
+                sys, 'argv', ['daily_batch.py']):
+            self.assertEqual(daily_batch.main(), 0)
+        self.assertFalse((self.root / 'batches').exists())
 
     def test_duplicate_tick_cannot_start_second_batch(self):
         self.repo('a')

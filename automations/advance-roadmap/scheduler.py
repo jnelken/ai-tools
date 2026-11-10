@@ -17,8 +17,8 @@ from workqueue import Store, read, rows, sync, human_changed, eligibility_finger
 DAY = 86400
 SHADOW_DAYS = 7
 TRIAL_DAYS = 7
-# Existing schedule can admit two new items per repo each day. More ticks must not raise that cap.
-MAX_NEW_PER_REPO_DAY = 2
+# Two scheduled one-thread slots permit two attempts per repo/day. Resume attempts count too.
+MAX_ATTEMPTS_PER_REPO_DAY = 2
 
 
 def digest(value):
@@ -39,7 +39,10 @@ def policy(store, repos, snapshot, now=None):
         hold = store.hold(repo, now)
         active = [w for w in store.list(repo) if w['state'] != 'done']
         changed_human = any(w['state'] == 'human' and human_changed(store, w, snapshot_data) for w in active)
-        if hold and not changed_human:
+        capped = repo not in daily_admission(store, [repo])
+        if capped:
+            decision, reason = 'wait', 'daily attempt budget used; eligible after local midnight'
+        elif hold and not changed_human:
             decision, reason = 'wait', hold['reason'] or hold['state']
         elif active or batch.pending_action(repo):
             decision, reason = 'resume', 'unfinished assignment is eligible; reuse checkpoint before planning'
@@ -183,7 +186,7 @@ def archive_completed_plan(store):
 
     A dirty/different checkout is left alone and retried next tick. No runtime data is committed.
     """
-    if not store.get('rollout_complete') or store.get('plan_archived'):
+    if store.get('mode') != 'dynamic' or not store.get('rollout_complete') or store.get('plan_archived'):
         return
     checkout = store.get('plan_checkout')
     if not checkout:
@@ -274,15 +277,17 @@ def daily_admission(store, repos):
     counts = {}
     for row in store.db.execute('SELECT assigned_repo,record,pid FROM attempts WHERE stamp>=?', (since,)):
         record = json.loads(row['record']) if row['record'] else {}
-        if (not row['record'] and row['pid'] is not None) or record.get('orchestrator') not in {None, 'none', 'pending-plan'}:
+        if ((not row['record'] and row['pid'] is not None)
+                or record.get('orchestrator') not in {None, 'none', 'pending-plan'}
+                or record.get('worker') not in {None, 'none'}):
             counts[row['assigned_repo']] = counts.get(row['assigned_repo'], 0) + 1
-    return [repo for repo in repos if counts.get(repo, 0) < MAX_NEW_PER_REPO_DAY]
+    return [repo for repo in repos if counts.get(repo, 0) < MAX_ATTEMPTS_PER_REPO_DAY]
 
 
 def dispatch(store, decisions, snapshot, pilot):
     eligible = [d for d in decisions if d['repo'] in pilot and d['decision'] != 'wait']
-    allowed = set(daily_admission(store, [d['repo'] for d in eligible if d['decision'] == 'plan']))
-    eligible = [d for d in eligible if d['decision'] == 'resume' or d['repo'] in allowed]
+    allowed = set(daily_admission(store, [d['repo'] for d in eligible]))
+    eligible = [d for d in eligible if d['repo'] in allowed]
     if not eligible:
         return
     # The same kernel lock excludes both legacy batches and other ticks for the entire dispatch.
@@ -380,9 +385,11 @@ def main():
                 decisions = policy(store, [r for r in repos if r not in live], snapshot)
                 record_shadow(store, decisions)
                 store.set('last_error', None)
-                advance_rollout(store, decisions)
-                archive_completed_plan(store)
-                if store.get('mode', 'shadow') in {'trial', 'dynamic'}:
+                held = (args.root / 'session-hold.json').exists()
+                if not held:
+                    advance_rollout(store, decisions)
+                    archive_completed_plan(store)
+                if not held and store.get('mode', 'shadow') in {'trial', 'dynamic'}:
                     dispatch(store, decisions, snapshot, store.get('pilot', []))
             except (OSError, RuntimeError, subprocess.TimeoutExpired) as error:
                 store.set('last_error', {'at': time.time(), 'error': str(error)})

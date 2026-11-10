@@ -116,6 +116,17 @@ class QueueTest(unittest.TestCase):
                            'finished_at': '2020-01-01T00:00:00'})
         self.assertIsNone(self.store.hold('a'))
 
+    def test_repeated_failure_backs_off_without_requesting_human_input(self):
+        self.register()
+        with patch.object(q.time, 'time', return_value=1000):
+            self.store.finish({'stamp': '20261110-103001', 'outcome': 'error'})
+        self.register('20261110-153001')
+        with patch.object(q.time, 'time', return_value=2000):
+            self.store.finish({'stamp': '20261110-153001', 'outcome': 'error'})
+        work = self.store.list()[0]
+        self.assertEqual(work['state'], 'retry')
+        self.assertEqual(work['not_before'], 2000 + 1800)
+
     def test_pid_reuse_is_not_live_worker_adoption(self):
         with patch.object(q, 'process_start', return_value='old birth'):
             self.store.attempt('s', 'a', plan(), pid=12)

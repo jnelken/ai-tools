@@ -67,6 +67,7 @@ class Store:
         self.root = Path(root)
         self.root.mkdir(parents=True, exist_ok=True)
         self.db = sqlite3.connect(self.root / 'workqueue.sqlite3', timeout=15)
+        os.chmod(self.root / 'workqueue.sqlite3', 0o600)
         self.db.row_factory = sqlite3.Row
         self.db.execute('PRAGMA journal_mode=WAL')
         self.db.execute('PRAGMA synchronous=FULL')
@@ -198,7 +199,9 @@ class Store:
                 finished = datetime.fromisoformat(record['finished_at']).timestamp()
             except (KeyError, ValueError, TypeError):
                 finished = time.time()
-            state, phase, wake = 'retry', work['phase'], finished + 900
+            failures = self.db.execute("SELECT COUNT(*) FROM attempts WHERE work_id=? AND outcome IN ('error','failed','incomplete','blocked','blocked-branch-left','limit_hit')", (work['id'],)).fetchone()[0]
+            backoff = min(6 * 3600, 900 * 2 ** min(max(failures - 1, 0), 5))
+            state, phase, wake = 'retry', work['phase'], finished + backoff
             if outcome == 'shipped' and record.get('worker_exit') == 0 and record.get('worker'):
                 state, phase, wake = 'done', 'done', 0
             elif outcome == 'shipped-deploy-failed':
