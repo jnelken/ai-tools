@@ -1,8 +1,8 @@
 ## Standing Git and deployment authorization
 
-Jake authorizes committing, pushing and deploying task changes in every accessible repository
+Jake authorizes committing, merging, pushing and deploying task changes in every accessible repository
 whose resolved path is under `~/Dropbox/code`, regardless of repository ownership. This is
-standing permission: do not ask again for ordinary pushes or deployments there. Apply the
+standing permission: do not ask again for ordinary merges, pushes or deployments there. Apply the
 repository's required checks and keep existing restrictions on rewriting shared history or
 shipping work explicitly marked parked or unfinished. Targets outside that directory retain
 their existing work/personal authorization rules.
