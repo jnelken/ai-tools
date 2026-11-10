@@ -155,8 +155,11 @@ worker skips its file, `worker.sh` recovers it from a fence in that final answer
 runs from before 2026-09-24.
 
 Two consecutive `error` / `failed` / `incomplete` runs post a separate `<!here>` Slack alert and a
-macOS notification, then again every 4 failures; the first success afterwards posts a recovery
-line. (A routine "error" summary line went unnoticed for 4.5 days in Sep 2026.)
+macOS notification, then again every 4 failures. A recovery notice requires a shipped worker
+with observed exit 0 for the same repository and item (ticket, branch, or item name), and names
+that work specifically. Unrelated/no-work planner results never confirm recovery; other
+outstanding failures are called out. (A routine "error" summary line went unnoticed for 4.5 days
+in Sep 2026.)
 
 A run stopped by usage — the planner hit its limit, or every worker provider was over its gate or
 limited — is recorded as **`quota-paused`**, not `error`. Its row carries a `quota` field (provider,

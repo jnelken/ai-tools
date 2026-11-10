@@ -285,6 +285,42 @@ def error_streak(records):
     return n
 
 
+def work_identity(record):
+    """Unknown targets cannot be proven recovered by a later unrelated planner."""
+    repo = record.get("repo")
+    if not repo:
+        return (None, record.get("stamp"))
+    return (repo, record.get("linear_id") or record.get("branch") or record.get("item"))
+
+
+def verified_recovery(records):
+    # Keep outstanding work independent of the global arrival-order error streak:
+    # a parallel lane's no-op, quota skip or unrelated success proves nothing about it.
+    pending, alerted = {}, set()
+    streak = 0
+    recovery = None
+    for record in records:
+        outcome = record.get("outcome")
+        if outcome in SKIP_OUTCOMES + QUOTA_OUTCOMES:
+            continue
+        recovery = None
+        key = work_identity(record)
+        if outcome in ERROR_OUTCOMES:
+            pending[key] = pending.get(key, 0) + 1
+            streak += 1
+            if streak >= ALERT_FIRST:
+                alerted.update(pending)
+            continue
+        streak = 0
+        if not all(key) or outcome != "shipped" or record.get("worker_exit") != 0 or not record.get("worker"):
+            continue
+        count = pending.pop(key, 0)
+        if count and key in alerted:
+            recovery = (key, count, bool(pending))
+        alerted.discard(key)
+    return recovery
+
+
 def alert_text(records):
     ran = [r for r in records if r.get("outcome") not in SKIP_OUTCOMES + QUOTA_OUTCOMES]
     if not ran:
@@ -294,11 +330,14 @@ def alert_text(records):
     if streak >= ALERT_FIRST and (streak - ALERT_FIRST) % ALERT_EVERY == 0:
         return (f"<!here> :rotating_light: advance-roadmap has failed {streak} runs in a row — "
                 f"latest `{last['stamp']}`: {last.get('detail') or last.get('outcome')}")
-    if streak == 0 and len(ran) >= 2:
-        prior = error_streak(records[:records.index(last)])
-        if prior >= ALERT_FIRST:
-            return (f":white_check_mark: advance-roadmap recovered after {prior} failed runs — "
-                    f"`{last['stamp']}` {last.get('outcome')}")
+    recovery = verified_recovery(ran)
+    if recovery:
+        key, count, remaining = recovery
+        scope = key[0] + (f" · {key[1]}" if key[1] else "")
+        suffix = "; other failed work remains unresolved" if remaining else ""
+        runs = "run" if count == 1 else "runs"
+        return (f":white_check_mark: advance-roadmap recovered {scope} after {count} failed {runs} — "
+                f"`{last['stamp']}` verified shipped worker{suffix}")
     return ""
 
 

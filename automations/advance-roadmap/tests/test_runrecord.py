@@ -215,5 +215,68 @@ class RunRecordTest(unittest.TestCase):
         self.assertEqual(runrecord.alert_text(records), "")
 
 
+
+
+class RecoveryAlertTest(unittest.TestCase):
+    def row(self, stamp, outcome, repo=None, item=None, **extra):
+        return dict(stamp=stamp, outcome=outcome, repo=repo, linear_id=item, **extra)
+
+    def failures(self):
+        return [self.row('a', 'error', 'ai-tools', 'DEV-324'),
+                self.row('b', 'error', 'typey.site', 'DEV-211')]
+
+    def shipped(self, stamp='c', repo='ai-tools', item='DEV-324', **extra):
+        return self.row(stamp, 'shipped', repo, item, worker='codex', worker_exit=0, **extra)
+
+    def test_unrelated_no_work_never_claims_recovery(self):
+        records = self.failures()
+        self.assertIn('failed 2 runs in a row', runrecord.alert_text(records))
+        records.append(self.row('c', 'blocked-no-item'))
+        self.assertEqual(runrecord.alert_text(records), '')
+        records.append(self.row('d', 'blocked-no-item', 'ai-tools', 'DEV-324'))
+        self.assertEqual(runrecord.alert_text(records), '')
+
+    def test_different_repository_or_ticket_success_does_not_recover_failed_work(self):
+        for success in [self.shipped(repo='other'), self.shipped(item='DEV-999')]:
+            self.assertEqual(runrecord.alert_text(self.failures() + [success]), '')
+
+    def test_one_worker_recovery_is_scoped_and_keeps_other_failures_visible(self):
+        text = runrecord.alert_text(self.failures() + [self.shipped()])
+        self.assertIn('recovered ai-tools · DEV-324', text)
+        self.assertIn('other failed work remains unresolved', text)
+
+    def test_recovery_survives_interleaved_noops_and_quota_pauses(self):
+        records = self.failures() + [self.row('c', 'blocked-no-item'), self.row('d', 'quota-paused'),
+                                    self.row('e', 'skipped-quota')]
+        records.append(self.shipped(stamp='f'))
+        self.assertIn('recovered ai-tools', runrecord.alert_text(records))
+        records.append(self.shipped(stamp='g', repo='typey.site', item='DEV-211'))
+        text = runrecord.alert_text(records)
+        self.assertIn('recovered typey.site', text)
+        self.assertNotIn('remain', text)
+        records.append(self.shipped(stamp='h', repo='typey.site', item='DEV-211'))
+        self.assertEqual(runrecord.alert_text(records), '')
+
+    def test_missing_worker_or_nonzero_exit_cannot_confirm_recovery(self):
+        for patch in [{'worker': None}, {'worker_exit': None}, {'worker_exit': 1}, {'outcome': 'shipped-deploy-failed'}]:
+            success = self.shipped(); success.update(patch)
+            self.assertNotIn('recovered', runrecord.alert_text(self.failures() + [success]))
+
+    def test_missing_work_identity_cannot_establish_same_item_recovery(self):
+        records = [self.row('a', 'error', 'demo'), self.row('b', 'error', 'demo')]
+        self.assertEqual(runrecord.alert_text(records + [self.shipped(repo='demo', item=None)]), '')
+
+    def test_branch_or_item_can_identify_ticketless_work(self):
+        for field in ['branch', 'item']:
+            records = [dict(self.row('a', 'error', 'demo'), **{field: 'same-work'}),
+                       dict(self.row('b', 'error', 'demo'), **{field: 'same-work'}),
+                       dict(self.shipped(repo='demo', item=None), **{field: 'same-work'})]
+            self.assertIn('recovered demo · same-work', runrecord.alert_text(records))
+
+    def test_unidentified_planner_failure_is_not_cleared_by_any_worker(self):
+        records = [self.row('a', 'error'), self.row('b', 'error')]
+        self.assertEqual(runrecord.alert_text(records + [self.shipped()]), '')
+
+
 if __name__ == "__main__":
     unittest.main()
