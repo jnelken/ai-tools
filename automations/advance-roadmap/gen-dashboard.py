@@ -877,6 +877,75 @@ def token_summary(runs):
             f'Hover a cell for the split. Cursor reports its Auto pool, not the model it routed to.</p>')
 
 
+def queue_panel():
+    """Read-only projection; refreshing the page cannot create or advance work."""
+    import sqlite3
+    from contextlib import closing
+    path = os.path.join(ROOT, 'workqueue.sqlite3')
+    if not os.path.exists(path):
+        return '<p class=dim>No durable queue observations yet.</p>'
+    try:
+        with closing(sqlite3.connect('file:' + path + '?mode=ro', uri=True, timeout=3)) as con:
+            con.row_factory = sqlite3.Row
+            settings = {r['key']: json.loads(r['value']) for r in con.execute(
+                "SELECT * FROM settings WHERE key IN ('mode','last_tick','last_error','shadow_started','rollout_wait','archive_wait','plan_archived')")}
+            work = list(con.execute("SELECT * FROM work WHERE state!='done' ORDER BY updated DESC LIMIT 80"))
+    except (sqlite3.Error, ValueError):
+        return '<p class=dim>Queue state temporarily unavailable; existing work is preserved.</p>'
+    mode = settings.get('mode', 'shadow')
+    tick = settings.get('last_tick') or {}
+    observed = datetime.fromtimestamp(tick['at']).strftime('%b %d %H:%M') if tick.get('at') else 'not yet observed'
+    out = [f'<p>Scheduler: <strong>{esc(mode)}</strong> · last check {esc(observed)}</p>']
+    if settings.get('shadow_started') and mode == 'shadow':
+        elapsed = (datetime.now().timestamp() - settings['shadow_started']) / 86400
+        out.append('<p class=dim>Shadow evidence: ' + esc(f'{elapsed:.1f}') + ' of at least 7 days.</p>')
+    if settings.get('archive_wait'):
+        out.append('<p>' + esc(settings['archive_wait']) + '</p>')
+    if settings.get('last_error'):
+        out.append('<p class=bad>' + esc(settings['last_error']['error']) + '</p>')
+    if work:
+        out.append('<div class=card><table><thead><tr><th>Item</th><th>Phase</th><th>Next action / waiting reason</th></tr></thead><tbody>')
+        for w in work:
+            cp = json.loads(w['checkpoint'])
+            wake = (' · eligible after ' + datetime.fromtimestamp(w['not_before']).strftime('%b %d %H:%M')) if w['not_before'] else ''
+            action = w['reason'] if w['state'] in ('human', 'retry') else cp.get('next_action')
+            out.append('<tr><td>' + esc(w['repo'] + ' / ' + w['item']) + '</td><td>'
+                       + esc(w['phase'] + ' · ' + w['state']) + '</td><td>'
+                       + esc((action or 'Reconcile saved assignment') + wake) + '</td></tr>')
+        out.append('</tbody></table></div>')
+    else:
+        out.append('<p class=dim>No unfinished assignments.</p>')
+    decisions = tick.get('decisions', [])
+    if decisions:
+        out.append('<details><summary>Eligibility decisions</summary><ul>' + ''.join(
+            '<li>' + esc(d['repo'] + ': ' + d['decision'] + ' — ' + d['reason']) + '</li>'
+            for d in decisions) + '</ul></details>')
+    # Keep unrouted issues accessible without asking an agent to fetch them.
+    snapshots = [os.path.join(ROOT, 'scheduler-snapshot.json'), os.path.join(ROOT, 'live-snapshot.json')]
+    snapshots += glob.glob(os.path.join(ROOT, 'batches', '*', 'linear-snapshot.json'))
+    available = [p for p in snapshots if os.path.isfile(p)]
+    latest = max(available, key=os.path.getmtime) if available else None
+    try:
+        with open(latest) as stream:
+            snap = json.load(stream)
+    except (OSError, ValueError, TypeError):
+        snap = {}
+    unassigned = [i for i in (snap or {}).get('issues', [])
+                  if not any(l.startswith('repo/') for l in i.get('labels', []) if isinstance(l, str))
+                  and i.get('state_type') not in ('completed', 'canceled')]
+    if unassigned:
+        out.append('<details><summary>' + str(len(unassigned)) + ' issues need a repository label</summary>'
+                   '<p>Assign a repo/* label in Linear to make each issue eligible. These issues remain visible here.</p><ul>')
+        for i in unassigned:
+            label = esc(str(i.get('id', '')) + ': ' + str(i.get('title', '')))
+            url = i.get('url') or ''
+            if url.startswith('https://linear.app/'):
+                label = '<a href="' + esc(url) + '">' + label + '</a>'
+            out.append('<li>' + label + '</li>')
+        out.append('</ul></details>')
+    return ''.join(out)
+
+
 def build():
     ledger = merge_cache(read_ledger())
     runs = parse_runs(ledger, read_records())
@@ -1012,7 +1081,7 @@ def build():
         cadence=base_cadence(), windows=esc(BATCH_DESCRIPTION),
         total=n, shipped=shipped, blocked=blocked, skipped=skipped, errored=errored,
         last_line=last_line, run_cards=run_cards, run_panels=run_panels, repo_cards=repo_cards,
-        waiting=waiting, quota_html=quota_html, token_html=token_html, missed_html=missed_html, **{f"n_{k}": v for k, v in counts.items()},
+        waiting=waiting, queue_html=queue_panel(), quota_html=quota_html, token_html=token_html, missed_html=missed_html, **{f"n_{k}": v for k, v in counts.items()},
     )
 
 
@@ -1165,6 +1234,9 @@ TEMPLATE = """<!doctype html>
 
   <h2>Token usage</h2>
   {token_html}
+
+  <h2>Work queue and continuation</h2>
+  {queue_html}
 
   <h2>Waiting on you</h2>
   {waiting}

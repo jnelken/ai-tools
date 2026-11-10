@@ -127,9 +127,12 @@ that memory directory is the right one. Don't guess a different path.)
 
 `$CODE_DIR/.advance-roadmap/pending-plan-<repo>.json` holds a dispatch decision for that repo whose
 worker never settled it (crash, limit, kill). `run.sh` reuses one without calling you when it is
-fresh (<36h), has been retried fewer than twice, and its repo is still safe and not busy in another
-lane — and drops it when it isn't. If you are running, the log lines `pending plan: not reusing (…)`
-say why any were declined; a plan for a busy repo is simply another lane's, so leave it alone.
+eligible, and its repo is still safe and not busy in another lane. Age/retries require revalidation;
+they never erase the assignment or its checkpoint history. Human-blocked assignments are parked,
+while unrelated repos may continue. `pending plan: held (…)` explains a hold. A busy repo belongs
+to another lane; leave it alone. Durable identity, attempts and phase checkpoints live in
+`~/.claude/automations/advance-roadmap/workqueue.sqlite3`. The worker receives a bounded continuation
+packet when work resumes; interrupted work does not itself require owner input.
 Never edit or delete these files — `run.sh` owns them.
 
 ### Partial triage exists

@@ -52,7 +52,7 @@ windows are the retired scheduler; its helpers are still imported.) The batch ru
 
 1. **Plan.** One planner per repo (*thread 1*), read-only, picks one item and lists its
    `touchpoints`. Once thread 1 has planned a *feature*, a planner for the repo's *next thread*
-   starts, shown the earlier threads' plans, up to `ADVANCE_ROADMAP_THREADS_PER_REPO` (default 2,
+   starts, shown the earlier threads' plans, up to `ADVANCE_ROADMAP_THREADS_PER_REPO` (default 1,
    at most 3; `--threads`). A later thread picks the next item that isn't theirs, owns no bookkeeping,
    and answers `no second thread` when there's nothing independent to do.
 2. **Approve.** At the barrier — every planner finished, no worker started — each repo with two or

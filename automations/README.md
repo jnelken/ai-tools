@@ -21,7 +21,8 @@ makes the deploy clone dirty.
 Two finite batches every day at **10:30 and 15:30 local time** (Eastern on Jake's Mac), starting
 with `daily_batch.py`. It queues direct-child personal repos, excluding `.noroadmap`,
 non-`jnelken` origins, aliases, and repos with a worker still in flight. Each repo gets
-its own read-only planner, scoped to **one actionable ticket/roadmap item**.
+its own read-only planner, scoped to **one actionable ticket/roadmap item**, with one thread
+per repo by default. Extra threads require an explicit override.
 The existing clean-tree, live-session, directive, dependency, and review gates still apply.
 When a repo has no actionable item, its planner reports that and stops (Step 2d). There is no
 code-health or hygiene fallback; `run.sh` refuses a `code_health` plan.
@@ -30,6 +31,75 @@ All planners finish before implementation begins. Ready plans are persisted and 
 a disk barrier; the controller releases workers together, up to the concurrency limit.
 Each worker uses the existing Superset workspace, verification, cross-model review, and
 PR merge flow. A repo's finished slot never queues another ticket from that repo.
+
+### Durable recovery and dynamic scheduling rollout
+
+`lib/workqueue.py` keeps stable work identities, attempts and bounded phase checkpoints in
+`~/.claude/automations/advance-roadmap/workqueue.sqlite3` (SQLite WAL, full synchronous commits).
+The existing pending-plan files remain compatibility projections and migration sources. Only
+existing pending assignments authorize recovery during migration; an old failed log does not
+revive deliberately parked work. Historical attempts retain assigned and reported repo separately.
+
+Saved work no longer disappears after 36 hours or two retries. Those thresholds request revalidation
+of the ticket, branch and existing PR/merge instead. Unsafe repos are held without losing their plan.
+Checkpoints preserve next actions, session IDs and artifact pointers across providers; a changed
+HEAD marks test/review evidence invalid while retaining findings for rechecking. Workers currently
+use checkpoint-based continuation; native CLI session reattachment is not assumed to work.
+
+The dashboard's **Work queue and continuation** panel shows phases, waiting reasons, eligibility
+decisions and unrouted Linear issues. Relevant human replies/directives reopen a held assignment
+for revalidation; an explicit release is also available without an agent:
+
+```sh
+python3 ~/.claude/automations/advance-roadmap/lib/workqueue.py status
+python3 ~/.claude/automations/advance-roadmap/lib/workqueue.py unblock <work-id> --reason 'What changed'
+```
+
+`com.jake.advance-roadmap-shadow.plist` invokes `scheduler.py` every 15 minutes. **Default mode is
+shadow:** it makes no model calls and dispatches no workers. It imports completed records,
+reconciles surviving workers using PID birth times, refreshes a cached Linear snapshot at most
+once per 15 minutes and records proposed eligibility decisions. An idle tick never launches a model.
+No-work caches depend on launch-time inputs, so late completions cannot make newer inputs look
+already triaged. Unrouted tickets remain on the dashboard instead of invalidating every repo;
+explicit repo directives and cross-repo dependencies are preserved.
+
+The active 10:30 / 15:30 job retains live authority during the seven-day shadow period. Trial and
+expansion commands are gated by actual saved observations, not just a configuration switch:
+
+```sh
+python3 ~/.claude/automations/advance-roadmap/scheduler.py --status
+# After seven days of fresh shadow observations without false skips/errors:
+python3 ~/.claude/automations/advance-roadmap/scheduler.py --promote <repo-one> [repo-two]
+# After a measured seven-day trial meets the efficiency/completion checks:
+python3 ~/.claude/automations/advance-roadmap/scheduler.py --expand
+# Restore legacy dispatch while preserving queue/checkpoints:
+python3 ~/.claude/automations/advance-roadmap/scheduler.py --rollback
+# Begin a new observation period after fixing a shadow failure:
+python3 ~/.claude/automations/advance-roadmap/scheduler.py --restart-shadow
+```
+
+In trial/dynamic mode, the scheduled job excludes those repos. The new controller shares its kernel
+lock and budget leases; it never runs beside the legacy controller. It streams one item per repo
+without a global planning barrier, caps all active phases at five, reserves full implementation plus
+review capacity before planning, and admits at most two fresh planning attempts per repo per day.
+Quota waits have a `not_before`; unchanged no-work inputs wait for a change or the 72-hour safety
+audit. Checkpoints are updated at phase transitions and worker milestones. Dynamic attempts are
+folded into the existing scheduled summary, not posted per tick. Rollback preserves all work history.
+
+The approved rollout is enabled with `scheduler.py --enable-rollout <ai-tools-dev-checkout>`.
+It automatically selects up to two eligible pilot repos with the largest measured no-work cost
+after the shadow gate passes. Expansion requires a full measured trial week with token
+coverage, at least 50% fewer no-work planning tokens, no lost ships and no increased errors.
+`--status` reports the baseline/trial totals and limitations; token totals are not quota percentages
+or cross-provider dollar costs. Do not report the rollout complete before these observation periods
+have actually passed. The execution plan stays active until then. After rollout completion, the controller moves it to
+`docs/plans/archive/`, commits and pushes the move from the configured dev checkout. A dirty tree,
+non-main branch or unpublished commits defer archival without touching other work. A failed push
+is retried using the recorded archive commit. Rollback disables automatic promotion.
+
+Install the shadow agent by symlinking the maintained deploy-clone plist into `~/Library/LaunchAgents/`,
+then `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.jake.advance-roadmap-shadow.plist`.
+It has `RunAtLoad=false`; a bootstrap does not start a model or force a roadmap batch.
 
 ### Schedule, concurrency, and recovery
 
@@ -40,8 +110,9 @@ past the next scheduled time; the shared kernel lock prevents overlapping schedu
 
 Carried dispatch/resume plans run first, without planning new work or expanding to extra
 threads. New work starts only after those workers ship and their pending plans are cleared.
-If any carried work is still running, blocked, failed or deferred for budget, new work waits
-for a later scheduled batch. Existing repo/in-flight locks and worker freshness checks remain.
+Interrupted work is resumed automatically. If a worker explicitly needs an owner decision or
+access, it is parked with one question while unrelated repos continue. Test failures and merge
+conflicts remain agent-owned. Existing repo/in-flight locks and worker freshness checks remain.
 
 `ADVANCE_ROADMAP_LANES=5` caps the total number of active agents in a batch. Planning, approval,
 and implementation run in sequence, so no more than **five agents at once** can be active across

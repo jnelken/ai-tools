@@ -179,6 +179,7 @@ record() {
   [ "$RECORDED" -eq 0 ] || return 0
   RECORDED=1
   local -a extra=()
+  [ -n "$TARGET_REPO" ] && extra+=(--repo "$TARGET_REPO")
   [ -n "${3:-}" ] && extra+=(--exit "$3")
   [ -n "$LANE" ] && extra+=(--lane "$LANE")
   [ -f "$RUN_DIR/workspace.json" ] && extra+=(--expect-pr)  # a workspace run must ship a PR
@@ -661,17 +662,28 @@ If a PushNotification probe would have been useful, set a note in summary; the w
   # Oldest first; another lane's repo is not ours to resume. A plan that can't be reused is
   # dead (too old, retried out, repo unsafe) — drop it, as a fresh plan would have replaced it.
   reused=0
+  held_pending=0
   # Only a repo's first thread resumes a saved plan; a later thread always plans fresh.
   for f in "$PENDING_DIR"/pending-plan*.json(N.Om); do
     [ "$THREAD" -gt 1 ] && break
     prepo="$(jq -r '.orchestrator.repo // empty' "$f" 2>/dev/null)"
     [ -n "$TARGET_REPO" ] && [ "$prepo" != "$TARGET_REPO" ] && continue
     [[ " $BUSY_REPOS " == *" $prepo "* ]] && continue
-    if python3 "$PLAN_PY" --file "$f" reuse --out "$result"; then
+    python3 "$PLAN_PY" --file "$f" reuse --out "$result"
+    reuse_rc=$?
+    if [ "$reuse_rc" -eq 0 ]; then
       PENDING_PLAN="$f"; reused=1; break
+    elif [ "$reuse_rc" -eq 2 ]; then
+      held_pending=1
+      continue
     fi
-    python3 "$PLAN_PY" --file "$f" clear
+    # Preserve the rejected source for diagnosis rather than silently dropping its history.
+    mv "$f" "$f.rejected-$STAMP"
   done
+  if [ "$reused" -eq 0 ] && [ "$held_pending" -eq 1 ]; then
+    record skipped-backoff "saved assignments are held or completed; no fresh planning"
+    exit 0
+  fi
   if [ "$reused" -eq 1 ]; then
     orch_rc=0
     ORCH=pending-plan  # the run record shows no planning pass ran
@@ -942,7 +954,10 @@ PY
     if [ -n "$plan_repo" ]; then
       PENDING_PLAN="$PENDING_DIR/pending-plan-$plan_repo.json"
       [ "$THREAD" -gt 1 ] && PENDING_PLAN="$PENDING_DIR/pending-plan-$plan_repo.t$THREAD.json"
-      python3 "$PLAN_PY" --file "$PENDING_PLAN" save --result "$result" --stamp "$STAMP"
+      if ! python3 "$PLAN_PY" --file "$PENDING_PLAN" save --result "$result" --stamp "$STAMP"; then
+        record aborted "could not durably save assignment; no worker launched"
+        exit 1
+      fi
     fi
   fi
 
@@ -1066,6 +1081,13 @@ PY
       ;;
   esac
 
+  cp "$req" "$RUN_DIR/worker-request.json"; req="$RUN_DIR/worker-request.json"
+  if [[ "$action" == (dispatch_worker|resume_worker) ]] && [ -f "$ROOT/lib/workqueue.py" ]; then
+    if ! python3 "$ROOT/lib/workqueue.py" --root "$ROOT" checkpoint --request-file "$req" --phase implementing; then
+      record aborted "checkpoint storage failed; assignment retained and no worker launched"
+      exit 1
+    fi
+  fi
   worker_rc=0
   chmod +x "$WORKER_SH" 2>/dev/null || true
   if [ -z "${WORKERS:-}" ] && [ "$action" = "dispatch_worker" -o "$action" = "resume_worker" ]; then
@@ -1091,7 +1113,6 @@ PY
     jq -n '{outcome:"bookkeeping",provider:"none",summary:"no-op no-work result: nothing to post, no bookkeeping worker ran"}' > "$WORKER_RESULT"
   elif [ "$SUPERSET_MODE" = "1" ] && [ -n "${WORKERS:-}" ] && [ "$action" = "dispatch_worker" -o "$action" = "resume_worker" ]; then
     # Keep the request where the workspace terminal can read it after this block's cleanup.
-    cp "$req" "$RUN_DIR/worker-request.json"; req="$RUN_DIR/worker-request.json"
     run_worker_in_workspace "$req" || true
   else
     "$WORKER_SH" --stamp "$STAMP" --request-file "$req" --providers "${WORKERS:-}" \

@@ -43,6 +43,8 @@
         "unresolved": { "type": "integer", "minimum": 0 }
       }
     },
+    "needs_input": { "type": "boolean", "default": false },
+    "input_question": { "type": ["string", "null"] },
     "summary": { "type": "string" },
     "slack_summary": { "type": ["string", "null"] }
   }

@@ -495,6 +495,24 @@ Retain original planning tickets. Legacy `create-pr` backfills may be deleted on
 creation provenance recorded in the reviewed plan and a successful archive readback. A missing
 PR is not evidence of backfill. Archive/log failures are reported and never block a clean ship.
 
+## Continuation between runs
+
+An interrupted assignment remains the same work item. Reconcile its existing branch, checkpoint,
+review artifacts and PR/merge state before acting. Continue from the last valid phase; do not
+repeat a completed merge. Test and review evidence is valid only for the revision it checked and
+the current required review strategy. A continuation packet is a guide, never proof that a check passed.
+
+The launcher gives the `workqueue.py checkpoint` command. Save a bounded checkpoint after durable
+milestones and before a handoff: completed steps, current HEAD, next action, tests/findings with
+their evidence HEAD, and paths to large artifacts. The controller also captures independent facts;
+Step 8 notes complement these checkpoints rather than replacing them.
+
+A crash, quota limit, failing test or merge conflict is recoverable by the agent. Only an actual
+owner decision or access requirement is a human blocker. Report `needs_input: true` and one
+specific `input_question` in that case; otherwise use `needs_input: false`. Human-blocked work is
+parked while other repos proceed, and revalidated when relevant human input changes. Do not ask
+Jake to resolve an ordinary implementation problem.
+
 ## Step 8 — Update run memory
 
 Run memory is **one file per repo** under `$(~/.ai-tools/bin/personal-code-dir --memory-dir)/advance-roadmap-runs/`

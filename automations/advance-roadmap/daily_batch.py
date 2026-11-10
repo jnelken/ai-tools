@@ -31,6 +31,7 @@ import supervisor as shared
 
 sys.path.insert(0, str(shared.HERE / "lib"))
 import usage  # noqa: E402
+import workqueue  # noqa: E402
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "lib"))
 import agent_budget  # noqa: E402
 
@@ -39,7 +40,7 @@ POLL_S = float(os.environ.get("ADVANCE_ROADMAP_BATCH_POLL_S", "1"))
 PLAN_TIMEOUT_S = float(os.environ.get("ADVANCE_ROADMAP_PLAN_TIMEOUT_S", "1800"))
 MAX_CONCURRENT_AGENTS = 5
 MAX_THREADS_PER_REPO = 3
-DEFAULT_THREADS_PER_REPO = 2
+DEFAULT_THREADS_PER_REPO = 1
 # Two workers of one repo creating Superset workspaces in the same second race the project import.
 RELEASE_GAP_S = float(os.environ.get("ADVANCE_ROADMAP_THREAD_RELEASE_GAP_S", "20"))
 APPROVAL_TIMEOUT_S = float(os.environ.get("ADVANCE_ROADMAP_APPROVAL_TIMEOUT_S", "1800"))
@@ -279,7 +280,7 @@ class RoadmapBudget:
                    and item.get("verdict_check", {}).get("result") == "pending")
         for planner in ([*self.planners, None] if pending else self.planners):
             allocation = self.choose(item=item, planner=planner,
-                                     scale=1 if pending else self.rates.get(item["repo"], .3))
+                                     scale=1 if pending or item.get("streaming") else self.rates.get(item["repo"], .3))
             if allocation is not None:
                 return True
         return False
@@ -393,6 +394,10 @@ class Batch:
         # its own repo are not busy: they are the siblings it is planning around.
         env["ADVANCE_ROADMAP_BUSY_REPOS"] = " ".join(
             sorted({i["repo"] for i in self.state["queue"] if i["repo"] != item["repo"]}))
+        with workqueue.Store(ROOT) as store:
+            store.set('eligibility_at_start:' + item['stamp'], workqueue.eligibility_fingerprint(
+                item['repo'], shared.code_dir(), workqueue.read(self.directory / 'linear-snapshot.json', {}),
+                shared.HERE.parents[1] / 'skills/advance-roadmap'))
         with open(ROOT / "logs" / f'batch-lane-{item["stamp"]}.err', "w") as err:
             proc = subprocess.Popen(["/bin/zsh", str(shared.RUN_SH)], env=env,
                                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
@@ -401,6 +406,8 @@ class Batch:
         if self.budget:
             agent_budget.transfer(item.get("budget_leases", []), proc.pid)
         item.update(status="planning", pid=proc.pid, started=time.time())
+        with workqueue.Store(ROOT) as store:
+            store.attempt(item['stamp'], item['repo'], pid=proc.pid)
         shared.log(f'planning {item["repo"]} thread {item["thread"]} [{item["stamp"]}]')
 
     def poll(self):
@@ -416,6 +423,10 @@ class Batch:
                     self.budget.release(item)
                 if row.get("quota"):
                     item["quota"] = row["quota"]  # who ran out, when it resets, the CLI's words
+                with workqueue.Store(ROOT) as store:
+                    workqueue.capture(store, item['stamp'], item['repo'], phase=None, code=shared.code_dir())
+                    if row:
+                        store.finish(row, workqueue.read(ROOT / 'runs' / item['stamp'] / 'worker-result.json', {}))
                 continue
             run = ROOT / "runs" / item["stamp"]
             if item["status"] == "planning" and (run / "batch-ready").exists():
@@ -425,6 +436,8 @@ class Batch:
                             plan=plan_of(result, item))
                 if self.budget:
                     self.budget.planned(item)
+                with workqueue.Store(ROOT) as store:
+                    workqueue.capture(store, item['stamp'], item['repo'], result, 'ready', shared.code_dir())
             elif item["status"] == "planning" and time.time() - item["started"] > PLAN_TIMEOUT_S:
                 # Only planning gets this deadline. Already dispatched workers retain run.sh's
                 # existing timeout/recovery behavior and are never killed by this controller.
@@ -632,9 +645,19 @@ class Batch:
         self.budget.refresh()
         return self.sync_review_fallback()
 
-    def run(self):
+    def run(self, streaming=False, summary=True):
+        self.streaming = streaming
+        self.summary_enabled = summary
         self.budget = RoadmapBudget()
         self.sync_review_fallback()
+        with workqueue.Store(ROOT) as store:
+            workqueue.sync(store, shared.code_dir())
+            workqueue.wake_humans(store, workqueue.read(self.directory / 'linear-snapshot.json', {}))
+            for item in self.state['queue']:
+                hold = store.hold(item['repo'])
+                if hold and item['status'] == 'queued':
+                    item.update(status='deferred', reason=hold['reason'], waiting_state=hold['state'],
+                                not_before=hold['not_before'])
         for item in self.state["queue"]:
             item["verdict_check"] = repo_priority(item["repo"], self.directory / "linear-snapshot.json")
         self.state["queue"].sort(key=lambda i: i["verdict_check"]["priority"])
@@ -649,7 +672,7 @@ class Batch:
             self.post_summary()
             return 0
         carried = [i for i in self.state["queue"]
-                   if i["verdict_check"]["priority"] == 0
+                   if (i["verdict_check"]["priority"] == 0 and i['status'] == 'queued')
                    or i.get("reason") == "previous worker is still running"]
         fresh = [i for i in self.state["queue"] if i not in carried and i["status"] == "queued"]
         if carried:
@@ -657,9 +680,11 @@ class Batch:
             for item in fresh:
                 item["status"] = "waiting-for-recovery"
             self.write()
-            self.run_work()
-            unfinished = [i["repo"] for i in carried
-                          if i.get("outcome") != "shipped" or pending_action(i["repo"])]
+            (self.run_stream if streaming else self.run_work)()
+            with workqueue.Store(ROOT) as store:
+                unfinished = [i['repo'] for i in carried
+                              if (i.get('outcome') != 'shipped' or pending_action(i['repo']))
+                              and not (store.hold(i['repo']) or {}).get('state') == 'human']
             for item in fresh:
                 if unfinished:
                     item.update(status="deferred", reason="carried work is unfinished: " + ", ".join(unfinished))
@@ -668,14 +693,58 @@ class Batch:
             self.state["recovery_first"] = False
             self.write()
             if not unfinished and fresh:
-                self.run_work()
+                (self.run_stream if streaming else self.run_work)()
         else:
-            self.run_work()
+            (self.run_stream if streaming else self.run_work)()
         self.state["phase"] = "done"
         self.state["quota_paused"] = quota_paused(self.state)
         self.write()
         self.post_summary()
         return 0
+
+    def run_stream(self):
+        """One item per repo, no global planner barrier; all active phases share the cap."""
+        if self.threads != 1:
+            raise ValueError('streaming requires one thread per repo')
+        self.state['phase'] = 'streaming'
+        for item in self.state['queue']:
+            item['streaming'] = True
+        while any(i['status'] in {'queued', 'planning', 'ready', 'running', 'canceling'}
+                  for i in self.state['queue']):
+            self.poll()
+            self.refresh_budget()
+            active = sum(i['status'] in {'planning', 'running', 'canceling'} for i in self.state['queue'])
+            slots = max(0, self.limit - active)
+            ready = sorted((i for i in self.state['queue'] if i['status'] == 'ready'),
+                           key=lambda i: i.get('verdict_check', {}).get('priority', 2))
+            released = 0
+            for item in ready[:slots]:
+                allocation = self.budget.choose(item=item)
+                if allocation is None:
+                    item['budget_hold'] = 'implementation and review need shared headroom'
+                    continue
+                run = ROOT / 'runs' / item['stamp']
+                save(run / 'batch-budget.json', {k: allocation[k] for k in
+                     ('worker', 'reviewers', 'review_strategy', 'review_fallback_reason')})
+                (run / 'batch-release').touch()
+                item.update(status='running', released_at=time.time())
+                item.pop('budget_hold', None)
+                released += 1
+            slots -= released
+            launched = 0
+            for item in [i for i in self.state['queue'] if i['status'] == 'queued'][:slots]:
+                if self.budget.admit(item):
+                    self.launch(item)
+                    launched += 1
+                else:
+                    item['budget_hold'] = 'complete job does not fit shared headroom'
+            if not active and not released and not launched:
+                # No model or worker can free capacity: save work and end this tick.
+                for item in ready:
+                    self.cancel(item, item.get('budget_hold') or 'waiting for shared headroom')
+                self.skip_planning('complete job does not fit shared headroom', 'orchestrator')
+            self.write()
+            time.sleep(POLL_S)
 
     def run_work(self):
         """Plan, approve and finish the currently queued wave under the existing caps."""
@@ -760,9 +829,28 @@ class Batch:
 
     def post_summary(self):
         """The batch's only Slack post, sent once every thread has stopped (or the batch failed)."""
-        if os.environ.get("ADVANCE_ROADMAP_BATCH_SUMMARY", "1") != "1":
+        if not getattr(self, 'summary_enabled', True) or os.environ.get("ADVANCE_ROADMAP_BATCH_SUMMARY", "1") != "1":
             return False
+        # Dynamic attempts are folded into the existing scheduled post, never one post per tick.
+        summarized = {}
+        with workqueue.Store(ROOT) as store:
+            seen = store.get('summary_seen', {})
+            current = {i['stamp'] for i in self.state.get('queue', [])}
+            for path in sorted((ROOT / 'batches').glob('dynamic-*/batch.json')):
+                for item in workqueue.read(path, {}).get('queue', []):
+                    signature = [item.get('status'), item.get('outcome')]
+                    if item['stamp'] not in current and seen.get(item['stamp']) != signature:
+                        self.state['queue'].append(item)
+                        summarized[item['stamp']] = signature
+            if summarized:
+                self.state['quota_paused'] = quota_paused(self.state)
+                self.write()
         posted = post_slack_summary(self.directory)
+        if posted and summarized:
+            with workqueue.Store(ROOT) as store:
+                seen = store.get('summary_seen', {})
+                seen.update(summarized)
+                store.set('summary_seen', dict(sorted(seen.items())[-5000:]))
         self.state["summary_posted"] = posted
         self.write()
         return posted
@@ -852,6 +940,7 @@ def post_slack_summary(directory):
     url = webhook_url()
     if not url:
         return False
+    state = shared.read_json(directory / 'batch.json') or {}
     text = text or " ".join(filter(None, [f'advance-roadmap batch {state.get("date")}: {state.get("phase")}.',
                                           quota_line(state)]))
     try:
@@ -886,6 +975,11 @@ def main():
     if not code:
         return 0
     repos = candidates(Path(code))
+    if (ROOT / 'workqueue.sqlite3').exists():
+        with workqueue.Store(ROOT) as store:
+            if store.get('mode', 'shadow') in {'trial', 'dynamic'}:
+                pilot = set(store.get('pilot', []))
+                repos = [r for r in repos if r not in pilot]
     if args.dry_run:
         budget = RoadmapBudget(dry_run=True)
         queue = [{"repo": repo, "stamp": f"dry-{n}", "verdict_check": repo_priority(repo, dry_run=True)}

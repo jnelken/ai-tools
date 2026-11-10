@@ -127,6 +127,7 @@ extra_dirs=()
 [ -n "$WORKTREE" ] && extra_dirs=(--add-dir "$CODE_DIR")
 [ -n "$STAMP" ] || { echo "FATAL: --stamp required" >&2; exit 2; }
 [ -n "$REQUEST_FILE" ] && [ -f "$REQUEST_FILE" ] || { echo "FATAL: --request-file required" >&2; exit 2; }
+export ADVANCE_ROADMAP_REQUEST_FILE="$REQUEST_FILE"
 [ -f "$USAGE_PY" ] || { echo "FATAL: missing $USAGE_PY" >&2; exit 2; }
 [ -f "$SKILL_DIR/WORKER.md" ] || { echo "FATAL: missing WORKER.md" >&2; exit 2; }
 [ -f "$SKILL_DIR/SAFETY.md" ] || { echo "FATAL: missing SAFETY.md" >&2; exit 2; }
@@ -208,7 +209,19 @@ EOF
 )"
 BASE_PROMPT="$BASE_PROMPT
 
-$REVIEW_CONTEXT"
+$REVIEW_CONTEXT
+
+Continuation rules:
+- Reconcile existing commits, review logs and PR/merge state before acting. Resume the saved phase.
+- After durable milestones and before a provider handoff, write a small JSON checkpoint with
+  summary, completed, next_action, head, evidence_head, tests and findings (only applicable fields).
+  Store large evidence in files and use artifact pointers; the packet limit is 8192 bytes.
+  Save it under the run directory and run:
+  python3 $ROOT/lib/workqueue.py --root $ROOT checkpoint --request-file $REQUEST_FILE --phase <implementing|reviewing|shipping|verifying> --packet-file <checkpoint.json>
+- A crash, quota limit, failing test or merge conflict is recoverable work; handle it automatically.
+- Only a decision or access that requires Jake is a human blocker. In that case include
+  needs_input: true and one specific input_question in the worker result; otherwise needs_input: false.
+- Do not repeat a completed merge or trust test/review evidence for a different HEAD."
 if [ -n "${ADVANCE_ROADMAP_TARGET_REPO:-}" ]; then
   BASE_PROMPT="$BASE_PROMPT
 

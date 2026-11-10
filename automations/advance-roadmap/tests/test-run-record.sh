@@ -13,7 +13,9 @@ trap 'rm -rf "$TMP"' EXIT INT TERM
 ROOT="$TMP/root"; SKILLS="$TMP/skills"; BIN="$TMP/bin"
 mkdir -p "$ROOT/lib" "$SKILLS" "$BIN" "$TMP/code/demo"
 cp "$HERE/run.sh" "$HERE/worker.sh" "$ROOT/"
-cp "$HERE/lib/runrecord.py" "$HERE/lib/tokens.py" "$HERE/lib/workspaces.py" "$HERE/lib/models.sh" "$ROOT/lib/"
+cp "$HERE/lib/workqueue.py" "$HERE/lib/runrecord.py" "$HERE/lib/tokens.py" "$HERE/lib/workspaces.py" "$HERE/lib/models.sh" "$ROOT/lib/"
+# This suite exercises records, not plan reuse; each fake orchestrator result is independent.
+print -r -- 'raise SystemExit(0)' > "$ROOT/lib/pendingplan.py"
 . "$ROOT/lib/models.sh"
 for f in ORCHESTRATOR.md SAFETY.md WORKER.md; do echo stub > "$SKILLS/$f"; done
 

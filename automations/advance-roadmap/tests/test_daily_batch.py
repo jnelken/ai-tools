@@ -48,7 +48,7 @@ if repo in os.environ.get('FAKE_PLANNER_GATED', '').split():
     skip_quota('no orchestrator available')
     raise SystemExit(0)
 event('plan-start')
-time.sleep(.15 if repo == 'a' else .05)
+time.sleep(float(os.environ.get('FAKE_SLOW_PLAN', '.8')) if repo == os.environ.get('FAKE_SLOW_REPO') else (.15 if repo == 'a' else .05))
 if repo == os.environ.get('FAKE_FAILED_REPO'):
     event('plan-failed')
     raise SystemExit(1)
@@ -76,8 +76,13 @@ if not os.environ.get('FAKE_KEEP_PENDING'):
     pending = Path(os.environ['PERSONAL_CODE_DIR']) / '.advance-roadmap'
     for saved in pending.glob(f'pending-plan-{repo}*.json'):
         saved.unlink()
+outcome = 'shipped'
+if repo == os.environ.get('FAKE_HUMAN_REPO'):
+    outcome = 'blocked'
+    (run / 'worker-result.json').write_text(json.dumps({'outcome': 'blocked-branch-left',
+        'needs_input': True, 'input_question': 'Which account should this use?'}))
 with open(root / 'runs.jsonl', 'a') as f:
-    f.write(json.dumps({'stamp': stamp, 'repo': repo, 'outcome': 'shipped'}) + '\n')
+    f.write(json.dumps({'stamp': stamp, 'repo': repo, 'outcome': outcome}) + '\n')
 PY
 '''
 
@@ -437,7 +442,9 @@ class DailyBatchTest(unittest.TestCase):
                 # Exercise launch's real environment construction without a model.
                 started = b.process_start(os.getpid())
                 with patch.object(daily_batch.subprocess, 'Popen') as spawn, patch.object(
-                        b, 'process_start', return_value=started):
+                        b, 'process_start', return_value=started), patch.object(
+                        daily_batch.workqueue, 'process_start', return_value=str(started)), patch.object(
+                        daily_batch.workqueue, 'git', return_value='head'):
                     spawn.return_value.pid = os.getpid()
                     batch.launch(item)
                 env = spawn.call_args.kwargs['env']
@@ -759,6 +766,47 @@ else:
         self.env['FAKE_KEEP_PENDING'] = '1'
         self.run_batch(lanes=2)
         self.assertFalse(any(e['repo'] == 'a' for e in self.events()))
+
+    def test_human_blocked_recovery_allows_fresh_repo_to_continue(self):
+        self.repo('a'); self.repo('z')
+        pending = self.code / '.advance-roadmap'; pending.mkdir()
+        (pending / 'pending-plan-z.json').write_text(json.dumps({'action': 'resume_worker'}))
+        self.env['FAKE_HUMAN_REPO'] = 'z'
+        self.run_batch(lanes=2)
+        fresh = next(i for i in self.state()['queue'] if i['repo'] == 'a')
+        self.assertEqual(fresh['outcome'], 'shipped')
+        with daily_batch.workqueue.Store(self.root) as store:
+            self.assertEqual(store.hold('z')['state'], 'human')
+
+    def test_streaming_releases_ready_work_before_unrelated_planner_and_caps_all_phases(self):
+        self.repo('a'); self.repo('b')
+        self.env.update(FAKE_SLOW_REPO='b', ADVANCE_ROADMAP_THREADS_PER_REPO='1')
+        script = """import sys
+sys.path.insert(0, sys.argv[1])
+import daily_batch
+original = daily_batch.Batch.run
+def streaming(self):
+    return original(self, streaming=True, summary=False)
+daily_batch.Batch.run = streaming
+sys.argv = ['daily_batch.py', '--lanes', '2', '--threads', '1']
+raise SystemExit(daily_batch.main())
+"""
+        proc = subprocess.run([sys.executable, '-c', script, str(HERE)], env=self.env,
+                              capture_output=True, text=True, timeout=30)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        events = self.events()
+        start = next(e['time'] for e in events if e['repo'] == 'a' and e['kind'] == 'work-start')
+        ready = next(e['time'] for e in events if e['repo'] == 'b' and e['kind'] == 'plan-ready')
+        self.assertLess(start, ready)
+        active = peak = 0
+        for e in sorted(events, key=lambda e: e['time']):
+            if e['kind'] in {'plan-start', 'work-start'}:
+                active += 1
+                peak = max(peak, active)
+            elif e['kind'] in {'plan-ready', 'work-end'}:
+                active -= 1
+        self.assertLessEqual(peak, 2)
+        self.assertEqual(len([e for e in events if e['kind'] == 'work-start']), 2)
 
     def test_slots_cover_morning_afternoon_and_wake_up_without_extra_runs(self):
         for now, expected in [

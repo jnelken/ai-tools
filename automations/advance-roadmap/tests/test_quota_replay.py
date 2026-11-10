@@ -866,11 +866,11 @@ exec(compile(open(__file__).read(), __file__, "exec"))
             issue("DEV-4", ["repo/demo"], "completed")]}))
         run = self.run_lane(FAKE_CLAUDE="plan")
         planner_snap = json.loads((run / "linear-snapshot-planner.json").read_text())
-        self.assertEqual([i["id"] for i in planner_snap["issues"]], ["DEV-1", "DEV-3"])
+        self.assertEqual([i["id"] for i in planner_snap["issues"]], ["DEV-1"])
         self.assertIn(str(run / "linear-snapshot-planner.json"), self.calls()[0]["prompt"])
         self.assertEqual(len(json.loads((run / "linear-snapshot.json").read_text())["issues"]), 4)
         self.assertEqual(sorted(json.loads((run / "fingerprint.json").read_text())["issues"]),
-                         ["DEV-1", "DEV-3", "DEV-4"])
+                         ["DEV-1", "DEV-4"])
 
     # ── a pending plan only disables its own repo's verdict check ───────────
 

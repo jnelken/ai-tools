@@ -2,7 +2,7 @@
 
 ## Status
 
-Ready for implementation. Evidence review and policy decisions are complete. The active 10:30 AM / 3:30 PM Eastern schedule remains in place for the first rollout stage.
+Implementation verified; deployment next. Durable queue/checkpoint support, the shadow controller and guarded automatic rollout/archival are built. The live 10:30 AM / 3:30 PM Eastern job retains authority while shadow observations accumulate.
 
 ## Decisions
 
@@ -108,4 +108,12 @@ Acceptance criteria:
 - [x] Record corrected objective: quota efficiency.
 - [x] Jake confirmed: interrupted work resumes automatically first; human-blocked work is parked while unrelated repos continue. These are distinct states.
 - [x] No further user decisions block implementation. Defaults: current shared quota limits, total concurrency cap five, 15-minute checks only after shadow validation, bounded checkpoints and the staged rollout above.
-- [ ] Execute the staged rollout, beginning with durable recovery under the existing schedule.
+- [x] Build durable work identity, phase checkpoints, saved-plan retention and migration that does not revive historical parked work.
+- [x] Separate explicit human blockers from recoverable failures; wake on relevant input, and retain a documented manual release.
+- [x] Build model-free eligibility, streaming trial dispatch, shared-lock authority, full-job reservations, daily planning caps and rollback.
+- [x] Add dashboard visibility and gated promotion/expansion with a reproducible baseline/trial comparison.
+- [x] Verification: 378 roadmap Python tests passed, followed by the final 63 batch, 14 queue and 16 scheduler/rollout tests. All four shell suites passed; plist/syntax and diff checks passed.
+- [ ] Push and deploy durable recovery, enable guarded rollout, and install the 15-minute shadow agent.
+- [ ] Observe seven shadow days; the enabled rollout promotes up to two eligible repos only after the saved guard passes. Status and operator overrides are documented in `automations/README.md`.
+- [ ] Observe a comparable trial week; automatic expansion is gated by recorded efficiency, ships, errors and accounting coverage.
+- [ ] Move this plan to `docs/plans/archive/` after the rollout is finished, as Jake requested. The controller archives and pushes only from a clean, up-to-date main checkout; otherwise it retains a visible wait reason and retries. Keep the plan active while live evidence is pending.

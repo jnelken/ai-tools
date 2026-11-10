@@ -228,6 +228,9 @@ PY
 }
 
 run_required_review() {
+  if [ -n "${ADVANCE_ROADMAP_REQUEST_FILE:-}" ] && [ -f "$ROOT/lib/workqueue.py" ]; then
+    python3 "$ROOT/lib/workqueue.py" --root "$ROOT" checkpoint --request-file "$ADVANCE_ROADMAP_REQUEST_FILE" --phase reviewing || return 2
+  fi
   local who="$1" phase="$2" rc=0 verdict text gate
   rm -f "$out.last" "$out.json" "$out.session"
   gate="$(python3 "$USAGE_PY" --root "$ROOT" gate --role reviewer --provider "$who" 2>/dev/null)"
@@ -275,6 +278,9 @@ run_required_review() {
 }
 
 run_cross_provider_review() {
+  if [ -n "${ADVANCE_ROADMAP_REQUEST_FILE:-}" ] && [ -f "$ROOT/lib/workqueue.py" ]; then
+    python3 "$ROOT/lib/workqueue.py" --root "$ROOT" checkpoint --request-file "$ADVANCE_ROADMAP_REQUEST_FILE" --phase reviewing || return 2
+  fi
   local used="" verdict="unavailable" who rc text gate hits="" hit
   gated_list="" capacity_list=""   # read by record_review: reviewers skipped over their gate / at capacity
   for who in "${cross_provider_reviewers[@]}"; do

@@ -32,7 +32,7 @@ class RunRecordTest(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
-    def append(self, orch=None, wstatus=None, wresult=None):
+    def append(self, orch=None, wstatus=None, wresult=None, assigned_repo=None):
         self.n += 1
         paths = {}
         for name, value in (("orch", orch), ("status", wstatus), ("result", wresult)):
@@ -41,9 +41,17 @@ class RunRecordTest(unittest.TestCase):
                 p.write_text(json.dumps(value))
             paths[name] = str(p)
         runrecord.main(["--root", str(self.root), "append", "--stamp", f"20261013-1030{self.n:02d}",
-                        "--status", "ran", "--orch-provider", "claude", "--orch-result", paths["orch"],
+                        "--status", "ran", *(["--repo", assigned_repo] if assigned_repo else []), "--orch-provider", "claude", "--orch-result", paths["orch"],
                         "--worker-status", paths["status"], "--worker-result", paths["result"]])
         return runrecord.read_records(str(self.root))[-1]
+
+    def test_assigned_repo_is_preserved_when_result_reports_a_fallback_repo(self):
+        rec = self.append({'action': 'blocked_no_item', 'repo': 'fallback'},
+                          {'used': 'none', 'exit': 0}, {'outcome': 'bookkeeping', 'repo': 'fallback'},
+                          assigned_repo='actual')
+        self.assertEqual(rec['repo'], 'actual')
+        self.assertEqual(rec['assigned_repo'], 'actual')
+        self.assertEqual(rec['reported_repo'], 'fallback')
 
     def test_planner_quota_is_a_quota_pause_with_its_details(self):
         rec = self.append(QUOTA_PLAN)
