@@ -2,7 +2,7 @@
 
 ## Status
 
-Implementation verified; deployment next.
+Complete. Committed, pushed, installed and activated on 2026-11-10.
 
 ## Decisions
 
@@ -19,7 +19,7 @@ Implementation verified; deployment next.
 ## Open threads
 
 - [x] Verified scheduled slots, duplicate prevention, recovery-first ordering, blocked recovery and live prior workers: all 61 batch tests passed; plist lint and diff checks passed.
-- [ ] Commit, push, install and reload launchd after checking for an active batch.
+- [x] Pushed implementation `27c16b0`, ran `~/.ai-tools/install.sh --quiet`, verified the job was idle and reloaded launchd. Live calendar triggers are Hour 10/Minute 30 and Hour 15/Minute 30; no batch was manually launched.
 
 ## Approach
 
