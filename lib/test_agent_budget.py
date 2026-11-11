@@ -419,6 +419,29 @@ print(bool(b.acquire('codex','planner',pid=int(sys.argv[2]))))
         self.assertEqual([s['tokens'] for s in samples], [70000, 30000])
         self.assertEqual([s['tokens'] for s in b.history()[1]], [70000, 30000])
 
+    def test_claude_snapshot_quality_marks_overlapping_and_open_sessions(self):
+        ch = b.claude_home()
+        self.append(ch / 'state/agent-usage.jsonl', [
+            dict(provider='claude', role='worker', total=10000, session_id=s)
+            for s in ('one', 'two', 'three')])
+        self.append(ch / 'state/quota-snapshots.jsonl',
+                    self.quota_rows('one', 10, 20) + self.quota_rows('two', 15, 25)
+                    + self.quota_rows('three', 30, 40)
+                    + [dict(event='start', session_id='open', timestamp=35)])
+        _, samples = b.history(persist=False)
+        self.assertEqual([s['quality'] for s in samples],
+                         ['concurrent_sessions', 'concurrent_sessions', 'possible_open_session'])
+        self.assertEqual(b.estimates([], samples)['claude']['sample_quality'],
+                         {'concurrent_sessions': 2, 'possible_open_session': 1})
+
+    def test_snapshot_quality_does_not_claim_unobserved_sessions_are_absent(self):
+        ch = b.claude_home()
+        self.append(ch / 'state/agent-usage.jsonl', [
+            dict(provider='claude', role='worker', total=10000, session_id='one')])
+        self.append(ch / 'state/quota-snapshots.jsonl', self.quota_rows('one', 10, 20))
+        _, samples = b.history(persist=False)
+        self.assertEqual(samples[0]['quality'], 'unverified_isolation')
+
     def test_codex_cache_writes_match_roadmap_accounting(self):
         raw = dict(input_tokens=1000, cached_input_tokens=800, cache_write_input_tokens=50,
                    output_tokens=10, total_tokens=1010)

@@ -366,10 +366,23 @@ def history(persist=True):
             elif row.get('event') == 'finish' and key in starts:
                 pairs.append((key, starts.pop(key), row))
                 counts[key] = counts.get(key, 0) + 1
+        # Account-level deltas can include other sessions. This only detects
+        # sessions observed by the snapshot collector, not work on other hosts.
+        intervals = [(key, epoch(start.get('timestamp')), epoch(finish.get('timestamp')))
+                     for key, start, finish in pairs]
+        intervals += [(key, epoch(start.get('timestamp')), None) for key, start in starts.items()]
         long_intervals = []
         for key, start, finish in pairs:
             since, until = epoch(start.get('timestamp')), epoch(finish.get('timestamp'))
             bounded = since is not None and until is not None and since <= until
+            overlap = bounded and any(other != key and other_start is not None and other_end is not None
+                                      and other_start < until and other_end > since
+                                      for other, other_start, other_end in intervals)
+            open_overlap = bounded and any(other != key and other_start is not None
+                                           and other_start < until and other_end is None
+                                           for other, other_start, other_end in intervals)
+            quality = ('concurrent_sessions' if overlap else 'possible_open_session' if open_overlap
+                       else 'unverified_isolation' if bounded else 'unknown_interval')
             matched = [r for r in indexed.get(key, []) if r.get('provider') == 'claude']
             # Resumed sessions can have multiple snapshot intervals. Untimed
             # aggregate ledger totals cannot be reused for each interval.
@@ -391,14 +404,15 @@ def history(persist=True):
                     and reset5a and reset5b and abs(reset5a - reset5b) < 60):
                 samples.append({'id': f'quota:{key}:{start.get("timestamp")}', 'provider': 'claude',
                                 'tokens': tokens, 'pct': b5 - a5,
-                                'windows_pct': {'five_hour': b5 - a5}, 'source': 'quota_snapshots'})
+                                'windows_pct': {'five_hour': b5 - a5}, 'source': 'quota_snapshots',
+                                'quality': quality})
             before7 = (start.get('quota') or {}).get('windows', {}).get('seven_day', {})
             after7 = (finish.get('quota') or {}).get('windows', {}).get('seven_day', {})
             a7, b7 = before7.get('used_percentage'), after7.get('used_percentage')
             reset7a, reset7b = epoch(before7.get('resets_at')), epoch(after7.get('resets_at'))
             if (tokens > 0 and fresh and number(a7) and number(b7) and b7 >= a7
                     and reset7a and reset7b and abs(reset7a - reset7b) < 60):
-                long_intervals.append(dict(id=key, at=since, tokens=tokens, delta=b7 - a7,
+                long_intervals.append(dict(id=key, at=since, tokens=tokens, delta=b7 - a7, quality=quality,
                                            reset=reset7a,
                                            five_reset=(reset5a if reset5a and reset5b and abs(reset5a - reset5b) < 60 else None),
                                            five_delta=(b5 - a5 if number(a5) and number(b5) and b5 >= a5
@@ -406,11 +420,11 @@ def history(persist=True):
         # The weekly gauge is rounded to whole points. Keep same-reset intervals
         # together until their accumulated increase is large enough to measure.
         accumulated, accumulated_tokens, accumulated_five = 0, 0, 0
-        group_reset, group_id, group_five_reset, pairable_five = None, None, None, True
+        group_reset, group_id, group_five_reset, pairable_five, group_quality = None, None, None, True, set()
         for interval in sorted(long_intervals, key=lambda row: row['at'] or 0):
             if group_reset is not None and interval['reset'] != group_reset:
                 accumulated, accumulated_tokens, accumulated_five = 0, 0, 0
-                group_id, group_five_reset, pairable_five = None, None, True
+                group_id, group_five_reset, pairable_five, group_quality = None, None, True, set()
             if group_reset != interval['reset']:
                 group_reset = interval['reset']
             if group_id is None:
@@ -419,6 +433,7 @@ def history(persist=True):
             elif interval['five_reset'] != group_five_reset:
                 pairable_five = False
             accumulated += interval['delta']
+            group_quality.add(interval['quality'])
             accumulated_tokens += interval['tokens']
             accumulated_five += interval['five_delta']
             if accumulated >= 2:
@@ -427,9 +442,13 @@ def history(persist=True):
                                 'windows_pct': {'seven_day': accumulated,
                                                 **({'five_hour': accumulated_five}
                                                    if pairable_five and accumulated_five > 0 else {})},
-                                'source': 'quota_snapshots'})
+                                'source': 'quota_snapshots',
+                                'quality': ('concurrent_sessions' if 'concurrent_sessions' in group_quality
+                                            else 'unknown_interval' if 'unknown_interval' in group_quality
+                                            else 'possible_open_session' if 'possible_open_session' in group_quality
+                                            else 'unverified_isolation')})
                 accumulated, accumulated_tokens, accumulated_five = 0, 0, 0
-                group_id, group_five_reset, pairable_five = None, None, True
+                group_id, group_five_reset, pairable_five, group_quality = None, None, True, set()
         # Rebuild generated samples so upgrades also repair previously persisted
         # bad denominators. Preserve manually supplied/provider-specific samples.
         existing = {r.get('id'): r for r in rows(budget_dir() / 'samples.jsonl')
@@ -518,8 +537,12 @@ def estimates(records, samples):
                            'pct': {window: max(.1, tokens * factor) for window, factor in window_factors.items()},
                            'ttl': max(60, duration * 1.5) if duration else 1800,
                            'observations': len(matched), 'sample_count': len(matched), 'source': source}
+        quality_counts = {}
+        for sample in provider_samples:
+            quality = sample.get('quality', 'unclassified')
+            quality_counts[quality] = quality_counts.get(quality, 0) + 1
         result[provider] = {'factor': window_factors, 'factor_source': window_sources,
-                            'factor_samples': window_counts, 'roles': roles}
+                            'factor_samples': window_counts, 'sample_quality': quality_counts, 'roles': roles}
     return result
 
 

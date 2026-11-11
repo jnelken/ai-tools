@@ -2,7 +2,7 @@
 
 ## Status
 
-Proposed follow-up, November 10, 2026. Current runtime limits are unchanged. This is separate from the active scheduler rollout: its existing shadow/pilot validation must not be mistaken for implementation of the smaller work units described here.
+Implementation in progress, November 11, 2026. Current runtime limits and whole-ticket admission are unchanged. This is separate from the active scheduler rollout: its existing shadow/pilot validation must not be mistaken for implementation of the smaller work units described here. The roadmap job remains deliberately paused.
 
 ## Decisions
 
@@ -18,6 +18,8 @@ Proposed follow-up, November 10, 2026. Current runtime limits are unchanged. Thi
 - `agent_budget.estimates()` combines historical provider/role token quantiles with provider-level token-to-quota calibration. The 82% is a forecast from past sessions, not a measurement of the next ticket or remaining phase. Model/effort/phase/resume cohorts are not distinguished in that estimate.
 - Claude calibration pairs account-level start/finish readings with a session's tokens. Overlapping unrelated sessions can contaminate the quota delta; sample quality must be visible and tested before changing the prediction.
 - Installed CLI help confirms explicit session resume for both configured harnesses. The launcher currently starts fresh sessions; storing IDs alone is not native session continuation. Claude's CLI dollar-budget option describes API-call spending and must not be treated as a subscription quota percentage control.
+- The local snapshot replay on November 11 found 22 Claude calibration samples overlapping another recorded session and one with a possibly open session. Missing finish events do not prove the other session was still active, and no overlap in local records proves account isolation. Sample quality is now reported without changing the estimator pending cohort validation.
+- Current worker output is parsed for session IDs after the provider process exits; a native continuation implementation must persist stream identity before interruption and validate the assigned worktree and revision. The batch's recovery-first barrier also holds unrelated fresh repos behind unfinished carried work and needs to change as part of incremental scheduling.
 
 ## Approach
 
@@ -46,6 +48,7 @@ Proposed follow-up, November 10, 2026. Current runtime limits are unchanged. Thi
 - [x] Incorporate Jake's cost constraint: native resume first, no mandatory recap per chunk, and measured checkpoint versus resume overhead.
 - [ ] Implement and validate phase/chunk admission, incremental usage collection, cooperative yield/watchdog behavior and native session adapters.
 - [ ] Validate estimator cohorts and concurrent-session contamination using saved data.
+  - Partial: local overlap quality flags and aggregate counts are available; calibration policy and model/phase cohorts still need validation.
 - [ ] Compare native resume alone with sparse fallback checkpoints on comparable interrupted work; include generation, cached input, compaction/reconstruction and useful-progress latency in total cost. Choose chunk boundaries from the results.
 - [ ] Replay today's zero-admission case: admit one bounded continuation without raising global limits or claiming the whole ticket fits.
 - [ ] Test crash/limit/provider-switch recovery, unchanged evidence, zero duplicate merges and explicit reporting of forced versus clean yields.
