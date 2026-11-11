@@ -13,7 +13,7 @@ export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
 ROOT="$TMP/root"; BIN="$TMP/bin"; REPO="$TMP/repo"; LOG="$TMP/reviews.jsonl"
 mkdir -p "$ROOT/lib" "$BIN"
 cp "$HERE/review.sh" "$ROOT/"
-cp "$HERE/lib/models.sh" "$HERE/lib/tokens.py" "$ROOT/lib/"
+cp "$HERE/lib/models.sh" "$HERE/lib/tokens.py" "$HERE/lib/reviewlease.py" "$ROOT/lib/"
 # Fake usage.py: `gate` refuses the providers in FAKE_GATED; anything else records its last arg.
 cat > "$ROOT/lib/usage.py" <<'PY'
 import json, os, re, sys
@@ -306,5 +306,9 @@ check "unleased fallback recorded as gated" "$(field gated)" "['codex', 'claude'
 
 review cursor 1 ADVANCE_ROADMAP_BUDGET_REVIEWERS=claude FAKE_CODEX=findings FAKE_CLAUDE=clean >/dev/null
 check "reserved cross-provider reviewer is used" "$(field reviewer)" claude
+
+review codex 1 ADVANCE_ROADMAP_INCREMENTAL=1 ADVANCE_ROADMAP_BUDGET_REVIEWERS=cursor FAKE_AGENT=clean >/dev/null
+rc=0; review codex 2 ADVANCE_ROADMAP_INCREMENTAL=1 ADVANCE_ROADMAP_BUDGET_REVIEWERS=cursor FAKE_AGENT=clean >/dev/null || rc=$?
+check "incremental reviewer cannot spend its reservation twice" "$rc" 3
 
 echo "all passed"

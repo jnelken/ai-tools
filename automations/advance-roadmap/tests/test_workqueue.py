@@ -41,6 +41,29 @@ class QueueTest(unittest.TestCase):
             self.assertEqual(restarted.list()[0]['checkpoint']['next_action'], 'Fix finding 2')
             self.assertEqual(restarted.db.execute('SELECT COUNT(*) FROM attempts').fetchone()[0], 1)
 
+    def test_clean_yield_advances_phase_but_forced_yield_does_not(self):
+        self.register()
+        self.store.finish({'stamp': '20261110-103001', 'outcome': 'yielded', 'worker_exit': 0},
+                          {'next_phase': 'reviewing'})
+        self.assertEqual((self.store.list()[0]['phase'], self.store.list()[0]['state']),
+                         ('reviewing', 'eligible'))
+        self.register('20261110-153001')
+        self.store.finish({'stamp': '20261110-153001', 'outcome': 'yielded', 'worker_exit': 124},
+                          {'next_phase': 'shipping'})
+        self.assertEqual(self.store.list()[0]['phase'], 'reviewing')
+
+    def test_interrupted_worker_cannot_clear_pending_assignment_with_partial_ship_result(self):
+        saved, result, request = (self.root / name for name in ('pending.json', 'result.json', 'request.json'))
+        saved.write_text(json.dumps({'orchestrator': plan(), 'last_stamp': '20261110-103001'}))
+        result.write_text(json.dumps({'outcome': 'shipped', 'provider': 'codex'}))
+        request.write_text(json.dumps({'stamp': '20261110-103001', 'orchestrator': plan()}))
+        store_type = q.Store
+        with patch.object(pendingplan.workqueue, 'Store', side_effect=lambda: store_type(self.root)):
+            pendingplan.cmd_settle(SimpleNamespace(file=str(saved), worker_result=str(result),
+                                                   request_file=str(request), worker_rc=124))
+        self.assertTrue(saved.exists())
+        self.assertNotEqual(self.store.list()[0]['state'], 'done')
+
     def test_late_older_attempt_cannot_replace_checkpoint_or_close_newer_work(self):
         wid = self.register()
         self.register('20261110-153001')
@@ -88,6 +111,16 @@ class QueueTest(unittest.TestCase):
         self.assertEqual(cp['findings'], ['old'])
         self.assertEqual(cp['artifacts'], ['reviews.jsonl'])
         self.assertEqual(self.store.db.execute('SELECT COUNT(*) FROM checkpoints').fetchone()[0], 2)
+
+    def test_changed_requirements_invalidate_evidence_even_at_same_head(self):
+        wid = self.register()
+        self.store.checkpoint(wid, '20261110-103001', 'reviewing', {'head': 'one', 'evidence_head': 'one'})
+        self.assertTrue(self.store.list()[0]['checkpoint']['evidence_valid'])
+        self.store.register({**plan(), 'worker_brief': 'Changed acceptance criteria'}, '20261110-153001')
+        checkpoint = self.store.list()[0]['checkpoint']
+        self.assertFalse(checkpoint['evidence_valid'])
+        self.assertIsNone(checkpoint['evidence_head'])
+        self.assertEqual(self.store.list()[0]['phase'], 'implementing')
 
     def test_oversized_checkpoint_does_not_destroy_prior_state(self):
         wid = self.register()
@@ -196,6 +229,7 @@ class QueueTest(unittest.TestCase):
         store_class = q.Store
         with patch.object(pendingplan, 'CODE_DIR', str(self.code)), patch.object(
                 pendingplan, 'branch_exists', return_value=True), patch.object(
+                pendingplan, 'merged_assignment', return_value=None), patch.object(
                 q, 'Store', side_effect=lambda: store_class(self.root)):
             rc = pendingplan.cmd_reuse(SimpleNamespace(file=str(saved), out=str(out), max_age_hours=36, max_attempts=2))
         result = json.loads(out.read_text())
@@ -204,6 +238,34 @@ class QueueTest(unittest.TestCase):
         self.assertIn('Fix finding 2', result['worker_brief'])
         self.assertIn('revalidation', result['worker_brief'])
         self.assertTrue(saved.exists())
+
+    def test_merged_recovery_checks_exact_branch_revision_and_time(self):
+        pr = {'headRefName': 'roadmap/test', 'headRefOid': 'abc', 'mergedAt': '2026-11-11T10:00:00Z',
+              'mergeCommit': {'oid': 'merge'}, 'url': 'https://github.com/jnelken/a/pull/1'}
+        def command(args, **kwargs):
+            return SimpleNamespace(stdout='abc\n' if args[0] == 'git' else json.dumps([pr]))
+        with patch.object(pendingplan.subprocess, 'run', side_effect=command):
+            self.assertEqual(pendingplan.merged_assignment(str(self.code / 'a'), 'roadmap/test',
+                             '2026-11-10T00:00:00+00:00')['merge_commit'], 'merge')
+            pr['headRefOid'] = 'different'
+            self.assertIsNone(pendingplan.merged_assignment(str(self.code / 'a'), 'roadmap/test',
+                                                            '2026-11-10T00:00:00+00:00'))
+
+    def test_merged_saved_assignment_resumes_verification_without_another_merge(self):
+        self.register()
+        saved, out = self.root / 'pending.json', self.root / 'out.json'
+        saved.write_text(json.dumps({'orchestrator': plan(), 'planned_stamp': '20261110-103001',
+                                    'planned_at': '2026-11-10T00:00:00', 'attempts': 0}))
+        merged = {'url': 'https://github.com/jnelken/a/pull/1', 'head': 'abc', 'merge_commit': 'merge'}
+        store_class = q.Store
+        with patch.object(pendingplan, 'CODE_DIR', str(self.code)), patch.object(
+                pendingplan, 'branch_exists', return_value=True), patch.object(
+                pendingplan, 'merged_assignment', return_value=merged), patch.object(
+                q, 'Store', side_effect=lambda: store_class(self.root)):
+            self.assertEqual(pendingplan.cmd_reuse(SimpleNamespace(file=str(saved), out=str(out),
+                                                                   max_age_hours=36, max_attempts=2)), 0)
+        self.assertEqual(self.store.list()[0]['phase'], 'verifying')
+        self.assertIn('never merge again', json.loads(out.read_text())['worker_brief'])
 
 
 if __name__ == '__main__':

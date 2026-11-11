@@ -178,6 +178,7 @@ class DailyBatchTest(unittest.TestCase):
                     'ADVANCE_ROADMAP_USAGE_PROBES': '0', 'ANTHROPIC_API_KEY': 'test-disable-oauth',
                     'CLAUDE_CODE_OAUTH_TOKEN': '', 'CLAUDE_CONFIG_DIR': str(self.root / '.claude'), 'ADVANCE_ROADMAP_ROOT': str(self.root),
                     'PERSONAL_CODE_DIR': str(self.code), 'ADVANCE_ROADMAP_BATCH_POLL_S': '.02',
+                    'ADVANCE_ROADMAP_INCREMENTAL': '0',
                     'ADVANCE_ROADMAP_SUPERSET': '0', 'DOTFILES_PERSONAL_MACHINE': '1',
                     'ADVANCE_ROADMAP_SKILL_DIR': str(self.root / 'skills'),
                     'FAKE_PYTHON': sys.executable, 'PYTHONDONTWRITEBYTECODE': '1',
@@ -600,6 +601,157 @@ PYTHON
                 leases = daily_batch.agent_budget.reap()
             self.assertEqual({l['id'] for l in leases}, set(item['budget_leases']))
             budget.release(item)
+
+    def test_incremental_admission_reserves_only_current_phase(self):
+        with self.budget_context(), patch.object(daily_batch, 'ROOT', self.root):
+            budget = daily_batch.RoadmapBudget(dry_run=True)
+            budget.incremental = True
+            budget.workers = ['claude']
+            budget.review_strategy = {'strategy': 'cross-provider', 'reason': None}
+            budget.gates = {'codex': {'state': 'ok'}, 'cursor': {'state': 'over'}}
+            budget.models['claude']['roles']['worker']['pct']['five_hour'] = 82.12
+            budget.readings['claude']['windows']['five_hour']['live'] = 7
+            with patch.object(daily_batch.agent_budget, 'reserve_bundle', return_value=[]) as reserve:
+                implementation = budget.choose(item={'repo': 'a', 'stamp': 'one',
+                                                      'work_phase': 'implementing'}, commit=False)
+                self.assertEqual(implementation['reviewers'], [])
+                requests = reserve.call_args.args[0]
+                self.assertAlmostEqual(requests[0]['scale'] * 82.12, 10)
+                self.assertEqual([r['role'] for r in requests], ['worker'])
+                review = budget.choose(item={'repo': 'a', 'stamp': 'two',
+                                             'work_phase': 'reviewing'}, commit=False)
+                self.assertEqual(review['reviewers'], ['codex'])
+                requests = reserve.call_args.args[0]
+                self.assertEqual([r['role'] for r in requests], ['worker', 'reviewer'])
+                self.assertLessEqual(requests[0]['scale'] * 82.12, 10)
+                self.assertLess(requests[0]['scale'], 1)
+
+    def test_incremental_batch_releases_implementation_with_reviewers_gated(self):
+        self.repo('a')
+        self.env['ADVANCE_ROADMAP_INCREMENTAL'] = '1'
+        self.env['FAKE_REVIEWER_GATES'] = json.dumps({'gates': [
+            {'provider': 'cursor', 'state': 'over'}, {'provider': 'codex', 'state': 'over'},
+            {'provider': 'claude', 'state': 'over'}]})
+        self.run_batch(lanes=1)
+        row = next(item for item in self.state()['queue'] if item['repo'] == 'a')
+        allocation = json.loads((self.root / 'runs' / row['stamp'] / 'batch-budget.json').read_text())
+        self.assertEqual(allocation['phase'], 'implementing')
+        self.assertEqual(allocation['reviewers'], [])
+        self.assertTrue(any(event['kind'] == 'work-start' for event in self.events()))
+        self.assertEqual(self.state()['starvation']['admitted'], 1)
+        self.assertEqual(self.state()['starvation']['consecutive_zero_admission'], 0)
+    def test_incremental_implementation_does_not_require_available_reviewers(self):
+        with self.budget_context(), patch.object(daily_batch, 'ROOT', self.root):
+            budget = daily_batch.RoadmapBudget(dry_run=True)
+            budget.incremental = True
+            budget.workers = ['claude']
+            budget.review_strategy = {'strategy': 'cross-provider', 'reason': None}
+            budget.gates = {'codex': {'state': 'over'}, 'cursor': {'state': 'over'}}
+            with patch.object(daily_batch.agent_budget, 'reserve_bundle', return_value=[]):
+                self.assertIsNotNone(budget.choose(item={'repo': 'a', 'stamp': 'one', 'work_phase': 'implementing'}, commit=False))
+                self.assertIsNone(budget.choose(item={'repo': 'a', 'stamp': 'one', 'work_phase': 'reviewing'}, commit=False))
+
+    def test_incremental_replay_admits_ten_point_unit_not_eighty_two_point_worker(self):
+        with self.budget_context(), patch.object(daily_batch, 'ROOT', self.root):
+            budget = daily_batch.RoadmapBudget(dry_run=True)
+            budget.incremental = True
+            budget.workers = ['claude']
+            budget.models['claude']['roles']['worker']['pct'] = {'five_hour': 82.12, 'seven_day': 1}
+            budget.readings['claude']['windows'] = {'five_hour': {'live': 7, 'cap': 70},
+                                                    'seven_day': {'live': 20, 'cap': 90}}
+            whole = daily_batch.agent_budget.reserve_bundle([{'provider': 'claude', 'role': 'worker'}],
+                reading_by_provider=budget.readings, models=budget.models, commit=False)
+            self.assertIsNone(whole)
+            selected = budget.choose(item={'repo': 'a', 'stamp': 'one', 'work_phase': 'implementing'},
+                                     commit=False)
+            self.assertIsNotNone(selected)
+            self.assertAlmostEqual(selected['leases'][0]['pct']['five_hour'], 10)
+
+    def test_incremental_forecast_uses_mature_mode_cohorts_conservatively(self):
+        with self.budget_context(), patch.object(daily_batch, 'ROOT', self.root), patch.object(
+                daily_batch, 'worker_configuration', return_value={'model': 'm', 'effort': 'high'}):
+            budget = daily_batch.RoadmapBudget(dry_run=True)
+            budget.incremental = True
+            budget.workers = ['claude']
+            budget.models['claude']['worker_cohorts'] = [
+                {'model': 'm', 'effort': 'high', 'phase': 'implementing', 'continuation_mode': mode,
+                 'sample_count': 5, 'tokens_p80': tokens, 'newest_at': time.time()}
+                for mode, tokens in [('fresh', 10000), ('native', 20000), ('fallback', 30000)]]
+            with patch.object(daily_batch.agent_budget, 'reserve_bundle', return_value=[]) as reserve:
+                selected = budget.choose(item={'repo': 'a', 'stamp': 'one', 'work_phase': 'implementing'},
+                                         commit=False)
+                self.assertEqual(selected['worker_estimate']['roles']['worker']['tokens_p80'], 30000)
+                self.assertEqual(reserve.call_args.kwargs['models']['claude']['roles']['worker']['source'],
+                                 'phase-mode-cohorts')
+
+    def test_job_override_requires_fresh_reading_and_keeps_shared_caps(self):
+        b = daily_batch.agent_budget
+        with self.budget_context(), patch.object(daily_batch, 'ROOT', self.root):
+            budget = daily_batch.RoadmapBudget(dry_run=True)
+            budget.incremental = True
+            budget.workers = []
+            now = time.time()
+            fresh = {'observed_at': now, 'source': 'fake', 'windows': {
+                'five_hour': {'live': 85, 'cap': 70}, 'seven_day': {'live': 20, 'cap': 90}}}
+            budget.readings['claude'] = fresh
+            budget.models['claude']['roles']['worker']['pct'] = {'five_hour': 82.12, 'seven_day': 1}
+            gate = [{'provider': 'claude', 'state': 'over', 'reason': '5h 85% >= 70%'},
+                    {'provider': 'codex', 'state': 'limited', 'reason': 'actual limit'}]
+            fake_result = type('Result', (), {'returncode': 0})()
+            with patch.object(daily_batch.shared, 'py', return_value=fake_result), \
+                    patch.object(daily_batch.usage, 'load', return_value={}), \
+                    patch.object(daily_batch.usage, 'role_gates', return_value=gate), \
+                    patch.object(b, 'readings', return_value=fresh):
+                self.assertTrue(budget.prepare_override())
+                self.assertEqual(budget.readings['claude']['windows']['five_hour']['cap'], 70)
+                self.assertEqual(budget.override_readings['claude']['windows']['five_hour']['cap'], 70)
+                chosen = budget.choose(item={'repo': 'a', 'stamp': 'one', 'work_phase': 'implementing',
+                                              'job_override': True}, commit=False)
+                self.assertIsNotNone(chosen)
+                self.assertEqual(chosen['worker'], 'claude')
+                self.assertEqual(chosen['baseline']['windows']['five_hour']['cap'], 100)
+                fresh['observed_at'] = now - 61
+                self.assertFalse(budget.prepare_override())
+
+    def test_job_override_charges_existing_reservations(self):
+        b = daily_batch.agent_budget
+        with self.budget_context(), patch.object(daily_batch, 'ROOT', self.root):
+            budget = daily_batch.RoadmapBudget(dry_run=True)
+            budget.incremental = True
+            budget.override_workers = ['claude']
+            budget.models['claude']['roles']['worker']['pct'] = {'five_hour': 82.12, 'seven_day': 1}
+            budget.override_readings = dict(budget.readings, claude={'observed_at': time.time(),
+                'windows': {'five_hour': {'live': 85, 'cap': 100}, 'seven_day': {'live': 20, 'cap': 100}}})
+            budget.forecast = [{'id': 'other', 'provider': 'claude', 'role': 'worker',
+                                'pct': {'five_hour': 6, 'seven_day': 0}}]
+            chosen = budget.choose(item={'repo': 'a', 'stamp': 'one', 'work_phase': 'implementing',
+                                          'job_override': True}, commit=False)
+            self.assertIsNone(chosen)
+
+    def test_idle_override_only_once_and_only_for_saved_continuation(self):
+        class Budget:
+            incremental = True
+
+            def prepare_override(self):
+                return True
+
+            def choose(self, **kwargs):
+                return {'worker': 'claude'}
+
+        with patch.object(daily_batch, 'ROOT', self.root):
+            batch = daily_batch.Batch(self.root, ['a', 'b'], lanes=2)
+            batch.budget = Budget()
+            fresh, saved = batch.state['queue']
+            fresh['verdict_check'] = {'result': 'no-verdict'}
+            saved['verdict_check'] = {'result': 'pending', 'action': 'resume_worker'}
+            with patch.object(batch, 'launch') as launch:
+                self.assertTrue(batch.try_idle_override())
+                self.assertEqual(launch.call_args.args[0]['repo'], 'b')
+                self.assertFalse(batch.try_idle_override())
+                self.assertEqual(launch.call_count, 1)
+            batch.state.pop('idle_override_used')
+            batch.state['normal_work_admitted'] = True
+            self.assertFalse(batch.try_idle_override())
 
     def test_interactive_leases_reduce_planner_lanes_and_refresh_blocks_conversion(self):
         b = daily_batch.agent_budget

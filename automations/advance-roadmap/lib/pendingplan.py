@@ -44,8 +44,8 @@ if not CODE_DIR:
     sys.exit("pendingplan: no personal code dir on this machine (set PERSONAL_CODE_DIR)")
 PREFLIGHT = os.path.expanduser("~/dotfiles/bin/git-safe-to-autocommit")
 DISPATCH_ACTIONS = {"dispatch_worker", "resume_worker"}
-# A worker that reports one of these made no durable progress; keep the plan.
-RETRY_OUTCOMES = {"failed", "limit_hit"}
+# These outcomes require continuation, including clean durable milestones.
+RETRY_OUTCOMES = {"failed", "limit_hit", "yielded"}
 
 
 def load(path):
@@ -104,6 +104,28 @@ def branch_exists(repo_dir, branch):
     ).returncode == 0
 
 
+def merged_assignment(repo_dir, branch, planned_at):
+    """Recognize an already-merged exact branch revision before a recovery worker starts."""
+    if not branch:
+        return None
+    try:
+        planned = datetime.fromisoformat(planned_at).astimezone().timestamp()
+        head = subprocess.run(['git', '-C', repo_dir, 'rev-parse', '--verify', f'refs/heads/{branch}'],
+                              capture_output=True, text=True, timeout=5, check=True).stdout.strip()
+        result = subprocess.run(['gh', 'pr', 'list', '--head', branch, '--state', 'merged', '--limit', '30',
+                                 '--json', 'headRefName,headRefOid,mergedAt,mergeCommit,url'],
+                                cwd=repo_dir, capture_output=True, text=True, timeout=20, check=True)
+        candidates = []
+        for pr in json.loads(result.stdout):
+            merged_at = datetime.fromisoformat(pr.get('mergedAt', '').replace('Z', '+00:00')).timestamp()
+            if (pr.get('headRefName') == branch and pr.get('headRefOid') == head
+                    and merged_at >= planned and (pr.get('mergeCommit') or {}).get('oid') and pr.get('url')):
+                candidates.append({'url': pr['url'], 'merge_commit': pr['mergeCommit']['oid'], 'head': head})
+        return candidates[0] if len(candidates) == 1 else None
+    except (OSError, ValueError, TypeError, KeyError, subprocess.SubprocessError):
+        return None
+
+
 def cmd_reuse(a):
     plan = load(a.file)
     if not plan:
@@ -124,6 +146,7 @@ def cmd_reuse(a):
     if why:
         print(f"pending plan: held ({why}); saved assignment retained")
         return 2
+    merged = merged_assignment(repo_dir, r.get('branch'), plan.get('planned_at')) if branch_exists(repo_dir, r.get('branch')) else None
     with workqueue.Store() as store:
         wid = store.register(r, plan.get('last_stamp') or plan.get('planned_stamp') or '00000000-000000', a.file)
         hold = store.hold(r['repo'])
@@ -131,6 +154,10 @@ def cmd_reuse(a):
             print(f"pending plan: held ({hold['reason']}); saved assignment retained")
             return 2
         current = next((w for w in store.list(r['repo']) if w['id'] == wid), None)
+        if merged and current and current['state'] != 'done':
+            store.checkpoint(wid, current['latest_stamp'], 'verifying',
+                {'merged_pr': merged, 'next_action': 'Verify the existing merge and deployment; never merge again'})
+            current = next((w for w in store.list(r['repo']) if w['id'] == wid), None)
         if current and (current['state'] == 'human' or current['not_before'] > time.time()):
             print('pending plan: this assignment is waiting; retained for its wake condition')
             return 2
@@ -174,6 +201,10 @@ def cmd_settle(a):
             print("pending plan: belongs to another item — left alone")
             return 0
     result = load(a.worker_result) or {}
+    if a.worker_rc != 0:
+        # A result written before a forced stop is not proof that shipping
+        # finished; reconcile the branch and PR on the next attempt.
+        result = {}
     outcome = result.get("outcome")
     stamp = ((load(a.request_file) or {}).get('stamp') if a.request_file else None) or plan.get('last_stamp') or plan.get('planned_stamp') or '00000000-000000'
     with workqueue.Store() as store:
@@ -183,7 +214,7 @@ def cmd_settle(a):
                       'finished_at': datetime.now().isoformat(timespec='seconds'),
                       'worker_exit': a.worker_rc, 'worker': result.get('provider'),
                       'detail': result.get('input_question') or result.get('summary')}, result)
-    if outcome is None or outcome in RETRY_OUTCOMES or outcome in {"blocked-branch-left", "shipped-deploy-failed"}:
+    if a.worker_rc != 0 or outcome is None or outcome in RETRY_OUTCOMES or outcome in {"blocked-branch-left", "shipped-deploy-failed"}:
         print(f"pending plan: kept for next run (worker outcome={outcome or 'none'}, rc={a.worker_rc})")
     else:
         clear(a.file)

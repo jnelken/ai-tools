@@ -1018,6 +1018,8 @@ PY
       export ADVANCE_ROADMAP_BUDGET_REVIEWERS="$(jq -r '.reviewers | join(" ")' "$RUN_DIR/batch-budget.json")"
       export ADVANCE_ROADMAP_BUDGET_REVIEW_STRATEGY="$(jq -r '.review_strategy // empty' "$RUN_DIR/batch-budget.json")"
       export ADVANCE_ROADMAP_BUDGET_REVIEW_FALLBACK_REASON="$(jq -r '.review_fallback_reason // empty' "$RUN_DIR/batch-budget.json")"
+      export ADVANCE_ROADMAP_INCREMENTAL_PHASE="$(jq -r '.phase // empty' "$RUN_DIR/batch-budget.json")"
+      export ADVANCE_ROADMAP_JOB_OVERRIDE="$(jq -r 'if .job_override == true then "1" else "0" end' "$RUN_DIR/batch-budget.json")"
       if [ -z "$reserved" ]; then
         record skipped-quota "batch release has no worker reservation"; exit 0
       fi

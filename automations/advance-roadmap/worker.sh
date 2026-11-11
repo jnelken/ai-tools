@@ -78,9 +78,9 @@ print(json.dumps(usage.saved_quota_record(Path(sys.argv[2]), "worker", usage.rea
                                           sys.argv[4] or None)))
 PY
   fi
-  python3 - "$STATUS_FILE" "$1" "$2" "${3:-}" "$LIMITED_LOG" "$MISSING" "$quota" "${tmpdir:-}/${1:-none}.log.session" <<'PY2'
+  python3 - "$STATUS_FILE" "$1" "$2" "${3:-}" "$LIMITED_LOG" "$MISSING" "$quota" "${tmpdir:-}/${1:-none}.log.session" "${RESULT_FILE:+${RESULT_FILE:h}/chunk-lifecycle.json}" <<'PY2'
 import json, sys
-path, used, rc, fatal, limited_log, missing, quota_path, session_path = sys.argv[1:9]
+path, used, rc, fatal, limited_log, missing, quota_path, session_path, lifecycle_path = sys.argv[1:10]
 session = None
 if used:
     try:
@@ -92,6 +92,10 @@ try:
     quota = json.load(open(quota_path)) if quota_path else None
 except (OSError, ValueError):
     pass
+try:
+    lifecycle = json.load(open(lifecycle_path)) if lifecycle_path else None
+except (OSError, ValueError):
+    lifecycle = None
 limited = []
 try:
     for line in open(limited_log) if limited_log else ():
@@ -107,7 +111,7 @@ json.dump({"used": used or None, "exit": int(rc) if rc.lstrip("-").isdigit() els
            "fatal": fatal or None, "limited": limited, "missing": missing.split(),
            "quota": quota if isinstance(quota, dict) else None,
            # The CLI session the used provider ran (Cursor/Claude JSON session_id, Codex header).
-           "session_id": session},
+           "session_id": session, "lifecycle": lifecycle},
           open(path, "w"), indent=1)
 PY2
 }
@@ -213,15 +217,45 @@ $REVIEW_CONTEXT
 
 Continuation rules:
 - Reconcile existing commits, review logs and PR/merge state before acting. Resume the saved phase.
-- After durable milestones and before a provider handoff, write a small JSON checkpoint with
-  summary, completed, next_action, head, evidence_head, tests and findings (only applicable fields).
-  Store large evidence in files and use artifact pointers; the packet limit is 8192 bytes.
-  Save it under the run directory and run:
-  python3 $ROOT/lib/workqueue.py --root $ROOT checkpoint --request-file $REQUEST_FILE --phase <implementing|reviewing|shipping|verifying> --packet-file <checkpoint.json>
+- Continue the exact saved session when available. Do not write a recap at every milestone;
+  retain existing commits, test and review artifacts as evidence. If native continuation is
+  unavailable and those artifacts lack essential recovery context, write a compact handoff
+  under the run directory and save its path with workqueue.py's checkpoint command.
 - A crash, quota limit, failing test or merge conflict is recoverable work; handle it automatically.
 - Only a decision or access that requires Jake is a human blocker. In that case include
   needs_input: true and one specific input_question in the worker result; otherwise needs_input: false.
 - Do not repeat a completed merge or trust test/review evidence for a different HEAD."
+if [ "${ADVANCE_ROADMAP_NO_MESSAGES:-0}" = 1 ]; then
+  BASE_PROMPT="$BASE_PROMPT
+
+Do not send Slack, email, or other messages to people during this invocation. Record any
+message that would have been needed in the local result instead."
+fi
+if [ "${ADVANCE_ROADMAP_INCREMENTAL:-0}" = 1 ]; then
+  BASE_PROMPT="$BASE_PROMPT
+
+This invocation is one bounded unit, reserved phase: ${ADVANCE_ROADMAP_INCREMENTAL_PHASE:-implementing}.
+Choose one concrete natural milestone in that phase, make durable progress on the assigned branch,
+and return outcome yielded when that
+milestone is reached without shipping; include next_phase (implementing, reviewing,
+shipping, or verifying) in the existing result. Do not start the next phase unless its capacity was
+explicitly reserved. Preserve the branch and existing artifacts; no recap is required.
+For yielded, the result needs only outcome, provider and next_phase; a prose summary,
+result fence and five-line sign-off are optional.
+The watchdog may interrupt this invocation after ${ADVANCE_ROADMAP_CHUNK_TIMEOUT_S:-900} seconds;
+this is a trial time boundary, not a subscription quota guarantee. Shipping still requires
+the normal current-HEAD tests, review, merge and deployment checks."
+  if [[ "${ADVANCE_ROADMAP_INCREMENTAL_PHASE:-implementing}" == (reviewing|shipping) ]] \
+      && [ -n "${ADVANCE_ROADMAP_BUDGET_REVIEWERS:-}" ]; then
+    BASE_PROMPT="$BASE_PROMPT
+This unit reserves worker and reviewer capacity, so after the required current-HEAD review
+and verification pass you may complete merge and deployment within this same unit."
+  elif [ "${ADVANCE_ROADMAP_INCREMENTAL_PHASE:-implementing}" = implementing ]; then
+    BASE_PROMPT="$BASE_PROMPT
+This implementation unit has no reviewer reservation: do not merge, push to the default
+branch, deploy, or close the ticket. Leave the branch unmerged and yield for review."
+  fi
+fi
 if [ -n "${ADVANCE_ROADMAP_TARGET_REPO:-}" ]; then
   BASE_PROMPT="$BASE_PROMPT
 
@@ -325,6 +359,126 @@ run_claude() {
   return $rc
 }
 
+# Incremental routing is enabled only by a batch that has admitted a bounded unit.
+# The exact owned session is selected by work identity, auth and checkout, never
+# by a provider's global "most recent" selector.
+incremental_session() {
+  local provider="$1" decision="${RESULT_FILE:h}/continuation-$1.json"
+  python3 "$ROOT/lib/continuation.py" --root "$ROOT" --request "$REQUEST_FILE" \
+    --provider "$provider" --workspace "$WORKDIR" > "$decision" || return 1
+  jq -r 'if .mode == "native" then .session_id else "" end' "$decision"
+}
+
+native_unavailable() {
+  # Only retry when the CLI explicitly rejected a missing session before any
+  # session/model event. Other failures may have spent quota or changed work.
+  python3 - "$1" <<'PY'
+import json, re, sys
+try:
+    text = open(sys.argv[1], encoding='utf-8', errors='replace').read()
+except OSError:
+    raise SystemExit(1)
+events = []
+for line in text.splitlines():
+    try:
+        value = json.loads(line)
+        if isinstance(value, dict):
+            events.append(value)
+    except ValueError:
+        pass
+if any(e.get('type') in ('thread.started', 'turn.started', 'assistant') or
+       (e.get('type') == 'system' and e.get('subtype') == 'init') for e in events):
+    raise SystemExit(1)
+pattern = r'no (?:conversation|session|rollout) found|(?:session|conversation|rollout)(?: id)?[^\n]{0,100}not found|cannot find (?:session|conversation|rollout)'
+raise SystemExit(0 if re.search(pattern, text, re.I) else 1)
+PY
+}
+
+record_native_fallback() {
+  python3 - "${RESULT_FILE:h}/continuation-$1.json" <<'PY'
+import json, os, sys
+path = sys.argv[1]
+try:
+    data = json.load(open(path))
+except (OSError, ValueError):
+    data = {}
+data.update(mode='fallback', reason='native session unavailable before model work',
+            attempted_session=data.get('session_id'))
+try:
+    lifecycle = json.load(open(os.path.join(os.path.dirname(path), 'chunk-lifecycle.json')))
+    data['native_failure_seconds'] = lifecycle.get('elapsed_seconds')
+except (OSError, ValueError):
+    pass
+data.pop('session_id', None)
+tmp = path + '.tmp'
+open(tmp, 'w').write(json.dumps(data) + '\n')
+os.replace(tmp, path)
+PY
+}
+
+run_incremental_codex() {
+  local out="$1" prompt sid
+  prompt="$(prompt_for_provider codex)" || return 2
+  sid="$(incremental_session codex)" || return 1
+  local base=("$CODEX" exec -o "$out.last" -m "$CODEX_WORKER_MODEL"
+    -c "model_reasoning_effort=$CODEX_WORKER_EFFORT" -C "$WORKDIR"
+    --add-dir "$CODE_DIR" --add-dir "$ROOT" --skip-git-repo-check
+    --dangerously-bypass-approvals-and-sandbox --json)
+  local cmd=("${base[@]}")
+  [ -n "$sid" ] && cmd+=(resume "$sid")
+  cmd+=("$prompt")
+  python3 "$ROOT/lib/session_stream.py" --provider codex --root "$ROOT" \
+    --request "$REQUEST_FILE" --workspace "$WORKDIR" --output "$out" \
+    --session-out "$out.session" --timeout "${ADVANCE_ROADMAP_CHUNK_TIMEOUT_S:-900}" \
+    --lifecycle "${RESULT_FILE:h}/chunk-lifecycle.json" --budget "${RESULT_FILE:h}/batch-budget.json" -- "${cmd[@]}"
+  local rc=$?
+  if [ -n "$sid" ] && [ "$rc" -ne 0 ] && native_unavailable "$out"; then
+    cp "$out" "${RESULT_FILE:h}/continuation-codex-error.log"
+    record_native_fallback codex
+    rc=0
+    python3 "$ROOT/lib/session_stream.py" --provider codex --root "$ROOT" \
+      --request "$REQUEST_FILE" --workspace "$WORKDIR" --output "$out" \
+      --session-out "$out.session" --timeout "${ADVANCE_ROADMAP_CHUNK_TIMEOUT_S:-900}" \
+      --lifecycle "${RESULT_FILE:h}/chunk-lifecycle.json" --budget "${RESULT_FILE:h}/batch-budget.json" \
+      -- "${base[@]}" "$prompt" || rc=$?
+  fi
+  python3 "$TOKENS_PY" codex "$out" --role worker --model "$CODEX_WORKER_MODEL" \
+    --log "$USAGE_LOG" --session-out "$out.session" 2>&1
+  return $rc
+}
+
+run_incremental_claude() {
+  local out="$1" prompt sid
+  prompt="$(prompt_for_provider claude)" || return 2
+  sid="$(incremental_session claude)" || return 1
+  local base=(python3 "${AI_TOOLS_HOME:-$HOME/.ai-tools}/bin/claude-session" run
+    --label "roadmap:worker:${STAMP:-unknown}" -- "$CLAUDE" -p "$prompt"
+    --model "$CLAUDE_WORKER_MODEL" --effort "$CLAUDE_WORKER_EFFORT"
+    --dangerously-skip-permissions --add-dir "$CODE_DIR" --add-dir "$ROOT"
+    --verbose --output-format stream-json)
+  local cmd=("${base[@]}")
+  [ -n "$sid" ] && cmd+=(--resume "$sid")
+  python3 "$ROOT/lib/session_stream.py" --provider claude --root "$ROOT" \
+    --request "$REQUEST_FILE" --workspace "$WORKDIR" --output "$out.json" \
+    --session-out "$out.session" --timeout "${ADVANCE_ROADMAP_CHUNK_TIMEOUT_S:-900}" \
+    --lifecycle "${RESULT_FILE:h}/chunk-lifecycle.json" --budget "${RESULT_FILE:h}/batch-budget.json" -- "${cmd[@]}"
+  local rc=$?
+  if [ -n "$sid" ] && [ "$rc" -ne 0 ] && native_unavailable "$out.json"; then
+    cp "$out.json" "${RESULT_FILE:h}/continuation-claude-error.log"
+    record_native_fallback claude
+    rc=0
+    python3 "$ROOT/lib/session_stream.py" --provider claude --root "$ROOT" \
+      --request "$REQUEST_FILE" --workspace "$WORKDIR" --output "$out.json" \
+      --session-out "$out.session" --timeout "${ADVANCE_ROADMAP_CHUNK_TIMEOUT_S:-900}" \
+      --lifecycle "${RESULT_FILE:h}/chunk-lifecycle.json" --budget "${RESULT_FILE:h}/batch-budget.json" \
+      -- "${base[@]}" || rc=$?
+  fi
+  python3 "$TOKENS_PY" claude-json "$out.json" "$out" --final "$out.last" --role worker \
+    --model "$CLAUDE_WORKER_MODEL" --log "$USAGE_LOG" --session-out "$out.session" 2>&1
+  [ -s "$out" ] || cp "$out.json" "$out" 2>/dev/null
+  return $rc
+}
+
 tmpdir="$(mktemp -d "${TMPDIR:-/tmp}/advance-roadmap-worker.XXXXXX")"
 trap 'rm -rf "$tmpdir"' EXIT INT TERM
 LIMITED_LOG="$tmpdir/limited.jsonl"
@@ -354,14 +508,40 @@ last_hit=""     # the last provider stopped by a limit banner
 # reservation only when its CLI cannot start (auth/missing); a live limit still ends here.
 LEASED_WORKER="${ADVANCE_ROADMAP_BUDGET_WORKER:-}"
 for provider in "${providers[@]}"; do
+  if [ "${ADVANCE_ROADMAP_INCREMENTAL:-0}" = 1 ] && [ -n "$LEASED_WORKER" ] \
+      && [ "$provider" != "$LEASED_WORKER" ]; then
+    echo "(skipping $provider — no reservation for an incremental fallback)"
+    continue
+  fi
   out="$tmpdir/$provider.log"
   # Fresh usage before every attempt — an explicit --providers list included. Exit 3 is the
   # only "over its gate"; a usage.py failure (1, 2) is no reading, which never blocks.
   gate="$(python3 "$USAGE_PY" --root "$ROOT" gate --role worker --provider "$provider" 2>/dev/null)"
   if [ $? -eq 3 ]; then
+    if [ "${ADVANCE_ROADMAP_INCREMENTAL:-0}" = 1 ] && [ "${ADVANCE_ROADMAP_JOB_OVERRIDE:-0}" = 1 ] \
+       && [ "$provider" = "${ADVANCE_ROADMAP_BUDGET_WORKER:-}" ] \
+       && print -r -- "$gate" | python3 -c 'import json,sys; g=json.load(sys.stdin); raise SystemExit(0 if g.get("state") == "over" and "rate limit reached" not in (g.get("reason") or "").lower() else 1)' \
+       && python3 - "${RESULT_FILE:h}/batch-budget.json" "$provider" <<'PY'
+import json, sys, time
+try:
+    b = json.load(open(sys.argv[1]))
+    reading = b['baseline']
+    ok = (b.get('job_override') is True and b.get('worker') == sys.argv[2]
+          and 0 <= time.time() - reading['observed_at'] <= 60
+          and bool(reading['windows']) and all(isinstance(w.get('live'), (int, float))
+                                                and w['live'] < 100 and w.get('cap') == 100
+                                                for w in reading['windows'].values()))
+except (OSError, ValueError, TypeError, KeyError):
+    ok = False
+raise SystemExit(0 if ok else 1)
+PY
+    then
+      echo "(job-only override admitted $provider above its normal forecast gate)"
+    else
     echo "(skipping $provider — over its usage gate: $gate)"
     print -r -- "$gate" >> "$LIMITED_LOG"
     continue
+    fi
   fi
   echo "=== worker try provider=$provider mode=$WORKER_MODE stamp=$STAMP ($(date)) ==="
   rc=0
@@ -376,8 +556,12 @@ for provider in "${providers[@]}"; do
   fi
   case "$provider" in
     cursor) run_cursor "$out" || rc=$? ;;
-    codex)  run_codex "$out"  || rc=$? ;;
-    claude) run_claude "$out" || rc=$? ;;
+    codex)  if [ "${ADVANCE_ROADMAP_INCREMENTAL:-0}" = 1 ]; then
+              run_incremental_codex "$out" || rc=$?
+            else run_codex "$out" || rc=$?; fi ;;
+    claude) if [ "${ADVANCE_ROADMAP_INCREMENTAL:-0}" = 1 ]; then
+              run_incremental_claude "$out" || rc=$?
+            else run_claude "$out" || rc=$?; fi ;;
     *) echo "unknown provider: $provider" >&2; continue ;;
   esac
   cat "$out"
@@ -407,6 +591,7 @@ for provider in "${providers[@]}"; do
   if [ "$rc" -eq 127 ]; then
     echo "(binary missing for $provider — failing over)"
     MISSING="$MISSING $provider"
+    if [ "${ADVANCE_ROADMAP_INCREMENTAL:-0}" = 1 ]; then used="$provider"; final_rc="$rc"; break; fi
     continue
   fi
 
@@ -417,6 +602,7 @@ for provider in "${providers[@]}"; do
     "$out" 2>/dev/null; then
     echo "(auth/startup failure for $provider — failing over)"
     MISSING="$MISSING $provider"
+    if [ "${ADVANCE_ROADMAP_INCREMENTAL:-0}" = 1 ]; then used="$provider"; final_rc="$rc"; break; fi
     continue
   fi
 

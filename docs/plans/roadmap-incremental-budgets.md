@@ -2,7 +2,7 @@
 
 ## Status
 
-Implementation in progress, November 11, 2026. Current runtime limits and whole-ticket admission are unchanged. This is separate from the active scheduler rollout: its existing shadow/pilot validation must not be mistaken for implementation of the smaller work units described here. The roadmap job remains deliberately paused.
+Implementation and fake-provider validation are complete in the development checkout, November 11, 2026; deployment and the explicitly requested monitored live run are next. Shared quota ceilings are unchanged. This is separate from the active scheduler rollout: its existing shadow/pilot validation must not be mistaken for validation of these smaller work units. The roadmap job remains paused until deployment is verified.
 
 ## Decisions
 
@@ -19,7 +19,10 @@ Implementation in progress, November 11, 2026. Current runtime limits and whole-
 - Claude calibration pairs account-level start/finish readings with a session's tokens. Overlapping unrelated sessions can contaminate the quota delta; sample quality must be visible and tested before changing the prediction.
 - Installed CLI help confirms explicit session resume for both configured harnesses. The launcher currently starts fresh sessions; storing IDs alone is not native session continuation. Claude's CLI dollar-budget option describes API-call spending and must not be treated as a subscription quota percentage control.
 - The local snapshot replay on November 11 found 22 Claude calibration samples overlapping another recorded session and one with a possibly open session. Missing finish events do not prove the other session was still active, and no overlap in local records proves account isolation. Sample quality is now reported without changing the estimator pending cohort validation.
-- Current worker output is parsed for session IDs after the provider process exits; a native continuation implementation must persist stream identity before interruption and validate the assigned worktree and revision. Recovery is still attempted first, but an unfinished item no longer holds unrelated repositories behind a batch-wide barrier.
+- Replaying the saved Claude calibration without flagged samples leaves fewer than five samples: the five-hour factor falls from 0.0002528 to the provisional 0.00003984 seed (about 6.3× lower), and there are no historical model/phase/resume cohorts. Neither number proves the next unit's cost. Preserve the existing conservative factor while collecting comparable new observations and report the sample quality and sparse cohorts alongside forecasts.
+- Recovery is still attempted first, but an unfinished item no longer holds unrelated repositories behind a batch-wide barrier.
+- The development implementation captures exact sessions from provider streams, validates work identity, account, workspace, branch and HEAD before resuming, and uses a bounded watchdog plus an independent orphan guard. Provider-switch and missing-session fallback, quota stop, review reservation, and forced-stop recovery have fake-provider coverage. A finite 15-minute watchdog and approximately ten-point forecast are initial trial settings, not hard subscription guarantees.
+- The dashboard now records account-wide observed deltas with isolation caveats and compares matching provider/model/effort/phase continuation cohorts. The CLIs do not separately attribute all reconstruction, compaction or handoff tokens; whole-unit tokens/time include those costs, and unavailable attribution is recorded as unknown rather than zero. Meaningful native-versus-fallback comparisons require future natural continuations.
 
 ## Approach
 
@@ -46,9 +49,9 @@ Implementation in progress, November 11, 2026. Current runtime limits and whole-
 - [x] Verify installed harnesses advertise explicit resume, without starting models.
 - [x] Record proposed metrics and the scoped 100% fallback.
 - [x] Incorporate Jake's cost constraint: native resume first, no mandatory recap per chunk, and measured checkpoint versus resume overhead.
-- [ ] Implement and validate phase/chunk admission, incremental usage collection, cooperative yield/watchdog behavior and native session adapters.
-- [ ] Validate estimator cohorts and concurrent-session contamination using saved data.
-  - Partial: local overlap quality flags and aggregate counts are available; calibration policy and model/phase cohorts still need validation.
+- [x] Implement and validate phase/chunk admission, incremental usage collection, cooperative yield/watchdog behavior and native session adapters with fake providers.
+- [x] Validate estimator cohorts and concurrent-session contamination using saved data; keep the conservative factor until comparable samples justify a change.
 - [ ] Compare native resume alone with sparse fallback checkpoints on comparable interrupted work; include generation, cached input, compaction/reconstruction and useful-progress latency in total cost. Choose chunk boundaries from the results.
-- [ ] Replay today's zero-admission case: admit one bounded continuation without raising global limits or claiming the whole ticket fits.
-- [ ] Test crash/limit/provider-switch recovery, unchanged evidence, zero duplicate merges and explicit reporting of forced versus clean yields.
+- [x] Replay November 10's zero-admission case: admit one bounded unit without raising global limits or claiming the whole ticket fits.
+- [x] Test crash/limit/provider-switch recovery, unchanged evidence, merged-branch reconciliation and explicit reporting of forced versus clean yields with fake providers.
+- [ ] Deploy and run the user-authorized batch while monitoring live; pause and fix any issues before resuming.

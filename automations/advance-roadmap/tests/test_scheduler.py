@@ -223,6 +223,8 @@ class SchedulerTest(unittest.TestCase):
         self.store.attempt('20261110-103001', 'a', {'repo': 'a', 'action': 'resume_worker', 'item': 'DEV-1'})
         self.store.finish({'stamp': '20261110-103001', 'outcome': 'blocked'},
                           {'needs_input': True, 'input_question': '<script>Which account?</script>'})
+        self.store.set('incremental_starvation', {'consecutive_zero_admission': 3,
+            'oldest_eligible_age_seconds': 7200, 'job_override': {'repo': 'a', 'outcome': 'yielded'}})
         (self.root / 'scheduler-snapshot.json').write_text(json.dumps({'issues': [
             {'id': 'DEV-unrouted', 'title': 'Assign me', 'labels': [], 'url': 'https://linear.app/jnelken/issue/DEV-unrouted'}]}))
         with patch.dict(os.environ, ADVANCE_ROADMAP_ROOT=str(self.root), PERSONAL_CODE_DIR=str(self.root / 'code')):
@@ -234,6 +236,8 @@ class SchedulerTest(unittest.TestCase):
         self.assertNotIn('<script>Which account?', result)
         self.assertIn('DEV-unrouted', result)
         self.assertIn('repo/* label', result)
+        self.assertIn('3 consecutive batches admitted no worker', result)
+        self.assertIn('job-only override: a (yielded)', result)
 
     def test_resumed_workers_also_consume_the_daily_attempt_cap(self):
         day = time.strftime('%Y%m%d')

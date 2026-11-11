@@ -44,6 +44,16 @@ def identity(plan):
     return hashlib.sha256(json.dumps([repo, item], ensure_ascii=False).encode()).hexdigest()[:32]
 
 
+def requirements_fingerprint(plan):
+    fields = ('repo', 'linear_id', 'item', 'branch', 'work_kind', 'worker_brief', 'acceptance')
+    brief = plan.get('worker_brief') or ''
+    for marker in ('\n\nContinuation checkpoint (', '\nSaved assignment needs revalidation'):
+        brief = brief.split(marker, 1)[0]
+    values = [brief if field == 'worker_brief' else plan.get(field) for field in fields]
+    return hashlib.sha256(json.dumps(values,
+                                     sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+
+
 def git(path, *args):
     try:
         result = subprocess.run(['git', '-C', str(path), *args], capture_output=True, text=True, timeout=5)
@@ -55,7 +65,8 @@ def git(path, *args):
 def packet(value):
     """The packet contains bounded descriptions and pointers, never full transcripts."""
     allowed = {'summary', 'completed', 'next_action', 'tests', 'findings', 'workspace', 'head', 'branch',
-               'dirty_paths', 'session_ids', 'artifacts', 'acceptance', 'evidence_head', 'evidence_valid'}
+               'dirty_paths', 'session_ids', 'artifacts', 'acceptance', 'evidence_head', 'evidence_valid',
+               'merged_pr'}
     out = {k: v for k, v in value.items() if k in allowed}
     if len(json.dumps(out, ensure_ascii=False).encode()) > PACKET_BYTES:
         raise ValueError('continuation packet exceeds 8192 bytes; use artifact paths for large evidence')
@@ -85,6 +96,10 @@ class Store:
           CREATE TABLE IF NOT EXISTS checkpoints (
             seq INTEGER PRIMARY KEY, work_id TEXT NOT NULL, stamp TEXT NOT NULL,
             phase TEXT NOT NULL, packet TEXT NOT NULL, created REAL NOT NULL);
+          CREATE TABLE IF NOT EXISTS sessions (
+            work_id TEXT NOT NULL, provider TEXT NOT NULL, stamp TEXT NOT NULL,
+            binding TEXT NOT NULL, updated REAL NOT NULL,
+            PRIMARY KEY(work_id, provider));
           CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
           CREATE TABLE IF NOT EXISTS decisions (
             tick TEXT NOT NULL, repo TEXT NOT NULL, decision TEXT NOT NULL,
@@ -130,6 +145,12 @@ class Store:
                 plan['worker_brief'] = plan['worker_brief'].split(marker, 1)[0]
         now = time.time()
         with self.db:
+            previous = self.db.execute('SELECT plan, checkpoint, latest_stamp FROM work WHERE id=?', (wid,)).fetchone()
+            if previous and stamp >= previous['latest_stamp'] and requirements_fingerprint(json.loads(previous['plan'])) != requirements_fingerprint(plan):
+                checkpoint = json.loads(previous['checkpoint'])
+                checkpoint.update(evidence_head=None, evidence_valid=False)
+                self.db.execute("UPDATE work SET checkpoint=?, phase=CASE WHEN state='done' THEN phase ELSE 'implementing' END WHERE id=?",
+                                (json.dumps(packet(checkpoint)), wid))
             self.db.execute('''INSERT INTO work(id,repo,item,plan,latest_stamp,created,updated)
                 VALUES (?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET
                 plan=CASE WHEN excluded.latest_stamp >= latest_stamp THEN excluded.plan ELSE plan END,
@@ -175,6 +196,25 @@ class Store:
                             (phase, encoded, time.time(), wid))
         return True
 
+    def save_session(self, binding):
+        """Persist an owned exact session as soon as its provider announces it."""
+        wid, stamp, provider = binding['work_id'], binding['attempt'], binding['provider']
+        with self.db:
+            row = self.db.execute('SELECT latest_stamp FROM work WHERE id=?', (wid,)).fetchone()
+            if not row or stamp != row['latest_stamp']:
+                return False
+            self.db.execute('''INSERT INTO sessions(work_id,provider,stamp,binding,updated)
+                VALUES (?,?,?,?,?) ON CONFLICT(work_id,provider) DO UPDATE SET
+                stamp=excluded.stamp,binding=excluded.binding,updated=excluded.updated
+                WHERE excluded.stamp >= sessions.stamp''',
+                (wid, provider, stamp, json.dumps(binding), time.time()))
+        return True
+
+    def session(self, wid, provider):
+        row = self.db.execute('SELECT binding FROM sessions WHERE work_id=? AND provider=?',
+                              (wid, provider)).fetchone()
+        return json.loads(row[0]) if row else None
+
     def finish(self, record, result=None):
         stamp = record['stamp']
         with self.db:
@@ -204,9 +244,17 @@ class Store:
             state, phase, wake = 'retry', work['phase'], finished + backoff
             if outcome == 'shipped' and record.get('worker_exit') == 0 and record.get('worker'):
                 state, phase, wake = 'done', 'done', 0
+            elif outcome == 'yielded' and record.get('worker_exit') == 0:
+                # A clean milestone can advance the phase; an interrupted
+                # worker's partial result is never trusted for this decision.
+                next_phase = result.get('next_phase')
+                if next_phase in {'implementing', 'reviewing', 'shipping', 'verifying'}:
+                    phase = next_phase
+                state, wake = 'eligible', 0
             elif outcome == 'shipped-deploy-failed':
                 state, phase = 'retry', 'verifying'
-            elif result.get('needs_input') is True and str(result.get('input_question') or '').strip():
+            elif (record.get('worker_exit') in (0, None) and result.get('needs_input') is True
+                  and str(result.get('input_question') or '').strip()):
                 state, reason, wake = 'human', result['input_question'], 0
                 snapshot = read(self.root / 'runs' / stamp / 'linear-snapshot-post.json') or read(
                     self.root / 'runs' / stamp / 'linear-snapshot.json', {})
@@ -331,7 +379,10 @@ def capture(store, stamp, repo, plan=None, phase='implementing', code=None):
                  'reviewing': 'Address existing findings and finish review', 'verifying': 'Verify the existing merge/deploy'}
              .get(phase, 'Reconcile existing artifacts before taking the next action'),
              'artifacts': [str(run / n) for n in ('orchestrator-result.json', 'worker-result.json', 'reviews.jsonl',
-                                                   'workspace.json', 'worker-status.json') if (run / n).exists()]}
+                                                   'workspace.json', 'worker-status.json', 'chunk-lifecycle.json',
+                                                   'batch-budget.json', 'admission.jsonl',
+                                                   'continuation-claude.json', 'continuation-codex.json')
+                           if (run / n).exists()]}
     if workspace:
         value.update(workspace=workspace, head=git(workspace, 'rev-parse', 'HEAD'),
                      dirty_paths=(git(workspace, 'status', '--porcelain') or '')[:1800])

@@ -13,6 +13,7 @@ from result files the agents wrote; nothing here reads the run log.
 """
 import argparse
 import fcntl
+import hashlib
 import json
 import os
 import sys
@@ -40,6 +41,27 @@ def load_json(path):
         return v if isinstance(v, dict) else None
     except (OSError, ValueError):
         return None
+
+
+def work_id(plan):
+    repo, item, action = plan.get('repo'), plan.get('linear_id') or plan.get('item'), plan.get('action')
+    if not repo or not item or action not in ('dispatch_worker', 'resume_worker'):
+        return None
+    return hashlib.sha256(json.dumps([repo, item], ensure_ascii=False).encode()).hexdigest()[:32]
+
+
+def json_lines(path):
+    try:
+        with open(path, encoding='utf-8') as stream:
+            for line in stream:
+                try:
+                    value = json.loads(line)
+                    if isinstance(value, dict):
+                        yield value
+                except ValueError:
+                    continue
+    except OSError:
+        return
 
 
 def stamp_epoch(stamp):
@@ -71,6 +93,9 @@ def derive(a, orch, wstatus, wresult):
         return "error", "worker.sh left no status"
     if wstatus.get("fatal"):
         return "error", f"worker.sh: {wstatus['fatal']}"
+    lifecycle = wstatus.get('lifecycle') or {}
+    if lifecycle.get('forced'):
+        return 'yielded', f"worker stopped by {lifecycle.get('reason') or 'signal'}; continuation retained"
     # A leased provider can hit a live limit and stop without writing a result: worker.sh
     # records it as `used` so the batch does not spend an unleased fallback. Preserve that
     # quota pause instead of treating its non-zero exit as a worker crash.
@@ -93,7 +118,7 @@ def derive(a, orch, wstatus, wresult):
             return "blocked", wresult.get("summary", "")[:200]
         if o == "limit_hit":
             return "quota-paused", f"worker hit a limit: {wresult.get('limit_text') or '?'}"
-        if o in ("shipped", "failed", "archive-only"):
+        if o in ("shipped", "failed", "archive-only", "yielded"):
             return o, ""
         if o == "shipped-deploy-failed":
             d = wresult.get("deploy") or {}
@@ -210,6 +235,26 @@ def cmd_append(a):
     now = time.time()
     w = wresult or {}
     o = orch or {}
+    run_dir = os.path.join(a.root, 'runs', a.stamp)
+    allocation = load_json(os.path.join(run_dir, 'batch-budget.json')) or {}
+    continuation = load_json(os.path.join(run_dir, f"continuation-{(wstatus or {}).get('used')}.json"))
+    lifecycle = (wstatus or {}).get('lifecycle')
+    admissions = list(json_lines(os.path.join(run_dir, 'admission.jsonl')))
+    incremental = None
+    if allocation.get('phase'):
+        active = (lifecycle or {}).get('elapsed_seconds')
+        total = int(now - started) if started else None
+        incremental = {'work_id': work_id(o), 'phase': allocation.get('phase'),
+                       'job_override': allocation.get('job_override', False),
+                       'continuation': continuation, 'lifecycle': lifecycle,
+                       'admission': admissions[-1] if admissions else None,
+                       'active_seconds': active,
+                       'milestone': (w.get('summary') or '')[:500] if outcome == 'yielded'
+                                    and (wstatus or {}).get('exit') == 0 else None,
+                       'milestone_observed_by_seconds': active if outcome == 'yielded'
+                                    and (wstatus or {}).get('exit') == 0 else None,
+                       'waiting_and_other_seconds': max(0, total - active)
+                       if total is not None and isinstance(active, (int, float)) else None}
     rec = {
         "stamp": a.stamp,
         "started_at": datetime.fromtimestamp(started).isoformat(timespec="seconds") if started else None,
@@ -226,6 +271,7 @@ def cmd_append(a):
         "worker": (wstatus or {}).get("used"),
         "worker_exit": (wstatus or {}).get("exit"),
         "worker_session": (wstatus or {}).get("session_id"),
+        "incremental": incremental,
         "worker_result_source": w.get("_source") or ("agent" if wresult else None),
         "repo": a.repo or w.get("repo") or o.get("repo") or None,
         "assigned_repo": a.repo or None,

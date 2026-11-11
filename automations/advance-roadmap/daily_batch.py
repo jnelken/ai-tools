@@ -13,6 +13,7 @@ planners wait without using a model. No new-work refills or quota retries within
 The two local-time slots are 10:30 and 15:30; each can start at most once. One Slack summary is posted when the batch ends; individual runs post nothing.
 """
 import argparse
+import copy
 import fcntl
 import json
 import os
@@ -76,10 +77,11 @@ def candidates(code):
 
 
 def implementation_headroom(budget=None):
-    """Preserve A4's provider/reviewer gates, then require one complete job's budget.
+    """Check initial headroom for the configured execution mode.
 
-    A broken quota gate is unknown, as in run.sh; shared budget admission still
-    bounds unknown readings to one job per provider.
+    Incremental execution checks a bounded implementation unit; legacy mode
+    retains the complete-job and reviewer gates. Unknown readings remain
+    limited by shared admission.
     """
     if budget is not None:
         workers, by_provider = budget.workers, budget.gates
@@ -96,6 +98,12 @@ def implementation_headroom(budget=None):
                 list(by_provider.values()))
         except (OSError, ValueError, AttributeError, subprocess.TimeoutExpired):
             return True, "", None
+    if budget is not None and getattr(budget, 'incremental', False):
+        if not workers:
+            return False, 'no worker provider is under its quota gate', 'worker'
+        if budget.choose(commit=False) is None:
+            return False, 'no bounded implementation unit fits shared headroom', 'worker'
+        return True, '', None
     if not workers:
         return False, "no worker provider is under its quota gate", "worker"
     if decision.get("strategy") == "cross-provider":
@@ -195,10 +203,25 @@ def dispatch_rates():
     return {repo: n / total for repo, (n, total) in counts.items()}
 
 
+def worker_configuration(provider):
+    prefix = provider.upper() + '_WORKER_'
+    try:
+        defaults = (shared.HERE / 'lib/models.sh').read_text()
+    except OSError:
+        defaults = ''
+    values = {}
+    for field in ('MODEL', 'EFFORT'):
+        match = re.search(r'^' + prefix + field + r'_DEFAULT=([^\s#]+)', defaults, re.M)
+        values[field.lower()] = os.environ.get('ADVANCE_ROADMAP_' + prefix + field) or (
+            match.group(1) if match else None)
+    return values
+
+
 class RoadmapBudget:
     """Batch jobs transact on exactly the same leases as interactive fan-out."""
     def __init__(self, dry_run=False):
         self.dry_run = dry_run
+        self.incremental = os.environ.get('ADVANCE_ROADMAP_INCREMENTAL', '1') == '1'
         self.models = agent_budget.cached_estimates(read_only=dry_run)
         self.rates = dispatch_rates()
         self.forecast = []
@@ -247,6 +270,9 @@ class RoadmapBudget:
                 yield worker, reviewers
 
     def choose(self, *, item=None, planner=None, scale=1, commit=True):
+        if getattr(self, 'incremental', False):
+            return self.choose_incremental(item=item, planner=planner, scale=scale, commit=commit,
+                                           override=bool((item or {}).get('job_override')))
         for worker, reviewers in self.routes():
             requests = [{"provider": worker, "role": "worker", "scale": scale},
                         *[{"provider": p, "role": "reviewer", "scale": scale} for p in reviewers]]
@@ -272,10 +298,155 @@ class RoadmapBudget:
                 return allocation
         return None
 
+    def prepare_override(self):
+        """Refresh once; prepare a job-scoped ceiling without changing shared gates."""
+        try:
+            result = shared.py('usage.py', '--root', str(ROOT), 'refresh', timeout=120)
+        except (OSError, subprocess.TimeoutExpired):
+            return False
+        if result.returncode:
+            return False
+        state = usage.load(ROOT)
+        gates = {g['provider']: g for g in usage.role_gates(state, 'worker')}
+        readings = {p: agent_budget.readings(p, root=ROOT, probe=p == 'claude')
+                    for p in ('codex', 'claude')}
+        now = time.time()
+        self.override_workers = []
+        self.override_readings = copy.deepcopy(self.readings)
+        for provider, reading in readings.items():
+            gate = gates.get(provider, {})
+            if gate.get('state') == 'limited' or 'rate limit reached' in (gate.get('reason') or '').lower():
+                continue  # an actual provider limit is not an estimate
+            if not isinstance(reading.get('observed_at'), (int, float)) or not 0 <= now - reading['observed_at'] <= 60:
+                continue
+            if not reading.get('windows') or any(not isinstance(w.get('live'), (int, float))
+                                                 for w in reading['windows'].values()):
+                continue
+            self.override_workers.append(provider)
+            self.override_readings[provider] = copy.deepcopy(reading)
+        return bool(self.override_workers)
+
+    def choose_incremental(self, *, item=None, planner=None, scale=1, commit=True, override=False):
+        phase = (item or {}).get('work_phase') or 'implementing'
+        if phase == 'ready':
+            phase = 'implementing'
+        decision = self.review_decision()
+        workers = getattr(self, 'override_workers', []) if override else self.workers
+        base_readings = getattr(self, 'override_readings', {}) if override else self.readings
+        tried = False
+        for worker in workers:
+            # Cursor has no bounded streaming continuation adapter yet.
+            if worker not in ('codex', 'claude'):
+                continue
+            readings = copy.deepcopy(base_readings) if override else base_readings
+            if override:
+                for window in readings[worker]['windows'].values():
+                    window['cap'] = 100
+            config = worker_configuration(worker)
+            cohorts = [c for c in self.models[worker].get('worker_cohorts', [])
+                       if c.get('model') == config['model'] and c.get('effort') == config['effort']
+                       and c.get('phase') == phase]
+            mature = [c for c in cohorts if c.get('sample_count', 0) >= 5
+                      and isinstance(c.get('newest_at'), (int, float))
+                      and 0 <= time.time() - c['newest_at'] <= 90 * 86400
+                      and isinstance(c.get('tokens_p80'), (int, float))]
+            models = self.models
+            if {'fresh', 'native', 'fallback'} <= {c['continuation_mode'] for c in mature}:
+                # Admission happens before workspace validation; use the most
+                # expensive observed mode rather than assuming native resume.
+                tokens = max(c['tokens_p80'] for c in mature)
+                models = copy.deepcopy(self.models)
+                role = models[worker]['roles']['worker']
+                role['tokens_p80'], role['source'] = tokens, 'phase-mode-cohorts'
+                role['pct'] = {name: max(.1, tokens * factor)
+                               for name, factor in models[worker]['factor'].items()}
+            worker_cost = models[worker]['roles']['worker']['pct'].get('five_hour', 0)
+            phase_cost = worker_cost
+            phase_estimate_source = 'worker'
+            if phase in ('reviewing', 'shipping'):
+                review_proxy = models[worker]['roles']['reviewer']['pct'].get('five_hour', 0)
+                if review_proxy > 0:
+                    phase_cost = min(worker_cost, review_proxy)
+                    phase_estimate_source = 'reviewer-proxy'
+            chunk_scale = min(1, 10 / worker_cost, phase_cost / worker_cost) if worker_cost > 0 else 1
+            reviews = [[]]
+            if phase in ('reviewing', 'shipping'):
+                if decision.get('strategy') == 'cross-provider':
+                    order = {'codex': ['cursor', 'claude'], 'claude': ['codex', 'cursor']}[worker]
+                    reviews = [[p] for p in order if self.gates.get(p, {}).get('state') not in OUT_STATES]
+                else:
+                    reviews = [['cursor', 'codex']] if all(
+                        self.gates.get(p, {}).get('state') not in OUT_STATES for p in ('cursor', 'codex')) else []
+            for reviewers in reviews:
+                tried = True
+                requests = [{'provider': worker, 'role': 'worker', 'scale': chunk_scale * scale},
+                            *[{'provider': p, 'role': 'reviewer', 'scale': scale} for p in reviewers]]
+                if planner:
+                    requests.append({'provider': planner, 'role': 'planner'})
+                if override and any(not isinstance(readings[p].get('observed_at'), (int, float))
+                                    or not 0 <= time.time() - readings[p]['observed_at'] <= 60
+                                    or any(not isinstance(w.get('live'), (int, float))
+                                           for w in readings[p].get('windows', {}).values())
+                                    for p in {r['provider'] for r in requests}):
+                    continue
+                diagnostics = []
+                leases = agent_budget.reserve_bundle(requests,
+                    replace_ids=(item or {}).get('budget_leases', []),
+                    reading_by_provider=readings, models=models,
+                    pid=(item or {}).get('pid'),
+                    label=f'roadmap:{item["stamp"]}' if item else 'roadmap:forecast',
+                    ttl=PLAN_TIMEOUT_S + APPROVAL_TIMEOUT_S if planner else None,
+                    commit=commit and not self.dry_run, extra_leases=self.forecast,
+                    diagnostics=diagnostics)
+                if item is not None and commit and not self.dry_run:
+                    run = ROOT / 'runs' / item['stamp']
+                    if run.is_dir():
+                        role = models[worker]['roles']['worker']
+                        event = {'at': time.time(), 'stamp': item['stamp'], 'repo': item['repo'],
+                                 'phase': phase, 'worker': worker, 'reviewers': reviewers,
+                                 **config,
+                                 'planner': planner, 'chunk_scale': chunk_scale * scale,
+                                 'estimate': {'tokens_p80': role.get('tokens_p80'),
+                                              'sample_count': role.get('sample_count'),
+                                              'source': role.get('source'),
+                                              'phase_estimate_source': phase_estimate_source,
+                                              'phase_reference_five_hour_pct': phase_cost,
+                                              'reviewer_proxy_samples': self.models[worker]['roles']['reviewer'].get('sample_count'),
+                                              'factor_source': self.models[worker].get('factor_source'),
+                                              'sample_quality': self.models[worker].get('sample_quality'),
+                                              'quantile': .8, 'matching_cohorts': cohorts,
+                                              'model_match': bool(cohorts),
+                                              'historical_sample_age_seconds': None,
+                                              'confidence': 'account-level calibration may include other sessions'},
+                                 'decision': 'admitted' if leases is not None else 'forecast rejected',
+                                 'job_override': override, 'capacity': diagnostics}
+                        with (run / 'admission.jsonl').open('a') as log:
+                            log.write(json.dumps(event) + '\n')
+                if leases is None:
+                    continue
+                allocation = {'worker': worker, 'reviewers': reviewers, 'planner': planner,
+                              'phase': phase, 'chunk_scale': chunk_scale, 'requests': requests,
+                              'job_override': override, 'baseline': readings[worker],
+                              'worker_estimate': models[worker] if models is not self.models else None,
+                              'review_strategy': decision.get('strategy'),
+                              'review_fallback_reason': decision.get('reason'), 'leases': leases}
+                if item is not None and commit:
+                    item.update(budget_leases=[lease['id'] for lease in leases], allocation=allocation)
+                    if self.dry_run:
+                        self.forecast.extend(leases)
+                return allocation
+        if not tried and item is not None and commit and not self.dry_run:
+            run = ROOT / 'runs' / item['stamp']
+            if run.is_dir():
+                with (run / 'admission.jsonl').open('a') as log:
+                    log.write(json.dumps({'at': time.time(), 'stamp': item['stamp'], 'repo': item['repo'],
+                        'phase': phase, 'job_override': override, 'decision': 'no eligible worker/reviewer route',
+                        'workers': workers, 'reviewer_gates': self.gates}) + '\n')
+        return None
+
     def admit(self, item):
-        # A pending dispatch needs its whole implementation. Prefer a planner
-        # fallback if it fits, but saved work can run without that extra cost.
-        # Later threads inherit ordering metadata but always plan fresh in run.sh.
+        # A saved assignment can proceed without a planner reservation. Later
+        # threads inherit ordering metadata but plan fresh in run.sh.
         pending = (item.get("thread", 1) == 1
                    and item.get("verdict_check", {}).get("result") == "pending")
         for planner in ([*self.planners, None] if pending else self.planners):
@@ -288,8 +459,11 @@ class RoadmapBudget:
     def planned(self, item):
         allocation = item.get("allocation") or {}
         requests = [r for r in allocation.get("requests", []) if r["role"] != "planner"]
+        models = self.models
+        if allocation.get('worker_estimate'):
+            models = {**self.models, allocation['worker']: allocation['worker_estimate']}
         leases = agent_budget.reserve_bundle(requests, replace_ids=item.get("budget_leases", []),
-            reading_by_provider=self.readings, models=self.models,
+            reading_by_provider=self.readings, models=models,
             pid=item.get("pid"), label=f'roadmap:{item["stamp"]}', reduce_only=True)
         item["budget_leases"] = [l["id"] for l in leases]
         allocation.update(requests=requests, leases=leases, planner=None)
@@ -318,6 +492,19 @@ def plan_of(result, item):
             "conflict_notes": [n for n in result.get("conflict_notes") or [] if isinstance(n, str)],
             "worker_brief": (result.get("worker_brief") or "")[:2500],
             "summary": (result.get("summary") or "")[:600]}
+
+
+def budget_record(allocation, budget):
+    worker = allocation['worker']
+    return {'worker': worker, 'reviewers': allocation['reviewers'],
+            'review_strategy': allocation.get('review_strategy'),
+            'review_fallback_reason': allocation.get('review_fallback_reason'),
+            'phase': allocation.get('phase'), 'chunk_scale': allocation.get('chunk_scale'),
+            'baseline': allocation.get('baseline') or budget.readings.get(worker),
+            'job_override': allocation.get('job_override', False),
+            'lease_ids': [lease['id'] for lease in allocation.get('leases', [])],
+            'worker_reservation': next((lease.get('pct') for lease in allocation.get('leases', [])
+                                        if lease.get('provider') == worker), {})}
 
 
 class Batch:
@@ -386,6 +573,8 @@ class Batch:
                "ADVANCE_ROADMAP_BATCH_SNAPSHOT": str(self.directory / "linear-snapshot.json"),
                "ADVANCE_ROADMAP_INFLIGHT_STAMPS": " ".join(i["stamp"] for i in self.state["queue"]),
                "ADVANCE_ROADMAP_LAST_VERDICT": str(self.verdict_path(item))}
+        if getattr(self.budget, 'incremental', False):
+            env['ADVANCE_ROADMAP_INCREMENTAL'] = '1'
         allocation = item.get("allocation") or {}
         env["ADVANCE_ROADMAP_BUDGET_PLANNER"] = allocation.get("planner") or "none"
         if item["thread"] == 1 and item.get("verdict_check", {}).get("result") == "pending":
@@ -409,6 +598,28 @@ class Batch:
         with workqueue.Store(ROOT) as store:
             store.attempt(item['stamp'], item['repo'], pid=proc.pid)
         shared.log(f'planning {item["repo"]} thread {item["thread"]} [{item["stamp"]}]')
+
+    def try_idle_override(self):
+        """At most one saved continuation, only after normal admission selects nothing."""
+        if (not getattr(self.budget, 'incremental', False) or self.state.get('normal_work_admitted')
+                or self.state.get('idle_override_used')):
+            return False
+        candidates = [item for item in self.state['queue'] if item['status'] == 'queued'
+                      and item.get('verdict_check', {}).get('result') == 'pending'
+                      and (item.get('verdict_check', {}).get('action') == 'resume_worker'
+                           or item.get('work_phase') not in (None, 'ready'))]
+        if not candidates or not self.budget.prepare_override():
+            return False
+        for item in candidates:
+            item['job_override'] = True
+            if self.budget.choose(item=item, planner=None):
+                self.state['idle_override_used'] = {'repo': item['repo'], 'stamp': item['stamp'],
+                    'reason': 'no normal admission; one saved bounded continuation', 'ceiling': 100}
+                item.pop('budget_hold', None)
+                self.launch(item)
+                return True
+            item.pop('job_override', None)
+        return False
 
     def poll(self):
         for item in self.state["queue"]:
@@ -437,7 +648,10 @@ class Batch:
                 if self.budget:
                     self.budget.planned(item)
                 with workqueue.Store(ROOT) as store:
-                    workqueue.capture(store, item['stamp'], item['repo'], result, 'ready', shared.code_dir())
+                    wid = workqueue.capture(store, item['stamp'], item['repo'], result, 'ready', shared.code_dir())
+                    work = next((w for w in store.list(item['repo']) if w['id'] == wid), None)
+                    if work:
+                        item['work_phase'] = work['phase']
             elif item["status"] == "planning" and time.time() - item["started"] > PLAN_TIMEOUT_S:
                 # Only planning gets this deadline. Already dispatched workers retain run.sh's
                 # existing timeout/recovery behavior and are never killed by this controller.
@@ -645,6 +859,30 @@ class Batch:
         self.budget.refresh()
         return self.sync_review_fallback()
 
+    def record_starvation(self):
+        if not getattr(self.budget, 'incremental', False):
+            return
+        now = time.time()
+        admitted = sum(bool(item.get('released_at')) for item in self.state['queue'])
+        with workqueue.Store(ROOT) as store:
+            prior = store.get('incremental_starvation', {})
+            eligible = [work for work in store.list() if work['state'] not in ('done', 'human')
+                        and work['not_before'] <= now]
+            count = 0 if admitted else prior.get('consecutive_zero_admission', 0) + 1
+            oldest = min((work['created'] for work in eligible), default=None)
+            snapshot = self.budget.snapshot(self.state['queue'])
+            headroom = {provider: {name: value.get('headroom') for name, value in view['windows'].items()}
+                        for provider, view in snapshot['providers'].items()}
+            exception = self.state.get('idle_override_used')
+            if exception:
+                item = next((i for i in self.state['queue'] if i['stamp'] == exception['stamp']), {})
+                exception = {**exception, 'outcome': item.get('outcome') or item.get('status')}
+            record = {'at': now, 'admitted': admitted, 'consecutive_zero_admission': count,
+                      'oldest_eligible_age_seconds': round(now - oldest) if oldest is not None else None,
+                      'unused_headroom': headroom, 'job_override': exception}
+            store.set('incremental_starvation', record)
+            self.state['starvation'] = record
+
     def run(self, streaming=False, summary=True):
         self.streaming = streaming
         self.summary_enabled = summary
@@ -657,6 +895,9 @@ class Batch:
             workqueue.wake_humans(store, workqueue.read(self.directory / 'linear-snapshot.json', {}))
             for item in self.state['queue']:
                 hold = store.hold(item['repo'])
+                eligible = [w for w in store.list(item['repo']) if w['state'] != 'done']
+                if len(eligible) == 1:
+                    item['work_phase'] = eligible[0]['phase']
                 if hold and item['status'] == 'queued':
                     item.update(status='deferred', reason=hold['reason'], waiting_state=hold['state'],
                                 not_before=hold['not_before'])
@@ -668,16 +909,21 @@ class Batch:
                 if item['status'] == 'queued':
                     item.update(status='deferred', reason='surviving workers occupy the agent cap')
             self.state['phase'] = 'done'
+            self.record_starvation()
             self.write()
             self.post_summary()
             return 0
         self.write()
         ok, reason, blocking_role = implementation_headroom(self.budget)
-        if not ok:
+        can_try_override = (getattr(self.budget, 'incremental', False)
+                            and any(i['status'] == 'queued' and i.get('verdict_check', {}).get('result') == 'pending'
+                                    for i in self.state['queue']))
+        if not ok and not can_try_override:
             self.state["phase"] = "skipped"
             self.state["skipped_reason"] = reason
             self.skip_planning(reason, blocking_role)
             self.state["quota_paused"] = quota_paused(self.state)
+            self.record_starvation()
             self.write()
             self.post_summary()
             return 0
@@ -701,6 +947,7 @@ class Batch:
             (self.run_stream if streaming else self.run_work)()
         self.state["phase"] = "done"
         self.state["quota_paused"] = quota_paused(self.state)
+        self.record_starvation()
         self.write()
         self.post_summary()
         return 0
@@ -722,13 +969,15 @@ class Batch:
                            key=lambda i: i.get('verdict_check', {}).get('priority', 2))
             released = 0
             for item in ready[:slots]:
+                if item.get('job_override') and not self.budget.prepare_override():
+                    item['budget_hold'] = 'job override requires fresh provider usage'
+                    continue
                 allocation = self.budget.choose(item=item)
                 if allocation is None:
                     item['budget_hold'] = 'implementation and review need shared headroom'
                     continue
                 run = ROOT / 'runs' / item['stamp']
-                save(run / 'batch-budget.json', {k: allocation[k] for k in
-                     ('worker', 'reviewers', 'review_strategy', 'review_fallback_reason')})
+                save(run / 'batch-budget.json', budget_record(allocation, self.budget))
                 (run / 'batch-release').touch()
                 item.update(status='running', released_at=time.time())
                 item.pop('budget_hold', None)
@@ -738,10 +987,14 @@ class Batch:
             for item in [i for i in self.state['queue'] if i['status'] == 'queued'][:slots]:
                 if self.budget.admit(item):
                     self.launch(item)
+                    self.state['normal_work_admitted'] = True
                     launched += 1
                 else:
                     item['budget_hold'] = 'complete job does not fit shared headroom'
             if not active and not released and not launched:
+                if self.try_idle_override():
+                    self.write()
+                    continue
                 # No model or worker can free capacity: save work and end this tick.
                 for item in ready:
                     self.cancel(item, item.get('budget_hold') or 'waiting for shared headroom')
@@ -767,12 +1020,14 @@ class Batch:
                 if self.budget.admit(item):
                     item.pop("budget_hold", None)
                     self.launch(item)
+                    self.state['normal_work_admitted'] = True
                     launched += 1
                 else:
                     item["budget_hold"] = "planner plus expected implementation does not fit shared headroom"
             self.state["lanes"] = sum(i["status"] == "planning" for i in self.state["queue"])
             if not launched and not any(i["status"] == "planning" for i in self.state["queue"]):
-                self.skip_planning("planner plus expected implementation does not fit shared headroom", "orchestrator")
+                if not self.try_idle_override():
+                    self.skip_planning("planner plus expected implementation does not fit shared headroom", "orchestrator")
             self.write()
             time.sleep(POLL_S)
         self.state["phase"] = "approving"
@@ -798,6 +1053,10 @@ class Batch:
                 self.refresh_budget()
                 held = []
                 for item in chosen:
+                    if item.get('job_override') and not self.budget.prepare_override():
+                        item['budget_hold'] = 'job override requires fresh provider usage'
+                        held.append(item)
+                        continue
                     allocation = self.budget.choose(item=item)
                     if allocation is None:
                         reason = "worker plus required review no longer fits shared headroom; saved plan waits for the next scheduled batch"
@@ -805,10 +1064,7 @@ class Batch:
                         held.append(item)
                         continue
                     run = ROOT / "runs" / item["stamp"]
-                    save(run / "batch-budget.json", {"worker": allocation["worker"],
-                                                    "reviewers": allocation["reviewers"],
-                                                    "review_strategy": allocation.get("review_strategy"),
-                                                    "review_fallback_reason": allocation.get("review_fallback_reason")})
+                    save(run / "batch-budget.json", budget_record(allocation, self.budget))
                     (run / "batch-release").touch()
                     item.pop("budget_hold", None)
                     item.update(status="running", released_at=time.time())

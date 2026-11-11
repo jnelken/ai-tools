@@ -53,6 +53,28 @@ class RunRecordTest(unittest.TestCase):
         self.assertEqual(rec['assigned_repo'], 'actual')
         self.assertEqual(rec['reported_repo'], 'fallback')
 
+    def test_forced_stop_is_yielded_even_if_partial_result_claims_shipped(self):
+        rec = self.append({'action': 'resume_worker', 'repo': 'demo'},
+                          {'used': 'codex', 'exit': 124,
+                           'lifecycle': {'forced': True, 'reason': 'watchdog'}},
+                          {'outcome': 'shipped', 'provider': 'codex', 'summary': 'partial'})
+        self.assertEqual(rec['outcome'], 'yielded')
+        self.assertIn('watchdog', rec['detail'])
+
+    def test_incremental_record_exposes_mode_forecast_and_timing(self):
+        run = self.root / 'runs/20261013-103001'
+        run.mkdir(parents=True)
+        (run / 'batch-budget.json').write_text(json.dumps({'phase': 'reviewing', 'job_override': True}))
+        (run / 'continuation-codex.json').write_text(json.dumps({'mode': 'native', 'selection_seconds': .1}))
+        (run / 'admission.jsonl').write_text(json.dumps({'decision': 'admitted', 'estimate': {'sample_count': 3}}) + '\n')
+        rec = self.append({'action': 'resume_worker', 'repo': 'demo', 'item': 'item'},
+                          {'used': 'codex', 'exit': 0, 'lifecycle': {'elapsed_seconds': 5}},
+                          {'outcome': 'yielded', 'provider': 'codex', 'summary': 'done'})
+        self.assertEqual(rec['incremental']['continuation']['mode'], 'native')
+        self.assertEqual(rec['incremental']['admission']['estimate']['sample_count'], 3)
+        self.assertEqual(rec['incremental']['active_seconds'], 5)
+        self.assertTrue(rec['incremental']['job_override'])
+
     def test_planner_quota_is_a_quota_pause_with_its_details(self):
         rec = self.append(QUOTA_PLAN)
         self.assertEqual(rec["outcome"], "quota-paused")

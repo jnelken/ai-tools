@@ -315,11 +315,27 @@ def parse_runs(ledger, records=None):
                     rec.get("review_strategy"),
                     rec.get("reviewer"), rec.get("review_verdict"),
                     f'{rec.get("review_rounds")} round(s)' if rec.get("review_rounds") else None) if x)
+            inc = rec.get('incremental') or {}
+            cont = inc.get('continuation') or {}
+            lifecycle = inc.get('lifecycle') or {}
+            admission = inc.get('admission') or {}
+            estimate = admission.get('estimate') or {}
+            continuation = ' · '.join(str(x) for x in (
+                inc.get('phase'), cont.get('mode'), cont.get('reason'), lifecycle.get('reason')) if x)
+            budget = ' · '.join(str(x) for x in (
+                'job-only 100% ceiling' if inc.get('job_override') else None,
+                admission.get('decision'),
+                f"{estimate.get('sample_count')} worker samples" if estimate.get('sample_count') is not None else None,
+                f"quality {estimate.get('sample_quality')}" if estimate.get('sample_quality') else None) if x)
+            timing = ' · '.join(str(x) for x in (
+                f"{inc['active_seconds']:.0f}s active" if isinstance(inc.get('active_seconds'), (int, float)) else None,
+                f"{inc['waiting_and_other_seconds']:.0f}s waiting/other" if isinstance(inc.get('waiting_and_other_seconds'), (int, float)) else None) if x)
             fields = {k: v for k, v in (
                 ("Repo", rec.get("repo")), ("Item", rec.get("item")),
                 ("Branch", rec.get("branch")), ("Merge", rec.get("merge_commit")),
                 ("Route", " → ".join(x for x in (rec.get("orchestrator"), rec.get("worker")) if x)),
-                ("Review", review), ("Summary", rec.get("summary")), ("Detail", detail)) if v}
+                ("Review", review), ("Continuation", continuation), ("Budget", budget),
+                ("Timing", timing), ("Summary", rec.get("summary")), ("Detail", detail)) if v}
             mm_model = rec.get("orchestrator")
         else:
             mm_model = mm.group(1) if mm else None
@@ -793,6 +809,7 @@ BADGE = {
     "blocked-no-item": ("unk", "◦ blocked"), "blocked": ("unk", "◦ blocked"),
     "skipped-quota": ("off", "⏸ quota skip"), "skipped-lock": ("off", "⏸ lock skip"),
     "quota-paused": ("off", "⏸ quota paused"),
+    "yielded": ("unk", "◦ yielded"),
     "skipped-backoff": ("off", "⏸ backoff skip"),
     "skipped-superset": ("off", "⏸ Superset down"),
     "skipped-unchanged": ("off", "⏸ unchanged skip"),
@@ -888,7 +905,7 @@ def queue_panel():
         with closing(sqlite3.connect('file:' + path + '?mode=ro', uri=True, timeout=3)) as con:
             con.row_factory = sqlite3.Row
             settings = {r['key']: json.loads(r['value']) for r in con.execute(
-                "SELECT * FROM settings WHERE key IN ('mode','last_tick','last_error','shadow_started','rollout_wait','archive_wait','plan_archived')")}
+                "SELECT * FROM settings WHERE key IN ('mode','last_tick','last_error','shadow_started','rollout_wait','archive_wait','plan_archived','incremental_starvation')")}
             work = list(con.execute("SELECT * FROM work WHERE state!='done' ORDER BY updated DESC LIMIT 80"))
     except (sqlite3.Error, ValueError):
         return '<p class=dim>Queue state temporarily unavailable; existing work is preserved.</p>'
@@ -896,6 +913,16 @@ def queue_panel():
     tick = settings.get('last_tick') or {}
     observed = datetime.fromtimestamp(tick['at']).strftime('%b %d %H:%M') if tick.get('at') else 'not yet observed'
     out = [f'<p>Scheduler: <strong>{esc(mode)}</strong> · last check {esc(observed)}</p>']
+    starvation = settings.get('incremental_starvation') or {}
+    if starvation:
+        oldest = starvation.get('oldest_eligible_age_seconds')
+        message = f"{starvation.get('consecutive_zero_admission', 0)} consecutive batches admitted no worker"
+        if oldest is not None:
+            message += f" · oldest eligible work {int(oldest / 3600)}h old"
+        exception = starvation.get('job_override')
+        if exception:
+            message += f" · job-only override: {exception.get('repo')} ({exception.get('outcome')})"
+        out.append('<p class=dim>' + esc(message) + '</p>')
     if settings.get('shadow_started') and mode == 'shadow':
         elapsed = (datetime.now().timestamp() - settings['shadow_started']) / 86400
         out.append('<p class=dim>Shadow evidence: ' + esc(f'{elapsed:.1f}') + ' of at least 7 days.</p>')
@@ -946,9 +973,31 @@ def queue_panel():
     return ''.join(out)
 
 
+def continuation_comparison(records):
+    import importlib.util
+    path = Path(__file__).resolve().parent / 'lib/continuation_metrics.py'
+    spec = importlib.util.spec_from_file_location('roadmap_continuation_metrics', path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    comparison = module.compare(records.values())
+    parts = ['<details><summary>Continuation overhead observations</summary>']
+    for mode in ('native', 'fallback', 'fresh'):
+        row = comparison[mode]
+        parts.append('<p>' + esc(f"{mode}: {row['samples']} units · worker tokens p80 {row['worker_tokens_p80']}"
+                     f" · cache-read p80 {row['cache_read_p80']} · active seconds p80 {row['active_seconds_p80']}"
+                     f" · milestone observed by seconds p80 {row['milestone_observed_by_seconds_p80']}") + '</p>')
+    parts.append('<p class=dim>' + esc(comparison['limitations']) + '</p>')
+    if not comparison['matched_cohorts']:
+        parts.append('<p class=dim>No matching model, effort and phase has both native and fallback observations yet.</p>')
+    else:
+        parts.append('<pre>' + esc(json.dumps(comparison['matched_cohorts'], indent=2)) + '</pre>')
+    return ''.join(parts) + '</details>'
+
+
 def build():
     ledger = merge_cache(read_ledger())
-    runs = parse_runs(ledger, read_records())
+    records = read_records()
+    runs = parse_runs(ledger, records)
     repos = survey_repos()
     missed = missed_slots(runs)
     q = quota()
@@ -1063,7 +1112,7 @@ def build():
     else:
         quota_html = '<p class=dim>No usage reading available — the gate would let a run proceed.</p>'
 
-    token_html = token_summary(runs)
+    token_html = token_summary(runs) + continuation_comparison(records)
 
     missed_html = ('<p class=dim>None — every scheduled slot since the first run produced a log.</p>'
                    if not missed else

@@ -42,7 +42,7 @@ LONG_WINDOW_SEED_RATIOS = {'claude': .1, 'codex': .25}
 PROVIDER_WINDOWS = {'claude': ('five_hour', 'seven_day'), 'codex': ('five_hour', 'weekly')}
 MAX_AGE = 15 * 60
 ESTIMATE_MAX_AGE = 10 * 60
-ESTIMATE_VERSION = 6
+ESTIMATE_VERSION = 7
 HISTORY_VERSION = 6
 ROLE_MIN_OBSERVATIONS = 5
 
@@ -290,6 +290,9 @@ def history(persist=True):
     records, calibration_records = [], []
     for row in rows(home / 'automations/advance-roadmap/runs.jsonl'):
         grouped = {}
+        incremental = row.get('incremental') or {}
+        admission = incremental.get('admission') or {}
+        continuation = incremental.get('continuation') or {}
         for call in (row.get('tokens') or {}).get('calls') or []:
             # Preserve each round's session/token association for calibration.
             calibration_records.append(call)
@@ -298,7 +301,11 @@ def history(persist=True):
             # reservation ledger's one-row-per-review granularity.
             key = (call.get('provider'), role, call.get('round') if role == 'reviewer' else None)
             record = grouped.setdefault(key, dict(provider=key[0], role=key[1], total=0,
-                                                   duration=row.get('duration_s'), round=key[2]))
+                duration=row.get('duration_s'), round=key[2], model=call.get('model'),
+                effort=admission.get('effort'), phase=incremental.get('phase'),
+                continuation_mode=continuation.get('mode'), at=row.get('finished_at')))
+            if record['model'] != call.get('model'):
+                record['model'] = None  # a mixed-model total cannot identify one model's cost
             record['total'] += token_total(call)
         records.extend(grouped.values())
     # G1's reservation ledger is an additional source of measured completed runs.
@@ -541,8 +548,23 @@ def estimates(records, samples):
         for sample in provider_samples:
             quality = sample.get('quality', 'unclassified')
             quality_counts[quality] = quality_counts.get(quality, 0) + 1
+        cohort_rows = {}
+        for row in role_records[provider]['worker']:
+            key = tuple(row.get(k) for k in ('model', 'effort', 'phase', 'continuation_mode'))
+            if not all(key):
+                continue
+            cohort_rows.setdefault(key, []).append(row)
+        cohorts = []
+        for key, matched in cohort_rows.items():
+            timestamps = [epoch(row.get('at')) for row in matched]
+            timestamps = [value for value in timestamps if value is not None]
+            cohorts.append(dict(zip(('model', 'effort', 'phase', 'continuation_mode'), key),
+                sample_count=len(matched), tokens_p80=pctl([token_total(row) for row in matched]),
+                newest_at=max(timestamps) if timestamps else None,
+                quality='sparse' if len(matched) < ROLE_MIN_OBSERVATIONS else 'observed'))
         result[provider] = {'factor': window_factors, 'factor_source': window_sources,
-                            'factor_samples': window_counts, 'sample_quality': quality_counts, 'roles': roles}
+                            'factor_samples': window_counts, 'sample_quality': quality_counts,
+                            'worker_cohorts': cohorts, 'roles': roles}
     return result
 
 
@@ -750,7 +772,8 @@ def acquire(provider, role, pid=None, ttl=None, label=None, reading=None, unknow
 
 
 def reserve_bundle(requests, *, replace_ids=(), reading_by_provider=None, models=None,
-                   label=None, pid=None, ttl=None, commit=True, extra_leases=(), reduce_only=False):
+                   label=None, pid=None, ttl=None, commit=True, extra_leases=(), reduce_only=False,
+                   diagnostics=None):
     """Atomically admit/replace a whole job, or leave its existing leases intact.
 
     One lease per provider includes all roles of this job. Unknown quota still
@@ -787,8 +810,19 @@ def reserve_bundle(requests, *, replace_ids=(), reading_by_provider=None, models
                 if any(group['pct'].get(window, 0) > value + 1e-9 for window, value in prior.items()):
                     raise ValueError('a reduction cannot add reserved cost')
                 continue
-            if not all(capacity(reading_by_provider[provider], remaining, provider,
-                                role, group['pct'], 1, model=models[provider]) for role in group['roles']):
+            fits = all(capacity(reading_by_provider[provider], remaining, provider,
+                                role, group['pct'], 1, model=models[provider]) for role in group['roles'])
+            if diagnostics is not None:
+                reading = reading_by_provider[provider]
+                active = [lease for lease in remaining if lease['provider'] == provider]
+                diagnostics.append({'provider': provider, 'roles': group['roles'],
+                    'observed_at': reading.get('observed_at'), 'source': reading.get('source'),
+                    'windows': {name: {'live': window.get('live'), 'cap': window.get('cap'),
+                        'reserved': sum(lease_pct(lease, name, models[provider]) for lease in active),
+                        'proposed': group['pct'].get(name, 0)}
+                        for name, window in reading['windows'].items()},
+                    'decision': 'fits' if fits else 'insufficient or unknown shared headroom'})
+            if not fits:
                 return None
         owner = pid or os.getpid()
         started = process_start(owner)

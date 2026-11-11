@@ -7,19 +7,23 @@ Hard constraints:
 
 - Obey [`SAFETY.md`](SAFETY.md) in full.
 - You are already the selected provider (Cursor Auto, Codex, or Claude). Implement directly.
-- When finished — shipped, blocked, failed, or bookkeeping — **write your result JSON to the
+- When finished — shipped, blocked, failed, yielded, or bookkeeping — **write your result JSON to the
   result file path named in the prompt** (schema in
   `~/.claude/automations/advance-roadmap/schemas/worker-result.json`). That file is the run's
   record: `run.sh` builds the dashboard, Slack summary, and failure alert from it, and a run
-  without it is recorded as `incomplete`. Also print it as a `WORKER_RESULT_JSON` block plus the
-  plain 5-line summary, for the human reading the log.
+  without it is recorded as `incomplete`. For a yielded unit, the result may contain only outcome,
+  provider and next_phase; do not write a recap just for the boundary. For other outcomes, also print
+  it as a `WORKER_RESULT_JSON` block plus the plain 5-line summary for the human reading the log.
 
 ## Request
 
 The prompt names a request JSON file. Modes:
 
 - **implement / resume** — fields from the orchestrator result (`repo`, `item`, `branch`,
-  `worker_brief`, `worker_mode`, …). Do Steps 3–8, including Step 5b's review (resume uses the existing branch). The launcher
+  `worker_brief`, `worker_mode`, …). Do Steps 3–8, including Step 5b's review (resume uses the existing branch).
+  When the launcher specifies a bounded unit, stop at the requested natural milestone with outcome
+  `yielded` and `next_phase`; do not start unreserved later phases. Keep the branch and artifacts.
+  Full review, verification, merge and deploy checks remain mandatory before reporting `shipped`. The launcher
   has already invoked the provider's native goal command when `worker_mode` is `goal`; do not
   create a second goal. When `directive_ticket` is set, do **Step 2c first** — it clears the dirty
   tree that would otherwise block Step 3. If `worker_brief` names a recovered-deploy ticket to
@@ -66,10 +70,11 @@ manual check Jake has to do, a FIXME left behind, or a red deploy — those are 
 For DEV-87's cleanup run: "Committed the existing .gitignore (.vercel) change and the README
 rewrite on master; Vercel deploy succeeded. DEV-87 Done."
 
-`outcome`: `shipped` | `shipped-deploy-failed` | `blocked-branch-left` | `failed` | `limit_hit` |
+`outcome`: `shipped` | `shipped-deploy-failed` | `blocked-branch-left` | `failed` | `limit_hit` | `yielded` |
 `archive-only` | `bookkeeping` (bookkeeping mode only — `run.sh` then records the orchestrator's
 `outcome_token`). `shipped` means the PR merged **and** the deploy is green (or there is no deploy);
 `shipped-deploy-failed` means it merged but Step 7b's cap was hit with production still red.
+For a bounded `yielded` result, include `next_phase`; a summary is optional and no recap is required.
 
 ---
 
@@ -293,6 +298,8 @@ reviews commits, not the working tree.
   `~/.local/bin/agent -p --force --trust --model auto --workspace <repo> "<findings and context>"`
   and inspect its diff before committing. A finding Cursor judges wrong is dismissed, not fixed —
   note it and why in your summary.
+  In a bounded incremental unit, do not start an unreserved remediation agent: address findings
+  yourself, preserve the evidence, and yield for a separately reserved follow-up review.
 - **`VERDICT: findings`** (or `unparsed` — read the text as findings), effective strategy
   `cross-provider` (configured or fallback) → address the real findings yourself, or use another
   provider that is under its gate and differs from the worker. Never dispatch remediation to a
@@ -559,6 +566,7 @@ archive plus cross-repo notes; don't write to it.)
 
 The **outcome token** is exactly one of:
 - `shipped` — an item's PR merged to `main` and its deploy is green (or the repo has none);
+- `yielded` — a bounded unit reached a milestone and the assigned branch remains available for continuation;
 - `shipped-deploy-failed` — an item's PR merged to `main` but Step 7b ran out of fix attempts and production is
   still red. **Name the repo, the failing SHA, and the deployment URL** in the notes — the next run's
   orchestrator skips new work in that repo until its deploy is green again;

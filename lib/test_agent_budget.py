@@ -61,6 +61,20 @@ class BudgetTests(unittest.TestCase):
         self.assertEqual(model['roles']['planner']['tokens_p80'], 40)
         self.assertEqual(model['roles']['reviewer']['tokens_p80'], 29000)
 
+    def test_worker_cohorts_report_model_phase_and_continuation_without_mixing(self):
+        records = [dict(provider='claude', role='worker', total=total, model=model,
+                        effort='high', phase=phase, continuation_mode=mode, at=1000 + total)
+                   for model, phase, mode, total in [('a', 'implementing', 'native', 100),
+                                                       ('a', 'implementing', 'native', 200),
+                                                       ('a', 'reviewing', 'fallback', 300),
+                                                       ('b', 'implementing', 'native', 400)]]
+        model = b.estimates(records, [])['claude']
+        cohorts = {(c['model'], c['phase'], c['continuation_mode']): c for c in model['worker_cohorts']}
+        self.assertEqual(cohorts[('a', 'implementing', 'native')]['sample_count'], 2)
+        self.assertEqual(cohorts[('a', 'implementing', 'native')]['quality'], 'sparse')
+        self.assertEqual(cohorts[('a', 'reviewing', 'fallback')]['tokens_p80'], 300)
+        self.assertEqual(len(cohorts), 3)
+
     def test_thin_role_estimate_blends_toward_cross_provider_proxy(self):
         records = ([{'provider': 'claude', 'role': 'reviewer', 'total': n} for n in (120000, 260000)]
                    + [{'provider': 'codex', 'role': 'reviewer', 'total': 40000}])

@@ -16,6 +16,10 @@ set -u
 ROOT="${ADVANCE_ROADMAP_ROOT:-/Users/jake/.claude/automations/advance-roadmap}"
 # Unattended: the status-glyph Stop hook must not force a sign-off turn over a result fence.
 export ADVANCE_ROADMAP_HEADLESS=1
+if [ "${ADVANCE_ROADMAP_INCREMENTAL:-0}" = 1 ] && [ -z "${ADVANCE_ROADMAP_BUDGET_REVIEWERS:-}" ]; then
+  echo 'REVIEW REQUIRED: no reviewer capacity was reserved for this bounded unit; yield before review.' >&2
+  exit 3
+fi
 [ -r "$ROOT/lib/models.sh" ] || { echo "review: missing model defaults: $ROOT/lib/models.sh" >&2; exit 1; }
 . "$ROOT/lib/models.sh"
 USAGE_PY="$ROOT/lib/usage.py"
@@ -227,6 +231,12 @@ with open(log, "a", encoding="utf-8") as f:
 PY
 }
 
+claim_bounded_review() {
+  [ "${ADVANCE_ROADMAP_INCREMENTAL:-0}" = 1 ] || return 0
+  local allowed=( ${=ADVANCE_ROADMAP_BUDGET_REVIEWERS:-} )
+  python3 "$ROOT/lib/reviewlease.py" "${LOG:h}/review-spend.json" "$1" "${allowed[@]}"
+}
+
 run_required_review() {
   if [ -n "${ADVANCE_ROADMAP_REQUEST_FILE:-}" ] && [ -f "$ROOT/lib/workqueue.py" ]; then
     python3 "$ROOT/lib/workqueue.py" --root "$ROOT" checkpoint --request-file "$ADVANCE_ROADMAP_REQUEST_FILE" --phase reviewing || return 2
@@ -237,6 +247,12 @@ run_required_review() {
   if [ "$?" -eq 3 ]; then
     record_review "$who" unavailable "$phase"
     echo "REVIEW REQUIRED: $who is over its usage gate ($gate); do not merge until this review stage succeeds."
+    echo "VERDICT: unavailable"
+    return 3
+  fi
+  if ! claim_bounded_review "$who"; then
+    record_review "$who" unavailable "$phase"
+    echo "REVIEW REQUIRED: $who's reserved review was already used; yield before another review."
     echo "VERDICT: unavailable"
     return 3
   fi
@@ -292,6 +308,11 @@ run_cross_provider_review() {
     if [ "$?" -eq 3 ]; then
       echo "(skipping reviewer $who — over its usage gate: $gate)"
       gated_list="$gated_list $who"
+      continue
+    fi
+    if ! claim_bounded_review "$who"; then
+      echo "(reviewer $who has no unused reservation in this unit)"
+      capacity_list="$capacity_list $who"
       continue
     fi
     rm -f "$out.last" "$out.json" "$out.session"
