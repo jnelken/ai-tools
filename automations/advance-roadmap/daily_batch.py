@@ -691,18 +691,11 @@ class Batch:
                 item["status"] = "waiting-for-recovery"
             self.write()
             (self.run_stream if streaming else self.run_work)()
-            with workqueue.Store(ROOT) as store:
-                unfinished = [i['repo'] for i in carried
-                              if (i.get('outcome') != 'shipped' or pending_action(i['repo']))
-                              and not (store.hold(i['repo']) or {}).get('state') == 'human']
             for item in fresh:
-                if unfinished:
-                    item.update(status="deferred", reason="carried work is unfinished: " + ", ".join(unfinished))
-                else:
-                    item["status"] = "queued"
+                item["status"] = "queued"
             self.state["recovery_first"] = False
             self.write()
-            if not unfinished and fresh:
+            if fresh:
                 (self.run_stream if streaming else self.run_work)()
         else:
             (self.run_stream if streaming else self.run_work)()

@@ -748,24 +748,23 @@ else:
         self.assertGreaterEqual(fresh, finished)
         self.assertEqual(self.state()['phase'], 'done')
 
-    def test_blocked_recovery_does_not_bypass_it_with_new_work(self):
+    def test_failed_recovery_does_not_block_an_unrelated_repo(self):
         self.repo('a'); self.repo('z')
         pending = self.code / '.advance-roadmap'; pending.mkdir()
         (pending / 'pending-plan-z.json').write_text(json.dumps({'action': 'resume_worker'}))
         self.env['FAKE_PLANNER_GATED'] = 'z'
         self.run_batch(lanes=2)
-        self.assertFalse(any(e['repo'] == 'a' for e in self.events()))
+        self.assertTrue(any(e['repo'] == 'a' and e['kind'] == 'work-start' for e in self.events()))
         fresh = next(i for i in self.state()['queue'] if i['repo'] == 'a')
-        self.assertEqual(fresh['status'], 'deferred')
-        self.assertIn('carried work is unfinished', fresh['reason'])
+        self.assertEqual(fresh['outcome'], 'shipped')
 
-    def test_remaining_pending_plan_keeps_new_work_deferred(self):
+    def test_remaining_pending_plan_does_not_block_an_unrelated_repo(self):
         self.repo('a'); self.repo('z')
         pending = self.code / '.advance-roadmap'; pending.mkdir()
         (pending / 'pending-plan-z.json').write_text(json.dumps({'action': 'dispatch_worker'}))
         self.env['FAKE_KEEP_PENDING'] = '1'
         self.run_batch(lanes=2)
-        self.assertFalse(any(e['repo'] == 'a' for e in self.events()))
+        self.assertTrue(any(e['repo'] == 'a' and e['kind'] == 'work-start' for e in self.events()))
 
     def test_human_blocked_recovery_allows_fresh_repo_to_continue(self):
         self.repo('a'); self.repo('z')
@@ -960,13 +959,15 @@ raise SystemExit(daily_batch.main())
         self.assertEqual(self.state()['queue'], [])
         self.assertEqual(self.state()['phase'], 'done')
 
-    def test_live_prior_worker_defers_new_work_too(self):
+    def test_live_prior_worker_only_defers_its_own_repo(self):
         self.repo('a'); self.repo('b')
         (self.root / 'inflight').mkdir()
         (self.root / 'inflight/a--old.pid').write_text(str(os.getpid()))
         self.run_batch()
-        self.assertTrue(all(i['status'] == 'deferred' for i in self.state()['queue']))
-        self.assertFalse((self.root / 'trace.jsonl').exists())
+        queue = {i['repo']: i for i in self.state()['queue']}
+        self.assertEqual(queue['a']['status'], 'deferred')
+        self.assertEqual(queue['b']['outcome'], 'shipped')
+        self.assertEqual([e['repo'] for e in self.events() if e['kind'] == 'work-start'], ['b'])
 
     # ── threads ───────────────────────────────────────────────────────────────
 

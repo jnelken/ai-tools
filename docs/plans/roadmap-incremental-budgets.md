@@ -19,7 +19,7 @@ Implementation in progress, November 11, 2026. Current runtime limits and whole-
 - Claude calibration pairs account-level start/finish readings with a session's tokens. Overlapping unrelated sessions can contaminate the quota delta; sample quality must be visible and tested before changing the prediction.
 - Installed CLI help confirms explicit session resume for both configured harnesses. The launcher currently starts fresh sessions; storing IDs alone is not native session continuation. Claude's CLI dollar-budget option describes API-call spending and must not be treated as a subscription quota percentage control.
 - The local snapshot replay on November 11 found 22 Claude calibration samples overlapping another recorded session and one with a possibly open session. Missing finish events do not prove the other session was still active, and no overlap in local records proves account isolation. Sample quality is now reported without changing the estimator pending cohort validation.
-- Current worker output is parsed for session IDs after the provider process exits; a native continuation implementation must persist stream identity before interruption and validate the assigned worktree and revision. The batch's recovery-first barrier also holds unrelated fresh repos behind unfinished carried work and needs to change as part of incremental scheduling.
+- Current worker output is parsed for session IDs after the provider process exits; a native continuation implementation must persist stream identity before interruption and validate the assigned worktree and revision. Recovery is still attempted first, but an unfinished item no longer holds unrelated repositories behind a batch-wide barrier.
 
 ## Approach
 
