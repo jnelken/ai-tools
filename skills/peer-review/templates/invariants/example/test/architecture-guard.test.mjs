@@ -12,10 +12,14 @@ test('real source: only the owner imports the raw client (barrel does not export
 test('fixture: clean project passes', () => {
   assert.deepEqual(findViolations(at('../fixtures/clean/src')), []);
 });
-test('fixture: nested, extensionless, JS/TS and CommonJS bypasses are caught', () => {
+test('fixture: nested, extensionless, JavaScript/TypeScript and CommonJS bypasses are caught', () => {
   assert.deepEqual(findViolations(at('../fixtures/violating/src')), [
     'extensionless-rogue.mjs',
     'handlers/rogue.mjs',
+    'rogue-import.jsx',
+    'rogue-import.mts',
+    'rogue-require.cjs',
+    'rogue-require.cts',
     'rogue-require.js',
     'rogue.js',
     'rogue.ts',

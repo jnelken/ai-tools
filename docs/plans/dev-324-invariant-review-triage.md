@@ -1,10 +1,10 @@
 # DEV-324 Invariant Review Triage
 
-> **Status:** Implementation complete; final current-HEAD review pending. Round 5 review of `cc91906` found that the architecture guard missed CommonJS `require()` calls; the guard, fixture, and lint example now cover this path.
+> **Status:** Implementation complete; final current-HEAD review pending. Round 6 found a broken CommonJS lint example and missing source extensions; both are fixed on the current branch.
 
 ## Status
 
-Implementation is complete. The final shipping review is still pending while current-HEAD findings are resolved.
+Implementation is complete. The final shipping review is still pending until the current HEAD receives a clean review.
 
 ## Decisions
 
@@ -28,7 +28,7 @@ Implementation is complete. The final shipping review is still pending while cur
 - Fixed reviewer findings on installed instruction paths and recursive guard coverage.
 - Required checks passed on `edd74df`: invariant fixtures (15), review automation, worker goal-mode routing, and agent profile tests (20); later revisions were reverified as recorded in their run artifacts.
 - Cross-provider review round 2 returned clean on `edd74df`.
-- Follow-up review found traversal-order sensitivity and a `set -e` diagnostic issue; fixed in `419edc5` and reverified. Round 5 found the CommonJS bypass described above.
+- Follow-up review found traversal-order sensitivity and a `set -e` diagnostic issue; fixed in `419edc5` and reverified. Round 5 found a CommonJS bypass; round 6 found an invalid lint example and four unscanned source extensions, all fixed on the current branch.
 
 ## Approach
 

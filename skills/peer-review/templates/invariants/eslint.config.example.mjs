@@ -3,7 +3,7 @@
 // is barred from importing or requiring the raw client; the owner is exempted by a later block.
 export default [
   {
-    files: ['src/**/*.{js,mjs,ts,tsx}'],
+    files: ['src/**/*.{js,jsx,mjs,cjs,ts,tsx,mts,cts}'],
     rules: {
       'no-restricted-imports': ['error', {
         patterns: [{
@@ -11,20 +11,18 @@ export default [
           message: 'Writes go through the owner (src/ledger). Do not import the raw client directly.',
         }],
       }],
-      'no-restricted-modules': ['error', {
-        patterns: [{
-          group: ['**/raw-client', '**/raw-client.*'],
-          message: 'Writes go through the owner (src/ledger). Do not require the raw client directly.',
-        }],
+      'no-restricted-syntax': ['error', {
+        selector: "CallExpression[callee.name='require'][arguments.0.value=/raw-client/]",
+        message: 'Writes go through the owner (src/ledger). Do not require the raw client directly.',
       }],
     },
   },
   {
-    // The single owner may import the raw client.
+    // The single owner may import or require the raw client.
     files: ['src/ledger.*'],
     rules: {
       'no-restricted-imports': 'off',
-      'no-restricted-modules': 'off',
+      'no-restricted-syntax': 'off',
     },
   },
 ];
