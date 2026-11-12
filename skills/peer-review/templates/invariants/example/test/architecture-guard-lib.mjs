@@ -11,12 +11,12 @@ function sourceFiles(dir) {
   });
 }
 
-// Returns the files under srcDir (other than the owner and the raw client itself)
-// that import the raw client, or that re-export it from the public barrel.
+// Returns files under srcDir (other than the owner and raw client) that reach it
+// through ESM imports/re-exports or CommonJS require().
 export function findViolations(srcDir, { owner = 'ledger.mjs', raw = 'raw-client.mjs' } = {}) {
   const bad = [];
   const rawStem = basename(raw).replace(/\.[^.]+$/, '');
-  const importFrom = /\b(?:from\s*|import\s*(?:\(\s*)?)['"]([^'"]+)['"]\s*\)?/g;
+  const importFrom = /\b(?:from\s*|import\s*(?:\(\s*)?|require\s*\(\s*)['"]([^'"]+)['"]\s*\)?/g;
   for (const path of sourceFiles(srcDir)) {
     const name = relative(srcDir, path);
     if (name === owner || name === raw) continue;

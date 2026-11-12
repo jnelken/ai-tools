@@ -1,10 +1,10 @@
 # DEV-324 Invariant Review Triage
 
-> **Status:** Implementation complete; final current-HEAD review pending as of 2026-11-12.
+> **Status:** Implementation complete; final current-HEAD review pending. Round 5 review of `cc91906` found that the architecture guard missed CommonJS `require()` calls; the guard, fixture, and lint example now cover this path.
 
 ## Status
 
-Implementation is complete. The last review found two test-only issues, now fixed in `419edc5`; the final shipping review is still pending.
+Implementation is complete. The final shipping review is still pending while current-HEAD findings are resolved.
 
 ## Decisions
 
@@ -26,9 +26,9 @@ Implementation is complete. The last review found two test-only issues, now fixe
 - Added isolated clean and violating fixtures, including nested and extensionless bypass cases.
 - Verified worker/reviewer prompt delivery and development/runtime profile composition.
 - Fixed reviewer findings on installed instruction paths and recursive guard coverage.
-- Required checks pass on `edd74df`: invariant fixtures (15), review automation, worker goal-mode routing, and agent profile tests (20).
+- Required checks passed on `edd74df`: invariant fixtures (15), review automation, worker goal-mode routing, and agent profile tests (20); later revisions were reverified as recorded in their run artifacts.
 - Cross-provider review round 2 returned clean on `edd74df`.
-- Follow-up review found traversal-order sensitivity and a `set -e` diagnostic issue; fixed in `419edc5` and reverified. A clean review of that final commit remains required.
+- Follow-up review found traversal-order sensitivity and a `set -e` diagnostic issue; fixed in `419edc5` and reverified. Round 5 found the CommonJS bypass described above.
 
 ## Approach
 
