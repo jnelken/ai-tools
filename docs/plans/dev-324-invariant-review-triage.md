@@ -2,9 +2,7 @@
 
 ## Status
 
-In progress. Unit 1 (done, committed) covers the shared invariant convention and
-the end-to-end review triage prompts. Reusable enforcement examples and focused
-fixtures remain for a later implementation unit.
+In progress. Implementation complete (units 1 and 2); awaiting independent review, PR, merge and deploy.
 
 ## Decisions
 
@@ -29,7 +27,7 @@ fixtures remain for a later implementation unit.
 
 ## Open threads
 
-- [ ] Add reusable invariant enforcement examples and isolated fixtures (`skills/peer-review/templates/invariants/`; already referenced by the prompts).
+- [x] Add reusable invariant enforcement examples and isolated fixtures (`skills/peer-review/templates/invariants/`, run with `run-fixtures.sh`; 15 Node tests, violating fixture and a real injected bypass both fail the guard).
 - [x] Add regression checks for worker-prompt, reviewer-prompt and profile-composition delivery (test-worker-goal-mode.sh, test-review.sh, test_agent_profiles.py).
 - [x] Run the assigned suites for this unit: test-review.sh, test-worker-goal-mode.sh, test_agent_profiles.py pass (run with the ADVANCE_ROADMAP_* env cleared).
 - [ ] Complete independent review, PR, merge, and deploy in their reserved phases.
