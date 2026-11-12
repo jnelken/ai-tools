@@ -1,10 +1,12 @@
 # DEV-324 Invariant Review Triage
 
-> **Status:** Final review is in progress; archive this plan in Step 6 after clean review and verification, before opening the PR.
+> **Shipped:** 2026-11-12 — `43a0c0a`.
+
+> **Status:** Archived after clean current-HEAD review and verification; PR pending.
 
 ## Status
 
-The item remains active through final review. After a clean current-HEAD review and verification, Step 6 records the shipped commit and moves this document to `docs/plans/archive/` before the PR is opened.
+The implementation and cross-provider review are complete at source revision `43a0c0a`. Shipping proceeds through the DEV-324 PR.
 
 ## Decisions
 
@@ -28,7 +30,7 @@ The item remains active through final review. After a clean current-HEAD review 
 - Fixed reviewer findings on installed instruction paths and recursive guard coverage.
 - Required checks passed on `edd74df`: invariant fixtures (15), review automation, worker goal-mode routing, and agent profile tests (20); later revisions were reverified as recorded in their run artifacts.
 - Cross-provider review round 2 returned clean on `edd74df`.
-- Follow-up review findings and fixes are retained in the run artifacts; clean current-HEAD review is still required before the plan is archived as shipped.
+- Follow-up review findings and fixes are retained in the run artifacts. Claude cross-provider round 9 was clean on source revision `43a0c0a`; the run artifacts record its exact-HEAD verification.
 
 ## Approach
 
