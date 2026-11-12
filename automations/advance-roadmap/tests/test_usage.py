@@ -21,6 +21,23 @@ _spec = importlib.util.spec_from_file_location("usage", SCRIPT)
 usage = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(usage)
 
+
+class ContinuousProbeTest(unittest.TestCase):
+    def test_refresh_reuses_readings_across_process_style_loads_for_two_minutes(self):
+        with tempfile.TemporaryDirectory() as directory, mock.patch.dict(
+                os.environ, {'ADVANCE_ROADMAP_CONTINUOUS': '1'}), mock.patch.object(
+                usage.time, 'time', return_value=1000) as clock, mock.patch.object(
+                usage, 'probe_claude') as claude, mock.patch.object(
+                usage, 'probe_codex') as codex, mock.patch.object(usage, 'probe_cursor_into') as cursor:
+            root = Path(directory)
+            usage.refresh(root)
+            clock.return_value = 1119
+            usage.refresh(root)
+            self.assertEqual((claude.call_count, codex.call_count, cursor.call_count), (1, 1, 1))
+            clock.return_value = 1120
+            usage.refresh(root)
+            self.assertEqual((claude.call_count, codex.call_count, cursor.call_count), (2, 2, 2))
+
 FUTURE = int(time.time()) + 3600
 PAST = int(time.time()) - 3600
 

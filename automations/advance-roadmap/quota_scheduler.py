@@ -46,7 +46,7 @@ def wake_after_no_capacity(state, budget, now):
     readings = getattr(budget, 'readings', {})
     if readings and any(readings.get(provider, {}).get('error')
                         or not isinstance(readings.get(provider, {}).get('observed_at'), (int, float))
-                        or not 0 <= now - readings[provider]['observed_at'] <= 120
+                        or not 0 <= now - readings[provider]['observed_at'] <= 300
                         or not readings[provider].get('windows')
                         or any(not isinstance(window.get('live'), (int, float))
                                for window in readings[provider]['windows'].values())

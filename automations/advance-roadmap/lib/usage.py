@@ -177,7 +177,7 @@ def load(root: Path) -> dict[str, Any]:
     except (OSError, json.JSONDecodeError):
         return empty_state()
     base = empty_state()
-    base.update({k: v for k, v in data.items() if k in ("updated_at", "history")})
+    base.update({k: v for k, v in data.items() if k in ("updated_at", "history", "continuous_usage_probed_at")})
     for name, defaults in base["providers"].items():
         got = (data.get("providers") or {}).get(name) or {}
         merged = dict(defaults)
@@ -768,9 +768,15 @@ def recompute_flags(state: dict[str, Any]) -> None:
 def refresh(root: Path) -> dict[str, Any]:
     with state_lock(root):
         state = load(root)
-        probe_claude(state)
-        probe_codex(state)
-        probe_cursor_into(state)
+        now = time.time()
+        last = state.get('continuous_usage_probed_at', 0)
+        if (os.environ.get('ADVANCE_ROADMAP_CONTINUOUS') != '1'
+                or not isinstance(last, (int, float)) or not 0 <= now - last < 120):
+            probe_claude(state)
+            probe_codex(state)
+            probe_cursor_into(state)
+            if os.environ.get('ADVANCE_ROADMAP_CONTINUOUS') == '1':
+                state['continuous_usage_probed_at'] = time.time()
         recompute_flags(state)
         save(root, state)
     return state

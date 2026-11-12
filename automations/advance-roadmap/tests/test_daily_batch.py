@@ -674,7 +674,7 @@ PYTHON
             budget = daily_batch.RoadmapBudget(dry_run=True)
             now = time.time()
             def reading(provider, **kwargs):
-                return {'observed_at': now - 121 if provider == 'codex' else now,
+                return {'observed_at': now - 301 if provider == 'codex' else now,
                         'windows': {'five_hour': {'live': None if provider == 'claude' else 1, 'cap': 70}}}
             with patch.object(daily_batch.agent_budget, 'readings', side_effect=reading):
                 budget.refresh()

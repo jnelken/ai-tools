@@ -105,7 +105,7 @@ def run(args):
             blocked, check = cached_quota(args, budget)
             if budget.get('job_override') or os.environ.get('ADVANCE_ROADMAP_CONTINUOUS') == '1':
                 fresh = (not check.get('error') and isinstance(check.get('observed_at'), (int, float))
-                         and 0 <= time.time() - check['observed_at'] <= (60 if budget.get('job_override') else 120)
+                         and 0 <= time.time() - check['observed_at'] <= (60 if budget.get('job_override') else 300)
                          and bool(check.get('windows'))
                          and all(isinstance(w.get('live'), (int, float)) for w in check['windows'].values()))
                 if not fresh:
@@ -315,7 +315,7 @@ def main():
     parser.add_argument('--timeout', type=float, default=900)
     parser.add_argument('--lifecycle')
     parser.add_argument('--budget')
-    parser.add_argument('--quota-poll', type=float, default=15)
+    parser.add_argument('--quota-poll', type=float, default=120)
     parser.add_argument('command', nargs=argparse.REMAINDER)
     args = parser.parse_args()
     if not 0 < args.timeout < float('inf'):

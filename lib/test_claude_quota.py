@@ -61,9 +61,13 @@ class QuotaTests(unittest.TestCase):
             self.assertEqual(probe.call_count, 2)
             clock.return_value = 1900
             self.assertEqual(q.quota()['windows']['five_hour']['used_percentage'], 12)
-            clock.return_value = 1959
+            clock.return_value = 2019
             q.quota()
             self.assertEqual(probe.call_count, 3)
+            clock.return_value = 2020
+            q.probe.side_effect = [(success, None)]
+            q.quota()
+            self.assertEqual(probe.call_count, 4)
 
     def test_old_statusline_is_explicitly_stale(self):
         (self.state / 'claude-usage.json').write_text(json.dumps({

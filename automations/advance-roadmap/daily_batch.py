@@ -253,7 +253,7 @@ class RoadmapBudget:
             def fresh(provider):
                 reading = self.readings[provider]
                 observed = reading.get('observed_at')
-                return (not reading.get('error') and isinstance(observed, (int, float)) and 0 <= now - observed <= 120
+                return (not reading.get('error') and isinstance(observed, (int, float)) and 0 <= now - observed <= 300
                         and bool(reading.get('windows'))
                         and all(isinstance(window.get('live'), (int, float))
                                 for window in reading['windows'].values()))
@@ -901,7 +901,7 @@ class Batch:
 
     def refresh_budget(self):
         if (os.environ.get('ADVANCE_ROADMAP_CONTINUOUS') == '1'
-                and time.monotonic() - getattr(self, '_budget_refreshed_at', 0) < 15):
+                and time.monotonic() - getattr(self, '_budget_refreshed_at', 0) < 120):
             return self.sync_review_fallback()
         self.budget.refresh()
         self._budget_refreshed_at = time.monotonic()
