@@ -326,7 +326,7 @@ local-fix path above; an **invariant** is a rule that must hold on every path re
 fixing, list every code path that reaches this side effect. If more than one, propose a single owner.**
 Prefer one owner with mechanical enforcement over patching each reported site. Record the invariant and
 its owner, check the changed paths against it, test the owner's policy once with table-driven cases,
-and test that each entry point delegates to it (convention: `~/.claude/instructions/development/shared.md`,
+and test that each entry point delegates to it (convention: `${AI_TOOLS_HOME:-$HOME/.ai-tools}/instructions/development/shared.md`,
 *Invariants*; examples: `~/.claude/skills/peer-review/templates/invariants/`). When two review rounds report
 different call sites of the same side effect, treat it as an invariant even if each finding reads as
 an instance. Escalate (Step 2b) only if choosing the owner exceeds the approved scope. This changes

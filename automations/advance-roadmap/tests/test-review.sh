@@ -116,6 +116,7 @@ for p in codex agent claude; do
   cat > "$BIN/$p" <<SH
 #!/bin/zsh
 name=$p; mode="\${FAKE_${p:u}:-clean}"
+if [ -n "\$CAPTURE_PROMPT" ]; then print -r -- "\$*" > "\$CAPTURE_PROMPT"; fi
 last=""; while [ \$# -gt 0 ]; do [ "\$1" = "-o" ] && { last="\$2"; shift; }; shift; done
 [ "\$name" = codex ] && print "session id: 11111111-2222-3333-4444-555555555555"
 print -r -- "echoed prompt: VERDICT: clean      (no findings)"
@@ -311,10 +312,12 @@ review codex 1 ADVANCE_ROADMAP_INCREMENTAL=1 ADVANCE_ROADMAP_BUDGET_REVIEWERS=cu
 rc=0; review codex 2 ADVANCE_ROADMAP_INCREMENTAL=1 ADVANCE_ROADMAP_BUDGET_REVIEWERS=cursor FAKE_AGENT=clean >/dev/null || rc=$?
 check "incremental reviewer cannot spend its reservation twice" "$rc" 3
 
-# The reviewer prompt asks for instance-vs-invariant classification without changing the verdict lines.
-review_src="$(dirname "$0")/../review.sh"
-rc=0; { grep -Fq 'Classify each finding as an instance' "$review_src" \
-  && grep -Fq 'VERDICT: findings   (one or more findings)' "$review_src"; } || rc=$?
-check "review prompt carries invariant classification and the unchanged verdict format" "$rc" 0
+# Assert on the prompt the fake reviewer actually received, not review.sh's source text.
+capture="$TMP/reviewer-prompt"
+review codex 1 CAPTURE_PROMPT="$capture" FAKE_AGENT=clean >/dev/null
+grep -Fq 'Classify each finding as an instance' "$capture" \
+  && grep -Fq 'VERDICT: findings   (one or more findings)' "$capture" \
+  || { echo "FAIL: dispatched review prompt omitted classification or verdict format"; exit 1; }
+echo "ok   dispatched review prompt carries invariant classification and unchanged verdict format"
 
 echo "all passed"
