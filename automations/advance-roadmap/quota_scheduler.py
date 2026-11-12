@@ -97,7 +97,7 @@ def forecast_candidates(budget, candidates, slots):
         if allocation is not None:
             budget.forecast.extend(allocation['leases'])
             chosen.append((repo, work))
-    if not chosen:
+    if not chosen and os.environ.get('ADVANCE_ROADMAP_CONTINUOUS') != '1':
         prepared = None
         for repo, work in candidates:
             if not (work or batch.pending_action(repo)):

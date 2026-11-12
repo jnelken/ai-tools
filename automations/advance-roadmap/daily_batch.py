@@ -281,6 +281,32 @@ class RoadmapBudget:
                 yield worker, reviewers
 
     def choose(self, *, item=None, planner=None, scale=1, commit=True):
+        if os.environ.get('ADVANCE_ROADMAP_CONTINUOUS') == '1':
+            phase = (item or {}).get('work_phase') or 'implementing'
+            decision = self.review_decision()
+            for worker in self.workers:
+                if worker not in ('codex', 'claude'):
+                    continue
+                reviewers = []
+                if phase in ('reviewing', 'shipping'):
+                    if decision.get('strategy') == 'cross-provider':
+                        reviewers = next(([p] for p in ({'codex': ['cursor', 'claude'],
+                            'claude': ['codex', 'cursor']}[worker])
+                            if self.gates.get(p, {}).get('state') not in OUT_STATES), None)
+                    else:
+                        reviewers = (['cursor', 'codex'] if all(self.gates.get(p, {}).get('state')
+                                     not in OUT_STATES for p in ('cursor', 'codex')) else None)
+                    if reviewers is None:
+                        continue
+                allocation = {'worker': worker, 'reviewers': reviewers, 'planner': planner,
+                              'phase': phase, 'requests': [], 'leases': [],
+                              'baseline': self.readings[worker], 'live_threshold': True,
+                              'review_strategy': decision.get('strategy'),
+                              'review_fallback_reason': decision.get('reason')}
+                if item is not None and commit:
+                    item.update(budget_leases=[], allocation=allocation)
+                return allocation
+            return None
         if getattr(self, 'incremental', False):
             return self.choose_incremental(item=item, planner=planner, scale=scale, commit=commit,
                                            override=bool((item or {}).get('job_override')))
@@ -470,6 +496,9 @@ class RoadmapBudget:
 
     def planned(self, item):
         allocation = item.get("allocation") or {}
+        if allocation.get('live_threshold'):
+            allocation['planner'] = None
+            return
         requests = [r for r in allocation.get("requests", []) if r["role"] != "planner"]
         models = self.models
         if allocation.get('worker_estimate'):
@@ -514,6 +543,7 @@ def budget_record(allocation, budget):
             'phase': allocation.get('phase'), 'chunk_scale': allocation.get('chunk_scale'),
             'baseline': allocation.get('baseline') or budget.readings.get(worker),
             'job_override': allocation.get('job_override', False),
+            'live_threshold': allocation.get('live_threshold', False),
             'lease_ids': [lease['id'] for lease in allocation.get('leases', [])],
             'worker_reservation': next((lease.get('pct') for lease in allocation.get('leases', [])
                                         if lease.get('provider') == worker), {})}
@@ -613,6 +643,8 @@ class Batch:
 
     def try_idle_override(self):
         """At most one saved continuation, only after normal admission selects nothing."""
+        if os.environ.get('ADVANCE_ROADMAP_CONTINUOUS') == '1':
+            return False
         if (not getattr(self.budget, 'incremental', False) or self.state.get('normal_work_admitted')
                 or self.state.get('idle_override_used')):
             return False

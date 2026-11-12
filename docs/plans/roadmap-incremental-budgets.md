@@ -11,6 +11,7 @@ The bounded execution implementation was deployed November 11, 2026. Its first m
 - Budget the next bounded unit of progress, rather than requiring an entire ticket's implementation and future reviews to fit before anything starts.
 - Jake allows considering usage up to 100%. Recommend a job-scoped, logged fallback when nothing fits, with one bounded attempt and existing reservations accounted for; do not silently raise every job's shared limits.
 - Replace the twice-daily production schedule with quota-driven continuation. Jake prefers up to two concurrent workers. Persist a provisional reset-based wake before each unit, recheck real account usage and reservations on wake, and continue immediately when headroom remains. Actual provider and longer-window limits still apply; a 60-second launchd tick provides wake granularity without model calls.
+- Subsequent trial policy: continuous roadmap work does not make forecast reservations or use the earlier up-to-100% exception. Admit up to two workers below the configured 70% five-hour threshold and the longer-window gate. After reaching a ceiling, finish the current provider turn before yielding, then resume on another eligible provider or wait. Provider-specific sessions cannot be moved across providers; fallback reconstructs from saved work. The independent watchdog and actual provider limits can interrupt before a turn finishes. Other uses of the shared reservation system are unchanged.
 
 ## Findings
 

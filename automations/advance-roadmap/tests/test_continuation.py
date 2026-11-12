@@ -47,6 +47,62 @@ class ContinuationTest(unittest.TestCase):
             self.assertEqual(session_stream.run(args), 124)
         self.assertEqual(json.loads(lifecycle.read_text())['reason'], 'usage-unavailable')
 
+    def test_turn_boundary_excludes_tool_use(self):
+        self.assertFalse(session_stream.turn_finished({'type': 'assistant',
+            'message': {'stop_reason': 'tool_use'}}, 'claude'))
+        self.assertTrue(session_stream.turn_finished({'type': 'assistant',
+            'message': {'stop_reason': 'end_turn'}}, 'claude'))
+        self.assertTrue(session_stream.turn_finished({'type': 'turn.completed'}, 'codex'))
+
+    def test_live_threshold_waits_for_completed_turn(self):
+        here = Path(__file__).resolve().parents[1]
+        root, fake_lib = self.path / 'runtime', self.path / 'fake-lib'
+        (root / 'lib').mkdir(parents=True)
+        fake_lib.mkdir()
+        for name in ('workqueue.py', 'continuation.py', 'session_stream.py', 'session_guard.py'):
+            shutil.copy(here / 'lib' / name, root / 'lib' / name)
+        (fake_lib / 'agent_budget.py').write_text('import json,os\nfrom pathlib import Path\n'
+            'def readings(*a,**kw): return json.load(open(os.environ["FAKE_READING_FILE"]))\n'
+            'def budget_dir(): return Path(os.environ["FAKE_BUDGET_DIR"])\n'
+            'def read_json(*a): return []\n'
+            'def lease_pct(*a): return 0\n')
+        request = self.path / 'request.json'
+        request.write_text(json.dumps(self.request))
+        with workqueue.Store(root) as store:
+            store.register(self.request['orchestrator'], 'one')
+        reading = {'observed_at': time.time(), 'windows': {'five_hour': {'live': 1, 'cap': 70}}}
+        reading_path, budget_path = self.path / 'reading.json', self.path / 'budget.json'
+        reading_path.write_text(json.dumps(reading))
+        budget_path.write_text(json.dumps({'baseline': reading, 'live_threshold': True}))
+        marker = self.path / 'turn-finished'
+        program = ('import json,time,pathlib; print(json.dumps({"type":"thread.started",'
+                   '"thread_id":"ffffffff-ffff-4fff-8fff-ffffffffffff"}),flush=True); '
+                   'time.sleep(1); pathlib.Path(' + repr(str(marker)) + ').touch(); '
+                   'print(json.dumps({"type":"turn.completed"}),flush=True); time.sleep(10)')
+        env = {**os.environ, **self.env, 'PYTHONPATH': str(fake_lib),
+               'FAKE_READING_FILE': str(reading_path), 'FAKE_BUDGET_DIR': str(fake_lib)}
+        child = subprocess.Popen([sys.executable, str(root / 'lib/session_stream.py'), '--provider', 'codex',
+            '--root', str(root), '--request', str(request), '--workspace', str(self.path),
+            '--output', str(self.path / 'out'), '--session-out', str(self.path / 'session'),
+            '--timeout', '15', '--quota-poll', '.05', '--budget', str(budget_path),
+            '--lifecycle', str(self.path / 'lifecycle'), '--', sys.executable, '-c', program], env=env)
+        try:
+            deadline = time.monotonic() + 3
+            while not (self.path / 'session').exists() and time.monotonic() < deadline:
+                time.sleep(.02)
+            self.assertTrue((self.path / 'session').exists())
+            reading['windows']['five_hour']['live'] = 70
+            reading_path.write_text(json.dumps(reading))
+            time.sleep(.3)
+            self.assertIsNone(child.poll(), 'worker stopped before finishing its turn')
+            self.assertEqual(child.wait(timeout=5), 124)
+            self.assertTrue(marker.exists())
+            self.assertEqual(json.loads((self.path / 'lifecycle').read_text())['reason'], 'quota-ceiling')
+        finally:
+            if child.poll() is None:
+                child.terminate()
+                child.wait(timeout=5)
+
     def test_exact_identity_and_compatibility(self):
         saved = continuation.binding(self.request, 'codex', self.path, 'session-1', self.env)
         self.assertTrue(continuation.compatible(saved, self.request, 'codex', self.path, self.env))

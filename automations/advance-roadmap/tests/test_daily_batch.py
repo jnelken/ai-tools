@@ -687,6 +687,18 @@ PYTHON
             self.assertEqual(budget.workers, [])
             self.assertEqual(budget.planners, [])
 
+    def test_continuous_admission_does_not_reserve_forecast(self):
+        with self.budget_context(), patch.object(daily_batch, 'ROOT', self.root), patch.dict(
+                os.environ, {'ADVANCE_ROADMAP_CONTINUOUS': '1'}):
+            budget = daily_batch.RoadmapBudget(dry_run=True)
+            budget.workers = ['claude']
+            with patch.object(daily_batch.agent_budget, 'reserve_bundle', side_effect=AssertionError('reserved')):
+                item = {'repo': 'a', 'stamp': 'one', 'work_phase': 'implementing'}
+                allocation = budget.choose(item=item)
+                budget.planned(item)
+            self.assertTrue(allocation['live_threshold'])
+            self.assertEqual(allocation['leases'], [])
+
     def test_incremental_replay_admits_ten_point_unit_not_eighty_two_point_worker(self):
         with self.budget_context(), patch.object(daily_batch, 'ROOT', self.root):
             budget = daily_batch.RoadmapBudget(dry_run=True)

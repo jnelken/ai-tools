@@ -43,6 +43,8 @@ def cached_quota(args, budget):
     now = time.time()
     active = [lease for lease in leases if lease.get('provider') == args.provider
               and lease.get('id') not in own and lease.get('created', 0) + lease.get('ttl', 0) > now]
+    if budget.get('live_threshold'):
+        active = []
     other = {name: sum(agent_budget.lease_pct(lease, name) for lease in active)
              for name in reading.get('windows', {})}
     for name, value in (budget.get('baseline', {}).get('windows') or {}).items():
@@ -68,6 +70,16 @@ def session_event(line, provider):
         return str(uuid.UUID(value))
     except (TypeError, ValueError, AttributeError):
         return None
+
+
+def turn_finished(event, provider):
+    if not isinstance(event, dict):
+        return False
+    message = event.get('message') if isinstance(event.get('message'), dict) else {}
+    return ((provider == 'codex' and event.get('type') == 'turn.completed')
+            or (provider == 'claude' and event.get('type') == 'result')
+            or (provider == 'claude' and event.get('type') == 'assistant'
+                and message.get('stop_reason') == 'end_turn'))
 
 
 def stop_failed_start(child):
@@ -149,7 +161,7 @@ def run(args):
         stop_failed_start(child)
         raise RuntimeError('cannot identify worker process for independent watchdog')
     deadline = started + args.timeout if args.timeout > 0 else None
-    stop_at, reason = None, None
+    stop_at, reason, pending_quota = None, None, None
     next_quota, last_quota = started, None
     previous = {}
 
@@ -192,7 +204,11 @@ def run(args):
                 if reason is None and budget and now >= next_quota:
                     next_quota = now + max(.1, args.quota_poll)
                     try:
-                        reason, last_quota = cached_quota(args, budget)
+                        quota_reason, last_quota = cached_quota(args, budget)
+                        if budget.get('live_threshold') and quota_reason == 'quota-ceiling':
+                            pending_quota = quota_reason
+                        else:
+                            reason = quota_reason
                     except (OSError, ValueError, KeyError, ImportError):
                         reason = None
                     if reason:
@@ -222,6 +238,13 @@ def run(args):
                             event = json.loads(line)
                         except (ValueError, UnicodeDecodeError):
                             event = {}
+                        if pending_quota and turn_finished(event, args.provider):
+                            if reason is None:
+                                reason, stop_at = pending_quota, time.monotonic()
+                                try:
+                                    os.killpg(child.pid, signal.SIGTERM)
+                                except ProcessLookupError:
+                                    pass
                         if isinstance(event, dict) and (event.get('type') == 'thread.compacted'
                                 or (event.get('type') == 'system' and event.get('subtype') == 'compact_boundary')):
                             compactions += 1
