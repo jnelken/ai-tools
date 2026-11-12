@@ -139,9 +139,10 @@ def cmd_reuse(a):
     repo_dir = os.path.join(CODE_DIR, r.get("repo") or "")
     if not r.get("repo") or not os.path.isdir(repo_dir):
         why = "repo missing"
-    elif not branch_exists(repo_dir, r.get("branch")) and subprocess.run(
+    elif (os.environ.get('ADVANCE_ROADMAP_SUPERSET', '1') != '1'
+          and not branch_exists(repo_dir, r.get("branch")) and subprocess.run(
         [PREFLIGHT, repo_dir], capture_output=True
-    ).returncode != 0:
+    ).returncode != 0):
         why = "repo no longer passes git-safe-to-autocommit"
     if why:
         print(f"pending plan: held ({why}); saved assignment retained")
@@ -176,6 +177,20 @@ def cmd_reuse(a):
             "\nSaved assignment needs revalidation because of age/retries. Check the ticket, branch, "
             "existing PR/merge and current scope first. Resume unfinished work; do not restart completed phases. "
             "If a human decision is required, report needs_input=true with a specific input_question.")
+    # Old plans can carry dirty-tree blockers from before worktree ownership was
+    # recognized. Keep their evidence for a live recheck, not as current facts
+    # for the bookkeeping worker to repost on every continuation.
+    dirty = [b for b in (r.get('blockers') or []) if isinstance(b, dict) and any(
+        word in str(b.get('detail') or '').lower() for word in ('dirty', 'uncommitted'))]
+    if dirty:
+        r = dict(r)
+        r['blockers'] = [b for b in (r.get('blockers') or []) if b not in dirty]
+        r['worker_brief'] = (r.get('worker_brief') or '') + (
+            '\nPrior dirty-workspace blockers require a live recheck under the current workspace '
+            'ownership rules; do not repost them as facts. Resume work in an advance-roadmap-tagged '
+            'workspace and preserve its changes; protect unowned work. Prior evidence: '
+            + json.dumps(dirty))
+        r['summary'] = f"Resuming {r.get('linear_id') or r.get('item') or r.get('repo')}; recheck prior dirty-workspace blockers."
     if branch_exists(repo_dir, r.get("branch")):
         r = {**r, "action": "resume_worker"}
     r["summary"] = (r.get("summary") or "") + (

@@ -136,7 +136,7 @@ Only when the request carries a `directive_ticket`. This is the dirty-tree excep
 
 You are the only role that ever writes to Linear, so this is yours to execute wherever a blocker
 comes from: an entry in the orchestrator's `blockers[]` list (bookkeeping mode), or one you hit
-yourself mid-run — a dirty tree with no directive, an unresolved decision, attended acceptance
+yourself mid-run — an unowned worktree needing changes without a directive, an unresolved decision, attended acceptance
 required before landing, a product judgment stalling Steps 4–5, or a red deploy after Step 7b's
 fix cap.
 
@@ -216,10 +216,15 @@ item's workspace (a git worktree under `~/.superset/worktrees/`, outside Dropbox
 branch, and launched you in its terminal; the prompt names its path, and that is your `<checkout>`
 for every step below. The leaderboard credits a merged PR only when it came from a workspace that
 ran an agent, which is why the work happens there. Don't switch branches in it — one workspace is
-one branch.
+one branch. Before changing it, run `git -C <checkout> status --porcelain` and
+`~/dotfiles/bin/git-safe-to-autocommit <checkout>`. In an `advance-roadmap`-tagged workspace, dirty files are this job's interrupted work: inspect
+and preserve them, continue the same item, and commit the relevant work before rebasing. Do not
+reset, clean, or discard them. Unrelated changes in the primary checkout or other worktrees do not
+block this isolated workspace and must not be modified.
 
-The workspace branched from the root checkout's local default branch, which can trail `origin`
-(merges happen on GitHub now). Bring it up to date before building:
+A new workspace starts from the committed remote default ref. For a resumed workspace, first
+inspect and preserve its existing work and commit relevant changes before rebasing. Bring the branch
+up to date before building:
 
 ```
 git -C <checkout> fetch origin

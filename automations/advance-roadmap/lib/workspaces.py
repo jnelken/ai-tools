@@ -150,9 +150,29 @@ def cmd_project_id(a):
 
 
 def find_workspace(pid, branch):
-    for w in as_list(cli("workspaces", "list", "--local", "--project", pid)):
+    data = cli("workspaces", "list", "--local", "--project", pid)
+    if not isinstance(data, list) and not (isinstance(data, dict) and any(
+            isinstance(data.get(key), list) for key in ('workspaces', 'items'))):
+        raise RuntimeError('cannot verify existing workspaces')
+    for w in as_list(data):
         if w.get("branch") == branch and not w.get("archivedAt"):
             return w
+    return None
+
+
+def remote_default(repo):
+    """Use a committed remote base, never local primary-checkout commits."""
+    try:
+        symbolic = subprocess.run(['git', '-C', repo, 'symbolic-ref', '--quiet', '--short',
+                                   'refs/remotes/origin/HEAD'], capture_output=True, text=True, timeout=5)
+        candidates = [symbolic.stdout.strip()] if symbolic.returncode == 0 else []
+        candidates += ['origin/main', 'origin/master']
+        for ref in candidates:
+            if ref and subprocess.run(['git', '-C', repo, 'rev-parse', '--verify', '--quiet',
+                                       ref + '^{commit}'], capture_output=True, timeout=5).returncode == 0:
+                return ref
+    except (OSError, subprocess.TimeoutExpired):
+        return None
     return None
 
 
@@ -161,9 +181,19 @@ def cmd_launch(a):
     if not pid:
         print(f"no Superset project for {a.repo}", file=sys.stderr)
         return 3
-    existing = find_workspace(pid, a.branch)
+    try:
+        existing = find_workspace(pid, a.branch)
+    except RuntimeError as error:
+        print(str(error), file=sys.stderr)
+        return 1
     if existing:
-        # Resume: the branch already has a workspace (git allows one worktree per branch).
+        # Do not adopt another user's workspace just because its branch matches.
+        tags = existing.get('tags') or []
+        tags = [t.strip() for t in tags.split(',')] if isinstance(tags, str) else tags
+        if TAG not in tags:
+            print(f"existing workspace for {a.branch} is not tagged {TAG}; refusing to adopt it", file=sys.stderr)
+            return 1
+        # Resume the automation-owned workspace, including its unfinished work.
         ws_id = existing.get("id")
         term = cli("terminals", "create", "--local", "--workspace", ws_id, "--command", a.command)
         if not term:
@@ -171,10 +201,13 @@ def cmd_launch(a):
         terminal_id = term.get("terminalId") or term.get("id") if isinstance(term, dict) else None
         out = {"workspace_id": ws_id, "terminal_id": terminal_id, "reused": True}
     else:
+        base = a.base or remote_default(a.repo)
+        if not base:
+            print(f"no committed origin default branch for {a.repo}; refusing an unsafe base", file=sys.stderr)
+            return 1
         args = ["workspaces", "create", "--local", "--project", pid, "--name", a.name,
-                "--branch", a.branch, "--skip-branch-prefix", "--command", a.command]
-        if a.base:  # default: the project's default branch (main or master)
-            args += ["--base-branch", a.base]
+                "--branch", a.branch, "--skip-branch-prefix", "--command", a.command,
+                "--base-branch", base]
         for tag in a.tag or [TAG]:
             args += ["--tag", tag]
         made = cli(*args, timeout=180)

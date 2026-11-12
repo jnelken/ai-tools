@@ -12,6 +12,9 @@ trap 'rm -rf "$TMP"' EXIT INT TERM
 
 ROOT="$TMP/root"; SKILLS="$TMP/skills"; BIN="$TMP/bin"
 mkdir -p "$ROOT/lib" "$SKILLS" "$BIN" "$TMP/code/demo"
+git init -q "$TMP/code/demo"
+git -C "$TMP/code/demo" -c user.name=Test -c user.email=test@example.invalid -c commit.gpgsign=false -c core.hooksPath=/dev/null commit -q --allow-empty -m base
+git -C "$TMP/code/demo" update-ref refs/remotes/origin/main HEAD
 cp "$HERE/run.sh" "$HERE/worker.sh" "$ROOT/"
 cp "$HERE/lib/workqueue.py" "$HERE/lib/runrecord.py" "$HERE/lib/tokens.py" "$HERE/lib/workspaces.py" "$HERE/lib/models.sh" "$ROOT/lib/"
 cp "$HERE/lib/post_run_summary.mjs" "$ROOT/lib/"
@@ -100,12 +103,18 @@ case "$1 $2" in
   "workspaces create")
     cmd=""; while [ $# -gt 0 ]; do [ "$1" = "--command" ] && { cmd="$2"; shift; }; shift; done
     mkdir -p "$FAKE_WS"
+    git init -q "$FAKE_WS"
     ( cd "$FAKE_WS" && SUPERSET_WORKSPACE_PATH="$FAKE_WS" SUPERSET_TERMINAL_ID=t1 zsh -c "$cmd" ) >/dev/null 2>&1 &!
     print '{"workspace":{"id":"w1"},"terminals":[{"terminalId":"t1"}],"alreadyExists":false}' ;;
   *) print '{}' ;;
 esac
 SH
 chmod +x "$BIN/codex" "$BIN/agent" "$BIN/superset"
+cat > "$BIN/preflight" <<'SH'
+#!/bin/zsh
+git -C "$1" symbolic-ref -q HEAD >/dev/null
+SH
+chmod +x "$BIN/preflight"
 
 # The results path must be on its own line for the fake to find it.
 grep -q '^(raw JSON, no fence) to: ' "$ROOT/worker.sh" || { echo "FAIL: prompt format changed"; exit 1; }
@@ -116,6 +125,7 @@ run() {
     ADVANCE_ROADMAP_ROOT="$ROOT" ADVANCE_ROADMAP_SKILL_DIR="$SKILLS" ADVANCE_ROADMAP_CONDUCTOR_DIR="$SKILLS" \
     ADVANCE_ROADMAP_SECRETS=/dev/null ADVANCE_ROADMAP_NOTIFY=0 \
     ADVANCE_ROADMAP_SUPERSET="${SUPERSET:-0}" ADVANCE_ROADMAP_SUPERSET_BIN="$BIN/superset" ADVANCE_ROADMAP_WORKER_POLL_S=1 \
+    ADVANCE_ROADMAP_PREFLIGHT="$BIN/preflight" \
     FAKE_SUPERSET="${FAKE_SUPERSET:-up}" FAKE_CODE="$TMP/code" FAKE_WS="$TMP/ws" ADVANCE_ROADMAP_TEST_TOKEN=s3cret \
     ADVANCE_ROADMAP_CODEX_BIN="$BIN/codex" ADVANCE_ROADMAP_AGENT_BIN="$BIN/agent" \
     ADVANCE_ROADMAP_CADENCE_HOURS="${CADENCE_HOURS:-1}" \

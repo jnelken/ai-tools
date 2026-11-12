@@ -1,6 +1,7 @@
 import importlib.util
 import json
 import sqlite3
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -79,6 +80,55 @@ class CleanupTests(unittest.TestCase):
         with patch.object(workspaces, 'cli', side_effect=cli), patch.object(workspaces, 'merged_workspaces', return_value=info), patch.object(workspaces.subprocess, 'run', return_value=completed):
             workspaces.cleanup_worktrees(SimpleNamespace(min_idle_minutes=0, dry_run=False), self.root)
         self.assertEqual(calls[-1], ('workspaces', 'delete', '--local', 'ws'))
+
+    def test_fresh_workspace_uses_origin_base_not_primary_checkout(self):
+        out = self.root / 'workspace.json'
+        args = SimpleNamespace(repo=str(self.root), branch='roadmap/new', name='new',
+                               command='worker', base=None, tag=None, out=str(out))
+        calls = []
+        def cli(*values, **kwargs):
+            calls.append(values)
+            return {'workspace': {'id': 'ws'}, 'terminals': [{'terminalId': 'term'}]}
+        with patch.object(workspaces, 'ensure_project', return_value='project'), \
+                patch.object(workspaces, 'find_workspace', return_value=None), \
+                patch.object(workspaces, 'remote_default', return_value='origin/main'), \
+                patch.object(workspaces, 'cli', side_effect=cli):
+            self.assertEqual(workspaces.cmd_launch(args), 0)
+        self.assertEqual(calls[0][calls[0].index('--base-branch') + 1], 'origin/main')
+
+    def test_remote_base_ignores_local_unpushed_commit(self):
+        def git(*args):
+            return subprocess.run(['git', '-C', str(self.root), *args], check=True,
+                                  capture_output=True, text=True).stdout.strip()
+        git('init', '-q', '-b', 'main')
+        git('-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', '-c', 'commit.gpgsign=false', '-c', 'core.hooksPath=/dev/null', 'commit', '-q', '--allow-empty', '-m', 'base')
+        git('update-ref', 'refs/remotes/origin/main', 'HEAD')
+        git('-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', '-c', 'commit.gpgsign=false', '-c', 'core.hooksPath=/dev/null', 'commit', '-q', '--allow-empty', '-m', 'local')
+        self.assertNotEqual(git('rev-parse', 'HEAD'), git('rev-parse', 'origin/main'))
+        self.assertEqual(workspaces.remote_default(str(self.root)), 'origin/main')
+
+    def test_fresh_workspace_fails_closed_without_origin_base(self):
+        args = SimpleNamespace(repo=str(self.root), branch='roadmap/new', name='new',
+                               command='worker', base=None, tag=None, out=str(self.root / 'out'))
+        with patch.object(workspaces, 'ensure_project', return_value='project'), \
+                patch.object(workspaces, 'find_workspace', return_value=None), \
+                patch.object(workspaces, 'remote_default', return_value=None), \
+                patch.object(workspaces, 'cli') as cli:
+            self.assertEqual(workspaces.cmd_launch(args), 1)
+            cli.assert_not_called()
+
+    def test_resume_requires_automation_owned_workspace(self):
+        args = SimpleNamespace(repo=str(self.root), branch='roadmap/old', name='old',
+                               command='worker', base=None, tag=None, out=str(self.root / 'out'))
+        workspace = {'id': 'ws', 'tags': 'other'}
+        with patch.object(workspaces, 'ensure_project', return_value='project'), \
+                patch.object(workspaces, 'find_workspace', return_value=workspace), \
+                patch.object(workspaces, 'cli', return_value={'terminalId': 'term'}) as cli:
+            self.assertEqual(workspaces.cmd_launch(args), 1)
+            cli.assert_not_called()
+            workspace['tags'] = 'advance-roadmap'
+            self.assertEqual(workspaces.cmd_launch(args), 0)
+            self.assertEqual(json.loads((self.root / 'out').read_text())['workspace_id'], 'ws')
 
 
 if __name__ == '__main__':

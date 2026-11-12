@@ -82,7 +82,7 @@ Candidate repos: direct children of the personal code dir, `CODE_DIR=$(~/.ai-too
 the personal machines; if it exits non-zero, this machine has no personal repos — stop). Check
 `~/.claude/automations/advance-roadmap/allowlist.txt` first when present, and query Linear once for
 pending directives — tickets carrying an unconsumed `## Directive` section, via the `linear` CLI
-only (see `SAFETY.md`) — from [[unblock-roadmap]] (the only dirty-tree exception).
+only (see `SAFETY.md`) — from [[unblock-roadmap]] for authorized changes to existing dirty work.
 
 ## Architecture (orchestrator / worker)
 
@@ -132,7 +132,7 @@ For human-driven work on an item you name, call `/conductor` directly.
 | | `wrapup-repos` | `advance-roadmap` |
 |---|---|---|
 | Input | dirty / recent | roadmap / Linear / plans item |
-| Tree | expects dirty | **requires clean** (directive exception) |
+| Tree | expects dirty | assigned worktree clean; unrelated trees preserved |
 | Remote | never | **merges a PR into `main`** |
 
 ## What to read next

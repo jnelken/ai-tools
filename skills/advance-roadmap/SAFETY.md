@@ -24,19 +24,17 @@ commit, merge, or push (see WORKER.md).
   hours is pure noise. Record it in run memory as `skipped-human-only` with its `DEV-N` id and
   move on. It's a flat workspace label, not a child of the `repo` group, so an issue carries both
   it and its own `repo/*` label.
-- **Clean tree or skip — unless a directive says otherwise.** `git -C <repo> status --porcelain`
-  must be empty. Uncommitted work means the user is mid-thought there; branching, merging and
-  pushing around it tangles their diff. Pick a different repo — never stash, reset, or commit
-  their WIP to get started **on your own initiative**. The one exception: a pending directive from
-  [[unblock-roadmap]] — an unconsumed `## Directive` section (marker `<!-- advance-roadmap:directive:
-  <repo> -->`, heading with no "(consumed"/"(archived" suffix) in the description of that repo's
-  ticket, which means Jake was already asked and already answered. See Step 1a (orchestrator,
-  decides) and Step 2c (worker, acts) for exactly how far that authorization extends and no further.
-  **The marker only marks a directive as pending; it authorizes nothing by itself.** What authorizes
-  a destructive instruction is the recorded `git status` snapshot matching
-  the live tree as an exact set — re-checked by the worker at execution time, never assumed from
-  triage. Resolve the ticket you intended to attempt before this
-  check; when the tree blocks it, comment on that ticket per Step 2b before moving on.
+- **Protect the actual working tree.** For a scheduled new item, create a separate Superset
+  worktree from the committed default branch; unrelated uncommitted or unpushed changes in the
+  primary checkout or other worktrees do not block it. Never incorporate, stash, reset, commit,
+  or remove those changes. Check `git status --porcelain` and run the shared preflight on the
+  assigned workspace before editing, rebasing, committing, or merging. When resuming the same item in an `advance-roadmap`-tagged workspace, its dirty files are
+  the job's interrupted work: inspect and continue them. Preserve them, validate their scope, and
+  commit the relevant work before rebasing; never reset, clean, or discard it. Do not adopt an
+  untagged workspace merely because its branch matches. Continue independent items in other
+  workspaces when they do not conflict. A pending directive authorizes only its recorded action on
+  unowned changes. For interactive work in the primary checkout, the
+  primary checkout is the assigned worktree and must be clean unless a directive says otherwise.
 - **Linear goes through the `linear` CLI, and nothing else.** It authenticates with the API key
   it keeps in the macOS keychain (service `linear-cli`, workspace `jnelken`) — the only credential
   that survives an unattended run. Never use Linear MCP tools and never attempt OAuth: that path
@@ -57,12 +55,12 @@ commit, merge, or push (see WORKER.md).
     which replaces the whole set)
   - descriptions: `linear issue update DEV-N --description-file <f>`
   If a CLI call fails, record the error and continue per the "never block a run on Linear" rule.
-- **Shared preflight, not a reimplementation.** Run `~/dotfiles/bin/git-safe-to-autocommit <repo>`
-  and skip the repo on a non-zero exit. It refuses repos mid-rebase/merge/cherry-pick/revert/bisect
+- **Shared preflight, not a reimplementation.** Run `~/dotfiles/bin/git-safe-to-autocommit <assigned-worktree>`
+  before mutating that worktree; stop that item on a non-zero exit. It refuses repos mid-rebase/merge/cherry-pick/revert/bisect
   and repos with a detached HEAD. Do not inline your own version of this check — a divergent copy
   is exactly what let a sibling automation commit on top of a stuck rebase for two weeks unnoticed.
-- **Skip live sessions.** If any `.claude/.sessions/*.md` at the repo root has `updated_at_epoch`
-  within the last 15 minutes, someone is working there right now. Pick a different repo.
+- **Skip live sessions.** If an active session is using the assigned worktree or overlapping item, do not dispatch a
+  second worker there. An unrelated session in another worktree does not block an isolated item.
 - **More than one thread in a repo only with an approved plan.** Several workers may share a repo
   in one daily batch only after [`PLAN_APPROVAL.md`](PLAN_APPROVAL.md)'s approver ruled on every
   thread after the first. No approver ruling (it failed, was unavailable or didn't answer) means the

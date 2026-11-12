@@ -124,6 +124,12 @@ PY2
 WORKTREE="${SUPERSET_WORKSPACE_PATH:-}"
 if [ -n "$WORKTREE" ]; then
   cd "$WORKTREE" || { echo "FATAL: cannot cd to workspace $WORKTREE" >&2; write_status "" 2 "cannot cd to workspace $WORKTREE"; exit 2; }
+  preflight="${ADVANCE_ROADMAP_PREFLIGHT:-$HOME/dotfiles/bin/git-safe-to-autocommit}"
+  if [ ! -x "$preflight" ] || ! "$preflight" "$WORKTREE"; then
+    echo "FATAL: assigned workspace did not pass git preflight: $WORKTREE" >&2
+    write_status "" 2 "assigned workspace failed git preflight: $WORKTREE"
+    exit 2
+  fi
 fi
 WORKDIR="${WORKTREE:-$CODE_DIR}"
 # The root checkouts stay readable/writable for Step 2c and Step 7's post-merge pull.

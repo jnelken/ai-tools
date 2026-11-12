@@ -468,21 +468,21 @@ def survey_repos():
             unpushed = c if c and c != "0" else ""
         rel, n_block, text = blockers(repo)
 
-        blocks = []
+        blocks, notes = [], []
         if os.path.exists(os.path.join(repo, ".noroadmap")):
             blocks.append(".noroadmap opt-out")
         if not roadmap and not plans:
             blocks.append("no roadmap or docs/plans")
         if dirty:
-            blocks.append(f"dirty tree ({len(dirty.splitlines())} files)")
+            notes.append(f"primary checkout has {len(dirty.splitlines())} uncommitted file(s); isolated worktrees can still run")
         if not has_origin_main:
             blocks.append("no origin/main — push flow has no target")
         if unpushed:
-            blocks.append(f"{unpushed} unpushed commit(s) — ff-only merge would refuse")
+            notes.append(f"primary checkout has {unpushed} unpushed commit(s)")
 
         out.append({
             "name": name, "roadmap": roadmap, "plans": plans, "blocks": blocks,
-            "eligible": not blocks, "blockers": n_block, "blockfile": rel, "blocktext": text,
+            "eligible": not blocks, "notes": notes, "blockers": n_block, "blockfile": rel, "blocktext": text,
         })
     out.sort(key=lambda r: (not r["eligible"], r["name"]))
     return out
@@ -1095,6 +1095,7 @@ def build():
             state = '<span class="badge ok">eligible</span>'
         else:
             state = "".join(f'<span class="badge unk">{esc(b)}</span> ' for b in r["blocks"])
+        state += "".join(f'<div class="dim">{esc(note)}</div>' for note in r.get("notes", []))
         bl = (f'<div class=kv><span class=k>decisions</span> {r["blockers"]} open '
               f'<span class=dim>({esc(r["blockfile"])})</span></div>') if r["blockers"] else ""
         for st, cls in (("Needs Input", "unk"), ("Paused", "off")):

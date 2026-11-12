@@ -273,6 +273,52 @@ class QueueTest(unittest.TestCase):
         self.assertIn('revalidation', result['worker_brief'])
         self.assertTrue(saved.exists())
 
+    def test_pending_fresh_workspace_does_not_check_primary_checkout_preflight(self):
+        saved, out = self.root / 'pending.json', self.root / 'out.json'
+        saved.write_text(json.dumps({'orchestrator': plan(), 'planned_stamp': '20261110-103001',
+                                     'planned_at': '2026-11-10T00:00:00', 'attempts': 0}))
+        store_class = q.Store
+        with patch.dict(os.environ, {'ADVANCE_ROADMAP_SUPERSET': '1'}), patch.object(
+                pendingplan, 'CODE_DIR', str(self.code)), patch.object(
+                pendingplan, 'branch_exists', return_value=False), patch.object(
+                pendingplan.subprocess, 'run', side_effect=AssertionError('primary checkout preflight called')), patch.object(
+                q, 'Store', side_effect=lambda: store_class(self.root)):
+            rc = pendingplan.cmd_reuse(SimpleNamespace(file=str(saved), out=str(out), max_age_hours=36, max_attempts=2))
+        self.assertEqual(rc, 0)
+        self.assertEqual(json.loads(out.read_text())['action'], 'dispatch_worker')
+
+    def test_pending_interactive_work_still_checks_primary_checkout_preflight(self):
+        saved, out = self.root / 'pending.json', self.root / 'out.json'
+        saved.write_text(json.dumps({'orchestrator': plan(), 'planned_stamp': '20261110-103001',
+                                     'planned_at': '2026-11-10T00:00:00', 'attempts': 0}))
+        with patch.dict(os.environ, {'ADVANCE_ROADMAP_SUPERSET': '0'}), patch.object(
+                pendingplan, 'CODE_DIR', str(self.code)), patch.object(
+                pendingplan, 'branch_exists', return_value=False), patch.object(
+                pendingplan.subprocess, 'run', return_value=SimpleNamespace(returncode=1)):
+            rc = pendingplan.cmd_reuse(SimpleNamespace(file=str(saved), out=str(out), max_age_hours=36, max_attempts=2))
+        self.assertEqual(rc, 2)
+        self.assertTrue(saved.exists())
+
+    def test_reuse_rechecks_old_dirty_blockers_without_losing_other_blockers(self):
+        saved, out = self.root / 'pending.json', self.root / 'out.json'
+        old = {**plan(), 'summary': 'DEV-2 stays blocked by dirty worktree',
+               'blockers': [{'linear_id': 'DEV-2', 'detail': 'dirty workspace'},
+                            {'linear_id': 'DEV-3', 'detail': 'Await a product decision'}]}
+        saved.write_text(json.dumps({'orchestrator': old, 'planned_stamp': '20261110-103001',
+                                    'planned_at': '2026-11-10T00:00:00', 'attempts': 0}))
+        store_class = q.Store
+        with patch.object(pendingplan, 'CODE_DIR', str(self.code)), patch.object(
+                pendingplan, 'branch_exists', return_value=True), patch.object(
+                pendingplan, 'merged_assignment', return_value=None), patch.object(
+                q, 'Store', side_effect=lambda: store_class(self.root)):
+            self.assertEqual(pendingplan.cmd_reuse(SimpleNamespace(file=str(saved), out=str(out),
+                                                                   max_age_hours=36, max_attempts=2)), 0)
+        result = json.loads(out.read_text())
+        self.assertEqual([b['linear_id'] for b in result['blockers']], ['DEV-3'])
+        self.assertIn('DEV-2', result['worker_brief'])
+        self.assertNotIn('stays blocked', result['summary'])
+        self.assertEqual(len(json.loads(saved.read_text())['orchestrator']['blockers']), 2)
+
     def test_merged_recovery_checks_exact_branch_revision_and_time(self):
         pr = {'headRefName': 'roadmap/test', 'headRefOid': 'abc', 'mergedAt': '2026-11-11T10:00:00Z',
               'mergeCommit': {'oid': 'merge'}, 'url': 'https://github.com/jnelken/a/pull/1'}
