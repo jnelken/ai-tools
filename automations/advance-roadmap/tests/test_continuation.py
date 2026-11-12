@@ -226,11 +226,13 @@ class ContinuationTest(unittest.TestCase):
         sid = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc'
         fake = self.path / 'fake-codex'
         fake.write_text('#!/usr/bin/env python3\n'
-            'import json,os,sys\n'
+            'import json,os,sys,time\n'
             'open(os.environ["CAPTURE"],"w").write(json.dumps(sys.argv[1:]))\n'
             'if os.environ.get("FAKE_MISSING") and "resume" in sys.argv:\n'
             ' print("No rollout found for this session",file=sys.stderr); sys.exit(1)\n'
             'print(json.dumps({"type":"thread.started","thread_id":"' + sid + '"}),flush=True)\n'
+            'if os.environ.get("FAKE_SLEEP"):\n'
+            ' print("Authentication required",flush=True); time.sleep(10)\n'
             'open(sys.argv[sys.argv.index("-o")+1],"w").write("done")\n'
             'open(os.environ["RESULT"],"w").write(json.dumps({"outcome":"yielded",'
             '"provider":"codex","summary":"milestone","next_phase":"reviewing"}))\n')
@@ -258,6 +260,9 @@ class ContinuationTest(unittest.TestCase):
         args = json.loads((self.path / 'args').read_text())
         self.assertEqual(args[args.index('resume') + 1], sid)
         self.assertNotIn('--last', args)
+        prompt = args[-1]
+        self.assertIn('leave the branch unmerged', prompt.lower())
+        self.assertNotIn('open/merge the pr', prompt.lower())
         self.assertEqual(json.loads((self.path / 'continuation-codex.json').read_text())['mode'], 'native')
         env['FAKE_MISSING'] = '1'
         result = subprocess.run(['/bin/zsh', str(here / 'worker.sh'), '--stamp', 'two',
@@ -294,6 +299,14 @@ class ContinuationTest(unittest.TestCase):
             '--status-file', str(status)], env=env, capture_output=True, text=True, timeout=15)
         self.assertEqual(result.returncode, 3)
         self.assertFalse((self.path / 'args').exists())
+        env.pop('FAKE_OVER')
+        env.pop('ADVANCE_ROADMAP_JOB_OVERRIDE')
+        env.update(FAKE_SLEEP='1', ADVANCE_ROADMAP_CHUNK_TIMEOUT_S='.4')
+        result = subprocess.run(['/bin/zsh', str(here / 'worker.sh'), '--stamp', 'two',
+            '--request-file', str(request_path), '--providers', 'codex', '--result-file', str(result_path),
+            '--status-file', str(status)], env=env, capture_output=True, text=True, timeout=15)
+        self.assertEqual(result.returncode, 124, result.stdout + result.stderr)
+        self.assertEqual(json.loads(status.read_text())['missing'], [])
 
     def test_provider_switch_uses_fallback_then_owns_claude_session(self):
         here = Path(__file__).resolve().parents[1]

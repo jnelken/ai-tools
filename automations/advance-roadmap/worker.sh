@@ -271,12 +271,20 @@ When you are finished — whatever the outcome — write that same WORKER_RESULT
 run.sh records this run from that file. Without it the run is recorded as incomplete."
 fi
 if [ -n "$WORKTREE" ]; then
-  BASE_PROMPT="$BASE_PROMPT
+  if [ "${ADVANCE_ROADMAP_INCREMENTAL:-0}" = 1 ] && [ "${ADVANCE_ROADMAP_INCREMENTAL_PHASE:-implementing}" = implementing ]; then
+    BASE_PROMPT="$BASE_PROMPT
+
+Your checkout is the Superset workspace $WORKTREE, on the assigned branch. Make the bounded
+implementation progress there and leave the branch unmerged; review and shipping are later phases.
+Touch the root checkout under $CODE_DIR only for an authorized Step 2c directive commit."
+  else
+    BASE_PROMPT="$BASE_PROMPT
 
 Your checkout is the Superset workspace $WORKTREE (a git worktree, already on the assigned
-branch). Build, commit, review (review.sh --repo $WORKTREE) and open/merge the PR from there,
-per WORKER.md Steps 3 and 7. Touch the repo's root checkout under $CODE_DIR only for Step 2c's
-directive commit and Step 7's post-merge pull."
+branch). Complete only the reserved phase there, including the required review and verification
+before any merge. Touch the root checkout under $CODE_DIR only for Step 2c's directive commit and
+Step 7's post-merge pull."
+  fi
 fi
 
 # Step 5b's cross-model review. The log is what run.sh reads to prove it ran.
@@ -566,6 +574,24 @@ PY
   esac
   cat "$out"
   echo "=== worker provider=$provider exit=$rc ==="
+
+  # Watchdog, quota and operator stops are intentional yields. A provider's
+  # transcript can quote authentication text, so do not mistake it for a
+  # startup failure or try another provider after a bounded stop.
+  if [ "${ADVANCE_ROADMAP_INCREMENTAL:-0}" = 1 ] \
+     && python3 - "${RESULT_FILE:h}/chunk-lifecycle.json" <<'PY'
+import json, sys
+try:
+    value = json.load(open(sys.argv[1]))
+except (OSError, ValueError):
+    value = {}
+raise SystemExit(0 if value.get('forced') else 1)
+PY
+  then
+    used="$provider"
+    final_rc="$rc"
+    break
+  fi
 
   # Live-limit rule (usage.py live-limit): a banner in the transcript counts only when this
   # call failed — non-zero exit or no final answer — never when a successful answer merely
