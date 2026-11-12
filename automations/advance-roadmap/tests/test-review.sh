@@ -4,6 +4,12 @@
 # echoed prompt), and every round leaves one line in the review log.
 set -eu
 
+# Scheduled worker variables must not change the fake reviewer's routing or quota behavior.
+if [ "${ADVANCE_ROADMAP_TEST_ENV_CLEAN:-0}" != 1 ]; then
+  exec env -i HOME="$HOME" PATH="$PATH" TMPDIR="${TMPDIR:-/tmp}" \
+    ADVANCE_ROADMAP_TEST_ENV_CLEAN=1 zsh "$0" "$@"
+fi
+
 HERE="$(cd "$(dirname "$0")/.." && pwd)"
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/advance-roadmap-review-test.XXXXXX")"
 trap 'rm -rf "$TMP"' EXIT INT TERM
@@ -116,6 +122,7 @@ for p in codex agent claude; do
   cat > "$BIN/$p" <<SH
 #!/bin/zsh
 name=$p; mode="\${FAKE_${p:u}:-clean}"
+if [ -n "\$CAPTURE_PROMPT" ]; then print -r -- "\$*" > "\$CAPTURE_PROMPT"; fi
 last=""; while [ \$# -gt 0 ]; do [ "\$1" = "-o" ] && { last="\$2"; shift; }; shift; done
 [ "\$name" = codex ] && print "session id: 11111111-2222-3333-4444-555555555555"
 print -r -- "echoed prompt: VERDICT: clean      (no findings)"
@@ -310,5 +317,13 @@ check "reserved cross-provider reviewer is used" "$(field reviewer)" claude
 review codex 1 ADVANCE_ROADMAP_INCREMENTAL=1 ADVANCE_ROADMAP_BUDGET_REVIEWERS=cursor FAKE_AGENT=clean >/dev/null
 rc=0; review codex 2 ADVANCE_ROADMAP_INCREMENTAL=1 ADVANCE_ROADMAP_BUDGET_REVIEWERS=cursor FAKE_AGENT=clean >/dev/null || rc=$?
 check "incremental reviewer cannot spend its reservation twice" "$rc" 3
+
+# Assert on the prompt the fake reviewer actually received, not review.sh's source text.
+capture="$TMP/reviewer-prompt"
+review codex 1 CAPTURE_PROMPT="$capture" FAKE_AGENT=clean >/dev/null
+grep -Fq 'Classify each finding as an instance' "$capture" \
+  && grep -Fq 'VERDICT: findings   (one or more findings)' "$capture" \
+  || { echo "FAIL: dispatched review prompt omitted classification or verdict format"; exit 1; }
+echo "ok   dispatched review prompt carries invariant classification and unchanged verdict format"
 
 echo "all passed"

@@ -66,6 +66,13 @@ class Profiles(unittest.TestCase):
         self.assertNotIn('Superset Workspaces',r['instructions'])
         self.assertNotIn('push `main` freely',r['instructions'])
         self.assertEqual(len(r['sources']),3)
+    def test_invariants_convention_in_development_not_runtime(self):
+        mine=self.repo()
+        for harness in ('claude','codex'):
+            dev=p.resolve('development/auto',mine,harness,{})['instructions']
+            self.assertIn('before fixing, list every code path that reaches this side effect',dev)
+            for profile in ('runtime/slackagent','runtime/text'):
+                self.assertNotIn('Invariants',p.resolve(profile,self.base,harness,{})['instructions'])
     def test_toml_array_of_inline_tables(self):
         # Python 3.11+ validates the exact syntax passed to Codex -c.
         import tomllib

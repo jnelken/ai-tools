@@ -95,6 +95,14 @@ unlike the scheduled run, you have someone to ask. The builder invokes
 `review.sh --worker cursor`, so Codex reviews (read-only) and the builder fixes findings for up to
 3 rounds; leftovers merge marked `FIXME/TODO(advance-roadmap review)`.
 
+**Classify review findings before fixes go out.** The builder's review rounds follow WORKER.md's
+*Instance versus invariant findings*. When you read review findings yourself or relay them to the builder, label each
+one an instance (one defect, local fix) or an invariant (a rule every path to a side effect must obey).
+For an invariant: before fixing, list every code path that reaches this side effect. If more than one,
+propose a single owner. Prefer one owner plus mechanical enforcement over repeated per-site patches
+(convention: `${AI_TOOLS_HOME:-$HOME/.ai-tools}/instructions/development/shared.md`, *Invariants*). Choosing an owner that exceeds the approved
+scope is a question for the user, not a silent redesign.
+
 To have the builder stop short of merging, say so in `worker_brief` ("stop after Step 5b; leave the
 branch, do not merge or push"). It reports `blocked-branch-left`; you then ask the user and send
 a `resume` request to land it.

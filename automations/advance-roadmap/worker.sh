@@ -256,6 +256,14 @@ This implementation unit has no reviewer reservation: do not merge, push to the 
 branch, deploy, or close the ticket. Leave the branch unmerged and yield for review."
   fi
 fi
+BASE_PROMPT="$BASE_PROMPT
+
+Invariants: classify every review finding as an instance (one defect, local fix) or an invariant (a
+rule every path to a side effect must obey) before fixing it. For an invariant: before fixing, list
+every code path that reaches this side effect. If more than one, propose a single owner. Prefer one
+owner and mechanical enforcement over repeated patches; record the invariant and its owner, check
+changed paths against it, test the owner's policy once with table-driven cases, and test entry-point
+delegation. Escalate only when the owner decision exceeds the approved scope."
 if [ -n "${ADVANCE_ROADMAP_TARGET_REPO:-}" ]; then
   BASE_PROMPT="$BASE_PROMPT
 

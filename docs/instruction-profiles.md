@@ -6,6 +6,8 @@ Source is maintained in ai-tools; installed entry points link to the deploy clon
 
 Use [instruction-profile-maintenance](../skills/instruction-profile-maintenance/SKILL.md) when changing recipes, bootstraps, selection, or harness loading/isolation. It directs the maintenance workflow; [ADR 0001](../adr/0001-compose-instructions-by-role-and-repository.md) owns the rationale and evaluation criteria. The normal installer exposes this skill to Claude and Codex through links to the deploy clone.
 
+Development instruction fragments (`instructions/development/*.md`, composed into development profiles for both harnesses) are maintained here under ADR 0001, including the *Invariants* convention in `shared.md`. Dotfiles owns only settings and procedure references; the convention is intentionally absent from runtime profiles.
+
 ## Starting and inspecting sessions
 
 ```sh
