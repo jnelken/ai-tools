@@ -1,11 +1,13 @@
 import { readdirSync, readFileSync } from 'node:fs';
-import { basename, join, relative } from 'node:path';
+import { basename, extname, join, relative } from 'node:path';
+
+const sourceExtensions = new Set(['.js', '.mjs', '.ts', '.tsx']);
 
 function sourceFiles(dir) {
   return readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
     const path = join(dir, entry.name);
     if (entry.isDirectory()) return sourceFiles(path);
-    return entry.isFile() && entry.name.endsWith('.mjs') ? [path] : [];
+    return entry.isFile() && sourceExtensions.has(extname(entry.name)) ? [path] : [];
   });
 }
 

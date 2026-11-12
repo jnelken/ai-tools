@@ -16,5 +16,7 @@ test('fixture: nested and extensionless imports that bypass the owner are caught
   assert.deepEqual(findViolations(at('../fixtures/violating/src')), [
     'extensionless-rogue.mjs',
     'handlers/rogue.mjs',
+    'rogue.js',
+    'rogue.ts',
   ]);
 });
