@@ -114,7 +114,7 @@ For an invariant finding, **before fixing, list every code path that reaches thi
 4. **Test each entry point delegates** to the owner, so a new path that bypasses it fails a test.
 5. **Enforce mechanically** where cheap: keep the raw client unexported, add an ESLint restriction, or add an architecture guard test that fails on a bypassing import.
 
-Reusable examples live in `skills/peer-review/templates/invariants/`. Escalate only when choosing the owner is an architectural decision beyond the approved scope; otherwise make the call and note it.
+Reusable examples live in `~/.claude/skills/peer-review/templates/invariants/`. Escalate only when choosing the owner is an architectural decision beyond the approved scope; otherwise make the call and note it.
 
 ## Refactoring vs Patching
 

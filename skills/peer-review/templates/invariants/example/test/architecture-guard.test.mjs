@@ -12,6 +12,9 @@ test('real source: only the owner imports the raw client (barrel does not export
 test('fixture: clean project passes', () => {
   assert.deepEqual(findViolations(at('../fixtures/clean/src')), []);
 });
-test('fixture: an unauthorized writer is caught', () => {
-  assert.deepEqual(findViolations(at('../fixtures/violating/src')), ['rogue.mjs']);
+test('fixture: nested and extensionless imports that bypass the owner are caught', () => {
+  assert.deepEqual(findViolations(at('../fixtures/violating/src')), [
+    'extensionless-rogue.mjs',
+    'handlers/rogue.mjs',
+  ]);
 });

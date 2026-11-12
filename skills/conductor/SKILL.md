@@ -100,7 +100,7 @@ unlike the scheduled run, you have someone to ask. The builder invokes
 one an instance (one defect, local fix) or an invariant (a rule every path to a side effect must obey).
 For an invariant: before fixing, list every code path that reaches this side effect. If more than one,
 propose a single owner. Prefer one owner plus mechanical enforcement over repeated per-site patches
-(convention: `instructions/development/shared.md`, *Invariants*). Choosing an owner that exceeds the approved
+(convention: `~/.claude/instructions/development/shared.md`, *Invariants*). Choosing an owner that exceeds the approved
 scope is a question for the user, not a silent redesign.
 
 To have the builder stop short of merging, say so in `worker_brief` ("stop after Step 5b; leave the

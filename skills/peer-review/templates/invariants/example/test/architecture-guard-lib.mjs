@@ -1,14 +1,31 @@
 import { readdirSync, readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { basename, join, relative } from 'node:path';
+
+function sourceFiles(dir) {
+  return readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
+    const path = join(dir, entry.name);
+    if (entry.isDirectory()) return sourceFiles(path);
+    return entry.isFile() && entry.name.endsWith('.mjs') ? [path] : [];
+  });
+}
 
 // Returns the files under srcDir (other than the owner and the raw client itself)
 // that import the raw client, or that re-export it from the public barrel.
 export function findViolations(srcDir, { owner = 'ledger.mjs', raw = 'raw-client.mjs' } = {}) {
   const bad = [];
-  for (const name of readdirSync(srcDir).filter((f) => f.endsWith('.mjs'))) {
+  const rawStem = basename(raw).replace(/\.[^.]+$/, '');
+  const importFrom = /\b(?:from\s*|import\s*(?:\(\s*)?)['"]([^'"]+)['"]\s*\)?/g;
+  for (const path of sourceFiles(srcDir)) {
+    const name = relative(srcDir, path);
     if (name === owner || name === raw) continue;
-    const text = readFileSync(join(srcDir, name), 'utf8');
-    if (text.includes(raw)) bad.push(name);
+    const text = readFileSync(path, 'utf8');
+    for (const [, specifier] of text.matchAll(importFrom)) {
+      const importedStem = basename(specifier).replace(/\.[^.]+$/, '');
+      if (importedStem === rawStem) {
+        bad.push(name);
+        break;
+      }
+    }
   }
   return bad;
 }
