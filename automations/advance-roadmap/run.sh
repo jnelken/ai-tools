@@ -220,9 +220,16 @@ save_quota_gates() {
 on_exit() {
   local rc=$?
   [ -n "${LOCK:-}" ] && [ "${HOLDS_LOCK:-0}" -eq 1 ] && rm -rf "$LOCK"
-  [ "$RECORDED" -eq 1 ] && return
-  record aborted "run.sh exited $rc before recording" "$rc"
-  regen_dashboard
+  if [ "$RECORDED" -ne 1 ]; then
+    record aborted "run.sh exited $rc before recording" "$rc"
+    regen_dashboard
+  fi
+  cleanup_workspaces
+}
+cleanup_workspaces() {
+  if [ "$SUPERSET_MODE" = "1" ] && [ -f "$WORKSPACES_PY" ]; then
+    python3 "$WORKSPACES_PY" cleanup --root "$ROOT" --min-idle-minutes 0 >> "$LOG" 2>&1 || echo "(workspace cleanup failed — non-fatal)" >> "$LOG"
+  fi
 }
 trap on_exit EXIT
 trap 'exit 130' INT
@@ -409,10 +416,10 @@ run_worker_in_workspace() {
     print -r -- "rc=\${pipestatus[1]}; print -r -- \$rc > ${(q)RUN_DIR}/worker.exit; rm -f ${(q)inflight}"
     # Settle here too: if run.sh timed out and moved on, nothing else would, and the next
     # tick would relaunch an item this worker already shipped.
-    print -r -- "python3 ${(q)PLAN_PY} --file ${(q)PENDING_PLAN} settle --worker-result ${(q)WORKER_RESULT} --worker-rc \$rc --request-file ${(q)req} >/dev/null 2>&1"
+    print -r -- "if python3 ${(q)PLAN_PY} --file ${(q)PENDING_PLAN} settle --worker-result ${(q)WORKER_RESULT} --worker-rc \$rc --request-file ${(q)req} >/dev/null 2>&1; then print -r -- complete > ${(q)RUN_DIR}/worker.complete; fi"
   } > "$launcher"
   chmod 700 "$launcher"
-  rm -f "$RUN_DIR/worker.pid" "$RUN_DIR/worker.exit"
+  rm -f "$RUN_DIR/worker.pid" "$RUN_DIR/worker.exit" "$RUN_DIR/worker.complete"
   if ! python3 "$WORKSPACES_PY" launch --repo "$CODE_DIR/$repo" --branch "$branch" --name "${name//  / }" \
        --command "/bin/zsh ${(q)launcher}" --out "$RUN_DIR/workspace.json" >> "$LOG" 2>&1; then
     superset_skip="could not create the Superset workspace for $repo ($branch)"; return 1
@@ -1252,6 +1259,7 @@ if [ "$last_outcome" = "shipped feature" ] && ! in_window; then
   echo "=== chain: past the sprint window — not chaining ===" >> "$LOG"
 elif [ "$last_outcome" = "shipped feature" ] && [ "$elapsed" -lt $(( CHAIN_MINUTES * 60 )) ]; then
   echo "=== chain: shipped at $(( elapsed / 60 ))m of ${CHAIN_MINUTES}m — starting link $(( CHAIN_LINK + 1 )) ===" >> "$LOG"
+  cleanup_workspaces
   trap - EXIT
   rm -rf "$LOCK"
   export ADVANCE_ROADMAP_CHAIN_START="$CHAIN_START" ADVANCE_ROADMAP_CHAIN_LINK=$(( CHAIN_LINK + 1 ))

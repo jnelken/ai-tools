@@ -23,12 +23,15 @@ Environment: ADVANCE_ROADMAP_SUPERSET_BIN (CLI path), ADVANCE_ROADMAP_SUPERSET_H
 (host.db path; derived from the logged-in org otherwise).
 """
 import argparse
+from contextlib import closing
+import fcntl
 import json
 import os
 import sqlite3
 import subprocess
 import sys
 import time
+from pathlib import Path
 
 SUPERSET = os.environ.get(
     "ADVANCE_ROADMAP_SUPERSET_BIN",
@@ -207,12 +210,104 @@ def merged_workspaces():
             for r in rows or []}
 
 
+def terminal_sessions(workspace):
+    data = cli("terminals", "list", "--local", "--workspace", workspace)
+    if isinstance(data, dict) and isinstance(data.get("sessions"), list):
+        return data["sessions"]
+    return None
+
+
+def process_exists(pid):
+    try:
+        os.kill(int(pid), 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except (ValueError, OSError):
+        return True  # an invalid or inaccessible process is not proof of completion
+
+
+def cleanup_terminals(root, dry_run):
+    """Close only detached terminals from recorded workers that completed settlement."""
+    try:
+        records = {}
+        with (root / "runs.jsonl").open() as stream:
+            for line in stream:
+                try:
+                    row = json.loads(line)
+                    records[row["stamp"]] = row
+                except (ValueError, KeyError, TypeError):
+                    continue
+    except OSError:
+        return
+    for run in (root / "runs").glob("*/worker.complete"):
+        directory = run.parent
+        record = records.get(directory.name, {})
+        if record.get("worker_exit") != 0 or (directory / "terminal.cleaned").exists():
+            continue
+        try:
+            worker = json.loads((directory / "workspace.json").read_text())
+            workspace, terminal = worker["workspace_id"], worker["terminal_id"]
+            pid = (directory / "worker.pid").read_text().strip()
+            if not workspace or not terminal or process_exists(pid):
+                continue
+        except (OSError, ValueError, KeyError, TypeError):
+            continue
+        sessions = terminal_sessions(workspace)
+        if sessions is None:
+            continue
+        matches = [s for s in sessions if s.get("terminalId") == terminal]
+        if not matches:
+            if not dry_run:
+                (directory / "terminal.cleaned").touch()
+            continue
+        if len(matches) != 1 or matches[0].get("attached") is not False:
+            continue
+        print(f"cleanup: {'would close' if dry_run else 'closing'} finished terminal {terminal} ({directory.name})")
+        if not dry_run and cli("terminals", "close", "--local", "--workspace", workspace,
+                               "--terminal", terminal) is not None:
+            (directory / "terminal.cleaned").touch()
+
+
+def unfinished_branches(root):
+    try:
+        with closing(sqlite3.connect(f"file:{root / 'workqueue.sqlite3'}?mode=ro", uri=True)) as con:
+            rows = con.execute("select plan from work where state != 'done'").fetchall()
+        branches = set()
+        for (plan,) in rows:
+            item = json.loads(plan)
+            if not isinstance(item, dict):
+                return None
+            if not isinstance(item.get("branch"), str) or not item["branch"]:
+                return None  # cannot rule out an assignment without its branch identity
+            branches.add(item["branch"])
+        return branches
+    except (sqlite3.Error, ValueError, OSError):
+        return None
+
+
 def cmd_cleanup(a):
+    root = Path(a.root)
+    root.mkdir(parents=True, exist_ok=True)
+    with (root / "workspace-cleanup.lock").open("a") as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return 0
+        cleanup_terminals(root, a.dry_run)
+        return cleanup_worktrees(a, root)
+
+
+def cleanup_worktrees(a, root):
     tagged = as_list(cli("workspaces", "list", "--local", "--tag", TAG))
     if not tagged:
         print("cleanup: no advance-roadmap workspaces")
         return 0
     merged = merged_workspaces()
+    unfinished = unfinished_branches(root)
+    if unfinished is None:
+        print("cleanup: work queue unavailable; keeping workspaces")
+        return 0
     now_ms = time.time() * 1000
     doomed = []
     for w in tagged:
@@ -221,11 +316,23 @@ def cmd_cleanup(a):
             continue  # unmerged: in flight, or a branch left for Jake — keep it
         if info["busy"] or info["open_prs"]:
             continue  # an agent is still working in it, or a fix-forward PR is still open
+        if not w.get("branch") or w["branch"] in unfinished:
+            continue
+        sessions = terminal_sessions(w["id"])
+        if sessions is None or any(s.get("exited") is not True for s in sessions):
+            continue
         path = w.get("worktreePath") or w.get("worktree_path")
+        if not path or not os.path.isdir(path):
+            continue
         if path and os.path.isdir(path):
             st = subprocess.run(["git", "-C", path, "status", "--porcelain"], capture_output=True, text=True)
             if st.returncode != 0 or st.stdout.strip():
                 print(f"cleanup: keeping {w.get('name') or w['id']} — uncommitted work in {path}")
+                continue
+            # A merged PR does not prove that later commits on this branch were merged.
+            ancestor = subprocess.run(["git", "-C", path, "merge-base", "--is-ancestor", "HEAD",
+                                       "refs/remotes/origin/HEAD"], capture_output=True)
+            if ancestor.returncode != 0:
                 continue
         idle_min = (now_ms - max(info["last_event_at"] or 0, info["merged_at"] or 0)) / 60000
         if idle_min < a.min_idle_minutes:
@@ -258,6 +365,7 @@ def main(argv=None):
     cp = sub.add_parser("cleanup")
     cp.add_argument("--dry-run", action="store_true")
     cp.add_argument("--min-idle-minutes", type=float, default=30)
+    cp.add_argument("--root", default=os.environ.get("ADVANCE_ROADMAP_ROOT", os.path.expanduser("~/.claude/automations/advance-roadmap")))
     a = p.parse_args(argv)
     return {"available": cmd_available, "project-id": cmd_project_id,
             "launch": cmd_launch, "cleanup": cmd_cleanup}[a.cmd](a)
