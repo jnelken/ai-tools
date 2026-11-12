@@ -1,10 +1,10 @@
 # DEV-324 Invariant Review Triage
 
-> **Status:** Implementation complete; awaiting clean current-HEAD review before shipment.
+> **Status:** Final review is in progress; archive this plan in Step 6 after clean review and verification, before opening the PR.
 
 ## Status
 
-Implementation is complete. The final shipping review is still pending.
+The item remains active through final review. After a clean current-HEAD review and verification, Step 6 records the shipped commit and moves this document to `docs/plans/archive/` before the PR is opened.
 
 ## Decisions
 
