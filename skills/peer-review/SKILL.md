@@ -190,6 +190,7 @@ Run the whole block above, including its last two lines (requested effort and ro
 
 **Every round: ensure the focus prompt carries the invariant checklist before dispatch.** The matrix above is prepared only on a branch's first round; this check runs on every round so existing focus files also receive the checklist. Append it idempotently:
 ```bash
+GIT_DIR=$(git rev-parse --git-dir)
 FOCUS_FILE="$GIT_DIR/peer-review-focus"
 touch "$FOCUS_FILE"
 if ! grep -Fq 'Invariant check:' "$FOCUS_FILE"; then
