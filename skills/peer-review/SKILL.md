@@ -184,7 +184,11 @@ Run the whole block above, including its last two lines (requested effort and ro
 2. **Self-check the predictable cells yourself, first** — especially the security-shaped ones: *does the new affordance respect value masking / authorization in every state?* Fix what you find before spending a review round discovering it.
 3. **Persist the matrix as a focus prompt** so every `/loop` round reuses it:
    ```bash
-   echo "verify copy-vs-display parity for every data type; check masked/unauthorized/loading/read-only states; check all editor variants and host contexts" > "$GIT_DIR/peer-review-focus"
+   FOCUS_FILE="$GIT_DIR/peer-review-focus"
+   MATRIX='verify copy-vs-display parity for every data type; check masked/unauthorized/loading/read-only states; check all editor variants and host contexts'
+   if ! grep -Fqx "$MATRIX" "$FOCUS_FILE" 2>/dev/null; then
+     printf '%s\n' "$MATRIX" >> "$FOCUS_FILE"
+   fi
    ```
    (That's an example — write the actual axes you enumerated.) Like the rounds file, this persists across iterations and is never cleaned up per-round.
 
