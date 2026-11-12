@@ -1,10 +1,10 @@
 # DEV-324 Invariant Review Triage
 
-> **Shipped:** 2026-11-12 — `edd74df`.
+> **Status:** Implementation complete; final current-HEAD review pending as of 2026-11-12.
 
 ## Status
 
-Implementation and cross-provider review are complete. Shipping proceeds through the DEV-324 PR.
+Implementation is complete. The last review found two test-only issues, now fixed in `419edc5`; the final shipping review is still pending.
 
 ## Decisions
 
@@ -28,6 +28,7 @@ Implementation and cross-provider review are complete. Shipping proceeds through
 - Fixed reviewer findings on installed instruction paths and recursive guard coverage.
 - Required checks pass on `edd74df`: invariant fixtures (15), review automation, worker goal-mode routing, and agent profile tests (20).
 - Cross-provider review round 2 returned clean on `edd74df`.
+- Follow-up review found traversal-order sensitivity and a `set -e` diagnostic issue; fixed in `419edc5` and reverified. A clean review of that final commit remains required.
 
 ## Approach
 
