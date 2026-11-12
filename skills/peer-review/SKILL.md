@@ -188,12 +188,14 @@ Run the whole block above, including its last two lines (requested effort and ro
    ```
    (That's an example — write the actual axes you enumerated.) Like the rounds file, this persists across iterations and is never cleaned up per-round.
 
-4. **Always include the invariant checklist in the focus prompt** (both reviewer paths read this file, so it is the one delivery point). Before every reviewer dispatch, append this line only if it is missing. This also updates focus files created by earlier rounds or branches before the checklist existed:
-   ```bash
-   if ! grep -Fq 'Invariant check:' "$GIT_DIR/peer-review-focus" 2>/dev/null; then
-     echo "Invariant check: classify each finding as an instance or an invariant (a rule every path reaching a side effect must obey). For an invariant, list every code path that reaches the side effect and flag any changed path that bypasses a single owner." >> "$GIT_DIR/peer-review-focus"
-   fi
-   ```
+**Every round: ensure the focus prompt carries the invariant checklist before dispatch.** The matrix above is prepared only on a branch's first round; this check runs on every round so existing focus files also receive the checklist. Append it idempotently:
+```bash
+FOCUS_FILE="$GIT_DIR/peer-review-focus"
+touch "$FOCUS_FILE"
+if ! grep -Fq 'Invariant check:' "$FOCUS_FILE"; then
+  echo "Invariant check: classify each finding as an instance or an invariant (a rule every path reaching a side effect must obey). For an invariant, list every code path that reaches the side effect and flag any changed path that bypasses a single owner." >> "$FOCUS_FILE"
+fi
+```
 
 For either reviewer, pass the **absolute worktree path**, scope `base:<branch>` or `uncommitted` from step 1, `$EFFORT` (`high` or `medium`), the complete contents of `$GIT_DIR/peer-review-focus` (including every `Decided … — do not re-report` line), and lens text plus label (`main` for a single call). Request "Also report anything else you find" alongside the focus. Each agent returns one fenced block with `status: ok | usage_limited | failed`, `reviewer: codex|claude <model> / <effort>`, `lens: <label>`, `log: <absolute path>`, and a normalized findings table (`sev | file:line | claim | suggested fix`), or `findings: none`.
 

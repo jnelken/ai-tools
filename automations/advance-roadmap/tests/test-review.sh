@@ -4,6 +4,12 @@
 # echoed prompt), and every round leaves one line in the review log.
 set -eu
 
+# Scheduled worker variables must not change the fake reviewer's routing or quota behavior.
+if [ "${ADVANCE_ROADMAP_TEST_ENV_CLEAN:-0}" != 1 ]; then
+  exec env -i HOME="$HOME" PATH="$PATH" TMPDIR="${TMPDIR:-/tmp}" \
+    ADVANCE_ROADMAP_TEST_ENV_CLEAN=1 zsh "$0" "$@"
+fi
+
 HERE="$(cd "$(dirname "$0")/.." && pwd)"
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/advance-roadmap-review-test.XXXXXX")"
 trap 'rm -rf "$TMP"' EXIT INT TERM

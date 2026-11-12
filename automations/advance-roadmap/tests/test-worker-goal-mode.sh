@@ -1,6 +1,12 @@
 #!/bin/zsh
 set -eu
 
+# Scheduled worker variables must not leak into these isolated routing fixtures.
+if [ "${ADVANCE_ROADMAP_TEST_ENV_CLEAN:-0}" != 1 ]; then
+  exec env -i HOME="$HOME" PATH="$PATH" TMPDIR="${TMPDIR:-/tmp}" \
+    ADVANCE_ROADMAP_TEST_ENV_CLEAN=1 zsh "$0" "$@"
+fi
+
 TEST_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 SKILL_DIR="$(cd "$TEST_DIR/../../skills/advance-roadmap" && pwd)"
 TMP_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/advance-roadmap-goal-test.XXXXXX")"
