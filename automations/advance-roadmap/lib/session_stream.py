@@ -51,6 +51,7 @@ def cached_quota(args, budget):
     reason, observations = quota_decision(reading, budget.get('baseline') or {},
                                           budget.get('worker_reservation') or {}, other)
     return reason, {'at': now, 'source': reading.get('source'), 'observed_at': reading.get('observed_at'),
+                    'error': reading.get('error'),
                     'windows': observations, 'other_reservations': len(active),
                     'account_delta_quality': 'account-wide, isolation unverified'}
 
@@ -90,13 +91,13 @@ def run(args):
     if budget:
         try:
             blocked, check = cached_quota(args, budget)
-            if budget.get('job_override'):
-                fresh = (isinstance(check.get('observed_at'), (int, float))
-                         and 0 <= time.time() - check['observed_at'] <= 60
+            if budget.get('job_override') or os.environ.get('ADVANCE_ROADMAP_CONTINUOUS') == '1':
+                fresh = (not check.get('error') and isinstance(check.get('observed_at'), (int, float))
+                         and 0 <= time.time() - check['observed_at'] <= (60 if budget.get('job_override') else 120)
                          and bool(check.get('windows'))
                          and all(isinstance(w.get('live'), (int, float)) for w in check['windows'].values()))
                 if not fresh:
-                    blocked = 'override-stale-usage'
+                    blocked = 'override-stale-usage' if budget.get('job_override') else 'usage-unavailable'
             if blocked:
                 if args.lifecycle:
                     Path(args.lifecycle).write_text(json.dumps({'reason': blocked, 'forced': True,
@@ -104,9 +105,9 @@ def run(args):
                         'last_quota': check}) + '\n')
                 return 124
         except (OSError, ValueError, KeyError, ImportError):
-            if budget.get('job_override'):
+            if budget.get('job_override') or os.environ.get('ADVANCE_ROADMAP_CONTINUOUS') == '1':
                 if args.lifecycle:
-                    Path(args.lifecycle).write_text(json.dumps({'reason': 'override-usage-unavailable',
+                    Path(args.lifecycle).write_text(json.dumps({'reason': 'override-usage-unavailable' if budget.get('job_override') else 'usage-unavailable',
                         'forced': True, 'elapsed_seconds': 0, 'provider_exit': None,
                         'session_captured': False}) + '\n')
                 return 124

@@ -100,13 +100,24 @@ def quota():
         cache = load(cache_path)
         if cache.get('identity') != identity:
             cache = {'identity': identity}
-        # Parallel session boundaries share a bounded-age observation; every boundary still logs.
-        if now - cache.get('attempted_at', 0) >= 5:
+        # Share a bounded-age observation across sessions. A rate-limited quota
+        # endpoint needs its own cooldown; retrying it every few seconds can
+        # keep an otherwise healthy account permanently stale.
+        next_probe = cache.get('next_probe_at')
+        if not isinstance(next_probe, (int, float)):
+            next_probe = cache.get('attempted_at', 0) + (300 if cache.get('error') == 'http_429' else 60)
+        if now >= next_probe:
             value, error = probe(credential)
             cache['attempted_at'] = now
             cache['error'] = error
             if value:
-                cache.update(observed_at=time.time(), windows=value, source='oauth_usage')
+                cache.update(observed_at=time.time(), windows=value, source='oauth_usage',
+                             rate_limit_failures=0, next_probe_at=now + 60)
+            elif error == 'http_429':
+                failures = min(int(cache.get('rate_limit_failures', 0)) + 1, 4)
+                cache.update(rate_limit_failures=failures, next_probe_at=now + min(1800, 300 * 2 ** (failures - 1)))
+            else:
+                cache['next_probe_at'] = now + 60
             fd = os.open(cache_path, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600)
             with os.fdopen(fd, 'w') as handle:
                 json.dump(cache, handle)
@@ -120,7 +131,7 @@ def quota():
             'source': cache.get('source', 'unavailable'), 'observed_at': observed,
             'age_seconds': max(0, round(time.time() - observed, 3)) if observed else None,
             'status': ('unavailable' if not cache.get('windows') else
-                       'stale' if cache.get('error') or cache.get('source') != 'oauth_usage' or now - observed > 5 else 'fresh'),
+                       'stale' if cache.get('error') or cache.get('source') != 'oauth_usage' or now - observed > 60 else 'fresh'),
             'windows': cache.get('windows', {}), 'error': cache.get('error'),
         }
 

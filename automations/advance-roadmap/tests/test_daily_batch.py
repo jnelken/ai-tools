@@ -12,6 +12,7 @@ import unittest
 from datetime import datetime
 from unittest.mock import patch
 from pathlib import Path
+from types import SimpleNamespace
 
 HERE = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(HERE))
@@ -230,6 +231,16 @@ class DailyBatchTest(unittest.TestCase):
         self.assertEqual(batch.state['review_fallback'], 'review fallback: cross-provider (cursor gated until reset)')
         batch.refresh_budget()
         self.assertNotIn('review_fallback', batch.state)
+
+    def test_continuous_budget_refresh_is_throttled(self):
+        budget = SimpleNamespace(review_strategy={'strategy': 'cross-provider', 'reason': None})
+        with patch.dict(os.environ, {'ADVANCE_ROADMAP_CONTINUOUS': '1'}), \
+                patch.object(daily_batch.time, 'monotonic', return_value=110), \
+                patch.object(daily_batch, 'ROOT', self.root):
+            batch = daily_batch.Batch(self.root, [], lanes=1)
+            batch.budget = budget
+            batch._budget_refreshed_at = 100
+            batch.refresh_budget()  # A second quota probe would fail: this budget has no refresh method.
 
     def events(self):
         return [json.loads(line) for line in (self.root / 'trace.jsonl').read_text().splitlines()]
@@ -669,6 +680,12 @@ PYTHON
                 budget.refresh()
             self.assertEqual(budget.workers, [])
             self.assertEqual(budget.planners, [])
+            with patch.object(daily_batch.agent_budget, 'readings', return_value={
+                    'observed_at': now, 'error': 'http_429',
+                    'windows': {'five_hour': {'live': 1, 'cap': 70}}}):
+                budget.refresh()
+            self.assertEqual(budget.workers, [])
+            self.assertEqual(budget.planners, [])
 
     def test_incremental_replay_admits_ten_point_unit_not_eighty_two_point_worker(self):
         with self.budget_context(), patch.object(daily_batch, 'ROOT', self.root):
@@ -729,6 +746,9 @@ PYTHON
                 self.assertIsNotNone(chosen)
                 self.assertEqual(chosen['worker'], 'claude')
                 self.assertEqual(chosen['baseline']['windows']['five_hour']['cap'], 100)
+                fresh['error'] = 'http_429'
+                self.assertFalse(budget.prepare_override())
+                fresh.pop('error')
                 fresh['observed_at'] = now - 61
                 self.assertFalse(budget.prepare_override())
 

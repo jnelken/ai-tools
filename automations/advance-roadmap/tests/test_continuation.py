@@ -9,6 +9,8 @@ import sys
 import tempfile
 import time
 import unittest
+from types import SimpleNamespace
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'lib'))
 import continuation
@@ -31,6 +33,19 @@ class ContinuationTest(unittest.TestCase):
 
     def git(self, *args):
         subprocess.run(['git', '-C', str(self.path), *args], check=True, capture_output=True)
+
+    def test_continuous_start_rejects_recent_rate_limited_reading(self):
+        request, budget, lifecycle = (self.path / name for name in ('request.json', 'budget.json', 'lifecycle.json'))
+        request.write_text('{}')
+        budget.write_text('{"lease_ids": ["one"]}')
+        args = SimpleNamespace(request=request, budget=budget, lifecycle=lifecycle)
+        reading = {'observed_at': time.time(), 'error': 'http_429',
+                   'windows': {'five_hour': {'live': 10}}}
+        with patch.dict(os.environ, {'ADVANCE_ROADMAP_CONTINUOUS': '1'}), \
+                patch.object(session_stream, 'cached_quota', return_value=(None, reading)), \
+                patch.object(session_stream.subprocess, 'Popen', side_effect=AssertionError('provider started')):
+            self.assertEqual(session_stream.run(args), 124)
+        self.assertEqual(json.loads(lifecycle.read_text())['reason'], 'usage-unavailable')
 
     def test_exact_identity_and_compatibility(self):
         saved = continuation.binding(self.request, 'codex', self.path, 'session-1', self.env)

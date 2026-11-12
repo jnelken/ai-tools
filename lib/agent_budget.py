@@ -610,7 +610,7 @@ def readings(provider, root=None, probe=True):
             if q.get('source') != 'oauth_usage':
                 q['windows'] = {}
         fresh = number(q.get('age_seconds')) and q['age_seconds'] <= MAX_AGE
-        return {'source': q.get('source'), 'observed_at': q.get('observed_at'), 'windows': {
+        return {'source': q.get('source'), 'observed_at': q.get('observed_at'), 'error': q.get('error'), 'windows': {
             name: {'live': value.get('used_percentage') if fresh else None, 'cap': cap}
             for name, cap in [('five_hour', usage.MAX_FIVE_HOUR_PCT), ('seven_day', usage.MAX_SEVEN_DAY_PCT)]
             for value in [q.get('windows', {}).get(name, {})]}}

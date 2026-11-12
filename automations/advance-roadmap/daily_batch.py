@@ -253,7 +253,7 @@ class RoadmapBudget:
             def fresh(provider):
                 reading = self.readings[provider]
                 observed = reading.get('observed_at')
-                return (isinstance(observed, (int, float)) and 0 <= now - observed <= 120
+                return (not reading.get('error') and isinstance(observed, (int, float)) and 0 <= now - observed <= 120
                         and bool(reading.get('windows'))
                         and all(isinstance(window.get('live'), (int, float))
                                 for window in reading['windows'].values()))
@@ -328,7 +328,7 @@ class RoadmapBudget:
             gate = gates.get(provider, {})
             if gate.get('state') == 'limited' or 'rate limit reached' in (gate.get('reason') or '').lower():
                 continue  # an actual provider limit is not an estimate
-            if not isinstance(reading.get('observed_at'), (int, float)) or not 0 <= now - reading['observed_at'] <= 60:
+            if reading.get('error') or not isinstance(reading.get('observed_at'), (int, float)) or not 0 <= now - reading['observed_at'] <= 60:
                 continue
             if not reading.get('windows') or any(not isinstance(w.get('live'), (int, float))
                                                  for w in reading['windows'].values()):
@@ -394,7 +394,8 @@ class RoadmapBudget:
                             *[{'provider': p, 'role': 'reviewer', 'scale': scale} for p in reviewers]]
                 if planner:
                     requests.append({'provider': planner, 'role': 'planner'})
-                if override and any(not isinstance(readings[p].get('observed_at'), (int, float))
+                if override and any(readings[p].get('error')
+                                    or not isinstance(readings[p].get('observed_at'), (int, float))
                                     or not 0 <= time.time() - readings[p]['observed_at'] <= 60
                                     or any(not isinstance(w.get('live'), (int, float))
                                            for w in readings[p].get('windows', {}).values())
@@ -867,7 +868,11 @@ class Batch:
         return decision
 
     def refresh_budget(self):
+        if (os.environ.get('ADVANCE_ROADMAP_CONTINUOUS') == '1'
+                and time.monotonic() - getattr(self, '_budget_refreshed_at', 0) < 15):
+            return self.sync_review_fallback()
         self.budget.refresh()
+        self._budget_refreshed_at = time.monotonic()
         return self.sync_review_fallback()
 
     def record_starvation(self):
@@ -898,6 +903,7 @@ class Batch:
         self.streaming = streaming
         self.summary_enabled = summary
         self.budget = RoadmapBudget()
+        self._budget_refreshed_at = time.monotonic()
         self.sync_review_fallback()
         with workqueue.Store(ROOT) as store:
             workqueue.sync(store, shared.code_dir())
