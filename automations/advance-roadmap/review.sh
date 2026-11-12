@@ -93,10 +93,16 @@ else
   REVIEW_FALLBACK_REASON="${REVIEW_FALLBACK_REASON:-}"
 fi
 
+# Cursor is disabled for roadmap routing even when an older saved allocation or
+# explicit legacy strategy requests it.
+if [ "$REVIEW_STRATEGY" = cursor-then-codex ]; then
+  REVIEW_STRATEGY=cross-provider
+  REVIEW_FALLBACK_REASON="Cursor is disabled for roadmap routing"
+fi
 case "$WORKER" in
   cursor) cross_provider_reviewers=(codex claude) ;;
-  codex) cross_provider_reviewers=(cursor claude) ;;
-  claude) cross_provider_reviewers=(codex cursor) ;;
+  codex) cross_provider_reviewers=(claude) ;;
+  claude) cross_provider_reviewers=(codex) ;;
 esac
 
 git -C "$REPO" diff --quiet "$BASE...HEAD" && { echo "FATAL: no changes vs $BASE to review" >&2; exit 2; }

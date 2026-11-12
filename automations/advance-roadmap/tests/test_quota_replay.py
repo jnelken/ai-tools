@@ -52,13 +52,10 @@ class Oct27BudgetAdmissionTest(unittest.TestCase):
             budget.readings = {p: {'windows': {'auto' if p == 'cursor' else 'five_hour': {'live': live, 'cap': cap}}}
                                for p, live, cap in [('codex', 41, 70), ('claude', 16, 70), ('cursor', 100, 100)]}
             self.assertLess(budget.models['codex']['roles']['planner']['pct']['five_hour'], 4.4)
-            # Actual 10-27 pool: mandatory Cursor review cannot run. A4 must
-            # stop before even the now-cheap Codex planners spend anything.
-            self.assertIsNone(budget.choose(commit=False))
-            self.assertFalse(budget.admit({'repo': 'demo', 'stamp': 'blocked'}))
-            # With an eligible cross-provider reviewer, the same 41% Codex
-            # reading can admit a bounded five-lane wave (old factor admitted 0).
-            os.environ['ADVANCE_ROADMAP_REVIEW_STRATEGY'] = 'cross-provider'
+            # The old Cursor pool no longer gates Codex work; Claude reviews it.
+            allocation = budget.choose(commit=False)
+            self.assertEqual(allocation['reviewers'], ['claude'])
+            # The same 41% Codex reading can admit a bounded five-lane wave.
             items = [{'repo': str(n), 'stamp': str(n)} for n in range(5)]
             self.assertEqual(sum(budget.admit(item) for item in items), 5)
             for item in items:

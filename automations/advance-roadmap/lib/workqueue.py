@@ -229,7 +229,8 @@ class Store:
                 # a completed item, or a later attempt.
                 if record.get('outcome') == 'yielded' and attempt['work_id']:
                     self.db.execute("UPDATE work SET state='eligible',not_before=0,updated=? "
-                                    "WHERE id=? AND latest_stamp=? AND state='retry'",
+                                    "WHERE id=? AND latest_stamp=? AND state='retry' "
+                                    "AND coalesce(reason, '') != 'Repeated empty continuation without checkpoint progress; retry after one hour'",
                                     (time.time(), attempt['work_id'], stamp))
                 return
             self.db.execute('UPDATE attempts SET reported_repo=?,outcome=?,record=?,updated=? WHERE stamp=?',
@@ -258,6 +259,25 @@ class Store:
                 if next_phase in {'implementing', 'reviewing', 'shipping', 'verifying'}:
                     phase = next_phase
                 state, wake = 'eligible', 0
+                # An empty repeated handoff at the same checkpoint is not forward progress.
+                # Back it off instead of immediately launching the identical continuation forever.
+                sparse = set(result) <= {'outcome', 'provider', 'next_phase'} and result.get('outcome') == 'yielded'
+                key = 'empty_yield:' + work['id']
+                if os.environ.get('ADVANCE_ROADMAP_CONTINUOUS') == '1' and sparse:
+                    try:
+                        checkpoint = json.loads(work['checkpoint'])
+                    except (ValueError, TypeError):
+                        checkpoint = {}
+                    signature = [phase, checkpoint.get('head'), checkpoint.get('dirty_paths'), result]
+                    prior = self.get(key, {})
+                    count = prior.get('count', 0) + 1 if prior.get('signature') == signature else 1
+                    self.db.execute('INSERT OR REPLACE INTO settings VALUES (?,?)',
+                                    (key, json.dumps({'signature': signature, 'count': count})))
+                    if count >= 2:
+                        state, wake = 'retry', finished + 3600
+                        reason = 'Repeated empty continuation without checkpoint progress; retry after one hour'
+                else:
+                    self.db.execute('DELETE FROM settings WHERE key=?', (key,))
             elif outcome == 'shipped-deploy-failed':
                 state, phase = 'retry', 'verifying'
             elif (record.get('worker_exit') in (0, None) and result.get('needs_input') is True

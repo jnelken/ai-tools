@@ -107,7 +107,8 @@ def implementation_headroom(budget=None):
     if not workers:
         return False, "no worker provider is under its quota gate", "worker"
     if decision.get("strategy") == "cross-provider":
-        reviewers = [name for name, gate in by_provider.items() if gate.get("state") not in OUT_STATES]
+        reviewers = [name for name, gate in by_provider.items() if name in usage.ROUTED_PROVIDERS['reviewer']
+                     and gate.get("state") not in OUT_STATES]
         if by_provider and not any(r != w for w in workers for r in reviewers):
             reason = "every reviewer is gated" if not reviewers else "no cross-provider reviewer is under its quota gate"
             return False, reason, "reviewer"
@@ -261,9 +262,12 @@ class RoadmapBudget:
             self.planners = [provider for provider in self.planners if fresh(provider)]
 
     def review_decision(self):
-        return getattr(self, "review_strategy", None) or usage.effective_review_strategy(
+        decision = getattr(self, "review_strategy", None) or usage.effective_review_strategy(
             os.environ.get("ADVANCE_ROADMAP_REVIEW_STRATEGY", "cursor-then-codex"),
             list(self.gates.values()))
+        if decision.get('strategy') == 'cursor-then-codex':
+            return usage.effective_review_strategy('cursor-then-codex', list(self.gates.values()))
+        return decision
 
     def routes(self):
         decision = self.review_decision()
@@ -271,8 +275,7 @@ class RoadmapBudget:
             if worker not in usage.ROUTED_PROVIDERS["worker"]:
                 continue
             if decision.get("strategy") == "cross-provider":
-                order = {"cursor": ["codex", "claude"], "codex": ["cursor", "claude"],
-                         "claude": ["codex", "cursor"]}[worker]
+                order = {"codex": ["claude"], "claude": ["codex"]}[worker]
                 reviews = [[p] for p in order if self.gates.get(p, {}).get("state") not in OUT_STATES]
             else:
                 reviews = [["cursor", "codex"]] if all(
@@ -290,8 +293,8 @@ class RoadmapBudget:
                 reviewers = []
                 if phase in ('reviewing', 'shipping'):
                     if decision.get('strategy') == 'cross-provider':
-                        reviewers = next(([p] for p in ({'codex': ['cursor', 'claude'],
-                            'claude': ['codex', 'cursor']}[worker])
+                        reviewers = next(([p] for p in ({'codex': ['claude'],
+                            'claude': ['codex']}[worker])
                             if self.gates.get(p, {}).get('state') not in OUT_STATES), None)
                     else:
                         reviewers = (['cursor', 'codex'] if all(self.gates.get(p, {}).get('state')
@@ -409,7 +412,7 @@ class RoadmapBudget:
             reviews = [[]]
             if phase in ('reviewing', 'shipping'):
                 if decision.get('strategy') == 'cross-provider':
-                    order = {'codex': ['cursor', 'claude'], 'claude': ['codex', 'cursor']}[worker]
+                    order = {'codex': ['claude'], 'claude': ['codex']}[worker]
                     reviews = [[p] for p in order if self.gates.get(p, {}).get('state') not in OUT_STATES]
                 else:
                     reviews = [['cursor', 'codex']] if all(
@@ -1025,6 +1028,11 @@ class Batch:
                                 or item.get('continuation_queued') or not pending_action(item['repo'])):
                             continue
                         item['continuation_queued'] = True
+                        with workqueue.Store(ROOT) as store:
+                            hold = store.hold(item['repo'])
+                        if hold:
+                            item['continuation_hold'] = hold['reason']
+                            continue
                         new = self.reserve(item['repo'], 1)
                         new['streaming'] = True
                         new['verdict_check'] = {'priority': 0, 'result': 'pending',

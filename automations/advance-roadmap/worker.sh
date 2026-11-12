@@ -158,6 +158,10 @@ fi
 
 # shellcheck disable=SC2206
 providers=(${=PROVIDERS_STR})
+# Old saved allocations may still name Cursor; continuous routing must not use it.
+if [ "${ADVANCE_ROADMAP_CONTINUOUS:-0}" = "1" ]; then
+  providers=(${providers:#cursor})
+fi
 if [ ${#providers[@]} -eq 0 ]; then
   # Bookkeeping with Claude is still possible if the chain came back empty — but only if
   # Claude is under its gate, which the loop below checks like any other provider.
@@ -181,6 +185,10 @@ if [ -z "$WORKER_REVIEW_STRATEGY" ]; then
       'import json,sys; print(json.load(sys.stdin).get("reason") or "")' 2>/dev/null || true)"
     [ -n "$WORKER_REVIEW_STRATEGY" ] || WORKER_REVIEW_STRATEGY="$configured_strategy"
   fi
+fi
+if [ "$WORKER_REVIEW_STRATEGY" = cursor-then-codex ]; then
+  WORKER_REVIEW_STRATEGY=cross-provider
+  WORKER_REVIEW_FALLBACK_REASON="Cursor is disabled for roadmap routing"
 fi
 case "$WORKER_REVIEW_STRATEGY" in
   cursor-then-codex|cross-provider) ;;

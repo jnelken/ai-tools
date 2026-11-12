@@ -332,12 +332,12 @@ class GateMatrixTests(unittest.TestCase):
                 "seven_day": {"used_pct": 90, "reset_epoch": later}}
         self.assertEqual(self.gate("claude", "worker", prov)["reset_epoch"], later)
 
-    def test_review_strategy_falls_back_only_when_configured_default_has_gated_cursor(self):
+    def test_legacy_cursor_review_strategy_is_disabled(self):
         gates = [{"provider": "cursor", "state": "over", "reset_at": "2026-11-03T10:30:00-05:00"}]
         self.assertEqual(usage.effective_review_strategy("cursor-then-codex", gates), {
             "configured": "cursor-then-codex", "strategy": "cross-provider",
-            "reason": "cursor gated until 2026-11-03T10:30:00-05:00",
-            "reset_at": "2026-11-03T10:30:00-05:00"})
+            "reason": "Cursor is disabled for roadmap routing",
+            "reset_at": None})
 
     def test_explicit_cross_provider_stays_cross_provider(self):
         decision = usage.effective_review_strategy("cross-provider", [
@@ -345,11 +345,11 @@ class GateMatrixTests(unittest.TestCase):
         self.assertEqual(decision["strategy"], "cross-provider")
         self.assertIsNone(decision["reason"])
 
-    def test_available_cursor_keeps_configured_strategy(self):
+    def test_available_cursor_still_uses_cross_provider(self):
         decision = usage.effective_review_strategy("cursor-then-codex", [
             {"provider": "cursor", "state": "ok"}])
-        self.assertEqual(decision["strategy"], "cursor-then-codex")
-        self.assertIsNone(decision["reason"])
+        self.assertEqual(decision["strategy"], "cross-provider")
+        self.assertEqual(decision["reason"], "Cursor is disabled for roadmap routing")
 
     def test_thresholds_are_overridable_by_env(self):
         env = dict(os.environ, ADVANCE_ROADMAP_MAX_FIVE_HOUR_PCT="50", ADVANCE_ROADMAP_MAX_WEEKLY_PCT="60",

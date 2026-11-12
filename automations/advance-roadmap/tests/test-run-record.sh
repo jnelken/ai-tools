@@ -14,6 +14,7 @@ ROOT="$TMP/root"; SKILLS="$TMP/skills"; BIN="$TMP/bin"
 mkdir -p "$ROOT/lib" "$SKILLS" "$BIN" "$TMP/code/demo"
 cp "$HERE/run.sh" "$HERE/worker.sh" "$ROOT/"
 cp "$HERE/lib/workqueue.py" "$HERE/lib/runrecord.py" "$HERE/lib/tokens.py" "$HERE/lib/workspaces.py" "$HERE/lib/models.sh" "$ROOT/lib/"
+cp "$HERE/lib/post_run_summary.mjs" "$ROOT/lib/"
 # This suite exercises records, not plan reuse; each fake orchestrator result is independent.
 print -r -- 'raise SystemExit(0)' > "$ROOT/lib/pendingplan.py"
 . "$ROOT/lib/models.sh"
@@ -111,7 +112,7 @@ grep -q '^(raw JSON, no fence) to: ' "$ROOT/worker.sh" || { echo "FAIL: prompt f
 
 run() {
   env -u SLACK_CCUSAGE_WEBHOOK_URL -u ADVANCE_ROADMAP_SLACK_WEBHOOK \
-    ADVANCE_ROADMAP_SLACKAGENT_DIR="$TMP/no-slackagent" PERSONAL_CODE_DIR="$TMP/code" DOTFILES_PERSONAL_MACHINE=1 \
+    ADVANCE_ROADMAP_SLACKAGENT_DIR="${TEST_SLACKAGENT_DIR:-$TMP/no-slackagent}" PERSONAL_CODE_DIR="$TMP/code" DOTFILES_PERSONAL_MACHINE=1 \
     ADVANCE_ROADMAP_ROOT="$ROOT" ADVANCE_ROADMAP_SKILL_DIR="$SKILLS" ADVANCE_ROADMAP_CONDUCTOR_DIR="$SKILLS" \
     ADVANCE_ROADMAP_SECRETS=/dev/null ADVANCE_ROADMAP_NOTIFY=0 \
     ADVANCE_ROADMAP_SUPERSET="${SUPERSET:-0}" ADVANCE_ROADMAP_SUPERSET_BIN="$BIN/superset" ADVANCE_ROADMAP_WORKER_POLL_S=1 \
@@ -267,4 +268,22 @@ fi
 run good echo
 check "echoed example fence is not a result" "$(last worker_result_source)" None
 check "echoed example does not ship"         "$(last outcome)" incomplete
+
+# Continuous quota skips also post exactly once; the fake Slack module records locally.
+mock_slack="$TMP/slackagent"
+mkdir -p "$mock_slack/scripts" "$mock_slack/src" "$mock_slack/node_modules/dotenv" "$mock_slack/node_modules/@slack/web-api"
+print '{"type":"module"}' > "$mock_slack/package.json"
+touch "$mock_slack/scripts/post-roadmap-summary.mjs"
+print 'exports.config = () => ({});' > "$mock_slack/node_modules/dotenv/index.js"
+print 'exports.WebClient = class {};' > "$mock_slack/node_modules/@slack/web-api/index.js"
+cat > "$mock_slack/src/roadmap-summary.js" <<'JS'
+import {readFileSync, appendFileSync} from 'node:fs';
+export const DEFAULT_ROADMAP_CHANNEL = '#eng';
+export const loadRunRecord = (path, stamp) => readFileSync(path, 'utf8').trim().split('\n').map(JSON.parse).find(r => r.stamp === stamp);
+export const postRoadmapSummary = async ({record}) => appendFileSync(process.env.TEST_POSTS, record.outcome + '\n');
+JS
+TEST_SLACKAGENT_DIR="$mock_slack" TEST_POSTS="$TMP/slack-posts" SLACK_BOT_TOKEN=test \
+  ADVANCE_ROADMAP_CONTINUOUS=1 ADVANCE_ROADMAP_BATCH_PID=$$ ADVANCE_ROADMAP_LANE=1 \
+  FAKE_NO_PLANNER=1 run good file
+check "continuous quota skip sends one run summary" "$(cat "$TMP/slack-posts")" skipped-quota
 echo "all passed"

@@ -307,12 +307,13 @@ class DailyBatchTest(unittest.TestCase):
 
     def test_a_gated_required_reviewer_plans_nothing(self):
         self.repo('a')
+        self.env['FAKE_WORKER_CHAIN'] = 'claude'
         self.env['FAKE_REVIEWER_GATES'] = json.dumps({'role': 'reviewer', 'gates': [
             {'provider': 'codex', 'state': 'over', 'reason': '5h 100% >= 70%'},
             {'provider': 'cursor', 'state': 'ok', 'reason': None}, {'provider': 'claude', 'state': 'ok'}]})
         self.run_batch()
         self.assertFalse(self.trace_exists())
-        self.assertIn('required codex reviewer is gated (5h 100% >= 70%)', self.state()['skipped_reason'])
+        self.assertIn('cross-provider reviewer', self.state()['skipped_reason'])
 
     def test_cursor_gate_automatically_admits_codex_with_claude_review(self):
         self.repo('a')
@@ -324,7 +325,7 @@ class DailyBatchTest(unittest.TestCase):
         state = self.state()
         self.assertTrue(self.trace_exists(), 'Codex work can be reviewed by Claude')
         self.assertEqual(state['review_fallback'],
-                         'review fallback: cross-provider (cursor gated until 2026-11-03T10:30:00-05:00)')
+                         'review fallback: cross-provider (Cursor is disabled for roadmap routing)')
 
     def test_cursor_gate_does_not_admit_claude_when_it_is_its_only_reviewer(self):
         self.repo('a')
@@ -338,7 +339,7 @@ class DailyBatchTest(unittest.TestCase):
         self.assertEqual(state['phase'], 'skipped')
         self.assertIn('cross-provider reviewer', state['skipped_reason'])
 
-    def test_cursor_available_keeps_default_two_stage_admission(self):
+    def test_cursor_available_still_uses_cross_provider_admission(self):
         self.repo('a')
         self.env['FAKE_REVIEWER_GATES'] = json.dumps({'gates': [
             {'provider': 'cursor', 'state': 'ok'}, {'provider': 'codex', 'state': 'ok'},
@@ -346,11 +347,12 @@ class DailyBatchTest(unittest.TestCase):
         self.run_batch()
         state = self.state()
         self.assertTrue(self.trace_exists())
-        self.assertNotIn('review_fallback', state)
+        self.assertIn('Cursor is disabled', state['review_fallback'])
+        self.assertTrue(all('cursor' not in i.get('allocation', {}).get('reviewers', []) for i in state['queue']))
 
     def test_reviewer_admission_skip_records_the_reviewer_gate(self):
         self.repo('a')
-        self.env.update(FAKE_REVIEWER_GATES=json.dumps({'gates': [
+        self.env.update(FAKE_WORKER_CHAIN='claude', FAKE_REVIEWER_GATES=json.dumps({'gates': [
             {'provider': 'codex', 'state': 'over', 'reason': '5h 99% >= 70%'},
             {'provider': 'cursor', 'state': 'ok'}, {'provider': 'claude', 'state': 'ok'}]}))
         # Healthy worker pool; the reviewer role alone names the exhausted provider.
@@ -481,7 +483,7 @@ class DailyBatchTest(unittest.TestCase):
         state_path = self.root / 'providers-usage.json'
         state = json.loads(state_path.read_text())
         # Recovery needs only its saved implementation and review, even with extra threads enabled.
-        state['providers']['codex']['five_hour']['used_pct'] = 69
+        state['providers']['codex']['five_hour']['used_pct'] = 40
         state_path.write_text(json.dumps(state))
         self.env.update(ADVANCE_ROADMAP_REVIEW_STRATEGY='cross-provider', FAKE_WORKER_CHAIN='claude')
         self.run_batch(lanes=1, extra=['--threads', '2'])
@@ -593,6 +595,7 @@ PYTHON
             routes = list(budget.routes())
             self.assertTrue(routes)
             self.assertTrue(all(worker != 'cursor' for worker, _ in routes))
+            self.assertTrue(all('cursor' not in reviewers for _, reviewers in routes))
 
     def test_expected_cost_and_conversion_follow_the_first_fitting_worker(self):
         with self.budget_context(), patch.object(daily_batch, 'ROOT', self.root), patch.object(daily_batch, 'dispatch_rates', return_value={'a': .6}):
@@ -603,7 +606,7 @@ PYTHON
             self.assertTrue(budget.admit(item))
             allocation = item['allocation']
             self.assertEqual(allocation['worker'], 'codex')
-            self.assertEqual([r['scale'] for r in allocation['requests'] if r['role'] != 'planner'], [.6, .6, .6])
+            self.assertEqual([r['scale'] for r in allocation['requests'] if r['role'] != 'planner'], [.6, .6])
             self.assertTrue(any(r['role'] == 'planner' for r in allocation['requests']))
             budget.planned(item)
             self.assertTrue(all(r['role'] != 'planner' for r in item['allocation']['requests']))
@@ -612,7 +615,7 @@ PYTHON
             budget.readings['cursor']['windows']['auto']['live'] = 94
             converted = budget.choose(item=item)
             self.assertIn(converted['worker'], ('codex', 'claude'))
-            self.assertEqual(converted['reviewers'], ['cursor', 'codex'])
+            self.assertEqual(converted['reviewers'], ['claude'])
             self.assertEqual({r.get('scale', 1) for r in converted['requests']}, {1})
             with daily_batch.agent_budget.lock():
                 leases = daily_batch.agent_budget.reap()

@@ -103,8 +103,8 @@ ROLE_PROVIDERS = {
     "worker": ("cursor", "codex", "claude"),
     "reviewer": ("codex", "cursor", "claude"),
 }
-# Cursor remains eligible for quota-aware review fallback, but not new worker assignments.
-ROUTED_PROVIDERS = {"worker": ("codex", "claude")}
+# Cursor is not routed to any unattended role, regardless of its reported quota.
+ROUTED_PROVIDERS = {"worker": ("codex", "claude"), "reviewer": ("codex", "claude")}
 # Cursor draws on a different pool per role: Auto, or the API pool for a named model.
 CURSOR_MODEL_ENV = {"worker": "ADVANCE_ROADMAP_CURSOR_WORKER_MODEL",
                     "reviewer": "ADVANCE_ROADMAP_CURSOR_REVIEW_MODEL"}
@@ -1167,12 +1167,7 @@ def effective_review_strategy(configured: str, reviewer_gates: list[dict[str, An
     decision = {"configured": configured, "strategy": configured, "reason": None, "reset_at": None}
     if configured == "cross-provider":
         return decision
-    cursor = next((g for g in reviewer_gates if g.get("provider") == "cursor"), {})
-    if cursor.get("state") in OUT_STATES:
-        reset_at = cursor.get("reset_at")
-        reason = f"cursor gated until {reset_at}" if reset_at else (
-            f"cursor gated ({cursor.get('reason') or cursor.get('state')})")
-        decision.update(strategy="cross-provider", reason=reason, reset_at=reset_at)
+    decision.update(strategy="cross-provider", reason="Cursor is disabled for roadmap routing")
     return decision
 
 

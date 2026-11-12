@@ -53,6 +53,30 @@ class QueueTest(unittest.TestCase):
         self.assertEqual(self.store.list()[0]['phase'], 'reviewing')
         self.assertEqual(self.store.list()[0]['state'], 'eligible')
 
+    def test_repeated_empty_yield_backs_off_and_reimport_preserves_hold(self):
+        result = {'outcome': 'yielded', 'provider': 'codex', 'next_phase': 'shipping'}
+        with patch.dict(os.environ, {'ADVANCE_ROADMAP_CONTINUOUS': '1'}), patch.object(q.time, 'time', return_value=1000):
+            self.register('20261110-103001')
+            self.store.finish({'stamp': '20261110-103001', 'outcome': 'yielded', 'worker_exit': 0}, result)
+            self.assertEqual(self.store.list()[0]['state'], 'eligible')
+            self.register('20261110-103002')
+            row = {'stamp': '20261110-103002', 'outcome': 'yielded', 'worker_exit': 0}
+            self.store.finish(row, result)
+            self.assertEqual((self.store.list()[0]['state'], self.store.list()[0]['not_before']), ('retry', 4600))
+            self.store.finish(row, result)
+            self.assertEqual(self.store.list()[0]['state'], 'retry')
+
+    def test_new_checkpoint_does_not_trigger_empty_yield_hold(self):
+        result = {'outcome': 'yielded', 'provider': 'codex', 'next_phase': 'shipping'}
+        with patch.dict(os.environ, {'ADVANCE_ROADMAP_CONTINUOUS': '1'}):
+            wid = self.register('20261110-103001')
+            self.store.checkpoint(wid, '20261110-103001', 'shipping', {'head': 'first'})
+            self.store.finish({'stamp': '20261110-103001', 'outcome': 'yielded', 'worker_exit': 0}, result)
+            self.register('20261110-103002')
+            self.store.checkpoint(wid, '20261110-103002', 'shipping', {'head': 'second'})
+            self.store.finish({'stamp': '20261110-103002', 'outcome': 'yielded', 'worker_exit': 0}, result)
+            self.assertEqual(self.store.list()[0]['state'], 'eligible')
+
     def test_interrupted_worker_cannot_clear_pending_assignment_with_partial_ship_result(self):
         saved, result, request = (self.root / name for name in ('pending.json', 'result.json', 'request.json'))
         saved.write_text(json.dumps({'orchestrator': plan(), 'last_stamp': '20261110-103001'}))

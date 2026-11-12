@@ -224,7 +224,48 @@ on_exit() {
     record aborted "run.sh exited $rc before recording" "$rc"
     regen_dashboard
   fi
+  post_continuous_summary
   cleanup_workspaces
+}
+post_continuous_summary() {
+  [ "${ADVANCE_ROADMAP_CONTINUOUS:-0}" = "1" ] && [ -n "$BATCH_PID" ] || return 0
+  [ "${ADVANCE_ROADMAP_RUN_SUMMARY:-1}" = "1" ] || return 0
+  local slackagent_dir="${ADVANCE_ROADMAP_SLACKAGENT_DIR:-$CODE_DIR/slackagent}"
+  local script="$slackagent_dir/scripts/post-roadmap-summary.mjs"
+  if [ -f "$script" ] && python3 - "$ROOT/lib/post_run_summary.mjs" "$script" "$STAMP" "$ROOT/runs.jsonl" >> "$LOG" 2>&1 <<'PY'
+import subprocess, sys
+try:
+    sys.exit(subprocess.run(['node', sys.argv[1], '--script', sys.argv[2], '--stamp', sys.argv[3],
+                             '--runs', sys.argv[4]], timeout=120, stdin=subprocess.DEVNULL).returncode)
+except (OSError, subprocess.TimeoutExpired) as error:
+    print(f'slackagent run post failed: {error}', file=sys.stderr)
+    sys.exit(1)
+PY
+  then
+    echo "=== slack: continuous run summary posted ===" >> "$LOG"
+    return 0
+  fi
+  echo "=== slack: continuous run summary failed; trying webhook ===" >> "$LOG"
+  [ -n "$SLACK_WEBHOOK" ] && command -v jq >/dev/null 2>&1 || return 0
+  local summary payload
+  summary="$(python3 - "$ROOT/runs.jsonl" "$STAMP" <<'PY'
+import json, sys
+for line in open(sys.argv[1]):
+    try:
+        row = json.loads(line)
+    except ValueError:
+        continue
+    if row.get('stamp') == sys.argv[2]:
+        detail = row.get('slack_summary') or row.get('summary') or row.get('detail') or ''
+        print(' '.join(f"{row.get('repo') or 'roadmap'}: {row.get('outcome') or 'unknown'} — {detail}".split())[:300])
+        break
+PY
+)"
+  [ -n "$summary" ] || return 0
+  payload="$(jq -n --arg t "*advance-roadmap* $summary" '{text:$t}')"
+  curl -sf -m 15 -X POST -H 'Content-Type: application/json' -d "$payload" "$SLACK_WEBHOOK" >/dev/null \
+    && echo "=== slack: continuous run webhook posted ===" >> "$LOG" \
+    || echo "=== slack: continuous run webhook failed ===" >> "$LOG"
 }
 cleanup_workspaces() {
   if [ "$SUPERSET_MODE" = "1" ] && [ -f "$WORKSPACES_PY" ]; then
