@@ -51,6 +51,7 @@ class QueueTest(unittest.TestCase):
         self.store.finish({'stamp': '20261110-153001', 'outcome': 'yielded', 'worker_exit': 124},
                           {'next_phase': 'shipping'})
         self.assertEqual(self.store.list()[0]['phase'], 'reviewing')
+        self.assertEqual(self.store.list()[0]['state'], 'eligible')
 
     def test_interrupted_worker_cannot_clear_pending_assignment_with_partial_ship_result(self):
         saved, result, request = (self.root / name for name in ('pending.json', 'result.json', 'request.json'))
@@ -63,6 +64,15 @@ class QueueTest(unittest.TestCase):
                                                    request_file=str(request), worker_rc=124))
         self.assertTrue(saved.exists())
         self.assertNotEqual(self.store.list()[0]['state'], 'done')
+
+    def test_reimport_migrates_old_retry_backoff_for_a_yield(self):
+        wid = self.register()
+        row = {'stamp': '20261110-103001', 'outcome': 'yielded', 'worker_exit': 143}
+        self.store.finish(row)
+        with self.store.db:
+            self.store.db.execute("UPDATE work SET state='retry',not_before=9999999999 WHERE id=?", (wid,))
+        self.store.finish(row)
+        self.assertEqual((self.store.list()[0]['state'], self.store.list()[0]['not_before']), ('eligible', 0))
 
     def test_late_older_attempt_cannot_replace_checkpoint_or_close_newer_work(self):
         wid = self.register()

@@ -224,6 +224,13 @@ class Store:
             # Re-imports must not advance cooldowns or resurrect settled work.
             encoded = json.dumps(record, sort_keys=True)
             if attempt['record'] == encoded:
+                # Older versions applied failure backoff to interrupted yields.
+                # Reconcile those records once without reviving a human hold,
+                # a completed item, or a later attempt.
+                if record.get('outcome') == 'yielded' and attempt['work_id']:
+                    self.db.execute("UPDATE work SET state='eligible',not_before=0,updated=? "
+                                    "WHERE id=? AND latest_stamp=? AND state='retry'",
+                                    (time.time(), attempt['work_id'], stamp))
                 return
             self.db.execute('UPDATE attempts SET reported_repo=?,outcome=?,record=?,updated=? WHERE stamp=?',
                             (record.get('repo'), record.get('outcome'), encoded, time.time(), stamp))
@@ -244,10 +251,10 @@ class Store:
             state, phase, wake = 'retry', work['phase'], finished + backoff
             if outcome == 'shipped' and record.get('worker_exit') == 0 and record.get('worker'):
                 state, phase, wake = 'done', 'done', 0
-            elif outcome == 'yielded' and record.get('worker_exit') == 0:
+            elif outcome == 'yielded':
                 # A clean milestone can advance the phase; an interrupted
                 # worker's partial result is never trusted for this decision.
-                next_phase = result.get('next_phase')
+                next_phase = result.get('next_phase') if record.get('worker_exit') == 0 else None
                 if next_phase in {'implementing', 'reviewing', 'shipping', 'verifying'}:
                     phase = next_phase
                 state, wake = 'eligible', 0

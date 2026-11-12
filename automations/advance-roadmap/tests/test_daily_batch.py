@@ -72,11 +72,17 @@ while not (run / 'batch-release').exists():
 event('work-start')
 time.sleep(.2)
 event('work-end')
-if not os.environ.get('FAKE_KEEP_PENDING'):
+yield_marker = root / ('yielded-once-' + repo)
+should_yield = bool(os.environ.get('FAKE_YIELD_ONCE') and not yield_marker.exists())
+if should_yield:
+    yield_marker.touch()
+    (run / 'worker-result.json').write_text(json.dumps({'outcome': 'yielded',
+        'provider': 'codex', 'next_phase': 'implementing'}))
+if not os.environ.get('FAKE_KEEP_PENDING') and not should_yield:
     pending = Path(os.environ['PERSONAL_CODE_DIR']) / '.advance-roadmap'
     for saved in pending.glob(f'pending-plan-{repo}*.json'):
         saved.unlink()
-outcome = 'shipped'
+outcome = 'yielded' if should_yield else 'shipped'
 if repo == os.environ.get('FAKE_HUMAN_REPO'):
     outcome = 'blocked'
     (run / 'worker-result.json').write_text(json.dumps({'outcome': 'blocked-branch-left',
@@ -651,6 +657,19 @@ PYTHON
                 self.assertIsNotNone(budget.choose(item={'repo': 'a', 'stamp': 'one', 'work_phase': 'implementing'}, commit=False))
                 self.assertIsNone(budget.choose(item={'repo': 'a', 'stamp': 'one', 'work_phase': 'reviewing'}, commit=False))
 
+    def test_continuous_mode_never_admits_on_stale_or_unknown_usage(self):
+        with self.budget_context(), patch.object(daily_batch, 'ROOT', self.root), patch.dict(
+                os.environ, {'ADVANCE_ROADMAP_CONTINUOUS': '1'}):
+            budget = daily_batch.RoadmapBudget(dry_run=True)
+            now = time.time()
+            def reading(provider, **kwargs):
+                return {'observed_at': now - 121 if provider == 'codex' else now,
+                        'windows': {'five_hour': {'live': None if provider == 'claude' else 1, 'cap': 70}}}
+            with patch.object(daily_batch.agent_budget, 'readings', side_effect=reading):
+                budget.refresh()
+            self.assertEqual(budget.workers, [])
+            self.assertEqual(budget.planners, [])
+
     def test_incremental_replay_admits_ten_point_unit_not_eighty_two_point_worker(self):
         with self.budget_context(), patch.object(daily_batch, 'ROOT', self.root):
             budget = daily_batch.RoadmapBudget(dry_run=True)
@@ -958,6 +977,30 @@ raise SystemExit(daily_batch.main())
                 active -= 1
         self.assertLessEqual(peak, 2)
         self.assertEqual(len([e for e in events if e['kind'] == 'work-start']), 2)
+
+    def test_continuous_stream_refills_a_yielded_assignment(self):
+        self.repo('a')
+        pending = self.code / '.advance-roadmap'
+        pending.mkdir()
+        (pending / 'pending-plan-a.json').write_text(json.dumps({'orchestrator': {
+            'action': 'resume_worker', 'repo': 'a', 'linear_id': 'DEV-a1', 'item': 'a t1',
+            'branch': 'roadmap/a-1'}}))
+        self.env.update(ADVANCE_ROADMAP_INCREMENTAL='1', ADVANCE_ROADMAP_CONTINUOUS='1', FAKE_YIELD_ONCE='1')
+        script = """import sys
+sys.path.insert(0, sys.argv[1])
+import daily_batch
+original = daily_batch.Batch.run
+def streaming(self):
+    return original(self, streaming=True, summary=False)
+daily_batch.Batch.run = streaming
+sys.argv = ['daily_batch.py', '--lanes', '1', '--threads', '1']
+raise SystemExit(daily_batch.main())
+"""
+        result = subprocess.run([sys.executable, '-c', script, str(HERE)], env=self.env,
+                                capture_output=True, text=True, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(len([event for event in self.events() if event['kind'] == 'work-start']), 2)
+        self.assertEqual([item['outcome'] for item in self.state()['queue']], ['yielded', 'shipped'])
 
     def test_slots_cover_morning_afternoon_and_wake_up_without_extra_runs(self):
         for now, expected in [

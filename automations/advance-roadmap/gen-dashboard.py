@@ -81,7 +81,23 @@ SPRINT_SINCE = datetime(2026, 10, 7, 0, 0)
 SPRINT_TICKS = [(10, 30), (11, 30), (12, 30), (13, 30), (14, 30), (16, 0), (17, 0), (18, 0), (19, 0), (20, 0)]
 BATCH_SINCE = datetime(2026, 10, 10, 0, 0)
 TWO_BATCHES_SINCE = datetime(2026, 11, 10, 0, 0)
-BATCH_DESCRIPTION = "10:30 and 15:30 daily; carried work first"
+
+
+def quota_scheduler_settings():
+    import sqlite3
+    from contextlib import closing
+    try:
+        with closing(sqlite3.connect('file:' + os.path.join(ROOT, 'workqueue.sqlite3') + '?mode=ro', uri=True)) as con:
+            values = {key: json.loads(value) for key, value in con.execute(
+                "SELECT key,value FROM settings WHERE key IN ('quota_scheduler_enabled','quota_scheduler_started','quota_schedule')")}
+        return values
+    except (sqlite3.Error, ValueError):
+        return {}
+
+
+QUOTA_SETTINGS = quota_scheduler_settings()
+BATCH_DESCRIPTION = ('Quota-driven; up to two workers, fresh usage checked before each unit'
+                     if QUOTA_SETTINGS.get('quota_scheduler_enabled') else '10:30 and 15:30 daily; carried work first')
 
 
 def slots_on(day):
@@ -103,7 +119,8 @@ def slots_on(day):
         out.append(day.replace(hour=10, minute=30))
     if day.replace(hour=15, minute=30) >= TWO_BATCHES_SINCE:
         out.append(day.replace(hour=15, minute=30))
-    return sorted(out)
+    started = QUOTA_SETTINGS.get('quota_scheduler_started') if QUOTA_SETTINGS.get('quota_scheduler_enabled') else None
+    return sorted(slot for slot in out if not isinstance(started, (int, float)) or slot.timestamp() < started)
 
 QUOTA_RE = re.compile(r"skipping — (\S+) usage (\d+)% >= (\d+)%")
 NO_ORCH_RE = re.compile(r"skipping — no orchestrator available")
@@ -905,7 +922,7 @@ def queue_panel():
         with closing(sqlite3.connect('file:' + path + '?mode=ro', uri=True, timeout=3)) as con:
             con.row_factory = sqlite3.Row
             settings = {r['key']: json.loads(r['value']) for r in con.execute(
-                "SELECT * FROM settings WHERE key IN ('mode','last_tick','last_error','shadow_started','rollout_wait','archive_wait','plan_archived','incremental_starvation')")}
+                "SELECT * FROM settings WHERE key IN ('mode','last_tick','last_error','shadow_started','rollout_wait','archive_wait','plan_archived','incremental_starvation','quota_scheduler_enabled','quota_schedule')")}
             work = list(con.execute("SELECT * FROM work WHERE state!='done' ORDER BY updated DESC LIMIT 80"))
     except (sqlite3.Error, ValueError):
         return '<p class=dim>Queue state temporarily unavailable; existing work is preserved.</p>'
@@ -913,6 +930,11 @@ def queue_panel():
     tick = settings.get('last_tick') or {}
     observed = datetime.fromtimestamp(tick['at']).strftime('%b %d %H:%M') if tick.get('at') else 'not yet observed'
     out = [f'<p>Scheduler: <strong>{esc(mode)}</strong> · last check {esc(observed)}</p>']
+    if settings.get('quota_scheduler_enabled'):
+        wake = settings.get('quota_schedule') or {}
+        at = datetime.fromtimestamp(wake['wake_at']).strftime('%b %d %H:%M:%S') if wake.get('wake_at') else 'not scheduled'
+        out.append('<p>Quota scheduler: up to two workers · next check ' + esc(at) + ' · '
+                   + esc(wake.get('reason') or 'unknown') + '</p>')
     starvation = settings.get('incremental_starvation') or {}
     if starvation:
         oldest = starvation.get('oldest_eligible_age_seconds')
@@ -1090,7 +1112,9 @@ def build():
 
     if q:
         orch, workers = q["orch"], q["workers"]
-        verdict = ('<span class="badge fail">next run would be SKIPPED — no orchestrator available</span>'
+        verdict = ('<span class="badge unk">next admission rechecks current quota</span>'
+                   if QUOTA_SETTINGS.get('quota_scheduler_enabled') else
+                   '<span class="badge fail">next run would be SKIPPED — no orchestrator available</span>'
                    if not orch else '<span class="badge ok">next run would proceed</span>')
         route = (f'<span class=dim>orchestrator</span> <b>{esc(orch or "none")}</b> '
                  f'<span class=dim>· workers</span> <b>{esc(" → ".join(workers) or "none")}</b>')
@@ -1101,9 +1125,8 @@ def build():
             checked_html = f'{ab} <span class=dim>(<time data-epoch="{int(ts)}">{rel}</time>)</span>'
         except (TypeError, ValueError):
             checked_html = '<span class=dim>unknown</span>'
-        cad_html = (f'<div class=checkline style="border-bottom:0;padding-bottom:0;margin-bottom:0">'
-                    '<strong>Schedule:</strong> batches at 10:30 and 15:30; carried work first'
-                    ' <span class=dim>— one item per repo; no automatic refill</span></div>')
+        cad_html = ('<div class=checkline style="border-bottom:0;padding-bottom:0;margin-bottom:0">'
+                    '<strong>Schedule:</strong> ' + esc(BATCH_DESCRIPTION) + '</div>')
         quota_html = (f'<div class=card><div class=checkline>{verdict} &nbsp;{route}</div>'
                       f'<div class=provs>{provider_rows(q["providers"])}</div>'
                       f'<div class="checkline dim" style="font-size:12.5px">Last usage check {checked_html} · '

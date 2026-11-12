@@ -25,7 +25,7 @@ def digest(value):
     return hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()
 
 
-def policy(store, repos, snapshot, now=None):
+def policy(store, repos, snapshot, now=None, daily_limit=True):
     """No model calls, budget probes or external mutations. Every skip has a wake condition."""
     now = time.time() if now is None else now
     code = Path(batch.shared.code_dir())
@@ -39,7 +39,7 @@ def policy(store, repos, snapshot, now=None):
         hold = store.hold(repo, now)
         active = [w for w in store.list(repo) if w['state'] != 'done']
         changed_human = any(w['state'] == 'human' and human_changed(store, w, snapshot_data) for w in active)
-        capped = repo not in daily_admission(store, [repo])
+        capped = daily_limit and repo not in daily_admission(store, [repo])
         if capped:
             decision, reason = 'wait', 'daily attempt budget used; eligible after local midnight'
         elif hold and not changed_human:
@@ -389,10 +389,11 @@ def main():
                 record_shadow(store, decisions)
                 store.set('last_error', None)
                 held = (args.root / 'session-hold.json').exists()
-                if not held:
+                quota_driven = store.get('quota_scheduler_enabled', False)
+                if not held and not quota_driven:
                     advance_rollout(store, decisions)
                     archive_completed_plan(store)
-                if not held and store.get('mode', 'shadow') in {'trial', 'dynamic'}:
+                if not held and not quota_driven and store.get('mode', 'shadow') in {'trial', 'dynamic'}:
                     dispatch(store, decisions, snapshot, store.get('pilot', []))
             except (OSError, RuntimeError, subprocess.TimeoutExpired) as error:
                 store.set('last_error', {'at': time.time(), 'error': str(error)})

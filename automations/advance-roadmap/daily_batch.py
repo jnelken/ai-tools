@@ -248,6 +248,17 @@ class RoadmapBudget:
             list(self.gates.values()))
         self.readings = {p: agent_budget.readings(p, root=ROOT, probe=not self.dry_run and p == "claude")
                          for p in agent_budget.PROVIDERS}
+        if os.environ.get('ADVANCE_ROADMAP_CONTINUOUS') == '1':
+            now = time.time()
+            def fresh(provider):
+                reading = self.readings[provider]
+                observed = reading.get('observed_at')
+                return (isinstance(observed, (int, float)) and 0 <= now - observed <= 120
+                        and bool(reading.get('windows'))
+                        and all(isinstance(window.get('live'), (int, float))
+                                for window in reading['windows'].values()))
+            self.workers = [provider for provider in self.workers if fresh(provider)]
+            self.planners = [provider for provider in self.planners if fresh(provider)]
 
     def review_decision(self):
         return getattr(self, "review_strategy", None) or usage.effective_review_strategy(
@@ -953,7 +964,7 @@ class Batch:
         return 0
 
     def run_stream(self):
-        """One item per repo, no global planner barrier; all active phases share the cap."""
+        """Stream work under the shared cap, refilling yielded units in continuous mode."""
         if self.threads != 1:
             raise ValueError('streaming requires one thread per repo')
         self.state['phase'] = 'streaming'
@@ -962,6 +973,28 @@ class Batch:
         while any(i['status'] in {'queued', 'planning', 'ready', 'running', 'canceling'}
                   for i in self.state['queue']):
             self.poll()
+            if os.environ.get('ADVANCE_ROADMAP_CONTINUOUS') == '1':
+                held = (ROOT / 'session-hold.json').exists()
+                if held:
+                    for item in self.state['queue']:
+                        if item['status'] == 'queued':
+                            item.update(status='deferred', reason='session hold')
+                        elif item['status'] == 'ready':
+                            self.cancel(item, 'session hold')
+                else:
+                    for item in list(self.state['queue']):
+                        if (item.get('status') != 'finished' or item.get('outcome') != 'yielded'
+                                or item.get('continuation_queued') or not pending_action(item['repo'])):
+                            continue
+                        item['continuation_queued'] = True
+                        new = self.reserve(item['repo'], 1)
+                        new['streaming'] = True
+                        new['verdict_check'] = {'priority': 0, 'result': 'pending',
+                                                'action': pending_action(item['repo'])}
+                        with workqueue.Store(ROOT) as store:
+                            work = [w for w in store.list(item['repo']) if w['state'] != 'done']
+                            if len(work) == 1:
+                                new['work_phase'] = work[0]['phase']
             self.refresh_budget()
             active = sum(i['status'] in {'planning', 'running', 'canceling'} for i in self.state['queue'])
             slots = max(0, self.limit - active)

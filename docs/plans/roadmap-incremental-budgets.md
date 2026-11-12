@@ -2,7 +2,7 @@
 
 ## Status
 
-Implementation and fake-provider validation are complete in the development checkout, November 11, 2026; deployment and the explicitly requested monitored live run are next. Shared quota ceilings are unchanged. This is separate from the active scheduler rollout: its existing shadow/pilot validation must not be mistaken for validation of these smaller work units. The roadmap job remains paused until deployment is verified.
+The bounded execution implementation was deployed November 11, 2026. Its first monitored run was paused after finding conflicting workspace-prompt wording; the two interrupted sessions and partial branches were retained. A prompt fix and the newly requested quota-driven scheduler are in development. Shared quota ceilings are unchanged. This is separate from the active shadow scheduler rollout, which remains observation-only while quota-driven scheduling is enabled.
 
 ## Decisions
 
@@ -10,6 +10,7 @@ Implementation and fake-provider validation are complete in the development chec
 - Do not require a model-written recap at every boundary or add model calls just to record progress. Persist session identity and recovery metadata mechanically; use existing artifacts and natural milestones for fallback evidence. Generate a compact handoff only when native resume is unavailable or demonstrably needs one.
 - Budget the next bounded unit of progress, rather than requiring an entire ticket's implementation and future reviews to fit before anything starts.
 - Jake allows considering usage up to 100%. Recommend a job-scoped, logged fallback when nothing fits, with one bounded attempt and existing reservations accounted for; do not silently raise every job's shared limits.
+- Replace the twice-daily production schedule with quota-driven continuation. Jake prefers up to two concurrent workers. Persist a provisional reset-based wake before each unit, recheck real account usage and reservations on wake, and continue immediately when headroom remains. Actual provider and longer-window limits still apply; a 60-second launchd tick provides wake granularity without model calls.
 
 ## Findings
 
@@ -22,6 +23,8 @@ Implementation and fake-provider validation are complete in the development chec
 - Replaying the saved Claude calibration without flagged samples leaves fewer than five samples: the five-hour factor falls from 0.0002528 to the provisional 0.00003984 seed (about 6.3× lower), and there are no historical model/phase/resume cohorts. Neither number proves the next unit's cost. Preserve the existing conservative factor while collecting comparable new observations and report the sample quality and sparse cohorts alongside forecasts.
 - Recovery is still attempted first, but an unfinished item no longer holds unrelated repositories behind a batch-wide barrier.
 - The development implementation captures exact sessions from provider streams, validates work identity, account, workspace, branch and HEAD before resuming, and uses a bounded watchdog plus an independent orphan guard. Provider-switch and missing-session fallback, quota stop, review reservation, and forced-stop recovery have fake-provider coverage. A finite 15-minute watchdog and approximately ten-point forecast are initial trial settings, not hard subscription guarantees.
+- The first live trial admitted two Codex implementation units with 6.48-point forecasts each and no reviewer reservation; both session IDs were recorded within 0.35 seconds. We stopped them after roughly 69 seconds to repair a conflicting workspace instruction. Their account-wide five-hour reading remained at 7%, which is rounded and confounded by overlapping work; the partial worker records show 43,709 and 52,711 newly processed tokens, with 230,272 and 417,408 cache-read tokens respectively. Both saved sessions still match their assigned workspace and HEAD.
+- The workspace prompt now explicitly keeps implementation-only units unmerged, and forced stops cannot be misclassified as authentication failures. The quota-driven controller has fake tests for two concurrent assignments, continuous refill, fresh quota checks, reset wake-up, and an unrelated repository proceeding when another cannot fit. It records a provisional reset before starting work, then updates the wake after each cycle; the launch agent checks due time every minute without model calls.
 - The dashboard now records account-wide observed deltas with isolation caveats and compares matching provider/model/effort/phase continuation cohorts. The CLIs do not separately attribute all reconstruction, compaction or handoff tokens; whole-unit tokens/time include those costs, and unavailable attribution is recorded as unknown rather than zero. Meaningful native-versus-fallback comparisons require future natural continuations.
 
 ## Approach
@@ -54,4 +57,5 @@ Implementation and fake-provider validation are complete in the development chec
 - [ ] Compare native resume alone with sparse fallback checkpoints on comparable interrupted work; include generation, cached input, compaction/reconstruction and useful-progress latency in total cost. Choose chunk boundaries from the results.
 - [x] Replay November 10's zero-admission case: admit one bounded unit without raising global limits or claiming the whole ticket fits.
 - [x] Test crash/limit/provider-switch recovery, unchanged evidence, merged-branch reconciliation and explicit reporting of forced versus clean yields with fake providers.
-- [ ] Deploy and run the user-authorized batch while monitoring live; pause and fix any issues before resuming.
+- [ ] Fix the conflicting workspace instruction found in the first live run; deploy and resume the captured sessions under live monitoring.
+- [ ] Implement, validate and enable the user-requested two-worker quota-driven schedule, retaining the separate shadow observations and replacing the twice-daily launch agent.

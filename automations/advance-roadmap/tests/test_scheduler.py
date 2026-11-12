@@ -120,6 +120,9 @@ class SchedulerTest(unittest.TestCase):
         for sec in ('103001', '153001'):
             self.store.attempt(stamp + '-' + sec, 'a', pid=os.getpid())
         self.assertEqual(s.daily_admission(self.store, ['a', 'b']), ['b'])
+        decision = self.decide()
+        self.assertEqual(decision['decision'], 'wait')
+        self.assertIn('midnight', decision['reason'])
 
     def test_automatic_rollout_cannot_skip_observation_or_trial_gates(self):
         self.store.set('auto_rollout', True)
@@ -247,9 +250,18 @@ class SchedulerTest(unittest.TestCase):
             self.store.finish({'stamp': stamp, 'orchestrator': 'pending-plan',
                                'worker': 'codex', 'outcome': 'quota-paused'})
         self.assertEqual(s.daily_admission(self.store, ['a', 'b']), ['b'])
-        decision = self.decide()
-        self.assertEqual(decision['decision'], 'wait')
-        self.assertIn('midnight', decision['reason'])
+
+    def test_quota_driven_policy_does_not_apply_twice_daily_attempt_cap(self):
+        day = time.strftime('%Y%m%d')
+        for sec in ('103001', '153001'):
+            stamp = day + '-' + sec
+            self.store.attempt(stamp, 'a')
+            self.store.finish({'stamp': stamp, 'orchestrator': 'pending-plan',
+                               'worker': 'codex', 'outcome': 'quota-paused'})
+        with patch.object(s.batch.shared, 'code_dir', return_value=str(self.root)), \
+                patch.object(s, 'eligibility_fingerprint', return_value='same'):
+            decisions = s.policy(self.store, ['a'], self.snapshot, daily_limit=False)
+        self.assertNotIn('daily attempt budget used', decisions[0]['reason'])
 
     def test_waiting_item_does_not_dispatch_or_create_batch(self):
         s.dispatch(self.store, [{'repo': 'a', 'decision': 'wait'}], self.snapshot, ['a'])
