@@ -319,6 +319,19 @@ reviews commits, not the working tree.
 - **`VERDICT: unavailable`** → stop before merge. Report which required reviewer was unavailable;
   do not substitute another provider or merge unreviewed.
 
+**Instance versus invariant findings (applies to every provider's findings).** Before dispatching or
+applying any fix, classify each real finding: an **instance** is one defect at one place and keeps the
+local-fix path above; an **invariant** is a rule that must hold on every path reaching a side effect
+(write, network call, payment, permission check, secret read). For an invariant finding, **before
+fixing, list every code path that reaches this side effect. If more than one, propose a single owner.**
+Prefer one owner with mechanical enforcement over patching each reported site. Record the invariant and
+its owner, check the changed paths against it, test the owner's policy once with table-driven cases,
+and test that each entry point delegates to it (convention: `instructions/development/shared.md`,
+*Invariants*; examples: `skills/peer-review/templates/invariants/`). When two review rounds report
+different call sites of the same side effect, treat it as an invariant even if each finding reads as
+an instance. Escalate (Step 2b) only if choosing the owner exceeds the approved scope. This changes
+how findings are fixed, not the verdict format, the reviewer routing, the quota gates or the round limits.
+
 The Codex pass is run once, immediately after Cursor first returns clean. If its findings require
 changes, use Cursor for those changes and allow up to 3 post-Codex Cursor follow-up rounds, without
 repeating Codex. If findings remain after those rounds, mark and summarize them as above. A

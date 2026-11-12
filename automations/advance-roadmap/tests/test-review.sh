@@ -311,4 +311,9 @@ review codex 1 ADVANCE_ROADMAP_INCREMENTAL=1 ADVANCE_ROADMAP_BUDGET_REVIEWERS=cu
 rc=0; review codex 2 ADVANCE_ROADMAP_INCREMENTAL=1 ADVANCE_ROADMAP_BUDGET_REVIEWERS=cursor FAKE_AGENT=clean >/dev/null || rc=$?
 check "incremental reviewer cannot spend its reservation twice" "$rc" 3
 
+# The reviewer prompt asks for instance-vs-invariant classification without changing the verdict lines.
+review_src="$(dirname "$0")/../review.sh"
+grep -Fq 'Classify each finding as an instance' "$review_src" && grep -Fq 'VERDICT: findings   (one or more findings)' "$review_src"
+check "review prompt carries invariant classification and the unchanged verdict format" "$?" 0
+
 echo "all passed"

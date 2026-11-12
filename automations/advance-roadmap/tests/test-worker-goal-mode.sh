@@ -86,6 +86,11 @@ grep -Fq 'Effective review strategy for this run: cross-provider.' "$fallback_ca
 grep -Fq 'Fallback reason: cursor gated until 2026-11-03T10:30:00-05:00.' "$fallback_capture"
 grep -Fq 'address them' "$fallback_capture"
 grep -Fq 'another under-gate provider' "$fallback_capture"
+grep -Fq 'every code path that reaches this side effect. If more than one, propose a single owner.' "$fallback_capture"
+for provider in cursor codex claude; do
+  grep -Fq 'every code path that reaches this side effect. If more than one, propose a single owner.' \
+    "$TMP_ROOT/$provider-standard.json.prompt"
+done
 if grep -Fq 'agent -p --force --trust --model auto' "$fallback_capture"; then
   print -u2 -- 'fallback worker brief still contains a Cursor dispatch instruction'
   exit 1

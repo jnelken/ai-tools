@@ -113,6 +113,11 @@ The diff (git diff $BASE...HEAD) is below. Read surrounding files in the repo as
 Report only real problems — bugs, broken edge cases, security issues, missing or wrong tests for new logic, clear violations of the repo's CLAUDE.md. Skip style
 nits and preferences.
 
+Classify each finding as an instance (one defect at one place) or an invariant (a rule that must hold
+on every path reaching a write, network call, payment, permission check or secret read). For an
+invariant, list every code path in the repo that reaches that side effect and say whether the change
+has a single owner enforcing the rule; flag any changed path that bypasses it.
+
 For each finding: file:line, severity (bug | risk | test), one sentence on what is wrong, one on the fix.
 End with exactly one line, the last line of your reply:
 VERDICT: clean      (no findings)

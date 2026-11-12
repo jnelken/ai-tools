@@ -102,6 +102,20 @@ When a commit only goes through with `--no-verify` because of lint errors alread
 Match process to task size: small task → one prompt; unfamiliar area → explore, plan, build; feature → context, plan, split, parallelize; refactor → success criteria, TDD plan, execute, review; hard bug → debug, one validated fix at a time. Keep thinking and doing in separate contexts. Details: `~/.claude/instructions/golden-paths.md`.
 
 
+## Invariants
+
+A review finding is either an **instance** (one defect at one place) or an **invariant** (a rule that must hold at every path reaching a side effect: a write, network call, payment, permission check, or secret read). Classify every finding that way before fixing it. Fixing each reported call site of an invariant one round at a time just waits for the next review to find the next site.
+
+For an invariant finding, **before fixing, list every code path that reaches this side effect. If more than one, propose a single owner.** Prefer one owner (a single module or function) that applies the policy, with mechanical enforcement over another per-site patch. Then:
+
+1. **Record** the invariant and its owner in the code or plan doc: one sentence of the rule, and the path to the owner.
+2. **Check changed paths** in the diff against it: anything new that reaches the side effect must go through the owner.
+3. **Test the owner's policy once**, with table-driven cases covering every allowed and denied input.
+4. **Test each entry point delegates** to the owner, so a new path that bypasses it fails a test.
+5. **Enforce mechanically** where cheap: keep the raw client unexported, add an ESLint restriction, or add an architecture guard test that fails on a bypassing import.
+
+Reusable examples live in `skills/peer-review/templates/invariants/`. Escalate only when choosing the owner is an architectural decision beyond the approved scope; otherwise make the call and note it.
+
 ## Refactoring vs Patching
 
 When one feature's fix cycle keeps producing new edge cases faster than it converges, consider consolidating the mechanism instead of layering guards — weighed against the feature's stakes. Details: `~/.claude/instructions/refactoring-vs-patching.md`.

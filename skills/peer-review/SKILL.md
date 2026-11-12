@@ -188,6 +188,11 @@ Run the whole block above, including its last two lines (requested effort and ro
    ```
    (That's an example — write the actual axes you enumerated.) Like the rounds file, this persists across iterations and is never cleaned up per-round.
 
+4. **Always include the invariant checklist in the focus prompt** (both reviewer paths read this file, so it is the one delivery point). Append this line once when the file is created, after the matrix axes:
+   ```bash
+   echo "Invariant check: classify each finding as an instance or an invariant (a rule every path reaching a side effect must obey). For an invariant, list every code path that reaches the side effect and flag any changed path that bypasses a single owner." >> "$GIT_DIR/peer-review-focus"
+   ```
+
 For either reviewer, pass the **absolute worktree path**, scope `base:<branch>` or `uncommitted` from step 1, `$EFFORT` (`high` or `medium`), the complete contents of `$GIT_DIR/peer-review-focus` (including every `Decided … — do not re-report` line), and lens text plus label (`main` for a single call). Request "Also report anything else you find" alongside the focus. Each agent returns one fenced block with `status: ok | usage_limited | failed`, `reviewer: codex|claude <model> / <effort>`, `lens: <label>`, `log: <absolute path>`, and a normalized findings table (`sev | file:line | claim | suggested fix`), or `findings: none`.
 
 **Gotcha:** both `--base <branch>` and `--uncommitted` are mutually exclusive with `[PROMPT]` (CLI exit 2); `codex-reviewer` handles that by stating the scope inside the prompt whenever focus text is present.
@@ -273,6 +278,8 @@ Findings arrive as the agents' normalized tables (the deduped union across lense
 | Nit (style preference, ultra-minor) | **skip** by default; apply only if a cluster of nits exists in one file (batch cheap fixes) |
 | Codex is wrong (you can verify by reading the file) | **skip**, note why |
 | Finding is already fixed in the working tree (Codex reviewed a stale snapshot) | **skip**, note |
+
+**Classify instance vs invariant before applying.** For each row, decide whether it is an instance (one defect at one place; the rules above apply) or an invariant (a rule that must hold on every path reaching a side effect). For an invariant row, **before fixing, list every code path that reaches this side effect. If more than one, propose a single owner**, and apply the owner-plus-enforcement fix (convention: `instructions/development/shared.md`, *Invariants*; examples: `skills/peer-review/templates/invariants/`) instead of patching only the reported site. Two rounds reporting different sites of one side effect make it an invariant. Picking an owner that needs an architectural decision beyond the branch's scope is **skip** (unresolved), surfaced to the user. This changes the fix, not the finding format, reviewer routing or round limits.
 
 **Two kinds of skip, and only one blocks the push.** A skip is **dismissed** only when you have cited evidence against the finding. That means one of three things: the file on disk contradicts Codex, the finding is already fixed, or the user or spec has already decided that exact point (quote where). Every other skipped P1/P2 is **unresolved**, including one that "needs a policy call", is a judgment you're unsure of, or is marked "probably fine". Dismissed findings don't gate step 8, but each one's evidence goes in the step 6 report and in the PR comment. When in doubt, it's unresolved.
 
