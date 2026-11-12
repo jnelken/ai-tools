@@ -27,5 +27,5 @@ export function findViolations(srcDir, { owner = 'ledger.mjs', raw = 'raw-client
       }
     }
   }
-  return bad;
+  return bad.sort();
 }
