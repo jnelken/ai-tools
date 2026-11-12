@@ -12,7 +12,7 @@ Everything runs with Node only (no dependencies): `./run-fixtures.sh` (or
 | `example/src/raw-client.mjs` + `example/src/index.mjs` | **Unexported raw client**: the side-effecting client is imported by the owner only and is absent from the public barrel. |
 | `example/src/ledger.mjs` | **The owner**: one policy (`checkWrite`) applied by `append()`. |
 | `example/src/api.mjs`, `example/src/importer.mjs` | Entry points that delegate to the owner. |
-| `eslint.config.example.mjs` | **ESLint restriction**: `no-restricted-imports` and a core `no-restricted-syntax` selector bar ESM imports and CommonJS `require()` calls outside the owner. Copy and adjust paths; not executed by the fixtures. |
+| `eslint.config.example.mjs` | **ESLint restriction**: `no-restricted-imports` and a core `no-restricted-syntax` selector bar ESM imports and CommonJS `require()` calls outside the owner. Merge the patterns/selectors into existing rule options and adjust paths; not executed by the fixtures. |
 | `example/test/architecture-guard.test.mjs` (+ `-lib.mjs`) | **Architecture guard**: fails when any other `.js`, `.jsx`, `.mjs`, `.cjs`, `.ts`, `.tsx`, `.mts`, or `.cts` file imports or requires the raw client. Fixtures `fixtures/clean` (passes) and `fixtures/violating` (rogue ESM and CommonJS writers; all must be caught) keep the guard itself honest. |
 | `example/test/owner-policy.test.mjs` | **Owner-policy tests**: one table-driven suite covering every allowed and denied input. |
 | `example/test/delegation.test.mjs` | **Delegation tests**: each entry point calls the owner; an unauthorized write fails and an allowed one passes through the real owner. |

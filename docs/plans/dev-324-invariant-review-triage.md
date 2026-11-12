@@ -1,10 +1,10 @@
 # DEV-324 Invariant Review Triage
 
-> **Status:** Implementation complete; final current-HEAD review pending. Round 6 found a broken CommonJS lint example and missing source extensions; both are fixed on the current branch.
+> **Status:** Implementation complete; awaiting clean current-HEAD review before shipment.
 
 ## Status
 
-Implementation is complete. The final shipping review is still pending until the current HEAD receives a clean review.
+Implementation is complete. The final shipping review is still pending.
 
 ## Decisions
 
@@ -17,7 +17,7 @@ Implementation is complete. The final shipping review is still pending until the
 - `skills/peer-review/SKILL.md` persists reviewer focus in the worktree Git directory and passes the same focus input through both Codex and Claude reviewer paths.
 - `automations/advance-roadmap/worker.sh` constructs the scheduled worker's prompt; `skills/advance-roadmap/WORKER.md` owns its review-fix procedure.
 - `skills/conductor/SKILL.md` owns the interactive conductor's review result triage before it dispatches the builder.
-- The invariant example keeps the raw client unexported; both `api.postPayment` and `importRows` delegate writes through `ledger.append`. Its architecture guard rejects direct nested and extensionless imports outside the owner.
+- The invariant example keeps the raw client unexported; both `api.postPayment` and `importRows` delegate writes through `ledger.append`. Its architecture guard rejects direct imports and requires across JavaScript and TypeScript source extensions outside the owner.
 
 ## Completed work
 
@@ -28,7 +28,7 @@ Implementation is complete. The final shipping review is still pending until the
 - Fixed reviewer findings on installed instruction paths and recursive guard coverage.
 - Required checks passed on `edd74df`: invariant fixtures (15), review automation, worker goal-mode routing, and agent profile tests (20); later revisions were reverified as recorded in their run artifacts.
 - Cross-provider review round 2 returned clean on `edd74df`.
-- Follow-up review found traversal-order sensitivity and a `set -e` diagnostic issue; fixed in `419edc5` and reverified. Round 5 found a CommonJS bypass; round 6 found an invalid lint example and four unscanned source extensions, all fixed on the current branch.
+- Follow-up review findings and fixes are retained in the run artifacts; clean current-HEAD review is still required before the plan is archived as shipped.
 
 ## Approach
 
