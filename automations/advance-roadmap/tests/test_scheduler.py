@@ -133,11 +133,35 @@ class SchedulerTest(unittest.TestCase):
             s.observe_completed(self.store, self.root)
             s.observe_completed(self.store, self.root)
         state = self.store.get('no_item_yield:a')
-        self.assertEqual((state['count'], state['not_before']), (2, 13600))
+        self.assertEqual((state['count'], state['not_before']), (2, 17200))
         self.assertEqual(self.decide()['decision'], 'wait')
         self.write([{'id': 'DEV-1', 'labels': ['repo/a'], 'human_comments_sha': 'new'}])
         self.assertEqual(self.decide()['decision'], 'plan')
         self.assertEqual(s.policy(self.store, ['b'], self.snapshot, now=10000)[0]['decision'], 'plan')
+
+    def test_no_item_backoff_ignores_git_churn_but_wakes_for_scoped_issue(self):
+        self.write([{'id': 'DEV-1', 'labels': ['repo/a'], 'title': 'one'}])
+        fingerprint = q.no_item_fingerprint('a', json.loads(self.snapshot.read_text()))
+        self.store.set('no_item_yield:a', {'input_fingerprint': fingerprint, 'not_before': 20000})
+        with patch.object(q, 'git', return_value='unrelated branch changed'):
+            self.assertEqual(self.decide()['decision'], 'wait')
+            self.write([{'id': 'DEV-1', 'labels': ['repo/a'], 'title': 'changed'}])
+            self.assertEqual(self.decide()['decision'], 'plan')
+
+    def test_completed_no_item_plan_waits_once_then_retries(self):
+        stamp = '20261112-100001'
+        fp = self.decide()['fingerprint']
+        self.store.set('eligibility_at_start:' + stamp, fp)
+        self.store.set('no_item_inputs_at_start:' + stamp,
+                       q.no_item_fingerprint('a', json.loads(self.snapshot.read_text())))
+        row = {'stamp': stamp, 'assigned_repo': 'a', 'action': 'blocked_no_item',
+               'outcome': 'blocked-no-item', 'worker_exit': 0,
+               'finished_at': datetime.fromtimestamp(10000).isoformat()}
+        (self.root / 'runs.jsonl').write_text(json.dumps(row) + '\n')
+        with patch.object(s.time, 'time', return_value=10000):
+            s.observe_completed(self.store, self.root)
+        self.assertEqual(self.decide()['decision'], 'wait')
+        self.assertEqual(s.policy(self.store, ['a'], self.snapshot, now=13601)[0]['decision'], 'plan')
 
     def test_no_item_yield_hold_does_not_block_actual_saved_assignment(self):
         fp = self.decide()['fingerprint']

@@ -16,7 +16,7 @@ set -u
 ROOT="${ADVANCE_ROADMAP_ROOT:-/Users/jake/.claude/automations/advance-roadmap}"
 # Unattended: the status-glyph Stop hook must not force a sign-off turn over a result fence.
 export ADVANCE_ROADMAP_HEADLESS=1
-if [ "${ADVANCE_ROADMAP_INCREMENTAL:-0}" = 1 ] && [ -z "${ADVANCE_ROADMAP_BUDGET_REVIEWERS:-}" ]; then
+if [ "${ADVANCE_ROADMAP_INCREMENTAL:-0}" = 1 ] && [ "${ADVANCE_ROADMAP_CONTINUOUS:-0}" != 1 ] && [ -z "${ADVANCE_ROADMAP_BUDGET_REVIEWERS:-}" ]; then
   echo 'REVIEW REQUIRED: no reviewer capacity was reserved for this bounded unit; yield before review.' >&2
   exit 3
 fi
@@ -136,7 +136,7 @@ Diff:
 $DIFF"
 
 run_reviewer() {
-  if [ -n "${ADVANCE_ROADMAP_BUDGET_REVIEWERS:-}" ] && [[ " $ADVANCE_ROADMAP_BUDGET_REVIEWERS " != *" $1 "* ]]; then
+  if [ "${ADVANCE_ROADMAP_CONTINUOUS:-0}" != 1 ] && [ -n "${ADVANCE_ROADMAP_BUDGET_REVIEWERS:-}" ] && [[ " $ADVANCE_ROADMAP_BUDGET_REVIEWERS " != *" $1 "* ]]; then
     echo "reviewer $1 has no batch budget reservation" > "$2"; return 127
   fi
   local who="$1" out="$2"
@@ -243,6 +243,7 @@ PY
 }
 
 claim_bounded_review() {
+  [ "${ADVANCE_ROADMAP_CONTINUOUS:-0}" != 1 ] || return 0
   [ "${ADVANCE_ROADMAP_INCREMENTAL:-0}" = 1 ] || return 0
   local allowed=( ${=ADVANCE_ROADMAP_BUDGET_REVIEWERS:-} )
   python3 "$ROOT/lib/reviewlease.py" "${LOG:h}/review-spend.json" "$1" "${allowed[@]}"
@@ -311,7 +312,7 @@ run_cross_provider_review() {
   local used="" verdict="unavailable" who rc text gate hits="" hit
   gated_list="" capacity_list=""   # read by record_review: reviewers skipped over their gate / at capacity
   for who in "${cross_provider_reviewers[@]}"; do
-    if [ -n "${ADVANCE_ROADMAP_BUDGET_REVIEWERS:-}" ] && [[ " $ADVANCE_ROADMAP_BUDGET_REVIEWERS " != *" $who "* ]]; then
+    if [ "${ADVANCE_ROADMAP_CONTINUOUS:-0}" != 1 ] && [ -n "${ADVANCE_ROADMAP_BUDGET_REVIEWERS:-}" ] && [[ " $ADVANCE_ROADMAP_BUDGET_REVIEWERS " != *" $who "* ]]; then
       gated_list="$gated_list $who"
       continue
     fi

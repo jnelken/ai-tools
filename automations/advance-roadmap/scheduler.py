@@ -12,7 +12,7 @@ from datetime import datetime
 from pathlib import Path
 
 import daily_batch as batch
-from workqueue import Store, read, rows, sync, human_changed, eligibility_fingerprint
+from workqueue import Store, read, rows, sync, human_changed, eligibility_fingerprint, no_item_fingerprint
 
 DAY = 86400
 SHADOW_DAYS = 7
@@ -39,6 +39,9 @@ def policy(store, repos, snapshot, now=None, daily_limit=True):
         hold = store.hold(repo, now)
         active = [w for w in store.list(repo) if w['state'] != 'done']
         no_item = store.get('no_item_yield:' + repo, {})
+        no_item_matches = (no_item.get('input_fingerprint') == no_item_fingerprint(repo, snapshot_data)
+                           if no_item.get('input_fingerprint') and snapshot_data.get('ok')
+                           else bool(no_item) and no_item.get('fingerprint') == fp)
         changed_human = any(w['state'] == 'human' and human_changed(store, w, snapshot_data) for w in active)
         capped = daily_limit and repo not in daily_admission(store, [repo])
         if capped:
@@ -47,8 +50,10 @@ def policy(store, repos, snapshot, now=None, daily_limit=True):
             decision, reason = 'wait', hold['reason'] or hold['state']
         elif active or batch.pending_action(repo):
             decision, reason = 'resume', 'unfinished assignment is eligible; reuse checkpoint before planning'
-        elif no_item.get('fingerprint') == fp and no_item.get('not_before', 0) > now:
+        elif no_item_matches and no_item.get('not_before', 0) > now:
             decision, reason = 'wait', 'repeated bookkeeping yields without an assignment or input change'
+        elif no_item_matches:
+            decision, reason = 'plan', 'no-assignment backoff expired; recheck for work'
         elif cached.get('fingerprint') == fp and now - cached.get('checked', 0) < 72 * 3600:
             decision, reason = 'wait', 'inputs unchanged; wake on relevant change or 72-hour safety audit'
         else:
@@ -78,7 +83,7 @@ def observe_completed(store, root):
         signature = digest(row)
         repo = row.get('assigned_repo') or assignments.get(stamp)
         fingerprint = store.get('eligibility_at_start:' + stamp)
-        no_item = (repo and fingerprint and row.get('outcome') == 'yielded'
+        no_item = (repo and fingerprint and row.get('outcome') in {'yielded', 'blocked-no-item', 'nothing-qualified'}
                    and row.get('action') in {'blocked_no_item', 'nothing_qualified'}
                    and not row.get('item') and not row.get('linear_id') and row.get('worker_exit') == 0)
         if no_item and store.get('observed_no_item:' + stamp) != signature:
@@ -94,8 +99,9 @@ def observe_completed(store, root):
                 # repetition count, though later input changes should wake the repo.
                 age = completed - prior.get('completed', 0)
                 count = prior.get('count', 0) + 1 if 0 <= age <= 24 * 3600 else 1
-                delay = min(24 * 3600, 3600 * 2 ** min(max(count - 2, 0), 5)) if count >= 2 else 0
+                delay = min(24 * 3600, 3600 * 2 ** min(max(count - 1, 0), 5))
                 store.set('no_item_yield:' + repo, {'fingerprint': fingerprint, 'count': count,
+                                                   'input_fingerprint': store.get('no_item_inputs_at_start:' + stamp),
                                                    'stamp': stamp, 'completed': completed,
                                                    'not_before': completed + delay})
             store.set('observed_no_item:' + stamp, signature)

@@ -230,6 +230,13 @@ on_exit() {
 post_continuous_summary() {
   [ "${ADVANCE_ROADMAP_CONTINUOUS:-0}" = "1" ] && [ -n "$BATCH_PID" ] || return 0
   [ "${ADVANCE_ROADMAP_RUN_SUMMARY:-1}" = "1" ] || return 0
+  # Milestone yields are recovery details, not user-facing run outcomes. Keep
+  # quota stops and requests for input visible, and fail open on unreadable data.
+  if python3 "$ROOT/lib/notification_policy.py" "$ROOT/runs.jsonl" "$STAMP" "$RUN_DIR"
+  then
+    echo "=== slack: routine checkpoint suppressed ===" >> "$LOG"
+    return 0
+  fi
   local slackagent_dir="${ADVANCE_ROADMAP_SLACKAGENT_DIR:-$CODE_DIR/slackagent}"
   local script="$slackagent_dir/scripts/post-roadmap-summary.mjs"
   if [ -f "$script" ] && python3 - "$ROOT/lib/post_run_summary.mjs" "$script" "$STAMP" "$ROOT/runs.jsonl" >> "$LOG" 2>&1 <<'PY'
@@ -476,7 +483,7 @@ run_worker_in_workspace() {
     if [ -n "$pid" ] && ! kill -0 "$pid" 2>/dev/null && [ ! -f "$RUN_DIR/worker.exit" ]; then
       echo "(worker terminal exited without an exit code — closed or killed)"; worker_rc=1; break
     fi
-    if [ "$waited" -ge $(( WORKER_TIMEOUT_MIN * 60 )) ]; then
+    if [ "${ADVANCE_ROADMAP_CONTINUOUS:-0}" != 1 ] && [ "$waited" -ge $(( WORKER_TIMEOUT_MIN * 60 )) ]; then
       echo "(worker still running after ${WORKER_TIMEOUT_MIN}m — leaving it, recording a timeout)"; worker_rc=124; break
     fi
   done
@@ -1022,6 +1029,18 @@ PY
     echo "(no-op no-work result: nothing to post, bookkeeping worker skipped)"
   fi
 
+  # In continuous mode a no-item planner result is a scheduling decision, not
+  # a new model assignment. Preserve proposed bookkeeping for later review.
+  if [ "${ADVANCE_ROADMAP_CONTINUOUS:-0}" = 1 ] && [ ! -f "$RUN_DIR/bookkeeping-skipped" ] \
+     && [[ "$(jq -r '.action // empty' "$ORCH_RESULT" 2>/dev/null)" == (blocked_no_item|nothing_qualified) ]]; then
+    : > "$RUN_DIR/bookkeeping-skipped"
+    : > "$RUN_DIR/bookkeeping-deferred"
+    python3 "$MEMORY_PY" append-ledger --repo "${TARGET_REPO:-none}" --stamp "$STAMP" \
+      --outcome "$(jq -r '.outcome_token // "blocked-no-item"' "$ORCH_RESULT")" \
+      --detail "no assignment; planner bookkeeping retained for later review" >> "$LOG" 2>&1 || true
+    echo "(no assignment: bookkeeping deferred; no worker launched)"
+  fi
+
   if [ -n "$BATCH_PID" ] && [ ! -f "$RUN_DIR/bookkeeping-skipped" ]; then
     # Persist the plan before announcing readiness. No implementation/bookkeeping model runs
     # until every planner finishes and the controller releases this slot in the finite batch.
@@ -1160,7 +1179,7 @@ PY
     jq -n --arg s "$(cat "$RUN_DIR/dispatch-rejected")" '{outcome:"bookkeeping",provider:"cursor",summary:$s}' > "$WORKER_RESULT"
   elif [ -f "$RUN_DIR/bookkeeping-skipped" ]; then
     print -r -- '{"used":"none","exit":0,"fatal":null}' > "$WORKER_STATUS"
-    jq -n '{outcome:"bookkeeping",provider:"none",summary:"no-op no-work result: nothing to post, no bookkeeping worker ran"}' > "$WORKER_RESULT"
+    jq -n '{outcome:"bookkeeping",provider:"none",summary:"No assignment; no bookkeeping worker ran"}' > "$WORKER_RESULT"
   elif [ "$SUPERSET_MODE" = "1" ] && [ -n "${WORKERS:-}" ] && [ "$action" = "dispatch_worker" -o "$action" = "resume_worker" ]; then
     # Keep the request where the workspace terminal can read it after this block's cleanup.
     run_worker_in_workspace "$req" || true
@@ -1196,6 +1215,7 @@ PY
     # Daily batches use a distinct verdict file for each target repo.
     partial_triage_flags=()
     [ "$PARTIAL_TRIAGE_CONSUMED" -eq 1 ] && partial_triage_flags=(--partial-triage-consumed)
+    [ -f "$RUN_DIR/bookkeeping-deferred" ] && partial_triage_flags+=(--bookkeeping-pending)
     python3 "$VERDICT_PY" save --file "$LAST_VERDICT" --fingerprint "$FINGERPRINT" \
       --post-fingerprint "$POST_FINGERPRINT" --repo "$TARGET_REPO" \
       "${partial_triage_flags[@]}" \

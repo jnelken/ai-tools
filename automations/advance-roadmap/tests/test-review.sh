@@ -206,6 +206,11 @@ check "review session recorded" "$(field session_id)" claude-session
 review codex 1 ADVANCE_ROADMAP_INCREMENTAL=1 ADVANCE_ROADMAP_BUDGET_REVIEWERS=claude FAKE_CLAUDE=clean >/dev/null
 rc=0; review codex 2 ADVANCE_ROADMAP_INCREMENTAL=1 ADVANCE_ROADMAP_BUDGET_REVIEWERS=claude FAKE_CLAUDE=clean >/dev/null || rc=$?
 check "incremental reviewer cannot reuse reservation" "$rc" 3
+review codex 1 ADVANCE_ROADMAP_CONTINUOUS=1 ADVANCE_ROADMAP_INCREMENTAL=1 FAKE_CLAUDE=clean >/dev/null
+review codex 2 ADVANCE_ROADMAP_CONTINUOUS=1 ADVANCE_ROADMAP_INCREMENTAL=1 FAKE_CLAUDE=clean >/dev/null
+check "continuous reviews can repeat without a reservation" "$(field verdict)" clean
+rc=0; review codex 3 ADVANCE_ROADMAP_CONTINUOUS=1 ADVANCE_ROADMAP_INCREMENTAL=1 FAKE_GATED=claude >/dev/null || rc=$?
+check "continuous reviews still obey the live gate" "$rc" 3
 capture="$TMP/reviewer-prompt"
 review codex 1 CAPTURE_PROMPT="$capture" FAKE_CLAUDE=clean >/dev/null
 grep -Fq 'Classify each finding as an instance' "$capture" || { echo "FAIL: missing invariant classification"; exit 1; }

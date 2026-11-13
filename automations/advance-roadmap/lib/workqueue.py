@@ -327,6 +327,16 @@ def eligibility_fingerprint(repo, code, snapshot, skill_root):
     return hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()
 
 
+def no_item_fingerprint(repo, snapshot):
+    """No-item retry inputs: scoped human decisions, not unrelated Git churn."""
+    from linearscope import scope_issues
+    relevant = scope_issues(snapshot.get('issues', []), repo)
+    inputs = [{k: i.get(k) for k in ('id', 'title', 'description', 'state', 'priority',
+                                     'labels', 'blocked_by', 'human_comments_sha')}
+              for i in sorted(relevant, key=lambda issue: issue['id'])]
+    return hashlib.sha256(json.dumps(inputs, sort_keys=True).encode()).hexdigest()
+
+
 def human_inputs(plan, snapshot):
     relevant = [i for i in snapshot.get('issues', [])
                 if i.get('id') == plan.get('linear_id')

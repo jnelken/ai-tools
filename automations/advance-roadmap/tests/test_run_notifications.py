@@ -32,15 +32,22 @@ export const postRoadmapSummary = async ({record, channel}) =>
 ''')
             runs = root / 'runs.jsonl'
             runs.write_text(''.join(json.dumps({'stamp': stamp, 'outcome': outcome}) + '\n'
-                                    for stamp, outcome in [('one', 'yielded'), ('two', 'skipped-quota')]))
+                                    for stamp, outcome in [('one', 'yielded'), ('two', 'skipped-quota'), ('three', 'yielded'), ('four', 'yielded')]))
+            with runs.open('a') as stream:
+                stream.write(json.dumps({'stamp': 'five', 'outcome': 'yielded', 'incremental': {'lifecycle': {'reason': 'quota-ceiling'}}}) + '\n')
+            for stamp, result in [('three', {'needs_input': True}), ('four', {'needs_input': False})]:
+                directory = root / 'runs' / stamp
+                directory.mkdir(parents=True)
+                (directory / 'worker-result.json').write_text(json.dumps(result))
             posts = root / 'posts'
             env = {**os.environ, 'SLACK_BOT_TOKEN': 'test', 'TEST_POSTS': str(posts)}
-            for stamp in ('one', 'two'):
+            for stamp in ('one', 'two', 'three', 'four', 'five'):
                 subprocess.run(['node', str(HERE / 'lib/post_run_summary.mjs'), '--script', str(script),
                                 '--stamp', stamp, '--runs', str(runs)], env=env, check=True)
             rows = [json.loads(line) for line in posts.read_text().splitlines()]
             self.assertEqual([(r['stamp'], r['outcome']) for r in rows],
-                             [('one', 'yielded'), ('two', 'skipped-quota')])
+                             [('one', 'yielded'), ('two', 'skipped-quota'), ('three', 'needs-input'),
+                              ('four', 'yielded'), ('five', 'quota-paused')])
             self.assertTrue(all(r['channel'] == '#eng' for r in rows))
 
 

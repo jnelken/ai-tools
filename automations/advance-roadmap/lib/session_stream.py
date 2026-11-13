@@ -142,7 +142,7 @@ def run(args):
             guard_ready.unlink(missing_ok=True)
             guard = subprocess.Popen([sys.executable, str(guard_path),
                 '--parent', str(os.getpid()), '--child', str(child.pid), '--child-start', child_start,
-                '--timeout', str(args.timeout + 5 if args.timeout > 0 else 0), '--ready', str(guard_ready)],
+                '--timeout', str(0 if os.environ.get('ADVANCE_ROADMAP_CONTINUOUS') == '1' else args.timeout + 5), '--ready', str(guard_ready)],
                 stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                 start_new_session=True)
             guard_deadline = time.monotonic() + 3
@@ -228,6 +228,8 @@ def run(args):
                     if not data:
                         selector.unregister(key.fileobj)
                         continue
+                    if os.environ.get('ADVANCE_ROADMAP_CONTINUOUS') == '1':
+                        deadline = time.monotonic() + args.timeout
                     output.write(data)
                     output.flush()
                     buffer += data

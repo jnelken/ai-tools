@@ -629,9 +629,13 @@ class Batch:
         env["ADVANCE_ROADMAP_BUSY_REPOS"] = " ".join(
             sorted({i["repo"] for i in self.state["queue"] if i["repo"] != item["repo"]}))
         with workqueue.Store(ROOT) as store:
+            snapshot = workqueue.read(self.directory / 'linear-snapshot.json', {})
             store.set('eligibility_at_start:' + item['stamp'], workqueue.eligibility_fingerprint(
-                item['repo'], shared.code_dir(), workqueue.read(self.directory / 'linear-snapshot.json', {}),
+                item['repo'], shared.code_dir(), snapshot,
                 shared.HERE.parents[1] / 'skills/advance-roadmap'))
+            if snapshot.get('ok'):
+                store.set('no_item_inputs_at_start:' + item['stamp'],
+                          workqueue.no_item_fingerprint(item['repo'], snapshot))
         with open(ROOT / "logs" / f'batch-lane-{item["stamp"]}.err', "w") as err:
             proc = subprocess.Popen(["/bin/zsh", str(shared.RUN_SH)], env=env,
                                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,

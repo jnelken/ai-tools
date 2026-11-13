@@ -17,7 +17,7 @@ git -C "$TMP/code/demo" -c user.name=Test -c user.email=test@example.invalid -c 
 git -C "$TMP/code/demo" update-ref refs/remotes/origin/main HEAD
 cp "$HERE/run.sh" "$HERE/worker.sh" "$ROOT/"
 cp "$HERE/lib/workqueue.py" "$HERE/lib/runrecord.py" "$HERE/lib/tokens.py" "$HERE/lib/workspaces.py" "$HERE/lib/models.sh" "$ROOT/lib/"
-cp "$HERE/lib/post_run_summary.mjs" "$ROOT/lib/"
+cp "$HERE/lib/post_run_summary.mjs" "$HERE/lib/notification_policy.py" "$ROOT/lib/"
 # This suite exercises records, not plan reuse; each fake orchestrator result is independent.
 print -r -- 'raise SystemExit(0)' > "$ROOT/lib/pendingplan.py"
 . "$ROOT/lib/models.sh"
@@ -54,6 +54,14 @@ print -r -- "=== advance-roadmap exit=2 finished (quoted from an old log) ==="
 # Codex's closing line (no rollout under this fake home, so tokens.py uses the total).
 print -r -- "tokens used"; print -r -- "12,345"
 [ "$FAKE_ORCH" = "garbage" ] && { print "no fence here"; exit 0; }
+if [ "$FAKE_ORCH" = noitem ]; then
+  cat > "$last" <<'EOF'
+```ORCHESTRATOR_RESULT_JSON
+{"action":"blocked_no_item","outcome_token":"blocked-no-item","repo":"demo","item":null,"archives":["demo/docs/plan.md"],"summary":"No ticket; archive proposed"}
+```
+EOF
+  exit 0
+fi
 kind=feature; [ "$FAKE_ORCH" = "health" ] && kind=code_health
 cat > "$last" <<EOF
 \`\`\`ORCHESTRATOR_RESULT_JSON
@@ -296,4 +304,9 @@ TEST_SLACKAGENT_DIR="$mock_slack" TEST_POSTS="$TMP/slack-posts" SLACK_BOT_TOKEN=
   ADVANCE_ROADMAP_CONTINUOUS=1 ADVANCE_ROADMAP_BATCH_PID=$$ ADVANCE_ROADMAP_LANE=1 \
   FAKE_NO_PLANNER=1 run good file
 check "continuous quota skip sends one run summary" "$(cat "$TMP/slack-posts")" skipped-quota
+ADVANCE_ROADMAP_CONTINUOUS=1 run noitem fail
+check "continuous no-item result launches no worker" "$(last worker)" none
+check "continuous no-item remains a scheduling result" "$(last outcome)" blocked-no-item
+last_stamp="$(last stamp)"
+[ -f "$ROOT/runs/$last_stamp/bookkeeping-deferred" ] || { echo "FAIL: proposed bookkeeping not retained"; exit 1; }
 echo "all passed"

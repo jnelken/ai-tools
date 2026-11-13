@@ -245,7 +245,7 @@ if [ "${ADVANCE_ROADMAP_NO_MESSAGES:-0}" = 1 ]; then
 Do not send Slack, email, or other messages to people during this invocation. Record any
 message that would have been needed in the local result instead."
 fi
-if [ "${ADVANCE_ROADMAP_INCREMENTAL:-0}" = 1 ]; then
+if [ "${ADVANCE_ROADMAP_INCREMENTAL:-0}" = 1 ] && [ "${ADVANCE_ROADMAP_CONTINUOUS:-0}" != 1 ]; then
   BASE_PROMPT="$BASE_PROMPT
 
 This invocation is one bounded unit, reserved phase: ${ADVANCE_ROADMAP_INCREMENTAL_PHASE:-implementing}.
@@ -270,6 +270,15 @@ This implementation unit has no reviewer reservation: do not merge, push to the 
 branch, deploy, or close the ticket. Leave the branch unmerged and yield for review."
   fi
 fi
+if [ "${ADVANCE_ROADMAP_CONTINUOUS:-0}" = 1 ]; then
+  BASE_PROMPT="$BASE_PROMPT
+
+Continue the assigned work through implementation, current-HEAD cross-provider review,
+verification and shipping while the required providers are available. Commit useful recovery
+checkpoints without stopping at milestones. Yield only when quota or an unavailable required
+reviewer prevents further progress, or when a genuine human decision or access is required.
+If review is unavailable, preserve the unmerged branch and return next_phase reviewing."
+fi
 BASE_PROMPT="$BASE_PROMPT
 
 Invariants: classify every review finding as an instance (one defect, local fix) or an invariant (a
@@ -293,7 +302,7 @@ When you are finished — whatever the outcome — write that same WORKER_RESULT
 run.sh records this run from that file. Without it the run is recorded as incomplete."
 fi
 if [ -n "$WORKTREE" ]; then
-  if [ "${ADVANCE_ROADMAP_INCREMENTAL:-0}" = 1 ] && [ "${ADVANCE_ROADMAP_INCREMENTAL_PHASE:-implementing}" = implementing ]; then
+  if [ "${ADVANCE_ROADMAP_INCREMENTAL:-0}" = 1 ] && [ "${ADVANCE_ROADMAP_CONTINUOUS:-0}" != 1 ] && [ "${ADVANCE_ROADMAP_INCREMENTAL_PHASE:-implementing}" = implementing ]; then
     BASE_PROMPT="$BASE_PROMPT
 
 Your checkout is the Superset workspace $WORKTREE, on the assigned branch. Make the bounded
@@ -303,7 +312,7 @@ Touch the root checkout under $CODE_DIR only for an authorized Step 2c directive
     BASE_PROMPT="$BASE_PROMPT
 
 Your checkout is the Superset workspace $WORKTREE (a git worktree, already on the assigned
-branch). Complete only the reserved phase there, including the required review and verification
+branch). Complete the assigned work there, including the required review and verification
 before any merge. Touch the root checkout under $CODE_DIR only for Step 2c's directive commit and
 Step 7's post-merge pull."
   fi

@@ -103,6 +103,22 @@ class ContinuationTest(unittest.TestCase):
                 child.terminate()
                 child.wait(timeout=5)
 
+    def test_continuous_watchdog_tracks_inactivity_not_elapsed_runtime(self):
+        root = self.path / 'runtime'
+        root.mkdir()
+        request = self.path / 'request.json'
+        request.write_text('{}')
+        program = 'import time; [(print("working", flush=True), time.sleep(.2)) for _ in range(10)]'
+        env = {**os.environ, 'ADVANCE_ROADMAP_CONTINUOUS': '1'}
+        command = [sys.executable, str(Path(session_stream.__file__)), '--provider', 'codex',
+                   '--root', str(root), '--request', str(request), '--workspace', str(self.path),
+                   '--output', str(self.path / 'out'), '--session-out', str(self.path / 'session'),
+                   '--timeout', '.7', '--lifecycle', str(self.path / 'lifecycle'),
+                   '--', sys.executable, '-c', program]
+        result = subprocess.run(command, env=env, timeout=10)
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(json.loads((self.path / 'lifecycle').read_text())['reason'], 'provider-exit')
+
     def test_exact_identity_and_compatibility(self):
         saved = continuation.binding(self.request, 'codex', self.path, 'session-1', self.env)
         self.assertTrue(continuation.compatible(saved, self.request, 'codex', self.path, self.env))
