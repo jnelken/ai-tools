@@ -21,6 +21,23 @@ _spec = importlib.util.spec_from_file_location("usage", SCRIPT)
 usage = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(usage)
 
+
+class ContinuousProbeTest(unittest.TestCase):
+    def test_refresh_reuses_readings_across_process_style_loads_for_two_minutes(self):
+        with tempfile.TemporaryDirectory() as directory, mock.patch.dict(
+                os.environ, {'ADVANCE_ROADMAP_CONTINUOUS': '1'}), mock.patch.object(
+                usage.time, 'time', return_value=1000) as clock, mock.patch.object(
+                usage, 'probe_claude') as claude, mock.patch.object(
+                usage, 'probe_codex') as codex, mock.patch.object(usage, 'probe_cursor_into') as cursor:
+            root = Path(directory)
+            usage.refresh(root)
+            clock.return_value = 1119
+            usage.refresh(root)
+            self.assertEqual((claude.call_count, codex.call_count, cursor.call_count), (1, 1, 1))
+            clock.return_value = 1120
+            usage.refresh(root)
+            self.assertEqual((claude.call_count, codex.call_count, cursor.call_count), (2, 2, 2))
+
 FUTURE = int(time.time()) + 3600
 PAST = int(time.time()) - 3600
 
@@ -189,6 +206,11 @@ class RoutingTests(unittest.TestCase):
             self.assertFalse(self.flags()["cursor"]["available_for_worker"])
         self.assertEqual(usage.pick_worker_chain(self.state), ["codex", "claude"])
 
+    def test_available_cursor_is_not_in_worker_route(self):
+        for provider in ("cursor", "codex", "claude"):
+            self.state["providers"][provider]["available_for_worker"] = True
+        self.assertEqual(usage.pick_worker_chain(self.state), ["codex", "claude"])
+
     def test_cursor_pinned_model_gates_on_api_pool(self):
         usage.apply_cursor(self.state, probed(usage.parse_cursor_usage(cursor_response(auto=100, api=5)), "dashboard_api"))
         with mock.patch.dict(os.environ, {"ADVANCE_ROADMAP_CURSOR_WORKER_MODEL": "claude-sonnet-4-6"}):
@@ -212,6 +234,25 @@ class RoutingTests(unittest.TestCase):
             "observed_at": usage.now_iso(), "reset_epoch": FUTURE}
         self.assertFalse(usage.apply_cursor(self.state, None))
         self.assertFalse(self.flags()["cursor"]["available_for_worker"])
+
+    def test_cursor_limit_without_reset_is_held_through_next_daily_batch(self):
+        observed = time.time() - 23 * 60 * 60
+        self.state["providers"]["cursor"]["last_limit_hit"] = {
+            "observed_at": datetime.fromtimestamp(observed).astimezone().isoformat(),
+            "reset_epoch": None}
+        gate = usage.provider_gate(self.state, "cursor", "worker", now=observed + 23 * 60 * 60)
+        self.assertFalse(gate["available"], gate)
+        self.assertEqual(gate["state"], "limited")
+        gate = usage.provider_gate(self.state, "cursor", "worker", now=observed + 25 * 60 * 60)
+        self.assertTrue(gate["available"], gate)
+
+    def test_other_provider_unknown_limit_keeps_one_hour_cooldown(self):
+        observed = time.time() - 23 * 60 * 60
+        self.state["providers"]["codex"]["last_limit_hit"] = {
+            "observed_at": datetime.fromtimestamp(observed).astimezone().isoformat(),
+            "reset_epoch": None}
+        gate = usage.provider_gate(self.state, "codex", "worker", now=observed + 23 * 60 * 60)
+        self.assertTrue(gate["available"], gate)
 
     def test_failed_probe_keeps_stored_values(self):
         usage.apply_codex(self.state, probed(usage.parse_codex_rate_limits(app_server_result(weekly=85)), "app_server"))
@@ -291,12 +332,12 @@ class GateMatrixTests(unittest.TestCase):
                 "seven_day": {"used_pct": 90, "reset_epoch": later}}
         self.assertEqual(self.gate("claude", "worker", prov)["reset_epoch"], later)
 
-    def test_review_strategy_falls_back_only_when_configured_default_has_gated_cursor(self):
+    def test_legacy_cursor_review_strategy_is_disabled(self):
         gates = [{"provider": "cursor", "state": "over", "reset_at": "2026-11-03T10:30:00-05:00"}]
         self.assertEqual(usage.effective_review_strategy("cursor-then-codex", gates), {
             "configured": "cursor-then-codex", "strategy": "cross-provider",
-            "reason": "cursor gated until 2026-11-03T10:30:00-05:00",
-            "reset_at": "2026-11-03T10:30:00-05:00"})
+            "reason": "Cursor is disabled for roadmap routing",
+            "reset_at": None})
 
     def test_explicit_cross_provider_stays_cross_provider(self):
         decision = usage.effective_review_strategy("cross-provider", [
@@ -304,11 +345,11 @@ class GateMatrixTests(unittest.TestCase):
         self.assertEqual(decision["strategy"], "cross-provider")
         self.assertIsNone(decision["reason"])
 
-    def test_available_cursor_keeps_configured_strategy(self):
+    def test_available_cursor_still_uses_cross_provider(self):
         decision = usage.effective_review_strategy("cursor-then-codex", [
             {"provider": "cursor", "state": "ok"}])
-        self.assertEqual(decision["strategy"], "cursor-then-codex")
-        self.assertIsNone(decision["reason"])
+        self.assertEqual(decision["strategy"], "cross-provider")
+        self.assertEqual(decision["reason"], "Cursor is disabled for roadmap routing")
 
     def test_thresholds_are_overridable_by_env(self):
         env = dict(os.environ, ADVANCE_ROADMAP_MAX_FIVE_HOUR_PCT="50", ADVANCE_ROADMAP_MAX_WEEKLY_PCT="60",
@@ -489,6 +530,11 @@ class LimitBannerTests(unittest.TestCase):
         self.assertEqual(usage.limit_banner(text), "You've hit your session limit · resets 11:50am (America/New_York)")
         self.assertIsNone(usage.limit_banner("The doc says you've hit your session limit sometimes."))
         self.assertIsNone(usage.limit_banner(""))
+
+    def test_cursor_actionrequired_usage_limit_is_a_live_banner(self):
+        banner = "ActionRequiredError: You've hit your usage limit Get Cursor Pro for more Agent usage, unlimited Tab, and more."
+        self.assertEqual(usage.limit_banner(banner), banner)
+        self.assertEqual(usage.live_limit_banner(banner, exit_code=1, final_answer=""), banner)
 
     def test_live_limit_ignores_echoed_banner_when_final_answer_succeeded(self):
         banner = "You've hit your usage limit. Resets 5pm."
@@ -872,7 +918,7 @@ class CliTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         out = json.loads(result.stdout)
         self.assertEqual(out["orchestrator"], "codex")
-        self.assertEqual(out["workers"], ["cursor", "codex", "claude"])
+        self.assertEqual(out["workers"], ["codex", "claude"])
 
     def test_record_limit_still_gates_with_probe_data_absent(self):
         self.run_usage("record-limit", "--provider", "codex", "--text", "usage limit, resets in 2h 5m")

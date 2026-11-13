@@ -37,6 +37,14 @@ class Profiles(unittest.TestCase):
     def test_unknown_and_invalid_mapping(self):
         self.assertEqual(p.resolve('development/auto',self.base,'codex',{})['profile'],'development/unknown')
         with self.assertRaises(ValueError):p.resolve('development/auto',self.base,'codex',{'roots':{str(self.base):'other'}})
+    def test_unknown_profile_gets_no_personal_or_work_specific_guidance(self):
+        for harness in ('claude', 'codex'):
+            result=p.resolve('development/unknown',self.base,harness,{})
+            self.assertNotIn('development/personal.md',result['sources'])
+            self.assertNotIn('development/work.md',result['sources'])
+            self.assertNotIn('providers/claude-personal.md',result['sources'])
+            self.assertNotIn('bin/agent-budget',result['instructions'])
+            self.assertNotIn('bin/fanout',result['instructions'])
     def test_provider_specific_fragments(self):
         r=self.repo()
         codex=p.resolve('development/auto',r,'codex',{})
@@ -44,6 +52,16 @@ class Profiles(unittest.TestCase):
         self.assertNotIn('Above-Sonnet',codex['instructions'])
         self.assertIn('Above-Sonnet',claude['instructions'])
         self.assertNotIn('Post-PR Workflow',codex['instructions'])
+    def test_budgeted_fanout_guidance_is_personal_only(self):
+        mine=self.repo()
+        personal=p.resolve('development/auto',mine,'claude',{})['instructions']
+        work=p.resolve('development/auto',self.repo('Concentro-Inc'),'claude',{})['instructions']
+        codex=p.resolve('development/auto',mine,'codex',{})['instructions']
+        self.assertIn('bin/agent-budget allow',personal)
+        self.assertNotIn('bin/agent-budget',work)
+        self.assertNotIn('bin/fanout',work)
+        self.assertNotIn('bin/agent-budget',codex)
+        self.assertIn('Parallelize with Subagents',work)
     def test_runtime_does_not_contain_dev_guidance(self):
         r=p.resolve('runtime/slackagent',self.base,'codex',{})
         self.assertNotIn('Superset Workspaces',r['instructions'])
@@ -86,6 +104,13 @@ class Profiles(unittest.TestCase):
     def test_machine_fragments_exist(self):
         for sources in p.MACHINE_SOURCES.values():
             for s in sources: self.assertTrue((p.ROOT/'instructions'/s).is_file(),s)
+    def test_invariants_convention_in_development_not_runtime(self):
+        mine=self.repo()
+        for harness in ('claude','codex'):
+            dev=p.resolve('development/auto',mine,harness,{})['instructions']
+            self.assertIn('before fixing, list every code path that reaches this side effect',dev)
+            for profile in ('runtime/slackagent','runtime/text'):
+                self.assertNotIn('Invariants',p.resolve(profile,self.base,harness,{})['instructions'])
     def test_toml_array_of_inline_tables(self):
         # Python 3.11+ validates the exact syntax passed to Codex -c.
         import tomllib

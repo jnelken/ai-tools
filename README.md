@@ -16,7 +16,7 @@ after installing SwiftBar (`brew install --cask swiftbar`).
 
 | Skill | Purpose |
 |---|---|
-| [`advance-roadmap`](skills/advance-roadmap) | Ship planned `ROADMAP.md` items (or `docs/plans/` docs, if no roadmap) in personal repos end-to-end, one per run, chaining runs for up to 40 min — branch, build, verify, mark shipped, merge + push `main`. With nothing to ship, runs one behavior-preserving code-health refactor; logs structured hygiene observations after each ship |
+| [`advance-roadmap`](skills/advance-roadmap) | Ship planned `ROADMAP.md` items (or `docs/plans/` docs, if no roadmap) in personal repos end-to-end, one per run, chaining runs for up to 40 min — branch, build, verify, mark shipped, merge + push `main`. With nothing to ship, reports that and stops; logs structured hygiene observations after each ship |
 | [`agenton`](skills/agenton) | zsh `agenton`/`agentoff`: keep the Mac awake with the lid closed for N minutes and log one line per minute — Wi-Fi network (named by gateway IP; 📱 marks a phone hotspot), ping latency, and Claude/Codex busy/total session counts. Sourced from `~/dotfiles/zsh/lib/45-agenton.zsh`; the skill teaches Claude to read the log and edit the script, never to run it |
 | [`conductor`](skills/conductor) | Human-driven "ship one item" that never implements in-process: the Claude session conducts Cursor (`agent`) as builder and Codex (`codex exec`, read-only) as reviewer via `worker.sh` / `review.sh`; owns the shared triage doc `ORCHESTRATOR.md` that `advance-roadmap`'s scheduler also reads |
 | [`babysit-pr`](skills/babysit-pr) | Iteratively address automated reviewer threads (Codex, CodeRabbit, etc.) on the current PR |
@@ -27,7 +27,9 @@ after installing SwiftBar (`brew install --cask swiftbar`).
 | [`datadog-add-log-facets`](skills/datadog-add-log-facets) | Create Datadog Logs facets from a path list via Claude in Chrome, leaving display names empty |
 | [`deploy-koyeb`](skills/deploy-koyeb) | Deploy a local service directory to a Koyeb app/service from a worktree or branch |
 | [`handoff`](skills/handoff) | Close out the session, then spawn a successor agent in the right Superset workspace with state, not transcript; `--cloud` writes the prompt for a claude.ai cloud session instead |
-| [`done`](skills/done) | Close this session's Superset terminal tab after checking for its own uncommitted, unpushed, or background work; Superset terminals only, `/done` or explicit request |
+| [`self-destruct`](skills/self-destruct) | The session deletes its own Superset worktree, local branch, workspace and tab after its PR is confirmed merged (loss check + confirm first), then signs off ⛏️; teardown runs from a detached script so it survives the session. In a root checkout it reaps the merged sswts the session spawned for dispatched agents (agents done, tree clean, PR merged) and closes only its own tab. The single command for ending a session: absorbs the old `done` skill and its confirmation dialog can run `close-out` or `pick-up` first. Replaces `close-sswt` |
+| [`clean-sswts`](skills/clean-sswts) | Sweep Superset workspaces from a project's root checkout: classify by PR state, dirtiness and liveness, reap the finished ones through `self-destruct`'s shared `reap-workspace.sh`, rename drifted ones, and surface the rest |
+| [`revive`](skills/revive) | Revive a dead session (claude.ai Remote Control link, `session_` id, UUID, or none to find unarchived dead ones across this Mac and the OMEN): map it to its transcript, autopsy why it died (power, reboot, CLI update, OAuth, WSL), propose a guardrail, then reattach the original thread or, failing that, resume it in a new thread |
 | [`kosha-triage`](skills/kosha-triage) | Migrate stale ClickUp captures into the markdown vault, then delete the originals |
 | [`jnelken-linear`](skills/jnelken-linear) | File or relabel a personal-workspace (DEV-*) Linear issue — refuses to create one without the `repo/<directory>` label advance-roadmap routes on |
 | [`linear-cli`](skills/linear-cli) | Read/write Linear from the shell with the `linear` CLI — the fallback when MCP is logged out or expired, plus the default filters that make `issue list` hide issues that exist |
@@ -37,7 +39,7 @@ after installing SwiftBar (`brew install --cask swiftbar`).
 | [`move-diff`](skills/move-diff) | Relocate uncommitted changes to a different branch/worktree |
 | [`fix-stale-docs`](skills/fix-stale-docs) | Scan for dead doc references, fix or delete them, push to an open (preferably approved) branch |
 | [`peer-review`](skills/peer-review) | Review with Claude for Codex-authored changes, Codex otherwise |
-| [`pick-up`](skills/pick-up) | Resume open work from `IN_PROGRESS.md`, running plan docs, and recent harness plans; offer to copy harness plans into the repo; `sweep` flags only evidence-backed done/tracked plan threads |
+| [`pick-up`](skills/pick-up) | Resume open work from `IN_PROGRESS.md`, running plan docs, and recent harness plans, each open item put to the user as a Zen-format decision (no plan mode), then `/compact` before the work; offer to copy harness plans into the repo; `sweep` flags only evidence-backed done/tracked plan threads |
 | [`post-pr`](skills/post-pr) | Take a finished PR the rest of the way: review until clean, watch CI, post to `#pr-review`, badge + undraft |
 | [`pr-review-gaps`](skills/pr-review-gaps) | Find sswt PRs never posted to `#pr-review`, with a hold-list for deliberately parked ones |
 | [`prod-query`](skills/prod-query) | Read-only production customer-tenant data questions via the api repo's audited `query:prod-readonly` script — CLI contract, RUM id → tenant mapping, safe query cookbook, PII rules |
@@ -51,7 +53,7 @@ after installing SwiftBar (`brew install --cask swiftbar`).
 | [`superset-config`](skills/superset-config) | Configure superset.sh (agentic IDE) project scripts — setup/run/teardown |
 | [`tab-triage`](skills/tab-triage) | Flush open Chrome tabs through chrome-tab-org, then triage the JSON log into vault notes and ClickUp tasks |
 | [`unblock-roadmap`](skills/unblock-roadmap) | Interactive sweep of the repos `advance-roadmap` is blocked on — asks how to resolve each, records answers as directives for a later run |
-| [`unblock-sessions`](skills/unblock-sessions) | Walk every Claude session in a Superset tab one at a time, ask Jake (with full context) about whatever each is waiting on, relay the answer or `reap`, and rescan for follow-ups; Skip for now / Skip forever on every prompt |
+| [`unblock-sessions`](skills/unblock-sessions) | Walk every Claude session in a Superset tab on any online host (or one via `--host`) one at a time, ask Jake (with full context) about whatever each is waiting on, relay the answer or `reap`, and rescan for follow-ups; Skip for now / Skip forever on every prompt |
 | [`use-spark`](skills/use-spark) | Query the Spark email client CLI — emails, calendar, contacts, scheduling |
 | [`weekly-product-changelog-and-announcement`](skills/weekly-product-changelog-and-announcement) | Generate + post a weekly per-engineer changelog (internal) and a customer-facing product announcement (external) from cross-repo git history |
 | [`wrapup-repos`](skills/wrapup-repos) | Wrap up in-progress work in one repo unattended — commit + record decisions in `.claude/IN_PROGRESS.md` |
@@ -121,7 +123,9 @@ Hooks need extra wiring in `~/.claude/settings.json` — see [`hooks/README.md`]
 
 | Automation | Schedule | Purpose |
 |---|---|---|
-| [`advance-roadmap`](automations/advance-roadmap) | Every 2 hours at :45 on odd hours (launchd; `ADVANCE_ROADMAP_CADENCE_HOURS` in the plist) | Headlessly ship planned `ROADMAP.md` items via the `advance-roadmap` skill — keeps shipping one after another until a run doesn't ship cleanly or 40 min pass |
+| [`advance-roadmap`](automations/advance-roadmap) | Daily at 10:30 (launchd) | Headlessly ship planned roadmap / Linear items in a parallel batch, one per repo, each as a merged PR from its own Superset workspace |
+| [`machine-status`](automations/machine-status) | Always on (launchd) | A read-only page of this Mac's health — the dotfiles daemons, Tailscale, Superset, disk, uptime, power, sleep and AI provider gates — at `/status` on the tailnet |
+| [`reap-sswts`](automations/reap-sswts) | Every 10 min (launchd) | Tear down sswts whose Claude tabs signed off ⛏️ over an hour ago (PR merged, tree clean, HEAD carried by the PR), and close ⛏️ root-checkout tabs; no model calls |
 | [`wrapup-repos`](automations/wrapup-repos) | Sunday 2:45am, weekly (launchd) | Headlessly wrap up in-progress work in one repo via the `wrapup-repos` skill |
 
 Scheduling (the launchd plist) needs manual per-machine setup — see [`automations/README.md`](automations/README.md).
@@ -145,6 +149,7 @@ Unlike the other categories, installing this also patches `~/.claude/settings.js
 | Tool | Purpose |
 |---|---|
 | [`ai-tools-clone-lock`](bin/ai-tools-clone-lock) | Keep the deploy working tree read-only; `run --` opens a brief update window and re-locks afterward |
+| [`main-push-wait`](bin/main-push-wait) | Sleep until a Koyeb app's last deploy is 20 min old before pushing or merging to an auto-deploying main (`--check` to just report) |
 
 ## Install
 

@@ -4,6 +4,12 @@
 # echoed prompt), and every round leaves one line in the review log.
 set -eu
 
+# Scheduled worker variables must not change the fake reviewer's routing or quota behavior.
+if [ "${ADVANCE_ROADMAP_TEST_ENV_CLEAN:-0}" != 1 ]; then
+  exec env -i HOME="$HOME" PATH="$PATH" TMPDIR="${TMPDIR:-/tmp}" \
+    ADVANCE_ROADMAP_TEST_ENV_CLEAN=1 zsh "$0" "$@"
+fi
+
 HERE="$(cd "$(dirname "$0")/.." && pwd)"
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/advance-roadmap-review-test.XXXXXX")"
 trap 'rm -rf "$TMP"' EXIT INT TERM
@@ -13,7 +19,7 @@ export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
 ROOT="$TMP/root"; BIN="$TMP/bin"; REPO="$TMP/repo"; LOG="$TMP/reviews.jsonl"
 mkdir -p "$ROOT/lib" "$BIN"
 cp "$HERE/review.sh" "$ROOT/"
-cp "$HERE/lib/models.sh" "$HERE/lib/tokens.py" "$ROOT/lib/"
+cp "$HERE/lib/models.sh" "$HERE/lib/tokens.py" "$HERE/lib/reviewlease.py" "$ROOT/lib/"
 # Fake usage.py: `gate` refuses the providers in FAKE_GATED; anything else records its last arg.
 cat > "$ROOT/lib/usage.py" <<'PY'
 import json, os, re, sys
@@ -116,6 +122,7 @@ for p in codex agent claude; do
   cat > "$BIN/$p" <<SH
 #!/bin/zsh
 name=$p; mode="\${FAKE_${p:u}:-clean}"
+if [ -n "\$CAPTURE_PROMPT" ]; then print -r -- "\$*" > "\$CAPTURE_PROMPT"; fi
 last=""; while [ \$# -gt 0 ]; do [ "\$1" = "-o" ] && { last="\$2"; shift; }; shift; done
 [ "\$name" = codex ] && print "session id: 11111111-2222-3333-4444-555555555555"
 print -r -- "echoed prompt: VERDICT: clean      (no findings)"
@@ -161,150 +168,45 @@ review_default() {  # default strategy, allowing the fake usage resolver to exer
 field() { python3 -c "import json; print(json.loads(open('$LOG').readlines()[-1])['$1'])"; }
 check() { [ "$2" = "$3" ] || { echo "FAIL [$1]: expected '$3', got '$2'"; exit 1; }; echo "ok   $1"; }
 
-out="$(review cursor 1 FAKE_CODEX=findings)"
-check "cursor's work → codex reviews"        "$(field reviewer)" codex
-check "reviewer session id logged"           "$(field session_id)" 11111111-2222-3333-4444-555555555555
-check "verdict from the final answer only"   "$(field verdict)" findings
-case "$out" in *"x.py:1 bug"*) echo "ok   findings printed" ;; *) echo "FAIL: no findings in output"; exit 1 ;; esac
-
-review codex 2 FAKE_AGENT=clean >/dev/null
-check "codex's work → cursor reviews"        "$(field reviewer)" cursor
-check "clean verdict"                         "$(field verdict)" clean
-check "round recorded"                        "$(field round)" 2
-review_default codex 3 FAKE_AGENT=clean >/dev/null
-check "Cursor available keeps default strategy" "$(field strategy)" cursor-then-codex
-
-out="$(review_default cursor 1 FAKE_GATED=cursor FAKE_CODEX=clean)"
-check "gated Cursor falls back to Codex" "$(field reviewer)" codex
-check "fallback strategy is logged" "$(field strategy)" cross-provider
-check "fallback reason is logged" "$(field fallback_reason)" "cursor gated until 2026-11-03T10:30:00-05:00"
-case "$out" in *"strategy=cross-provider"*) echo "ok   fallback execution is cross-provider" ;; *) echo "FAIL: fallback strategy missing from output"; exit 1 ;; esac
-
-review_default codex 1 ADVANCE_ROADMAP_REVIEW_STRATEGY=cross-provider FAKE_GATED=cursor FAKE_AGENT=clean >/dev/null
-check "explicit cross-provider remains configured" "$(field strategy)" cross-provider
-check "explicit strategy has no fallback reason" "$(python3 -c "import json; print('fallback_reason' in json.loads(open('$LOG').readlines()[-1]))")" False
-
-review_default codex 1 ADVANCE_ROADMAP_BUDGET_REVIEW_STRATEGY=cross-provider \
-  ADVANCE_ROADMAP_BUDGET_REVIEW_FALLBACK_REASON="cursor gated until reserved reset" \
-  ADVANCE_ROADMAP_BUDGET_REVIEWERS=claude FAKE_AGENT=clean >/dev/null
-check "batch reservation pins its strategy" "$(field strategy)" cross-provider
-check "batch reservation pins fallback reason" "$(field fallback_reason)" "cursor gated until reserved reset"
-check "reserved reviewer is used after Cursor resets" "$(field reviewer)" claude
-
-out="$(review cursor 1 FAKE_CODEX=limit FAKE_CLAUDE=clean)"
-check "limited codex → claude reviews"       "$(field reviewer)" claude
-case "$out" in *"reviewer=codex"*) echo "FAIL: limited reviewer's text leaked"; exit 1 ;; *) echo "ok   no stale text from limited reviewer" ;; esac
-grep -q "usage limit" "$ROOT/limits.txt" && echo "ok   limit recorded" || { echo "FAIL: limit not recorded"; exit 1; }
-check "limited reviewer logged with its reset" \
-  "$(python3 -c "import json; l = json.loads(open('$LOG').readlines()[-1])['limited']; print([(h['provider'], h['cause'], h['reset_epoch']) for h in l])")" \
-  "[('codex', \"You've hit your usage limit. Resets 5pm.\", 1760396400)]"
-
-rc=0; review claude 1 FAKE_CODEX=limit FAKE_AGENT=limit >/dev/null || rc=$?
-check "all reviewers limited → exit 3"       "$rc" 3
-check "logged as unavailable"                "$(field verdict)" unavailable
-check "one log row per completed review stage" "$(wc -l < "$LOG" | tr -d ' ')" 9
-
-rc=0; review cursor 1 ADVANCE_ROADMAP_CODEX_BIN=/nonexistent FAKE_CLAUDE=clean >/dev/null || rc=$?
-check "missing binary → next reviewer"       "$(field reviewer)" claude
-
-review cursor 1 FAKE_GATED=codex FAKE_CLAUDE=clean >/dev/null
-check "codex over its gate → claude reviews" "$(field reviewer)" claude
-check "gated reviewer logged"                "$(field gated)" "['codex']"
-
-rc=0; review claude 1 FAKE_GATED="codex cursor" >/dev/null || rc=$?
-check "every reviewer gated → exit 3"        "$rc" 3
-check "gated round logged as unavailable"    "$(field verdict)" unavailable
-
-: > "$ROOT/limits.txt"
-out="$(review cursor 1 FAKE_CODEX=capacity FAKE_CLAUDE=clean)"
-check "codex at capacity → claude reviews"   "$(field reviewer)" claude
-check "capacity is not unparsed"             "$(field verdict)" clean
-check "capacity reviewer logged"             "$(field capacity)" "['codex']"
-check "skipped reviewer's session not kept"  "$(field session_id)" claude-session
-[ -s "$ROOT/limits.txt" ] && { echo "FAIL: capacity recorded as a quota limit"; exit 1; } || echo "ok   capacity is not a quota hit"
-case "$out" in *"at capacity"*) echo "ok   capacity skip printed" ;; *) echo "FAIL: no capacity note"; exit 1 ;; esac
-
-rc=0; review claude 1 FAKE_CODEX=capacity FAKE_AGENT=http503 >/dev/null || rc=$?
-check "every reviewer at capacity → exit 3"  "$rc" 3
-check "capacity round logged as unavailable" "$(field verdict)" unavailable
-check "both capacity reviewers logged"       "$(field capacity)" "['codex', 'cursor']"
-
-out="$(review cursor 1 FAKE_CODEX=echo)"
-check "a transcript-only verdict is unparsed" "$(field verdict)" unparsed
-
-# Successful final answer + banner on its own line in the transcript is not a live limit.
-# (A prefix like "echoed prior log:" would dodge the anchored detector and not exercise suppression.)
-: > "$ROOT/limits.txt"
-cat > "$BIN/codex" <<'SH'
-#!/bin/zsh
-last=""; while [ $# -gt 0 ]; do [ "$1" = "-o" ] && { last="$2"; shift; }; shift; done
-print "echoed prior log:"
-print "You've hit your usage limit. Resets 5pm."
-print -r -- "reviewer=codex
-VERDICT: clean" > "$last"
-print "session id: 11111111-2222-3333-4444-555555555555"
-SH
-chmod +x "$BIN/codex"
-review cursor 1 >/dev/null
-check "echoed banner + clean final is clean" "$(field verdict)" clean
-check "echoed banner does not fail over"     "$(field reviewer)" codex
-[ -s "$ROOT/limits.txt" ] && { echo "FAIL: echoed banner recorded as a limit"; exit 1; } \
-  || echo "ok   echoed banner is not a live limit"
-case "$out" in *"VERDICT: unparsed"*) echo "ok   unparsed printed" ;; *) echo "FAIL: no unparsed note"; exit 1 ;; esac
-
-# Zero-exit JSON is_error:true must fail over (needs --result-json); Claude is the next reviewer.
-: > "$ROOT/limits.txt"
-# Recreate the default codex stub first (overwritten above), then run with agent json-limit.
-for p in codex; do
-  cat > "$BIN/$p" <<SH
-#!/bin/zsh
-name=$p; mode="\${FAKE_${p:u}:-clean}"
-last=""; while [ \$# -gt 0 ]; do [ "\$1" = "-o" ] && { last="\$2"; shift; }; shift; done
-print "session id: 11111111-2222-3333-4444-555555555555"
-print -r -- "echoed prompt: VERDICT: clean      (no findings)"
-body="reviewer=\$name
-x.py:1 bug: something
-VERDICT: \$mode"
-if [ -n "\$last" ]; then print -r -- "\$body" > "\$last"; fi
-SH
-  chmod +x "$BIN/$p"
-done
-review codex 1 FAKE_AGENT=json-limit FAKE_CLAUDE=clean >/dev/null
-check "json is_error limit fails over"       "$(field reviewer)" claude
-check "json is_error verdict is clean"       "$(field verdict)" clean
-[ -s "$ROOT/limits.txt" ] || { echo "FAIL: is_error JSON was not recorded as a limit"; exit 1; }
-echo "ok   json is_error is a live limit"
-
-# Zero-exit JSON overload must use capacity fallback (not unparsed), without a quota hit.
-: > "$ROOT/limits.txt"
-out="$(review codex 1 FAKE_AGENT=json-capacity FAKE_CLAUDE=clean)"
-check "json is_error capacity fails over"    "$(field reviewer)" claude
-check "json is_error capacity is clean"      "$(field verdict)" clean
-check "json capacity reviewer logged"        "$(field capacity)" "['cursor']"
-[ -s "$ROOT/limits.txt" ] && { echo "FAIL: json capacity recorded as a quota limit"; exit 1; } \
-  || echo "ok   json capacity is not a quota hit"
-case "$out" in *"at capacity"*) echo "ok   json capacity skip printed" ;; *) echo "FAIL: no json capacity note"; exit 1 ;; esac
-
-out="$(review codex 1 FAKE_AGENT=findings)"
-check "cursor's JSON final answer is parsed" "$(field verdict)" findings
-check "cursor reviewer session id logged"    "$(field session_id)" agent-session
-case "$out" in *"echoed prompt"*) echo "FAIL: transcript printed instead of the final answer"; exit 1 ;; *) echo "ok   only the final answer printed" ;; esac
-
-# Cursor completes; Codex is then gated before launch. Its stage has no session.
-# Clear the earlier default-strategy integration row so it cannot satisfy the one-time Codex pass.
-: > "$LOG"
-rc=0; review cursor 1 ADVANCE_ROADMAP_REVIEW_STRATEGY=cursor-then-codex FAKE_AGENT=clean FAKE_GATED=codex >/dev/null || rc=$?
-check "required Codex gate → exit 3" "$rc" 3
-check "required Codex gate logged" "$(field reviewer)" codex
-check "gated Codex has no Cursor session" "$(field session_id)" None
-# A batch reservation selects one cross-provider reviewer. Limits cannot
-# spill to a healthy provider which has no lease.
-rc=0; review cursor 1 ADVANCE_ROADMAP_BUDGET_REVIEWERS=codex FAKE_GATED=codex FAKE_CLAUDE=clean >/dev/null || rc=$?
-check "unleased reviewer cannot be a quota fallback" "$rc" 3
-check "unleased fallback is unavailable" "$(field verdict)" unavailable
-check "unleased fallback recorded as gated" "$(field gated)" "['codex', 'claude']"
-
-review cursor 1 ADVANCE_ROADMAP_BUDGET_REVIEWERS=claude FAKE_CODEX=findings FAKE_CLAUDE=clean >/dev/null
-check "reserved cross-provider reviewer is used" "$(field reviewer)" claude
-
+# Cursor is disabled even when a saved strategy or reviewer allocation asks for it.
+review codex 1 FAKE_CLAUDE=clean >/dev/null
+check "codex work uses Claude" "$(field reviewer)" claude
+check "clean verdict" "$(field verdict)" clean
+review claude 1 FAKE_CODEX=findings >/dev/null
+check "Claude work uses Codex" "$(field reviewer)" codex
+check "findings verdict" "$(field verdict)" findings
+review_default codex 1 ADVANCE_ROADMAP_REVIEW_STRATEGY=cursor-then-codex FAKE_CLAUDE=clean >/dev/null
+check "legacy strategy routes cross-provider" "$(field strategy)" cross-provider
+check "legacy strategy does not invoke Cursor" "$(field reviewer)" claude
+review_default codex 1 ADVANCE_ROADMAP_BUDGET_REVIEW_STRATEGY=cursor-then-codex FAKE_CLAUDE=clean >/dev/null
+check "legacy saved strategy does not invoke Cursor" "$(field reviewer)" claude
+rc=0; review codex 1 ADVANCE_ROADMAP_BUDGET_REVIEWERS=cursor FAKE_AGENT=clean >/dev/null || rc=$?
+check "Cursor-only saved reservation cannot invoke Cursor" "$rc" 3
+check "unavailable reviewer logged" "$(field verdict)" unavailable
+rc=0; review codex 1 FAKE_GATED=claude FAKE_AGENT=clean >/dev/null || rc=$?
+check "gated Claude does not fall back to Cursor" "$rc" 3
+check "gate logged as unavailable" "$(field verdict)" unavailable
+review cursor 1 FAKE_CODEX=limit FAKE_CLAUDE=clean >/dev/null
+check "legacy Cursor worker reviewed by Claude after Codex limit" "$(field reviewer)" claude
+check "limited reviewer is recorded" "$(python3 -c "import json; print(json.loads(open('$LOG').readlines()[-1])['limited'][0]['provider'])")" codex
+review cursor 1 FAKE_CODEX=capacity FAKE_CLAUDE=clean >/dev/null
+check "capacity fails over for legacy worker" "$(field reviewer)" claude
+check "capacity is recorded" "$(field capacity)" "['codex']"
+review cursor 1 FAKE_CODEX=echo >/dev/null
+check "transcript-only verdict is unparsed" "$(field verdict)" unparsed
+rc=0; review codex 1 FAKE_CLAUDE=json-limit >/dev/null || rc=$?
+check "JSON quota error makes review unavailable" "$rc" 3
+check "JSON limit recorded" "$(python3 -c "import json; print(json.loads(open('$LOG').readlines()[-1])['limited'][0]['provider'])")" claude
+rc=0; review codex 1 FAKE_CLAUDE=json-capacity >/dev/null || rc=$?
+check "JSON capacity makes review unavailable" "$rc" 3
+check "JSON capacity recorded" "$(field capacity)" "['claude']"
+review codex 1 FAKE_CLAUDE=findings >/dev/null
+check "Claude JSON verdict is parsed" "$(field verdict)" findings
+check "review session recorded" "$(field session_id)" claude-session
+review codex 1 ADVANCE_ROADMAP_INCREMENTAL=1 ADVANCE_ROADMAP_BUDGET_REVIEWERS=claude FAKE_CLAUDE=clean >/dev/null
+rc=0; review codex 2 ADVANCE_ROADMAP_INCREMENTAL=1 ADVANCE_ROADMAP_BUDGET_REVIEWERS=claude FAKE_CLAUDE=clean >/dev/null || rc=$?
+check "incremental reviewer cannot reuse reservation" "$rc" 3
+capture="$TMP/reviewer-prompt"
+review codex 1 CAPTURE_PROMPT="$capture" FAKE_CLAUDE=clean >/dev/null
+grep -Fq 'Classify each finding as an instance' "$capture" || { echo "FAIL: missing invariant classification"; exit 1; }
 echo "all passed"

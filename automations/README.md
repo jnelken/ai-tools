@@ -1,5 +1,7 @@
 # Automations
 
+Private automations `paradev` and `tailnet-index` live in the private dotfiles repo under `automations/`, not here.
+
 Scheduled headless `claude -p` runs, launched by macOS `launchd` on my machines.
 `install.sh` symlinks each automation's script(s) into `~/.claude/automations/<name>/`,
 but **launchd plists are not auto-loaded** — paths/usernames can differ
@@ -18,29 +20,105 @@ makes the deploy clone dirty.
 
 ## `advance-roadmap`
 
-One finite batch every day at **10:30 local time** (Eastern on Jake's Mac), starting
+Two finite batches every day at **10:30 and 15:30 local time** (Eastern on Jake's Mac), starting
 with `daily_batch.py`. It queues direct-child personal repos, excluding `.noroadmap`,
 non-`jnelken` origins, aliases, and repos with a worker still in flight. Each repo gets
-its own read-only planner, scoped to **one actionable ticket/roadmap item or one hygiene pass**.
+its own read-only planner, scoped to **one actionable ticket/roadmap item**, with one thread
+per repo by default. Extra threads require an explicit override.
 The existing clean-tree, live-session, directive, dependency, and review gates still apply.
-When a repo has no actionable item, its planner uses the existing Step 2d code-health fallback:
-prefer a code-health ticket, otherwise queue one bounded, behavior-preserving hygiene pass.
-This fallback is evaluated per repo, even when other repos have feature work. All existing
-hygiene eligibility rules apply, including opt-in, a clean tree, verification, and the 24-hour
-cooldown. An ineligible repo is skipped. Each repo gets one feature/resume **or** hygiene run,
-never both in the same daily batch.
+When a repo has no actionable item, its planner reports that and stops (Step 2d). There is no
+code-health or hygiene fallback; `run.sh` refuses a `code_health` plan.
 
 All planners finish before implementation begins. Ready plans are persisted and wait at
 a disk barrier; the controller releases workers together, up to the concurrency limit.
 Each worker uses the existing Superset workspace, verification, cross-model review, and
 PR merge flow. A repo's finished slot never queues another ticket from that repo.
 
+### Durable recovery and dynamic scheduling rollout
+
+`lib/workqueue.py` keeps stable work identities, attempts and bounded phase checkpoints in
+`~/.claude/automations/advance-roadmap/workqueue.sqlite3` (SQLite WAL, full synchronous commits).
+The existing pending-plan files remain compatibility projections and migration sources. Only
+existing pending assignments authorize recovery during migration; an old failed log does not
+revive deliberately parked work. Historical attempts retain assigned and reported repo separately.
+
+Saved work no longer disappears after 36 hours or two retries. Those thresholds request revalidation
+of the ticket, branch and existing PR/merge instead. Unsafe repos are held without losing their plan.
+Checkpoints preserve next actions, session IDs and artifact pointers across providers; a changed
+HEAD marks test/review evidence invalid while retaining findings for rechecking. Workers currently
+use checkpoint-based continuation; native CLI session reattachment is not assumed to work.
+
+The dashboard's **Work queue and continuation** panel shows phases, waiting reasons, eligibility
+decisions and unrouted Linear issues. Relevant human replies/directives reopen a held assignment
+for revalidation; an explicit release is also available without an agent:
+
+```sh
+python3 ~/.claude/automations/advance-roadmap/lib/workqueue.py status
+python3 ~/.claude/automations/advance-roadmap/lib/workqueue.py unblock <work-id> --reason 'What changed'
+```
+
+`com.jake.advance-roadmap-shadow.plist` invokes `scheduler.py` every 15 minutes. **Default mode is
+shadow:** it makes no model calls and dispatches no workers. It imports completed records,
+reconciles surviving workers using PID birth times, refreshes a cached Linear snapshot at most
+once per 15 minutes and records proposed eligibility decisions. An idle tick never launches a model.
+No-work caches depend on launch-time inputs, so late completions cannot make newer inputs look
+already triaged. Unrouted tickets remain on the dashboard instead of invalidating every repo;
+explicit repo directives and cross-repo dependencies are preserved.
+
+The active 10:30 / 15:30 job retains live authority during the seven-day shadow period. Trial and
+expansion commands are gated by actual saved observations, not just a configuration switch:
+
+```sh
+python3 ~/.claude/automations/advance-roadmap/scheduler.py --status
+# After seven days of fresh shadow observations without false skips/errors:
+python3 ~/.claude/automations/advance-roadmap/scheduler.py --promote <repo-one> [repo-two]
+# After a measured seven-day trial meets the efficiency/completion checks:
+python3 ~/.claude/automations/advance-roadmap/scheduler.py --expand
+# Restore legacy dispatch while preserving queue/checkpoints:
+python3 ~/.claude/automations/advance-roadmap/scheduler.py --rollback
+# Begin a new observation period after fixing a shadow failure:
+python3 ~/.claude/automations/advance-roadmap/scheduler.py --restart-shadow
+```
+
+In trial/dynamic mode, the scheduled job excludes those repos. The new controller shares its kernel
+lock and budget leases; it never runs beside the legacy controller. It streams one item per repo
+without a global planning barrier, caps all active phases at five, reserves full implementation plus
+review capacity before planning, and admits at most two model attempts per repo per day, including resumptions. More frequent
+ticks cannot multiply retry spending; repeated failures back off up to six hours.
+Quota waits have a `not_before`; unchanged no-work inputs wait for a change or the 72-hour safety
+audit. Checkpoints are updated at phase transitions and worker milestones. Dynamic attempts are
+folded into the existing scheduled summary, not posted per tick. Rollback preserves all work history.
+
+The approved rollout is enabled with `scheduler.py --enable-rollout <ai-tools-dev-checkout>`.
+It automatically selects up to two eligible pilot repos with the largest measured no-work cost in the recent week
+after the shadow gate passes. Expansion requires a full measured trial week with token
+coverage, at least 50% fewer no-work planning tokens, no lost ships and no increased errors.
+`--status` reports the baseline/trial totals and limitations; token totals are not quota percentages
+or cross-provider dollar costs. Do not report the rollout complete before these observation periods
+have actually passed. The execution plan stays active until then. After rollout completion, the controller moves it to
+`docs/plans/archive/`, commits and pushes the move from the configured dev checkout. A dirty tree,
+non-main branch or unpublished commits defer archival without touching other work. A failed push
+is retried using the recorded archive commit. Rollback disables automatic promotion.
+
+Install the shadow agent by symlinking the maintained deploy-clone plist into `~/Library/LaunchAgents/`,
+then `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.jake.advance-roadmap-shadow.plist`.
+It has `RunAtLoad=false`; a bootstrap does not start a model or force a roadmap batch.
+A local `session-hold.json` under the automation root pauses live dispatch and promotion without
+claiming a scheduled slot; shadow observations may continue. Remove it when the implementation
+session finishes. An unloaded/disabled LaunchAgent must also be enabled and bootstrapped again.
+
 ### Schedule, concurrency, and recovery
 
-`com.jake.advance-roadmap.plist` has one `StartCalendarInterval`: 10:30 daily, with
-`RunAtLoad=false`. It replaces the two continuously refilled sprint windows and their
-hourly watchdog ticks. macOS may deliver a missed tick after waking; the dated manifest
-prevents a second batch that day. A batch already in progress can finish after 10:30.
+`com.jake.advance-roadmap.plist` has two `StartCalendarInterval` entries: **10:30 AM and
+3:30 PM local time**, with `RunAtLoad=false`. macOS may deliver a missed tick after waking;
+a slot-specific manifest prevents starting the same slot twice. A running batch can finish
+past the next scheduled time; the shared kernel lock prevents overlapping schedulers.
+
+Carried dispatch/resume plans run first, without planning new work or expanding to extra
+threads. New work starts only after those workers ship and their pending plans are cleared.
+Interrupted work is resumed automatically. If a worker explicitly needs an owner decision or
+access, it is parked with one question while unrelated repos continue. Test failures and merge
+conflicts remain agent-owned. Existing repo/in-flight locks and worker freshness checks remain.
 
 `ADVANCE_ROADMAP_LANES=5` caps the total number of active agents in a batch. Planning, approval,
 and implementation run in sequence, so no more than **five agents at once** can be active across
@@ -53,18 +131,17 @@ Planning times out after 30 minutes (`ADVANCE_ROADMAP_PLAN_TIMEOUT_S`); an indiv
 failed or skipped planner does not block the rest. Worker timeouts remain in `run.sh`.
 
 The shared kernel lock prevents overlapping schedulers. The durable queue and selected
-ticket IDs are in `~/.claude/automations/advance-roadmap/batches/YYYY-MM-DD/batch.json`;
+ticket IDs are in `~/.claude/automations/advance-roadmap/batches/YYYY-MM-DD-HHMM/batch.json`;
 that directory also holds the batch's immutable Linear snapshot. Logs and lane run records
 remain in the usual `logs/`, `runs/`, and `runs.jsonl` paths. Plans not implemented remain
-in the existing per-repo pending-plan files for the next daily batch.
+in the existing per-repo pending-plan files for the next scheduled batch.
 
 Quota is checked before each implementation wave. Exhaustion defers the remaining plans
 and finishes the batch; there is **no 30-minute quota retry loop, refilling, chaining, or
-second batch that day**. A crashed controller is not automatically rerun that day either:
+second batch in the same scheduled slot**. A crashed controller is not automatically rerun in the same slot either:
 waiting lanes exit when it disappears, while already dispatched workers can finish and
-remain protected by the existing repo/in-flight locks. A failed preflight is recorded in
-the manifest and waits for the next daily tick. Legacy cadence/backoff calculations apply
-only to manual `run.sh` use, not this daily schedule.
+remain protected by the existing repo/in-flight locks. A failed preflight does not claim a slot; the next invocation can retry it. Legacy cadence/backoff calculations apply
+only to manual `run.sh` use, not this twice-daily schedule.
 
 Install the maintained source after committing/pushing and running `~/.ai-tools/install.sh`.
 Preserve any existing local plist before replacing it, then symlink the maintained plist
@@ -113,8 +190,11 @@ Skipped runs never reach the Slack step, so only completed runs post.
    limit banner instead of a plan is recorded and the tick fails over to the next planner still
    under its gate.
 3. Parses `ORCHESTRATOR_RESULT_JSON`, then dispatches `worker.sh` along
-   **Cursor Auto → Codex Sol → Claude Opus**, skipping any provider over its usage gate and failing
-   over on a limit banner within the same tick.
+   **Codex Luna (high) → Claude Sonnet (high)**, skipping any provider over its usage
+   gate and failing over on a limit banner within the same tick. Cursor remains in usage telemetry
+   and reviewer routing, but is no longer routed as a worker. Worker models and efforts are
+   `*_WORKER_*_DEFAULT` in `lib/models.sh`; override with `ADVANCE_ROADMAP_{CLAUDE,CODEX}_WORKER_MODEL`
+   and `_WORKER_EFFORT`.
 4. Records provider limits so the **next** run routes differently.
 
 **A failed plan dispatches nothing.** When no planner returns a valid `ORCHESTRATOR_RESULT_JSON`
@@ -156,8 +236,11 @@ worker skips its file, `worker.sh` recovers it from a fence in that final answer
 runs from before 2026-09-24.
 
 Two consecutive `error` / `failed` / `incomplete` runs post a separate `<!here>` Slack alert and a
-macOS notification, then again every 4 failures; the first success afterwards posts a recovery
-line. (A routine "error" summary line went unnoticed for 4.5 days in Sep 2026.)
+macOS notification, then again every 4 failures. A recovery notice requires a shipped worker
+with observed exit 0 for the same repository and item (ticket, branch, or item name), and names
+that work specifically. Unrelated/no-work planner results never confirm recovery; other
+outstanding failures are called out. (A routine "error" summary line went unnoticed for 4.5 days
+in Sep 2026.)
 
 A run stopped by usage — the planner hit its limit, or every worker provider was over its gate or
 limited — is recorded as **`quota-paused`**, not `error`. Its row carries a `quota` field (provider,
@@ -218,7 +301,7 @@ than posting to an absolute `/refresh`, which the `/roadmap` prefix would otherw
 Turn tailnet access off with `tailscale serve reset`. That leaves the local server running on
 `127.0.0.1:8421`.
 
-The 10:30 batch stays separate from the Sunday 02:45 `wrapup-repos` schedule.
+The 10:30 and 15:30 batches stay separate from the Sunday 02:45 `wrapup-repos` schedule.
 
 ### Token accounting
 
@@ -292,6 +375,51 @@ Limitations:
   hang a scheduled run; it just skips the Cursor probe.
 - The Keychain token is the Agent CLI's; if it expires the probe gets a 401 until the next `agent`
   run refreshes it.
+
+## `machine-status`
+
+A read-only page of this Mac's health at `http://127.0.0.1:8423/`, mounted at `/status` on the
+tailnet. Each card is one check, with its own timeout, run in parallel and cached 30 s:
+
+- **Daemons:** `claude-rc-daemon`, `superset-host-daemon` and `crash-session-check` `status`
+  (from `~/dotfiles/bin`), parsed to ok / problem / not installed, raw output collapsed.
+- **Tailscale** (online, name, addresses, served pages) and **Superset** (CLI and host answering).
+- **This Mac:** disk free (warns under 10%), uptime, load, power and battery, last sleep and wake,
+  and what's holding the Mac awake.
+- **AI providers:** each gate and usage window from advance-roadmap's `providers-usage.json`.
+
+```sh
+ln -sf ~/.ai-tools/automations/machine-status/com.jake.machine-status.plist ~/Library/LaunchAgents/
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.jake.machine-status.plist
+tailscale serve --bg --set-path /status http://127.0.0.1:8423
+```
+
+Tests: `python3 -m unittest discover -s automations/machine-status/tests`.
+
+## `reap-sswts`
+
+Every 10 minutes, `reap.py` looks at this machine's Superset tabs (local host only) and acts
+on Claude tabs whose transcript ends on a ⛏️ sign-off at least an hour old
+(`REAP_SSWTS_GRACE_MIN`), with the agent idle and nothing typed since. Replying to the
+session, even after the glyph, cancels it. No model calls; it is plain checks plus the CLI.
+
+- **sswt (worktree workspace):** runs [`self-destruct`](../skills/self-destruct/SKILL.md)'s
+  `teardown.sh` (archive the workspace, prune, `git branch -D` in the root clone, recovery
+  command in `~/.claude/state/self-destruct.log`) only if every other tab in it is also a
+  reapable ⛏️ Claude tab or an idle shell prompt, the tree is clean, the branch has a
+  MERGED PR and no OPEN one, `HEAD` is a commit that PR carried, and no gitignored
+  `IN_PROGRESS.md` would go with it. It also drops the PR's `pr-review-posted.jsonl` entry.
+- **Root checkout** (non-worktree type, the project's own path, or `main`/`master`): closes
+  the ⛏️ tab's terminal only, like `/self-destruct` in a root checkout. The workspace and clone are never touched.
+
+Every skip is logged with its reason to `~/.claude/automations/reap-sswts/logs/reap.log`.
+Preview with `~/.claude/automations/reap-sswts/run.sh --dry-run` (prints to the terminal).
+Tests: `python3 -m unittest discover -s automations/reap-sswts/tests`.
+
+```sh
+ln -s ~/.ai-tools/automations/reap-sswts/com.jake.reap-sswts.plist ~/Library/LaunchAgents/
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.jake.reap-sswts.plist
+```
 
 ## `wrapup-repos`
 

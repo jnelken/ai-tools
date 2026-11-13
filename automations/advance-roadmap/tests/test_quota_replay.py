@@ -52,13 +52,10 @@ class Oct27BudgetAdmissionTest(unittest.TestCase):
             budget.readings = {p: {'windows': {'auto' if p == 'cursor' else 'five_hour': {'live': live, 'cap': cap}}}
                                for p, live, cap in [('codex', 41, 70), ('claude', 16, 70), ('cursor', 100, 100)]}
             self.assertLess(budget.models['codex']['roles']['planner']['pct']['five_hour'], 4.4)
-            # Actual 10-27 pool: mandatory Cursor review cannot run. A4 must
-            # stop before even the now-cheap Codex planners spend anything.
-            self.assertIsNone(budget.choose(commit=False))
-            self.assertFalse(budget.admit({'repo': 'demo', 'stamp': 'blocked'}))
-            # With an eligible cross-provider reviewer, the same 41% Codex
-            # reading can admit a bounded five-lane wave (old factor admitted 0).
-            os.environ['ADVANCE_ROADMAP_REVIEW_STRATEGY'] = 'cross-provider'
+            # The old Cursor pool no longer gates Codex work; Claude reviews it.
+            allocation = budget.choose(commit=False)
+            self.assertEqual(allocation['reviewers'], ['claude'])
+            # The same 41% Codex reading can admit a bounded five-lane wave.
             items = [{'repo': str(n), 'stamp': str(n)} for n in range(5)]
             self.assertEqual(sum(budget.admit(item) for item in items), 5)
             for item in items:
@@ -107,6 +104,13 @@ elif name == "agent":
               open(path, "w"))
     print(json.dumps({{"type": "result", "result": "done", "usage": {{"inputTokens": 1, "outputTokens": 1}}}}))
 elif name == "codex":
+    if role == "worker" and mode == "plan":
+        path = next(l.split(": ", 1)[1] for l in prompt.splitlines()
+                    if l.startswith("(raw JSON, no fence) to: "))
+        json.dump({{"outcome": "bookkeeping", "provider": "codex", "repo": "demo",
+                   "summary": "bookkeeping done"}}, open(path, "w"))
+        print("codex done")
+        sys.exit(0)
     if session_id:
         print("session id: " + session_id, flush=True)
     out = args[args.index("-o") + 1] if "-o" in args else None
@@ -156,7 +160,14 @@ elif name == "claude":
         path = next(l.split(": ", 1)[1] for l in prompt.splitlines() if l.startswith("(raw JSON, no fence) to: "))
         json.dump({{"outcome": "limit_hit", "provider": "claude", "repo": "demo",
                     "limit_text": os.environ["FAKE_RESULT_LIMIT"]}}, open(path, "w"))
-    result = fence if mode == "plan" else "I looked around and decided nothing."
+    if role == "worker" and mode == "plan":
+        path = next(l.split(": ", 1)[1] for l in prompt.splitlines()
+                    if l.startswith("(raw JSON, no fence) to: "))
+        json.dump({{"outcome": "bookkeeping", "provider": "claude", "repo": "demo",
+                   "summary": "bookkeeping done"}}, open(path, "w"))
+        result = "done"
+    else:
+        result = fence if mode == "plan" else "I looked around and decided nothing."
     reply = {{"type": "result", "subtype": "success", "is_error": False, "result": result, "modelUsage": {{}}}}
     if session_id:
         reply["session_id"] = session_id
@@ -250,8 +261,8 @@ class QuotaReplayTest(unittest.TestCase):
         proc = subprocess.Popen(["/bin/zsh", str(self.root / "run.sh")], env=env,
                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         self.reached_barrier = False
-        deadline = time.time() + 90
-        while proc.poll() is None and time.time() < deadline:
+        deadline = time.monotonic() + 90  # monotonic: a sleeping Mac must not look like a hung run.sh
+        while proc.poll() is None and time.monotonic() < deadline:
             if (run / "batch-ready").exists() and not (run / "batch-release").exists():
                 self.reached_barrier = True
                 if budget_route:
@@ -418,12 +429,12 @@ class QuotaReplayTest(unittest.TestCase):
         proc = subprocess.Popen(["/bin/zsh", str(self.root / "run.sh")], env=env,
                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
         calls = self.dir / "calls.jsonl"
-        deadline = time.time() + 20
-        while not calls.exists() and time.time() < deadline:
+        deadline = time.monotonic() + 20
+        while not calls.exists() and time.monotonic() < deadline:
             time.sleep(0.02)
         self.assertTrue(calls.exists(), "fake Codex did not start")
         stdout = self.root / "runs" / self.stamp / "orchestrator-stdout.txt"
-        while (not stdout.exists() or "session id: codex-timeout-id" not in stdout.read_text()) and time.time() < deadline:
+        while (not stdout.exists() or "session id: codex-timeout-id" not in stdout.read_text()) and time.monotonic() < deadline:
             time.sleep(0.02)
         self.assertIn("session id: codex-timeout-id", stdout.read_text())
         rollout = self.dir / "codex-sessions" / "2026" / "10" / "rollout-fixture-codex-timeout-id.jsonl"
@@ -767,7 +778,7 @@ exec(compile(open(__file__).read(), __file__, "exec"))
         plan = {**NO_WORK, "blockers": [{"repo": "demo", "linear_id": "DEV-7", "detail": "needs a decision"}]}
         self.run_lane(FAKE_CLAUDE="plan", FAKE_PLAN=json.dumps(plan))
         self.assertTrue(self.reached_barrier)
-        self.assertEqual([c["bin"] for c in self.calls() if c["role"] == "worker"], ["agent"])
+        self.assertEqual([c["bin"] for c in self.calls() if c["role"] == "worker"], ["claude"])
         self.assertEqual(self.record()["outcome"], "blocked-no-item")
         self.assertEqual(json.loads(self.verdict.read_text())["summary"], NO_WORK["summary"])
         self.assertFalse((self.root / "memory").exists(), "the worker owns the ledger row, not run.sh")
@@ -852,11 +863,11 @@ exec(compile(open(__file__).read(), __file__, "exec"))
             issue("DEV-4", ["repo/demo"], "completed")]}))
         run = self.run_lane(FAKE_CLAUDE="plan")
         planner_snap = json.loads((run / "linear-snapshot-planner.json").read_text())
-        self.assertEqual([i["id"] for i in planner_snap["issues"]], ["DEV-1", "DEV-3"])
+        self.assertEqual([i["id"] for i in planner_snap["issues"]], ["DEV-1"])
         self.assertIn(str(run / "linear-snapshot-planner.json"), self.calls()[0]["prompt"])
         self.assertEqual(len(json.loads((run / "linear-snapshot.json").read_text())["issues"]), 4)
         self.assertEqual(sorted(json.loads((run / "fingerprint.json").read_text())["issues"]),
-                         ["DEV-1", "DEV-3", "DEV-4"])
+                         ["DEV-1", "DEV-4"])
 
     # ── a pending plan only disables its own repo's verdict check ───────────
 

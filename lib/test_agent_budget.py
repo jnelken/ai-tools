@@ -42,6 +42,13 @@ class BudgetTests(unittest.TestCase):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(''.join(json.dumps(r) + '\n' for r in records))
 
+    def repo(self, name, owner):
+        path = self.home / name
+        path.mkdir()
+        subprocess.run(['git', 'init', '-q', str(path)], check=True)
+        subprocess.run(['git', '-C', str(path), 'remote', 'add', 'origin', f'git@github.com:{owner}/example.git'], check=True)
+        return path
+
     def leases(self):
         with b.lock():
             return b.reap()
@@ -53,6 +60,57 @@ class BudgetTests(unittest.TestCase):
         model = b.estimates(records, [])['codex']
         self.assertEqual(model['roles']['planner']['tokens_p80'], 40)
         self.assertEqual(model['roles']['reviewer']['tokens_p80'], 29000)
+
+    def test_worker_cohorts_report_model_phase_and_continuation_without_mixing(self):
+        records = [dict(provider='claude', role='worker', total=total, model=model,
+                        effort='high', phase=phase, continuation_mode=mode, at=1000 + total)
+                   for model, phase, mode, total in [('a', 'implementing', 'native', 100),
+                                                       ('a', 'implementing', 'native', 200),
+                                                       ('a', 'reviewing', 'fallback', 300),
+                                                       ('b', 'implementing', 'native', 400)]]
+        model = b.estimates(records, [])['claude']
+        cohorts = {(c['model'], c['phase'], c['continuation_mode']): c for c in model['worker_cohorts']}
+        self.assertEqual(cohorts[('a', 'implementing', 'native')]['sample_count'], 2)
+        self.assertEqual(cohorts[('a', 'implementing', 'native')]['quality'], 'sparse')
+        self.assertEqual(cohorts[('a', 'reviewing', 'fallback')]['tokens_p80'], 300)
+        self.assertEqual(len(cohorts), 3)
+
+    def test_thin_role_estimate_blends_toward_cross_provider_proxy(self):
+        records = ([{'provider': 'claude', 'role': 'reviewer', 'total': n} for n in (120000, 260000)]
+                   + [{'provider': 'codex', 'role': 'reviewer', 'total': 40000}])
+        role = b.estimates(records, [])['claude']['roles']['reviewer']
+        self.assertEqual(role['source'], 'blended')
+        self.assertEqual(role['sample_count'], 2)
+        self.assertEqual(role['tokens_p80'], 128000)  # 2/5 × 260k + 3/5 × 40k
+
+    def test_five_role_observations_keep_the_raw_estimate(self):
+        records = ([{'provider': 'claude', 'role': 'reviewer', 'total': n}
+                    for n in (50000, 60000, 70000, 80000, 90000)]
+                   + [{'provider': 'codex', 'role': 'reviewer', 'total': 300000}])
+        role = b.estimates(records, [])['claude']['roles']['reviewer']
+        self.assertEqual((role['source'], role['sample_count'], role['tokens_p80']),
+                         ('observed', 5, 80000))
+
+    def test_thin_reviewer_uses_same_provider_subagent_when_no_peer_role_exists(self):
+        records = ([{'provider': 'claude', 'role': 'reviewer', 'total': 200000}] * 2
+                   + [{'provider': 'claude', 'role': 'subagent', 'total': 150000}] * 5)
+        role = b.estimates(records, [])['claude']['roles']['reviewer']
+        self.assertEqual(role['source'], 'blended')
+        self.assertEqual(role['tokens_p80'], 170000)
+
+    def test_unobserved_role_reports_proxy_source(self):
+        role = b.estimates([{'provider': 'codex', 'role': 'reviewer', 'total': 40000}], [])['claude']['roles']['reviewer']
+        self.assertEqual((role['source'], role['sample_count'], role['tokens_p80']), ('proxy', 0, 40000))
+
+    def test_status_json_exposes_role_estimate_source_and_sample_count(self):
+        model = b.estimates([{'provider': 'claude', 'role': 'reviewer', 'total': 100000}], [])
+        output = io.StringIO()
+        with patch.object(b, 'cached_estimates', return_value=model), \
+                patch.object(b, 'readings', return_value=self.reading), \
+                contextlib.redirect_stdout(output):
+            b.main(['status', '--json'])
+        role = json.loads(output.getvalue())['claude']['estimates']['roles']['reviewer']
+        self.assertEqual((role['source'], role['sample_count']), ('blended', 1))
 
     def test_seeds_until_five_calibrated_samples(self):
         samples = [{'provider': 'codex', 'tokens': 1000, 'pct': i} for i in range(1, 6)]
@@ -300,6 +358,21 @@ print(bool(b.acquire('codex','planner',pid=int(sys.argv[2]))))
         self.assertEqual(len(b.history()[1]), 1)
         self.assertTrue((b.budget_dir() / 'samples.jsonl').exists())
 
+    def test_history_counts_successful_claude_reviewer_ledger_runs(self):
+        self.append(b.claude_home() / 'automations/advance-roadmap/runs.jsonl', [
+            dict(tokens=dict(calls=[dict(provider='claude', role='reviewer', round=1, total=110000),
+                                   dict(provider='claude', role='reviewer', round=2, total=130000)]))])
+        self.append(b.budget_dir() / 'ledger.jsonl', [
+            dict(agent='claude', role='reviewer', outcome='ok', actual_total=125000),
+            dict(agent='claude', role='reviewer', outcome='error', actual_total=999999),
+            dict(agent='codex', role='worker', outcome='ok', actual_total=80000)])
+        records, _ = b.history(persist=False)
+        claude_reviews = [r for r in records if r.get('provider') == 'claude' and r.get('role') == 'reviewer']
+        self.assertEqual(sorted((r['total'], r.get('source')) for r in claude_reviews),
+                         [(110000, None), (125000, 'ledger'), (130000, None)])
+        role = b.estimates(records, [])['claude']['roles']['reviewer']
+        self.assertEqual((role['source'], role['sample_count']), ('blended', 3))
+
     def quota_rows(self, session, start, finish, before=10, after=13, path=None):
         return [dict(event=event, session_id=session, timestamp=at, transcript_path=str(path) if path else None,
                      quota=dict(age_seconds=0, windows={'five_hour': dict(used_percentage=pct, resets_at=2000000000)}))
@@ -314,7 +387,7 @@ print(bool(b.acquire('codex','planner',pid=int(sys.argv[2]))))
         self.append(b.budget_dir() / 'samples.jsonl', [dict(id='quota:one:10', source='quota_snapshots',
                     provider='claude', tokens=140000, pct=3)])
         records, samples = b.history()
-        self.assertEqual(records[0]['total'], 140000)  # whole-job estimate
+        self.assertEqual(sorted(r['total'] for r in records), [70000, 70000])  # one reviewer observation per round
         self.assertEqual([s['tokens'] for s in samples], [70000, 70000])
         self.assertEqual([s['tokens'] for s in b.rows(b.budget_dir() / 'samples.jsonl')], [70000, 70000])
         self.assertEqual(len(b.history()[1]), 2)
@@ -359,6 +432,29 @@ print(bool(b.acquire('codex','planner',pid=int(sys.argv[2]))))
         _, samples = b.history()
         self.assertEqual([s['tokens'] for s in samples], [70000, 30000])
         self.assertEqual([s['tokens'] for s in b.history()[1]], [70000, 30000])
+
+    def test_claude_snapshot_quality_marks_overlapping_and_open_sessions(self):
+        ch = b.claude_home()
+        self.append(ch / 'state/agent-usage.jsonl', [
+            dict(provider='claude', role='worker', total=10000, session_id=s)
+            for s in ('one', 'two', 'three')])
+        self.append(ch / 'state/quota-snapshots.jsonl',
+                    self.quota_rows('one', 10, 20) + self.quota_rows('two', 15, 25)
+                    + self.quota_rows('three', 30, 40)
+                    + [dict(event='start', session_id='open', timestamp=35)])
+        _, samples = b.history(persist=False)
+        self.assertEqual([s['quality'] for s in samples],
+                         ['concurrent_sessions', 'concurrent_sessions', 'possible_open_session'])
+        self.assertEqual(b.estimates([], samples)['claude']['sample_quality'],
+                         {'concurrent_sessions': 2, 'possible_open_session': 1})
+
+    def test_snapshot_quality_does_not_claim_unobserved_sessions_are_absent(self):
+        ch = b.claude_home()
+        self.append(ch / 'state/agent-usage.jsonl', [
+            dict(provider='claude', role='worker', total=10000, session_id='one')])
+        self.append(ch / 'state/quota-snapshots.jsonl', self.quota_rows('one', 10, 20))
+        _, samples = b.history(persist=False)
+        self.assertEqual(samples[0]['quality'], 'unverified_isolation')
 
     def test_codex_cache_writes_match_roadmap_accounting(self):
         raw = dict(input_tokens=1000, cached_input_tokens=800, cache_write_input_tokens=50,
@@ -499,7 +595,8 @@ print(bool(b.acquire('codex','planner',pid=int(sys.argv[2]))))
         out = io.StringIO()
         args = ['spawn', '--provider', 'codex', '--role', 'planner', '--label', 'test', '--workspace', 'ws',
                 '--prompt-file', str(prompt), '--model', 'test-model', '--effort', 'high', '--dry-run']
-        with contextlib.redirect_stdout(out), patch.object(f.uuid, 'uuid4') as uid:
+        with contextlib.redirect_stdout(out), patch.object(f.uuid, 'uuid4') as uid, \
+                patch.object(f, 'workspace_path', return_value=None):
             uid.return_value.hex = 'job'
             self.assertEqual(f.main(args), 0)
         data = json.loads(out.getvalue())
@@ -511,6 +608,44 @@ print(bool(b.acquire('codex','planner',pid=int(sys.argv[2]))))
             '--label', 'test', '--', 'codex', 'exec', '--json', '--model', 'test-model', '-c',
             'model_reasoning_effort="high"', 'hello $world; `literal`'])
         self.assertFalse(f.state_dir().exists())
+
+    def test_fanout_explicit_workspace_starts_in_its_worktree(self):
+        worktree, elsewhere = self.home / 'wt', self.home / 'root'
+        (worktree / 'src').mkdir(parents=True)
+        elsewhere.mkdir()
+        with patch.object(f, 'workspace_path', return_value=str(worktree)):
+            with patch.object(f.os, 'getcwd', return_value=str(elsewhere)):
+                self.assertEqual(f.job_cwd('ws', explicit=True), str(worktree.resolve()))
+                self.assertEqual(f.job_cwd('ws', explicit=False), str(elsewhere.resolve()))
+            with patch.object(f.os, 'getcwd', return_value=str(worktree / 'src')):
+                self.assertEqual(f.job_cwd('ws', explicit=True), str((worktree / 'src').resolve()))
+        with patch.object(f, 'workspace_path', return_value=None), patch.object(f.os, 'getcwd', return_value=str(elsewhere)):
+            self.assertEqual(f.job_cwd('ws', explicit=True), str(elsewhere.resolve()))
+
+    def test_fanout_status_says_a_job_is_queued_for_budget(self):
+        self.reading['windows']['five_hour']['live'] = 100
+        job = f.state_dir() / 'queued'
+        job.mkdir(parents=True)
+        b.write_json(job / 'meta.json', dict(id='queued', label='w', provider='codex', role='worker'))
+        (job / 'result.json').write_text('')
+        (job / 'stderr').write_text('agent-budget: codex/worker queued; waiting 30s\n' * 3)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(f.main(['status']), 0)
+        self.assertEqual(out.getvalue().strip(), 'queued w: pending, queued for budget (five_hour live=100 cap=70)')
+        (job / 'result.json').write_text('{"type":"thread.started"}\n')
+        self.assertEqual(f.inspect_jobs('queued')[0]['waiting'], '')
+
+    def test_fanout_spawn_warns_when_provider_has_no_headroom(self):
+        self.reading['windows']['five_hour']['live'] = 75
+        err = io.StringIO()
+        with patch.object(b, 'allow', return_value=0), contextlib.redirect_stderr(err):
+            f.warn_if_no_headroom(dict(provider='codex', role='worker'))
+        self.assertIn('no codex headroom now (five_hour live=75 cap=70)', err.getvalue())
+        err = io.StringIO()
+        with patch.object(b, 'allow', return_value=1), contextlib.redirect_stderr(err):
+            f.warn_if_no_headroom(dict(provider='codex', role='worker'))
+        self.assertEqual(err.getvalue(), '')
 
     def test_fanout_resolves_workspace_for_repo_subdirectory_and_worktree(self):
         repo, worktree = self.home / 'repo', self.home / 'worktree'
@@ -573,10 +708,27 @@ print(bool(b.acquire('codex','planner',pid=int(sys.argv[2]))))
 
     def test_hook_denies_at_zero(self):
         self.reading['windows']['five_hour']['live'] = 70
-        result = hook.handle(dict(hook_event_name='PreToolUse', tool_name='Agent', session_id='sid'))
+        personal = self.repo('personal repo', 'jnelken')
+        result = hook.handle(dict(hook_event_name='PreToolUse', tool_name='Agent', session_id='sid', cwd=str(personal)))
         self.assertEqual(result['hookSpecificOutput']['permissionDecision'], 'deny')
         self.assertIn('bin/fanout', result['hookSpecificOutput']['permissionDecisionReason'])
         self.assertEqual(self.leases(), [])
+
+    def test_hook_skips_work_and_unknown_targets(self):
+        self.reading['windows']['five_hour']['live'] = 70
+        work = self.repo('work repo', 'Concentro-Inc')
+        unknown = self.repo('unknown repo', 'some-org')
+        for target in (work, unknown):
+            with self.subTest(target=target.name):
+                skipped = hook.handle(dict(hook_event_name='PreToolUse', tool_name='Agent', session_id='sid', cwd=str(target)))
+                self.assertIsNone(skipped)
+        self.assertEqual(self.leases(), [])
+
+    def test_is_personal_target_only_accepts_personal_repositories(self):
+        for owner, expected in (('Concentro-Inc', False), ('jnelken', True), ('some-org', False)):
+            repo = self.repo(owner, owner)
+            self.assertEqual(hook.is_personal_target(str(repo)), expected, owner)
+        self.assertFalse(hook.is_personal_target(None))
 
     def invoke_hook(self, payload):
         out, err = io.StringIO(), io.StringIO()
@@ -586,7 +738,8 @@ print(bool(b.acquire('codex','planner',pid=int(sys.argv[2]))))
 
     def test_hook_fails_open_on_null_leases_filesystem_error_and_bad_stdin(self):
         b.write_json(b.budget_dir() / 'leases.json', None)
-        payload = json.dumps(dict(hook_event_name='PreToolUse', tool_name='Agent'))
+        personal = self.repo('personal repo', 'jnelken')
+        payload = json.dumps(dict(hook_event_name='PreToolUse', tool_name='Agent', cwd=str(personal)))
         out, err = self.invoke_hook(payload)
         self.assertEqual(out, '')
         self.assertIn('allowing tool', err)
@@ -664,7 +817,8 @@ b.cached_estimates = lambda: b.estimates([], [])
 sys.exit(hook.main())
 """
         state = self.home / 'slow-probe'
-        payload = json.dumps(dict(hook_event_name='PreToolUse', tool_name='Agent'))
+        personal = self.repo('personal repo', 'jnelken')
+        payload = json.dumps(dict(hook_event_name='PreToolUse', tool_name='Agent', cwd=str(personal)))
         result = subprocess.run([sys.executable, '-c', script, str(b.ROOT / 'lib'), str(state)],
                                 input=payload, capture_output=True, text=True, timeout=2)
         self.assertTrue((state / 'probe-started').exists())
@@ -690,10 +844,11 @@ sys.exit(hook.main())
 
     def test_hook_reuses_models_and_quota_five_second_cache(self):
         self.readings.stop()
+        personal = self.repo('personal repo', 'jnelken')
         with patch.object(b.claude_quota, 'state_dir', return_value=self.home / 'quota'), patch.object(b.claude_quota, 'token', return_value='fixture'), patch.object(b.claude_quota, 'probe', return_value=({'five_hour': {'used_percentage': 10}, 'seven_day': {'used_percentage': 10}}, None)) as probe, patch.object(b, 'history', return_value=([], [])) as history, patch.object(hook, 'owner_pid', return_value=os.getpid()):
             started = time.monotonic()
             for tool in ('Agent', 'Workflow'):
-                self.assertIsNone(hook.handle(dict(hook_event_name='PreToolUse', tool_name=tool, session_id='sid')))
+                self.assertIsNone(hook.handle(dict(hook_event_name='PreToolUse', tool_name=tool, session_id='sid', cwd=str(personal))))
             self.assertLess(time.monotonic() - started, 1)
             self.assertEqual(probe.call_count, 1)
             self.assertEqual(history.call_count, 1)
@@ -708,9 +863,11 @@ sys.exit(hook.main())
         self.assertEqual(b.allow('claude', 'subagent'), 0)  # fanout/batch retain one lease
 
     def test_hook_releases_exact_subagent_out_of_order(self):
+        personal = self.repo('personal repo', 'jnelken')
         with patch.object(hook, 'owner_pid', return_value=os.getpid()):
             for tool in ('first', 'second'):
-                self.assertIsNone(hook.handle(dict(hook_event_name='PreToolUse', tool_name='Agent', session_id='sid', tool_use_id=tool)))
+                self.assertIsNone(hook.handle(dict(hook_event_name='PreToolUse', tool_name='Agent', session_id='sid', tool_use_id=tool,
+                                                   cwd=str(personal))))
         path = self.home / 'agent-child.jsonl'
         b.write_json(path.with_suffix('.meta.json'), {'toolUseId': 'second'})
         hook.handle(dict(hook_event_name='SubagentStop', session_id='sid', agent_transcript_path=str(path)))
@@ -775,8 +932,11 @@ sys.exit(hook.main())
         self.append(b.claude_home() / 'automations/advance-roadmap/runs.jsonl', [
             dict(duration_s=100, tokens=dict(calls=[dict(provider='claude', role='orchestrator', total=v, sessions=['sid']) for v in (10, 20)]))])
         records, _ = b.history()
-        self.assertEqual(b.estimates(records, [])['claude']['roles']['planner']['tokens_p80'], 30)
-        self.assertEqual(b.estimates(records, [])['claude']['roles']['planner']['ttl'], 150)
+        self.assertEqual(records[0]['total'], 30)
+        role = b.estimates(records, [])['claude']['roles']['planner']
+        self.assertEqual((role['source'], role['sample_count']), ('blended', 1))
+        self.assertEqual(role['tokens_p80'], .2 * 30 + .8 * b.SEED_TOKENS['claude']['planner'])
+        self.assertEqual(role['ttl'], 150)
 
     def test_installer_preserves_and_deduplicates_gate_hooks(self):
         import shutil

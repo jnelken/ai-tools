@@ -207,7 +207,7 @@ per-workspace `superset terminals list` round-trip and the idle-detection
   cross-references `host.db` by session id: a session whose workspace simply
   hasn't been viewed since reboot is reported as a dormant Superset tab with
   its origin workspace, not as a plain-terminal session.
-- **The statusline `🪪<session-id>` fallback only helps sometimes.** It's
+- **The statusline `🪪 <session-id>` fallback only helps sometimes.** It's
   used for live tabs that have *no* binding row (claude launched by hand,
   not by a Superset agent) to identify what's running in them. After a full
   reboot, the daemon's terminal buffer is empty — the frozen tab you see on

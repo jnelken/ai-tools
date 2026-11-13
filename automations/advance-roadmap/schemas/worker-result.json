@@ -2,11 +2,13 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "AdvanceRoadmapWorkerResult",
   "type": "object",
-  "required": ["outcome", "provider", "summary"],
+  "required": ["outcome", "provider"],
+  "allOf": [{"if": {"properties": {"outcome": {"const": "yielded"}}, "required": ["outcome"]},
+             "then": {"required": ["next_phase"]}, "else": {"required": ["summary"]}}],
   "properties": {
     "outcome": {
       "type": "string",
-      "enum": ["shipped", "shipped-deploy-failed", "blocked-branch-left", "failed", "limit_hit", "archive-only", "bookkeeping"]
+      "enum": ["shipped", "shipped-deploy-failed", "blocked-branch-left", "failed", "limit_hit", "yielded", "archive-only", "bookkeeping"]
     },
     "provider": {
       "type": "string",
@@ -22,9 +24,13 @@
       "type": "string",
       "enum": ["standard", "goal"]
     },
+    "next_phase": {
+      "type": ["string", "null"],
+      "enum": ["implementing", "reviewing", "shipping", "verifying", null]
+    },
     "work_kind": {
       "type": "string",
-      "enum": ["feature", "code_health"]
+      "enum": ["feature"]
     },
     "limit_text": { "type": ["string", "null"] },
     "deploy": {
@@ -43,6 +49,8 @@
         "unresolved": { "type": "integer", "minimum": 0 }
       }
     },
+    "needs_input": { "type": "boolean", "default": false },
+    "input_question": { "type": ["string", "null"] },
     "summary": { "type": "string" },
     "slack_summary": { "type": ["string", "null"] }
   }

@@ -12,6 +12,7 @@ import unittest
 from datetime import datetime
 from unittest.mock import patch
 from pathlib import Path
+from types import SimpleNamespace
 
 HERE = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(HERE))
@@ -48,7 +49,7 @@ if repo in os.environ.get('FAKE_PLANNER_GATED', '').split():
     skip_quota('no orchestrator available')
     raise SystemExit(0)
 event('plan-start')
-time.sleep(.15 if repo == 'a' else .05)
+time.sleep(float(os.environ.get('FAKE_SLOW_PLAN', '.8')) if repo == os.environ.get('FAKE_SLOW_REPO') else (.15 if repo == 'a' else .05))
 if repo == os.environ.get('FAKE_FAILED_REPO'):
     event('plan-failed')
     raise SystemExit(1)
@@ -72,8 +73,23 @@ while not (run / 'batch-release').exists():
 event('work-start')
 time.sleep(.2)
 event('work-end')
+yield_marker = root / ('yielded-once-' + repo)
+should_yield = bool(os.environ.get('FAKE_YIELD_ONCE') and not yield_marker.exists())
+if should_yield:
+    yield_marker.touch()
+    (run / 'worker-result.json').write_text(json.dumps({'outcome': 'yielded',
+        'provider': 'codex', 'next_phase': 'implementing'}))
+if not os.environ.get('FAKE_KEEP_PENDING') and not should_yield:
+    pending = Path(os.environ['PERSONAL_CODE_DIR']) / '.advance-roadmap'
+    for saved in pending.glob(f'pending-plan-{repo}*.json'):
+        saved.unlink()
+outcome = 'yielded' if should_yield else 'shipped'
+if repo == os.environ.get('FAKE_HUMAN_REPO'):
+    outcome = 'blocked'
+    (run / 'worker-result.json').write_text(json.dumps({'outcome': 'blocked-branch-left',
+        'needs_input': True, 'input_question': 'Which account should this use?'}))
 with open(root / 'runs.jsonl', 'a') as f:
-    f.write(json.dumps({'stamp': stamp, 'repo': repo, 'outcome': 'shipped'}) + '\n')
+    f.write(json.dumps({'stamp': stamp, 'repo': repo, 'outcome': outcome}) + '\n')
 PY
 '''
 
@@ -142,10 +158,10 @@ class DailyBatchTest(unittest.TestCase):
             "    os.environ.get('FAKE_NO_QUOTA') and os.path.exists(os.path.join(os.environ['ADVANCE_ROADMAP_ROOT'], 'trace.jsonl')))\n"
             "if 'budget-input' in sys.argv:\n"
             "    gates = json.loads(os.environ.get('FAKE_REVIEWER_GATES') or '{}').get('gates', [])\n"
-            "    print(json.dumps({'workers': [] if dry else os.environ.get('FAKE_WORKER_CHAIN', 'cursor').split(),\n"
+            "    print(json.dumps({'workers': [] if dry else os.environ.get('FAKE_WORKER_CHAIN', 'codex').split(),\n"
             "                      'planners': ['codex'], 'reviewer_gates': gates}))\n"
             "    raise SystemExit(0)\n"
-            "print('' if dry else {'pick-worker-chain': os.environ.get('FAKE_WORKER_CHAIN', 'cursor'), 'pick-orchestrator': 'codex'}.get(sys.argv[-1], ''))\n")
+            "print('' if dry else {'pick-worker-chain': os.environ.get('FAKE_WORKER_CHAIN', 'codex'), 'pick-orchestrator': 'codex'}.get(sys.argv[-1], ''))\n")
         (self.root / 'lib/workspaces.py').write_text(
             "import os, sys\nsys.exit(1 if os.environ.get('FAKE_SUPERSET_DOWN') and 'available' in sys.argv else 0)\n")
         (self.root / 'lib/planapproval.py').write_text(FAKE_APPROVER)
@@ -169,6 +185,7 @@ class DailyBatchTest(unittest.TestCase):
                     'ADVANCE_ROADMAP_USAGE_PROBES': '0', 'ANTHROPIC_API_KEY': 'test-disable-oauth',
                     'CLAUDE_CODE_OAUTH_TOKEN': '', 'CLAUDE_CONFIG_DIR': str(self.root / '.claude'), 'ADVANCE_ROADMAP_ROOT': str(self.root),
                     'PERSONAL_CODE_DIR': str(self.code), 'ADVANCE_ROADMAP_BATCH_POLL_S': '.02',
+                    'ADVANCE_ROADMAP_INCREMENTAL': '0',
                     'ADVANCE_ROADMAP_SUPERSET': '0', 'DOTFILES_PERSONAL_MACHINE': '1',
                     'ADVANCE_ROADMAP_SKILL_DIR': str(self.root / 'skills'),
                     'FAKE_PYTHON': sys.executable, 'PYTHONDONTWRITEBYTECODE': '1',
@@ -209,12 +226,21 @@ class DailyBatchTest(unittest.TestCase):
         batch.state = {'review_fallback': 'review fallback: cross-provider (stale)'}
 
         batch.refresh_budget()
-        self.assertNotIn('review_fallback', batch.state, 'Cursor reset clears the stale note')
+        self.assertNotIn('review_fallback', batch.state)
         batch.refresh_budget()
-        self.assertEqual(batch.state['review_fallback'],
-                         'review fallback: cross-provider (cursor gated until reset)')
+        self.assertEqual(batch.state['review_fallback'], 'review fallback: cross-provider (cursor gated until reset)')
         batch.refresh_budget()
-        self.assertNotIn('review_fallback', batch.state, 'a later reset clears it again')
+        self.assertNotIn('review_fallback', batch.state)
+
+    def test_continuous_budget_refresh_is_throttled(self):
+        budget = SimpleNamespace(review_strategy={'strategy': 'cross-provider', 'reason': None})
+        with patch.dict(os.environ, {'ADVANCE_ROADMAP_CONTINUOUS': '1'}), \
+                patch.object(daily_batch.time, 'monotonic', return_value=110), \
+                patch.object(daily_batch, 'ROOT', self.root):
+            batch = daily_batch.Batch(self.root, [], lanes=1)
+            batch.budget = budget
+            batch._budget_refreshed_at = 100
+            batch.refresh_budget()  # A second quota probe would fail: this budget has no refresh method.
 
     def events(self):
         return [json.loads(line) for line in (self.root / 'trace.jsonl').read_text().splitlines()]
@@ -281,13 +307,13 @@ class DailyBatchTest(unittest.TestCase):
 
     def test_a_gated_required_reviewer_plans_nothing(self):
         self.repo('a')
-        gates = lambda codex: json.dumps({'role': 'reviewer', 'gates': [
-            {'provider': 'codex', 'state': codex, 'reason': '5h 100% >= 70%'},
+        self.env['FAKE_WORKER_CHAIN'] = 'claude'
+        self.env['FAKE_REVIEWER_GATES'] = json.dumps({'role': 'reviewer', 'gates': [
+            {'provider': 'codex', 'state': 'over', 'reason': '5h 100% >= 70%'},
             {'provider': 'cursor', 'state': 'ok', 'reason': None}, {'provider': 'claude', 'state': 'ok'}]})
-        self.env['FAKE_REVIEWER_GATES'] = gates('over')
         self.run_batch()
         self.assertFalse(self.trace_exists())
-        self.assertIn('required codex reviewer is gated (5h 100% >= 70%)', self.state()['skipped_reason'])
+        self.assertIn('cross-provider reviewer', self.state()['skipped_reason'])
 
     def test_cursor_gate_automatically_admits_codex_with_claude_review(self):
         self.repo('a')
@@ -299,7 +325,7 @@ class DailyBatchTest(unittest.TestCase):
         state = self.state()
         self.assertTrue(self.trace_exists(), 'Codex work can be reviewed by Claude')
         self.assertEqual(state['review_fallback'],
-                         'review fallback: cross-provider (cursor gated until 2026-11-03T10:30:00-05:00)')
+                         'review fallback: cross-provider (Cursor is disabled for roadmap routing)')
 
     def test_cursor_gate_does_not_admit_claude_when_it_is_its_only_reviewer(self):
         self.repo('a')
@@ -313,7 +339,7 @@ class DailyBatchTest(unittest.TestCase):
         self.assertEqual(state['phase'], 'skipped')
         self.assertIn('cross-provider reviewer', state['skipped_reason'])
 
-    def test_cursor_available_keeps_default_two_stage_admission(self):
+    def test_cursor_available_still_uses_cross_provider_admission(self):
         self.repo('a')
         self.env['FAKE_REVIEWER_GATES'] = json.dumps({'gates': [
             {'provider': 'cursor', 'state': 'ok'}, {'provider': 'codex', 'state': 'ok'},
@@ -321,13 +347,14 @@ class DailyBatchTest(unittest.TestCase):
         self.run_batch()
         state = self.state()
         self.assertTrue(self.trace_exists())
-        self.assertNotIn('review_fallback', state)
+        self.assertIn('Cursor is disabled', state['review_fallback'])
+        self.assertTrue(all('cursor' not in i.get('allocation', {}).get('reviewers', []) for i in state['queue']))
 
     def test_reviewer_admission_skip_records_the_reviewer_gate(self):
         self.repo('a')
-        self.env.update(FAKE_REVIEWER_GATES=json.dumps({'gates': [
+        self.env.update(FAKE_WORKER_CHAIN='claude', FAKE_REVIEWER_GATES=json.dumps({'gates': [
             {'provider': 'codex', 'state': 'over', 'reason': '5h 99% >= 70%'},
-            {'provider': 'cursor', 'state': 'ok'}]}))
+            {'provider': 'cursor', 'state': 'ok'}, {'provider': 'claude', 'state': 'ok'}]}))
         # Healthy worker pool; the reviewer role alone names the exhausted provider.
         self.env.update(FAKE_QUOTA_WORKER=json.dumps({'role': 'worker', 'provider': None}),
                         FAKE_QUOTA_REVIEWER=json.dumps({
@@ -344,15 +371,11 @@ class DailyBatchTest(unittest.TestCase):
         self.repo('a')
         self.env.update(ADVANCE_ROADMAP_REVIEW_STRATEGY='cross-provider',
                         FAKE_WORKER_CHAIN='cursor', FAKE_REVIEWER_GATES=json.dumps({
-            'gates': [{'provider': 'cursor', 'state': 'ok'}, {'provider': 'codex', 'state': 'over'},
-                      {'provider': 'claude', 'state': 'limited'}]}))
+            'gates': [{'provider': 'cursor', 'state': 'ok'}, {'provider': 'codex', 'state': 'ok'},
+                      {'provider': 'claude', 'state': 'ok'}]}))
         self.run_batch()
-        self.assertFalse(self.trace_exists())
-        self.assertIn('cross-provider reviewer', self.state()['skipped_reason'])
-        shutil.rmtree(self.root / 'batches')
-        self.env['FAKE_WORKER_CHAIN'] = 'cursor claude'
-        self.run_batch()
-        self.assertTrue(self.trace_exists(), 'Claude can work while Cursor reviews')
+        self.assertFalse(self.trace_exists(), 'a Cursor-only provider chain is filtered')
+        self.assertIn('no worker provider is under its quota gate', self.state()['skipped_reason'])
 
     def test_cross_provider_review_needs_only_one_reviewer(self):
         self.repo('a')
@@ -395,8 +418,8 @@ class DailyBatchTest(unittest.TestCase):
             elif event['kind'] in {'plan-ready', 'plan-failed'}:
                 active -= 1
         self.assertEqual(maximum, 1)
-        self.assertEqual(len([e for e in self.events() if e['kind'] == 'work-start']), 5)
-        self.assertEqual(self.state()['budget']['held'], [])
+        self.assertLessEqual(len([e for e in self.events() if e['kind'] == 'work-start']), 5)
+        self.assertTrue(self.state()['budget']['held'])
         self.assertEqual(self.state()['budget']['providers']['codex']['reserved_pct'], 0)
 
     def test_fractional_expectations_at_barrier_cannot_deadlock_the_batch(self):
@@ -404,7 +427,7 @@ class DailyBatchTest(unittest.TestCase):
             self.repo(repo)
         state_path = self.root / 'providers-usage.json'
         state = json.loads(state_path.read_text())
-        state['providers']['cursor']['included']['auto_pct'] = 86
+        state['providers']['codex']['five_hour']['used_pct'] = 64
         state_path.write_text(json.dumps(state))
         self.run_batch(lanes=5)
         state = self.state()
@@ -420,7 +443,8 @@ class DailyBatchTest(unittest.TestCase):
                 daily_batch.shared, 'LOG', None):
             budget = daily_batch.RoadmapBudget(dry_run=True)
             budget.dry_run = False
-            budget.workers, budget.planners, budget.gates = ['cursor'], ['codex'], {}
+            budget.workers, budget.planners, budget.gates = ['claude'], ['codex'], {}
+            budget.review_strategy = {'strategy': 'cross-provider', 'reason': None}
             # The raw planner gate is open, but the two remaining Codex points
             # fit its review only, not the additional three-point planner.
             budget.readings['codex']['windows']['five_hour']['live'] = 68
@@ -438,7 +462,9 @@ class DailyBatchTest(unittest.TestCase):
                 # Exercise launch's real environment construction without a model.
                 started = b.process_start(os.getpid())
                 with patch.object(daily_batch.subprocess, 'Popen') as spawn, patch.object(
-                        b, 'process_start', return_value=started):
+                        b, 'process_start', return_value=started), patch.object(
+                        daily_batch.workqueue, 'process_start', return_value=str(started)), patch.object(
+                        daily_batch.workqueue, 'git', return_value='head'):
                     spawn.return_value.pid = os.getpid()
                     batch.launch(item)
                 env = spawn.call_args.kwargs['env']
@@ -447,7 +473,7 @@ class DailyBatchTest(unittest.TestCase):
             finally:
                 budget.release(item)
 
-    def test_second_thread_of_pending_dispatch_still_requires_planner_budget(self):
+    def test_pending_dispatch_does_not_expand_into_fresh_threads(self):
         self.repo('a')
         pending = self.code / '.advance-roadmap'
         pending.mkdir()
@@ -456,19 +482,15 @@ class DailyBatchTest(unittest.TestCase):
             'planned_at': datetime.now().isoformat(), 'attempts': 0}))
         state_path = self.root / 'providers-usage.json'
         state = json.loads(state_path.read_text())
-        # Three Codex points fit the saved implementation's review, but cannot
-        # also fund a fresh planner for its later thread. Cursor stays healthy.
-        state['providers']['codex']['five_hour']['used_pct'] = 67
+        # Recovery needs only its saved implementation and review, even with extra threads enabled.
+        state['providers']['codex']['five_hour']['used_pct'] = 40
         state_path.write_text(json.dumps(state))
+        self.env.update(ADVANCE_ROADMAP_REVIEW_STRATEGY='cross-provider', FAKE_WORKER_CHAIN='claude')
         self.run_batch(lanes=1, extra=['--threads', '2'])
         by_thread = {i['thread']: i for i in self.state()['queue']}
-        self.assertEqual(set(by_thread), {1, 2})
+        self.assertEqual(set(by_thread), {1})
         self.assertIsNone(by_thread[1]['allocation']['planner'])
         self.assertEqual(by_thread[1]['outcome'], 'shipped')
-        self.assertEqual(by_thread[2]['verdict_check']['result'], 'pending',
-                         'ordering metadata is inherited, but saved-plan admission must not be')
-        self.assertEqual(by_thread[2]['outcome'], 'skipped-quota')
-        self.assertNotIn('allocation', by_thread[2])
         self.assertEqual([e['thread'] for e in self.events() if e['kind'] == 'plan-start'], [1])
 
     def test_single_lane_barrier_preserves_changed_repo_over_all_reservations(self):
@@ -476,7 +498,7 @@ class DailyBatchTest(unittest.TestCase):
             self.repo(repo)
         state_path = self.root / 'providers-usage.json'
         state = json.loads(state_path.read_text())
-        state['providers']['cursor']['included']['auto_pct'] = 86
+        state['providers']['codex']['five_hour']['used_pct'] = 64
         state_path.write_text(json.dumps(state))
         verdicts = self.root / 'batch-verdicts'
         verdicts.mkdir()
@@ -562,6 +584,19 @@ PYTHON
             with b.lock():
                 self.assertEqual(b.reap(), [], 'the dead lane PID must free its reservations')
 
+    def test_cursor_is_never_allocated_as_worker(self):
+        with self.budget_context(), patch.object(daily_batch, 'ROOT', self.root):
+            budget = daily_batch.RoadmapBudget(dry_run=True)
+            budget.dry_run = False
+            budget.workers, budget.planners = ['cursor', 'codex', 'claude'], ['codex']
+            budget.gates = {'cursor': {'provider': 'cursor', 'state': 'ok'},
+                            'codex': {'provider': 'codex', 'state': 'ok'},
+                            'claude': {'provider': 'claude', 'state': 'ok'}}
+            routes = list(budget.routes())
+            self.assertTrue(routes)
+            self.assertTrue(all(worker != 'cursor' for worker, _ in routes))
+            self.assertTrue(all('cursor' not in reviewers for _, reviewers in routes))
+
     def test_expected_cost_and_conversion_follow_the_first_fitting_worker(self):
         with self.budget_context(), patch.object(daily_batch, 'ROOT', self.root), patch.object(daily_batch, 'dispatch_rates', return_value={'a': .6}):
             budget = daily_batch.RoadmapBudget(dry_run=True)
@@ -570,8 +605,8 @@ PYTHON
             item = {'repo': 'a', 'stamp': 'one'}
             self.assertTrue(budget.admit(item))
             allocation = item['allocation']
-            self.assertEqual(allocation['worker'], 'cursor')
-            self.assertEqual([r['scale'] for r in allocation['requests'] if r['role'] != 'planner'], [.6, .6, .6])
+            self.assertEqual(allocation['worker'], 'codex')
+            self.assertEqual([r['scale'] for r in allocation['requests'] if r['role'] != 'planner'], [.6, .6])
             self.assertTrue(any(r['role'] == 'planner' for r in allocation['requests']))
             budget.planned(item)
             self.assertTrue(all(r['role'] != 'planner' for r in item['allocation']['requests']))
@@ -579,20 +614,206 @@ PYTHON
             # no longer fits. The next worker in chain must be tried.
             budget.readings['cursor']['windows']['auto']['live'] = 94
             converted = budget.choose(item=item)
-            self.assertEqual(converted['worker'], 'codex')
-            self.assertEqual(converted['reviewers'], ['cursor', 'codex'])
+            self.assertIn(converted['worker'], ('codex', 'claude'))
+            self.assertEqual(converted['reviewers'], ['claude'])
             self.assertEqual({r.get('scale', 1) for r in converted['requests']}, {1})
             with daily_batch.agent_budget.lock():
                 leases = daily_batch.agent_budget.reap()
             self.assertEqual({l['id'] for l in leases}, set(item['budget_leases']))
             budget.release(item)
 
+    def test_incremental_admission_reserves_only_current_phase(self):
+        with self.budget_context(), patch.object(daily_batch, 'ROOT', self.root):
+            budget = daily_batch.RoadmapBudget(dry_run=True)
+            budget.incremental = True
+            budget.workers = ['claude']
+            budget.review_strategy = {'strategy': 'cross-provider', 'reason': None}
+            budget.gates = {'codex': {'state': 'ok'}, 'cursor': {'state': 'over'}}
+            budget.models['claude']['roles']['worker']['pct']['five_hour'] = 82.12
+            budget.readings['claude']['windows']['five_hour']['live'] = 7
+            with patch.object(daily_batch.agent_budget, 'reserve_bundle', return_value=[]) as reserve:
+                implementation = budget.choose(item={'repo': 'a', 'stamp': 'one',
+                                                      'work_phase': 'implementing'}, commit=False)
+                self.assertEqual(implementation['reviewers'], [])
+                requests = reserve.call_args.args[0]
+                self.assertAlmostEqual(requests[0]['scale'] * 82.12, 10)
+                self.assertEqual([r['role'] for r in requests], ['worker'])
+                review = budget.choose(item={'repo': 'a', 'stamp': 'two',
+                                             'work_phase': 'reviewing'}, commit=False)
+                self.assertEqual(review['reviewers'], ['codex'])
+                requests = reserve.call_args.args[0]
+                self.assertEqual([r['role'] for r in requests], ['worker', 'reviewer'])
+                self.assertLessEqual(requests[0]['scale'] * 82.12, 10)
+                self.assertLess(requests[0]['scale'], 1)
+
+    def test_incremental_batch_releases_implementation_with_reviewers_gated(self):
+        self.repo('a')
+        self.env['ADVANCE_ROADMAP_INCREMENTAL'] = '1'
+        self.env['FAKE_REVIEWER_GATES'] = json.dumps({'gates': [
+            {'provider': 'cursor', 'state': 'over'}, {'provider': 'codex', 'state': 'over'},
+            {'provider': 'claude', 'state': 'over'}]})
+        self.run_batch(lanes=1)
+        row = next(item for item in self.state()['queue'] if item['repo'] == 'a')
+        allocation = json.loads((self.root / 'runs' / row['stamp'] / 'batch-budget.json').read_text())
+        self.assertEqual(allocation['phase'], 'implementing')
+        self.assertEqual(allocation['reviewers'], [])
+        self.assertTrue(any(event['kind'] == 'work-start' for event in self.events()))
+        self.assertEqual(self.state()['starvation']['admitted'], 1)
+        self.assertEqual(self.state()['starvation']['consecutive_zero_admission'], 0)
+    def test_incremental_implementation_does_not_require_available_reviewers(self):
+        with self.budget_context(), patch.object(daily_batch, 'ROOT', self.root):
+            budget = daily_batch.RoadmapBudget(dry_run=True)
+            budget.incremental = True
+            budget.workers = ['claude']
+            budget.review_strategy = {'strategy': 'cross-provider', 'reason': None}
+            budget.gates = {'codex': {'state': 'over'}, 'cursor': {'state': 'over'}}
+            with patch.object(daily_batch.agent_budget, 'reserve_bundle', return_value=[]):
+                self.assertIsNotNone(budget.choose(item={'repo': 'a', 'stamp': 'one', 'work_phase': 'implementing'}, commit=False))
+                self.assertIsNone(budget.choose(item={'repo': 'a', 'stamp': 'one', 'work_phase': 'reviewing'}, commit=False))
+
+    def test_continuous_mode_never_admits_on_stale_or_unknown_usage(self):
+        with self.budget_context(), patch.object(daily_batch, 'ROOT', self.root), patch.dict(
+                os.environ, {'ADVANCE_ROADMAP_CONTINUOUS': '1'}):
+            budget = daily_batch.RoadmapBudget(dry_run=True)
+            now = time.time()
+            def reading(provider, **kwargs):
+                return {'observed_at': now - 301 if provider == 'codex' else now,
+                        'windows': {'five_hour': {'live': None if provider == 'claude' else 1, 'cap': 70}}}
+            with patch.object(daily_batch.agent_budget, 'readings', side_effect=reading):
+                budget.refresh()
+            self.assertEqual(budget.workers, [])
+            self.assertEqual(budget.planners, [])
+            with patch.object(daily_batch.agent_budget, 'readings', return_value={
+                    'observed_at': now, 'error': 'http_429',
+                    'windows': {'five_hour': {'live': 1, 'cap': 70}}}):
+                budget.refresh()
+            self.assertEqual(budget.workers, [])
+            self.assertEqual(budget.planners, [])
+
+    def test_continuous_admission_does_not_reserve_forecast(self):
+        with self.budget_context(), patch.object(daily_batch, 'ROOT', self.root), patch.dict(
+                os.environ, {'ADVANCE_ROADMAP_CONTINUOUS': '1'}):
+            budget = daily_batch.RoadmapBudget(dry_run=True)
+            budget.workers = ['claude']
+            with patch.object(daily_batch.agent_budget, 'reserve_bundle', side_effect=AssertionError('reserved')):
+                item = {'repo': 'a', 'stamp': 'one', 'work_phase': 'implementing'}
+                allocation = budget.choose(item=item)
+                budget.planned(item)
+            self.assertTrue(allocation['live_threshold'])
+            self.assertEqual(allocation['leases'], [])
+
+    def test_incremental_replay_admits_ten_point_unit_not_eighty_two_point_worker(self):
+        with self.budget_context(), patch.object(daily_batch, 'ROOT', self.root):
+            budget = daily_batch.RoadmapBudget(dry_run=True)
+            budget.incremental = True
+            budget.workers = ['claude']
+            budget.models['claude']['roles']['worker']['pct'] = {'five_hour': 82.12, 'seven_day': 1}
+            budget.readings['claude']['windows'] = {'five_hour': {'live': 7, 'cap': 70},
+                                                    'seven_day': {'live': 20, 'cap': 90}}
+            whole = daily_batch.agent_budget.reserve_bundle([{'provider': 'claude', 'role': 'worker'}],
+                reading_by_provider=budget.readings, models=budget.models, commit=False)
+            self.assertIsNone(whole)
+            selected = budget.choose(item={'repo': 'a', 'stamp': 'one', 'work_phase': 'implementing'},
+                                     commit=False)
+            self.assertIsNotNone(selected)
+            self.assertAlmostEqual(selected['leases'][0]['pct']['five_hour'], 10)
+
+    def test_incremental_forecast_uses_mature_mode_cohorts_conservatively(self):
+        with self.budget_context(), patch.object(daily_batch, 'ROOT', self.root), patch.object(
+                daily_batch, 'worker_configuration', return_value={'model': 'm', 'effort': 'high'}):
+            budget = daily_batch.RoadmapBudget(dry_run=True)
+            budget.incremental = True
+            budget.workers = ['claude']
+            budget.models['claude']['worker_cohorts'] = [
+                {'model': 'm', 'effort': 'high', 'phase': 'implementing', 'continuation_mode': mode,
+                 'sample_count': 5, 'tokens_p80': tokens, 'newest_at': time.time()}
+                for mode, tokens in [('fresh', 10000), ('native', 20000), ('fallback', 30000)]]
+            with patch.object(daily_batch.agent_budget, 'reserve_bundle', return_value=[]) as reserve:
+                selected = budget.choose(item={'repo': 'a', 'stamp': 'one', 'work_phase': 'implementing'},
+                                         commit=False)
+                self.assertEqual(selected['worker_estimate']['roles']['worker']['tokens_p80'], 30000)
+                self.assertEqual(reserve.call_args.kwargs['models']['claude']['roles']['worker']['source'],
+                                 'phase-mode-cohorts')
+
+    def test_job_override_requires_fresh_reading_and_keeps_shared_caps(self):
+        b = daily_batch.agent_budget
+        with self.budget_context(), patch.object(daily_batch, 'ROOT', self.root):
+            budget = daily_batch.RoadmapBudget(dry_run=True)
+            budget.incremental = True
+            budget.workers = []
+            now = time.time()
+            fresh = {'observed_at': now, 'source': 'fake', 'windows': {
+                'five_hour': {'live': 85, 'cap': 70}, 'seven_day': {'live': 20, 'cap': 90}}}
+            budget.readings['claude'] = fresh
+            budget.models['claude']['roles']['worker']['pct'] = {'five_hour': 82.12, 'seven_day': 1}
+            gate = [{'provider': 'claude', 'state': 'over', 'reason': '5h 85% >= 70%'},
+                    {'provider': 'codex', 'state': 'limited', 'reason': 'actual limit'}]
+            fake_result = type('Result', (), {'returncode': 0})()
+            with patch.object(daily_batch.shared, 'py', return_value=fake_result), \
+                    patch.object(daily_batch.usage, 'load', return_value={}), \
+                    patch.object(daily_batch.usage, 'role_gates', return_value=gate), \
+                    patch.object(b, 'readings', return_value=fresh):
+                self.assertTrue(budget.prepare_override())
+                self.assertEqual(budget.readings['claude']['windows']['five_hour']['cap'], 70)
+                self.assertEqual(budget.override_readings['claude']['windows']['five_hour']['cap'], 70)
+                chosen = budget.choose(item={'repo': 'a', 'stamp': 'one', 'work_phase': 'implementing',
+                                              'job_override': True}, commit=False)
+                self.assertIsNotNone(chosen)
+                self.assertEqual(chosen['worker'], 'claude')
+                self.assertEqual(chosen['baseline']['windows']['five_hour']['cap'], 100)
+                fresh['error'] = 'http_429'
+                self.assertFalse(budget.prepare_override())
+                fresh.pop('error')
+                fresh['observed_at'] = now - 61
+                self.assertFalse(budget.prepare_override())
+
+    def test_job_override_charges_existing_reservations(self):
+        b = daily_batch.agent_budget
+        with self.budget_context(), patch.object(daily_batch, 'ROOT', self.root):
+            budget = daily_batch.RoadmapBudget(dry_run=True)
+            budget.incremental = True
+            budget.override_workers = ['claude']
+            budget.models['claude']['roles']['worker']['pct'] = {'five_hour': 82.12, 'seven_day': 1}
+            budget.override_readings = dict(budget.readings, claude={'observed_at': time.time(),
+                'windows': {'five_hour': {'live': 85, 'cap': 100}, 'seven_day': {'live': 20, 'cap': 100}}})
+            budget.forecast = [{'id': 'other', 'provider': 'claude', 'role': 'worker',
+                                'pct': {'five_hour': 6, 'seven_day': 0}}]
+            chosen = budget.choose(item={'repo': 'a', 'stamp': 'one', 'work_phase': 'implementing',
+                                          'job_override': True}, commit=False)
+            self.assertIsNone(chosen)
+
+    def test_idle_override_only_once_and_only_for_saved_continuation(self):
+        class Budget:
+            incremental = True
+
+            def prepare_override(self):
+                return True
+
+            def choose(self, **kwargs):
+                return {'worker': 'claude'}
+
+        with patch.object(daily_batch, 'ROOT', self.root):
+            batch = daily_batch.Batch(self.root, ['a', 'b'], lanes=2)
+            batch.budget = Budget()
+            fresh, saved = batch.state['queue']
+            fresh['verdict_check'] = {'result': 'no-verdict'}
+            saved['verdict_check'] = {'result': 'pending', 'action': 'resume_worker'}
+            with patch.object(batch, 'launch') as launch:
+                self.assertTrue(batch.try_idle_override())
+                self.assertEqual(launch.call_args.args[0]['repo'], 'b')
+                self.assertFalse(batch.try_idle_override())
+                self.assertEqual(launch.call_count, 1)
+            batch.state.pop('idle_override_used')
+            batch.state['normal_work_admitted'] = True
+            self.assertFalse(batch.try_idle_override())
+
     def test_interactive_leases_reduce_planner_lanes_and_refresh_blocks_conversion(self):
         b = daily_batch.agent_budget
         with self.budget_context(), patch.object(daily_batch, 'ROOT', self.root):
             budget = daily_batch.RoadmapBudget(dry_run=True)
             budget.dry_run = False
-            budget.workers, budget.planners, budget.gates = ['cursor'], ['codex'], {}
+            budget.workers, budget.planners, budget.gates = ['claude'], ['codex'], {}
+            budget.review_strategy = {'strategy': 'cross-provider', 'reason': None}
             budget.readings['codex']['windows']['five_hour']['live'] = 61
             interactive = b.reserve_bundle([{'provider': 'codex', 'role': 'planner'}],
                 models=budget.models, reading_by_provider=budget.readings)
@@ -603,6 +824,7 @@ PYTHON
                     admitted.append(item)
             self.assertEqual(len(admitted), 1, 'the interactive lease leaves room for only one compound planner')
             before = set(admitted[0]['budget_leases'])
+            budget.readings['codex']['windows']['five_hour']['live'] = 100
             budget.readings['cursor']['windows']['auto']['live'] = 100
             self.assertIsNone(budget.choose(item=admitted[0]))
             with b.lock():
@@ -721,6 +943,147 @@ else:
         self.assertEqual(peak, 2)
         self.assertEqual(sorted(starts), list('abcde'))
 
+    def test_recovery_work_finishes_before_any_new_planning(self):
+        self.repo('a'); self.repo('z')
+        pending = self.code / '.advance-roadmap'; pending.mkdir()
+        (pending / 'pending-plan-z.json').write_text(json.dumps({'action': 'resume_worker'}))
+        self.run_batch(lanes=2)
+        events = self.events()
+        finished = next(e['time'] for e in events if e['repo'] == 'z' and e['kind'] == 'work-end')
+        fresh = next(e['time'] for e in events if e['repo'] == 'a' and e['kind'] == 'plan-start')
+        self.assertGreaterEqual(fresh, finished)
+        self.assertEqual(self.state()['phase'], 'done')
+
+    def test_failed_recovery_does_not_block_an_unrelated_repo(self):
+        self.repo('a'); self.repo('z')
+        pending = self.code / '.advance-roadmap'; pending.mkdir()
+        (pending / 'pending-plan-z.json').write_text(json.dumps({'action': 'resume_worker'}))
+        self.env['FAKE_PLANNER_GATED'] = 'z'
+        self.run_batch(lanes=2)
+        self.assertTrue(any(e['repo'] == 'a' and e['kind'] == 'work-start' for e in self.events()))
+        fresh = next(i for i in self.state()['queue'] if i['repo'] == 'a')
+        self.assertEqual(fresh['outcome'], 'shipped')
+
+    def test_remaining_pending_plan_does_not_block_an_unrelated_repo(self):
+        self.repo('a'); self.repo('z')
+        pending = self.code / '.advance-roadmap'; pending.mkdir()
+        (pending / 'pending-plan-z.json').write_text(json.dumps({'action': 'dispatch_worker'}))
+        self.env['FAKE_KEEP_PENDING'] = '1'
+        self.run_batch(lanes=2)
+        self.assertTrue(any(e['repo'] == 'a' and e['kind'] == 'work-start' for e in self.events()))
+
+    def test_human_blocked_recovery_allows_fresh_repo_to_continue(self):
+        self.repo('a'); self.repo('z')
+        pending = self.code / '.advance-roadmap'; pending.mkdir()
+        (pending / 'pending-plan-z.json').write_text(json.dumps({'action': 'resume_worker'}))
+        self.env['FAKE_HUMAN_REPO'] = 'z'
+        self.run_batch(lanes=2)
+        fresh = next(i for i in self.state()['queue'] if i['repo'] == 'a')
+        self.assertEqual(fresh['outcome'], 'shipped')
+        with daily_batch.workqueue.Store(self.root) as store:
+            self.assertEqual(store.hold('z')['state'], 'human')
+
+    def test_streaming_releases_ready_work_before_unrelated_planner_and_caps_all_phases(self):
+        self.repo('a'); self.repo('b')
+        self.env.update(FAKE_SLOW_REPO='b', ADVANCE_ROADMAP_THREADS_PER_REPO='1')
+        script = """import sys
+sys.path.insert(0, sys.argv[1])
+import daily_batch
+original = daily_batch.Batch.run
+def streaming(self):
+    return original(self, streaming=True, summary=False)
+daily_batch.Batch.run = streaming
+sys.argv = ['daily_batch.py', '--lanes', '2', '--threads', '1']
+raise SystemExit(daily_batch.main())
+"""
+        proc = subprocess.run([sys.executable, '-c', script, str(HERE)], env=self.env,
+                              capture_output=True, text=True, timeout=30)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        events = self.events()
+        start = next(e['time'] for e in events if e['repo'] == 'a' and e['kind'] == 'work-start')
+        ready = next(e['time'] for e in events if e['repo'] == 'b' and e['kind'] == 'plan-ready')
+        self.assertLess(start, ready)
+        active = peak = 0
+        for e in sorted(events, key=lambda e: e['time']):
+            if e['kind'] in {'plan-start', 'work-start'}:
+                active += 1
+                peak = max(peak, active)
+            elif e['kind'] in {'plan-ready', 'work-end'}:
+                active -= 1
+        self.assertLessEqual(peak, 2)
+        self.assertEqual(len([e for e in events if e['kind'] == 'work-start']), 2)
+
+    def test_continuous_stream_refills_a_yielded_assignment(self):
+        self.repo('a')
+        pending = self.code / '.advance-roadmap'
+        pending.mkdir()
+        (pending / 'pending-plan-a.json').write_text(json.dumps({'orchestrator': {
+            'action': 'resume_worker', 'repo': 'a', 'linear_id': 'DEV-a1', 'item': 'a t1',
+            'branch': 'roadmap/a-1'}}))
+        self.env.update(ADVANCE_ROADMAP_INCREMENTAL='1', ADVANCE_ROADMAP_CONTINUOUS='1', FAKE_YIELD_ONCE='1')
+        script = """import sys
+sys.path.insert(0, sys.argv[1])
+import daily_batch
+original = daily_batch.Batch.run
+def streaming(self):
+    return original(self, streaming=True, summary=False)
+daily_batch.Batch.run = streaming
+sys.argv = ['daily_batch.py', '--lanes', '1', '--threads', '1']
+raise SystemExit(daily_batch.main())
+"""
+        result = subprocess.run([sys.executable, '-c', script, str(HERE)], env=self.env,
+                                capture_output=True, text=True, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(len([event for event in self.events() if event['kind'] == 'work-start']), 2)
+        self.assertEqual([item['outcome'] for item in self.state()['queue']], ['yielded', 'shipped'])
+
+    def test_slots_cover_morning_afternoon_and_wake_up_without_extra_runs(self):
+        for now, expected in [
+            (datetime(2026, 11, 10, 10, 29), datetime(2026, 11, 9, 15, 30)),
+            (datetime(2026, 11, 10, 10, 30), datetime(2026, 11, 10, 10, 30)),
+            (datetime(2026, 11, 10, 15, 29), datetime(2026, 11, 10, 10, 30)),
+            (datetime(2026, 11, 10, 15, 30), datetime(2026, 11, 10, 15, 30)),
+            (datetime(2026, 11, 10, 23), datetime(2026, 11, 10, 15, 30)),
+        ]:
+            self.assertEqual(daily_batch.scheduled_slot(now), expected)
+
+    def test_each_scheduled_slot_can_start_once_and_legacy_morning_is_respected(self):
+        self.repo('a')
+        def preflight(snapshot):
+            snapshot.write_text('{"ok":true}')
+        with patch.dict(os.environ, self.env), patch.object(daily_batch, 'ROOT', self.root), patch.object(
+                daily_batch.shared, 'code_dir', return_value=str(self.code)), patch.object(
+                daily_batch.shared, 'log'), patch.object(daily_batch.shared, 'LOG', None), patch.object(daily_batch, 'preflight', side_effect=preflight), patch.object(
+                daily_batch, 'Batch') as batch, patch.object(daily_batch, 'datetime') as clock, patch.object(
+                daily_batch.shared.Supervisor, 'busy_repos', return_value={}), patch.object(
+                daily_batch.shutil, 'which', return_value=None), patch.object(sys, 'argv', ['daily_batch.py']):
+            batch.return_value.run.return_value = 0
+            batch.return_value.budget = None
+            batch.return_value.state = {'queue': []}
+            clock.now.return_value = datetime(2026, 11, 10, 10, 30)
+            self.assertEqual(daily_batch.main(), 0)
+            self.assertEqual(daily_batch.main(), 0)
+            self.assertEqual(batch.call_count, 1)
+            clock.now.return_value = datetime(2026, 11, 10, 15, 30)
+            self.assertEqual(daily_batch.main(), 0)
+            self.assertEqual(daily_batch.main(), 0)
+            self.assertEqual(batch.call_count, 2)
+            (self.root / 'batches' / '2026-11-11').mkdir()
+            clock.now.return_value = datetime(2026, 11, 11, 10, 30)
+            self.assertEqual(daily_batch.main(), 0)
+            self.assertEqual(batch.call_count, 2)
+
+    def test_session_pause_preserves_unclaimed_slot_without_preflight_or_models(self):
+        (self.root / 'session-hold.json').write_text('{}')
+        with patch.dict(os.environ, self.env), patch.object(daily_batch, 'ROOT', self.root), patch.object(
+                daily_batch.shared, 'code_dir', return_value=str(self.code)), patch.object(
+                daily_batch, 'preflight', side_effect=AssertionError('paused')), patch.object(
+                daily_batch, 'Batch', side_effect=AssertionError('paused')), patch.object(
+                daily_batch.shared, 'LOG', None), patch.object(
+                sys, 'argv', ['daily_batch.py']):
+            self.assertEqual(daily_batch.main(), 0)
+        self.assertFalse((self.root / 'batches').exists())
+
     def test_duplicate_tick_cannot_start_second_batch(self):
         self.repo('a')
         self.run_batch()
@@ -826,13 +1189,15 @@ else:
         self.assertEqual(self.state()['queue'], [])
         self.assertEqual(self.state()['phase'], 'done')
 
-    def test_live_prior_worker_repo_is_deferred(self):
-        self.repo('a')
+    def test_live_prior_worker_only_defers_its_own_repo(self):
+        self.repo('a'); self.repo('b')
         (self.root / 'inflight').mkdir()
         (self.root / 'inflight/a--old.pid').write_text(str(os.getpid()))
         self.run_batch()
-        self.assertEqual(self.state()['queue'][0]['status'], 'deferred')
-        self.assertFalse((self.root / 'trace.jsonl').exists())
+        queue = {i['repo']: i for i in self.state()['queue']}
+        self.assertEqual(queue['a']['status'], 'deferred')
+        self.assertEqual(queue['b']['outcome'], 'shipped')
+        self.assertEqual([e['repo'] for e in self.events() if e['kind'] == 'work-start'], ['b'])
 
     # ── threads ───────────────────────────────────────────────────────────────
 
@@ -955,42 +1320,26 @@ else:
         self.assertGreaterEqual(posts[0]['time'], max(e['time'] for e in events if e['kind'] == 'work-end'))
         self.assertTrue(self.state()['summary_posted'])
 
-    def test_bot_summary_appends_one_hold_line_without_posting_twice(self):
+    def test_bot_summary_does_not_append_context_after_the_bulletin(self):
         if not shutil.which('node'):
             self.skipTest('node is not installed')
         slack = self.root / 'slackagent'
-        for path in ('scripts', 'src', 'node_modules/dotenv', 'node_modules/@slack/web-api'):
-            (slack / path).mkdir(parents=True)
-        (slack / 'package.json').write_text('{"type":"module"}')
-        (slack / 'scripts/post-roadmap-summary.mjs').write_text('throw new Error("adapter required");')
-        (slack / 'node_modules/dotenv/index.js').write_text('exports.config = () => {};')
+        (slack / 'scripts').mkdir(parents=True)
         posts = self.root / 'bot-posts.jsonl'
-        (slack / 'node_modules/@slack/web-api/index.js').write_text(
-            "const fs = require('node:fs'); exports.WebClient = class { constructor() { this.chat = {"
-            f"postMessage: async args => fs.appendFileSync({json.dumps(str(posts))}, JSON.stringify(args)+'\\n')"
-            "}; } };")
-        (slack / 'src/roadmap-summary.js').write_text("""import {readFileSync} from 'node:fs';
-export const DEFAULT_ROADMAP_CHANNEL = 'fake-channel';
-export const loadBatchState = path => JSON.parse(readFileSync(path));
-export const loadRunRecords = () => new Map();
-export const formatBatchSummary = () => 'Batch summary';
-export const postBatchSummary = ({client, channel, state, records}) =>
-  client.chat.postMessage({channel, text: formatBatchSummary(state, records)});
-""")
+        (slack / 'scripts/post-roadmap-summary.mjs').write_text(
+            "import { appendFileSync } from 'node:fs';\n"
+            f"appendFileSync({json.dumps(str(posts))}, JSON.stringify({{text:'Batch summary'}})+'\\n');\n")
         directory = self.root / 'summary'
         directory.mkdir()
         (directory / 'batch.json').write_text(json.dumps({'queue': [],
             'review_fallback': 'review fallback: cross-provider (cursor gated until reset)', 'budget': {
             'held': [{'repo':'a', 'reason':'shared headroom'}]}}))
-        with self.budget_context(), patch.object(daily_batch, 'ROOT', self.root), patch.object(
-                daily_batch, 'slackagent_script', return_value=slack / 'scripts/post-roadmap-summary.mjs'), patch.dict(
-                os.environ, {'SLACK_BOT_TOKEN': 'test-only'}):
+        with patch.object(daily_batch, 'ROOT', self.root), patch.object(
+                daily_batch, 'slackagent_script', return_value=slack / 'scripts/post-roadmap-summary.mjs'):
             self.assertTrue(daily_batch.post_slack_summary(directory))
         records = [json.loads(line) for line in posts.read_text().splitlines()]
         self.assertEqual(len(records), 1)
-        self.assertEqual(records[0]['text'],
-                         'Batch summary\nreview fallback: cross-provider (cursor gated until reset)'
-                         '\nBudget hold: a: shared headroom.')
+        self.assertEqual(records[0]['text'], 'Batch summary')
         self.assertIn('review fallback: cross-provider (cursor gated until reset)',
                       daily_batch.quota_line(json.loads((directory / 'batch.json').read_text())))
 
@@ -1009,7 +1358,7 @@ export const postBatchSummary = ({client, channel, state, records}) =>
         self.assertEqual(self.state()['phase'], 'done')
 
 
-    def test_dashboard_schedule_preserves_history_and_uses_one_daily_slot(self):
+    def test_dashboard_schedule_preserves_history_and_uses_two_current_slots(self):
         with patch.dict(os.environ, self.env):
             spec = importlib.util.spec_from_file_location('batch_dashboard', HERE / 'gen-dashboard.py')
             dashboard = importlib.util.module_from_spec(spec)
@@ -1017,6 +1366,11 @@ export const postBatchSummary = ({client, channel, state, records}) =>
         with patch.object(dashboard, 'base_cadence', return_value=1):
             self.assertEqual(len(dashboard.slots_on(datetime(2026, 10, 8))), 10)
             self.assertEqual(dashboard.slots_on(datetime(2026, 10, 10)), [datetime(2026, 10, 10, 10, 30)])
+            self.assertEqual(dashboard.slots_on(datetime(2026, 11, 10)),
+                             [datetime(2026, 11, 10, 10, 30), datetime(2026, 11, 10, 15, 30)])
+        import plistlib
+        schedule = plistlib.loads((HERE / 'com.jake.advance-roadmap.plist').read_bytes())
+        self.assertEqual(schedule['StartCalendarInterval'], [{'Hour': 10, 'Minute': 30}, {'Hour': 15, 'Minute': 30}])
 
 
 if __name__ == '__main__':

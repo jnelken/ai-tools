@@ -6,29 +6,29 @@ Execute the assignment; do not re-pick a different item across the personal code
 Hard constraints:
 
 - Obey [`SAFETY.md`](SAFETY.md) in full.
-- You are already the selected provider (Cursor Auto, Codex, or Claude). Implement directly.
-- When finished — shipped, blocked, failed, or bookkeeping — **write your result JSON to the
+- You are already the selected provider (Codex or Claude). Implement directly.
+- When finished — shipped, blocked, failed, yielded, or bookkeeping — **write your result JSON to the
   result file path named in the prompt** (schema in
   `~/.claude/automations/advance-roadmap/schemas/worker-result.json`). That file is the run's
   record: `run.sh` builds the dashboard, Slack summary, and failure alert from it, and a run
-  without it is recorded as `incomplete`. Also print it as a `WORKER_RESULT_JSON` block plus the
-  plain 5-line summary, for the human reading the log.
+  without it is recorded as `incomplete`. For a yielded unit, the result may contain only outcome,
+  provider and next_phase; do not write a recap just for the boundary. For other outcomes, also print
+  it as a `WORKER_RESULT_JSON` block plus the plain 5-line summary for the human reading the log.
 
 ## Request
 
 The prompt names a request JSON file. Modes:
 
 - **implement / resume** — fields from the orchestrator result (`repo`, `item`, `branch`,
-  `worker_brief`, `worker_mode`, …). Do Steps 3–8, including Step 5b's review (resume uses the existing branch). The launcher
+  `worker_brief`, `worker_mode`, …). Do Steps 3–8, including Step 5b's review (resume uses the existing branch).
+  When the launcher specifies a bounded unit, stop at the requested natural milestone with outcome
+  `yielded` and `next_phase`; do not start unreserved later phases. Keep the branch and artifacts.
+  Full review, verification, merge and deploy checks remain mandatory before reporting `shipped`. The launcher
   has already invoked the provider's native goal command when `worker_mode` is `goal`; do not
   create a second goal. When `directive_ticket` is set, do **Step 2c first** — it clears the dirty
   tree that would otherwise block Step 3. If `worker_brief` names a recovered-deploy ticket to
   close out, do that alongside your own item's Step 6/7 bookkeeping (comment, `Done`, clear
   `Paused`) — it's a different ticket than the one you're implementing.
-- **code-health** — an implement/resume request whose orchestrator result says
-  `"work_kind": "code_health"`. Read [`CODE_HEALTH.md`](CODE_HEALTH.md) first; its *code-health
-  pass* section amends Steps 3–8 (baseline first, caps, stricter verification, commit trailer, no
-  roadmap edits). The product must behave exactly as before.
 - **bookkeeping** — full orchestrator result with `blocked_no_item` / `nothing_qualified`
   (request field `orchestrator`). Run Step 2b once per entry in `blockers[]`, perform `archives`,
   close out any recovered-deploy ticket `worker_brief` names (comment, `Done`, clear `Paused` —
@@ -44,7 +44,7 @@ print the same object in a fence:
 ```WORKER_RESULT_JSON
 {
   "outcome": "shipped",
-  "provider": "cursor",
+  "provider": "codex",
   "repo": "mailcruxh",
   "item": "DEV-35 …",
   "branch": "roadmap/triage-analytics",
@@ -70,10 +70,11 @@ manual check Jake has to do, a FIXME left behind, or a red deploy — those are 
 For DEV-87's cleanup run: "Committed the existing .gitignore (.vercel) change and the README
 rewrite on master; Vercel deploy succeeded. DEV-87 Done."
 
-`outcome`: `shipped` | `shipped-deploy-failed` | `blocked-branch-left` | `failed` | `limit_hit` |
+`outcome`: `shipped` | `shipped-deploy-failed` | `blocked-branch-left` | `failed` | `limit_hit` | `yielded` |
 `archive-only` | `bookkeeping` (bookkeeping mode only — `run.sh` then records the orchestrator's
 `outcome_token`). `shipped` means the PR merged **and** the deploy is green (or there is no deploy);
 `shipped-deploy-failed` means it merged but Step 7b's cap was hit with production still red.
+For a bounded `yielded` result, include `next_phase`; a summary is optional and no recap is required.
 
 ---
 
@@ -135,7 +136,7 @@ Only when the request carries a `directive_ticket`. This is the dirty-tree excep
 
 You are the only role that ever writes to Linear, so this is yours to execute wherever a blocker
 comes from: an entry in the orchestrator's `blockers[]` list (bookkeeping mode), or one you hit
-yourself mid-run — a dirty tree with no directive, an unresolved decision, attended acceptance
+yourself mid-run — an unowned worktree needing changes without a directive, an unresolved decision, attended acceptance
 required before landing, a product judgment stalling Steps 4–5, or a red deploy after Step 7b's
 fix cap.
 
@@ -215,10 +216,15 @@ item's workspace (a git worktree under `~/.superset/worktrees/`, outside Dropbox
 branch, and launched you in its terminal; the prompt names its path, and that is your `<checkout>`
 for every step below. The leaderboard credits a merged PR only when it came from a workspace that
 ran an agent, which is why the work happens there. Don't switch branches in it — one workspace is
-one branch.
+one branch. Before changing it, run `git -C <checkout> status --porcelain` and
+`~/dotfiles/bin/git-safe-to-autocommit <checkout>`. In an `advance-roadmap`-tagged workspace, dirty files are this job's interrupted work: inspect
+and preserve them, continue the same item, and commit the relevant work before rebasing. Do not
+reset, clean, or discard them. Unrelated changes in the primary checkout or other worktrees do not
+block this isolated workspace and must not be modified.
 
-The workspace branched from the root checkout's local default branch, which can trail `origin`
-(merges happen on GitHub now). Bring it up to date before building:
+A new workspace starts from the committed remote default ref. For a resumed workspace, first
+inspect and preserve its existing work and commit relevant changes before rebasing. Bring the branch
+up to date before building:
 
 ```
 git -C <checkout> fetch origin
@@ -261,74 +267,44 @@ merge, and report exactly what failed with the error output. If what stopped you
 rather than a bug — the fix depends on a decision that's the user's to make — write it up per
 Step 2b and name the branch in the ticket comment so the question and work in flight stay linked.
 
-## Step 5b — Cursor review cycle, then one Codex pass
+## Step 5b — Cross-provider review
 
-Before anything merges, run the selected review strategy against the branch diff. Under the default
-strategy, Cursor reviews in up to 3 rounds, including when Cursor wrote the change. Run the review
-command from your prompt (it names your provider and the log path) from the repo, with the round
-number:
+Before merging, commit the work and run the review command from your prompt against the branch diff:
 
 ```
 ~/.claude/automations/advance-roadmap/review.sh --repo <repo> --worker <you> --round 1 --log <log>
 ```
 
-The default strategy is `cursor-then-codex`. To select another strategy for a call, add
-`--strategy cross-provider`; the same choice can be set for scheduled runs with
-`ADVANCE_ROADMAP_REVIEW_STRATEGY` in the launch agent's environment. The named strategies are:
+Cursor is disabled for roadmap routing. Codex work is reviewed by Claude; Claude work is reviewed
+by Codex. A reviewer must differ from the worker and be under its quota gate. The command records
+its verdict and provider; do not invoke Cursor for review or remediation, even if an older plan
+requests it.
 
-- **`cursor-then-codex`** — Cursor reviews each round, then Codex reviews once after Cursor is
-  clean. This is the default.
-- **`cross-provider`** — preserve the earlier policy: Cursor work is reviewed by Codex (then Claude
-  on limit), Codex work by Cursor (then Claude), and Claude work by Codex (then Cursor).
+- **`VERDICT: clean`** → go to Step 6.
+- **`VERDICT: findings`** or **`unparsed`** → assess the findings, fix real issues yourself,
+  rerun Step 5 verification, commit the fixes, and request the next cross-provider review. In a
+  bounded incremental unit, preserve the evidence and yield for a separately scheduled review.
+- **`VERDICT: unavailable`** → stop before merge and report the unavailable reviewer; do not
+  substitute Cursor or merge unreviewed.
 
-Each call reviews `origin/main...HEAD` read-only. In `cursor-then-codex`, once a Cursor round is
-clean, that same call runs one final Codex review. The log records each provider, phase, and
-strategy. In `cursor-then-codex`, there is no provider fallback: if a required reviewer is missing
-or limited, stop before merging and report the blocker. Commit your work before calling it: it
-reviews commits, not the working tree.
+**Instance versus invariant findings (applies to every provider's findings).** Before dispatching or
+applying any fix, classify each real finding: an **instance** is one defect at one place and keeps the
+local-fix path above; an **invariant** is a rule that must hold on every path reaching a side effect
+(write, network call, payment, permission check, secret read). For an invariant finding, **before
+fixing, list every code path that reaches this side effect. If more than one, propose a single owner.**
+Prefer one owner with mechanical enforcement over patching each reported site. Record the invariant and
+its owner, check the changed paths against it, test the owner's policy once with table-driven cases,
+and test that each entry point delegates to it (convention: `${AI_TOOLS_HOME:-$HOME/.ai-tools}/instructions/development/shared.md`,
+*Invariants*; examples: `~/.claude/skills/peer-review/templates/invariants/`). When two review rounds report
+different call sites of the same side effect, treat it as an invariant even if each finding reads as
+an instance. Escalate (Step 2b) only if choosing the owner exceeds the approved scope. This changes
+how findings are fixed, not the verdict format, the reviewer routing, the quota gates or the round limits.
 
-- **`VERDICT: clean`** from the Codex pass or a post-Codex Cursor follow-up → go to Step 6.
-- **`VERDICT: findings`** (or `unparsed` — read the text as findings), effective strategy
-  `cursor-then-codex` with Cursor available → have Cursor assess and address the real findings,
-  regardless of which provider did the initial implementation. Re-run Step 5's verification,
-  commit (`fix: address review round N`), then call the review command with the next round number.
-  After the one Codex pass, later calls run Cursor only; Codex is never repeated. If you are not
-  Cursor, dispatch the fixes to Cursor with
-  `~/.local/bin/agent -p --force --trust --model auto --workspace <repo> "<findings and context>"`
-  and inspect its diff before committing. A finding Cursor judges wrong is dismissed, not fixed —
-  note it and why in your summary.
-- **`VERDICT: findings`** (or `unparsed` — read the text as findings), effective strategy
-  `cross-provider` (configured or fallback) → address the real findings yourself, or use another
-  provider that is under its gate and differs from the worker. Never dispatch remediation to a
-  gated provider, including Cursor when its reviewer gate caused the fallback. Re-run Step 5's
-  verification and call the next review round with the same effective `cross-provider` strategy;
-  its reviewer must differ from the worker. The worker brief supplies the effective strategy and
-  fallback reason for the run. Commit the fixes as `fix: address review round N` before reviewing.
-- **After 3 Cursor rounds before the Codex pass, still findings** → **merge anyway** without the
-  Codex pass, with every unresolved finding marked in the code where it applies, in the file's
-  comment syntax:
-  - `FIXME(advance-roadmap review): <finding> — <reviewer>, <date>` for a bug or correctness risk;
-  - `TODO(advance-roadmap review): <finding> — <reviewer>, <date>` for anything lesser (a missing
-    test, an edge case worth handling).
-
-  Commit the markers on their own (`chore: mark unresolved review findings`), list each one in the
-  final summary, and carry on to Step 6. Don't call a fourth Cursor round in that phase.
-- **`VERDICT: unavailable`** → stop before merge. Report which required reviewer was unavailable;
-  do not substitute another provider or merge unreviewed.
-
-The Codex pass is run once, immediately after Cursor first returns clean. If its findings require
-changes, use Cursor for those changes and allow up to 3 post-Codex Cursor follow-up rounds, without
-repeating Codex. If findings remain after those rounds, mark and summarize them as above. A
-rebase-and-reverify in Step 7 doesn't trigger a new review unless the rebase changed your code.
-Bookkeeping-only runs (archives, no code) skip this step.
-
-Record the review result in JSON; a clean first Cursor round followed by a clean Codex pass is
-`"review": {"reviewer": "codex", "rounds": 2, "unresolved": 0}`.
+A rebase-and-reverify in Step 7 doesn't trigger a new review unless the rebase changed your code.
+Bookkeeping-only runs (archives, no code) skip this step. Record the actual reviewer and rounds in
+JSON, for example `"review": {"reviewer": "claude", "rounds": 1, "unresolved": 0}`.
 
 ## Step 6 — Update the roadmap (and friends)
-
-A code-health pass skips this step: it isn't a roadmap item, and a ticket-backed one is closed in
-Step 7b's close-out like any ticket.
 
 In the roadmap file you located in Step 1 (not necessarily a root `ROADMAP.md`):
 - Move the completed item into the **Shipped (reference)** section, in that section's existing prose
@@ -404,7 +380,7 @@ gh pr create -R jnelken/<github-repo> --head <branch> --base <default-branch> \
   Linear line from the body. Never create a ticket to fill this template.
 
   Keep it skimmable: no file names or function names unless the change is about them, and no "all
-  tests pass" in Validation. A code-health PR says it preserves behavior.
+  tests pass" in Validation.
 - Merge it right away; Step 5b's review was the gate. Use a merge commit:
 
 ```
@@ -502,6 +478,24 @@ Retain original planning tickets. Legacy `create-pr` backfills may be deleted on
 creation provenance recorded in the reviewed plan and a successful archive readback. A missing
 PR is not evidence of backfill. Archive/log failures are reported and never block a clean ship.
 
+## Continuation between runs
+
+An interrupted assignment remains the same work item. Reconcile its existing branch, checkpoint,
+review artifacts and PR/merge state before acting. Continue from the last valid phase; do not
+repeat a completed merge. Test and review evidence is valid only for the revision it checked and
+the current required review strategy. A continuation packet is a guide, never proof that a check passed.
+
+The launcher gives the `workqueue.py checkpoint` command. Save a bounded checkpoint after durable
+milestones and before a handoff: completed steps, current HEAD, next action, tests/findings with
+their evidence HEAD, and paths to large artifacts. The controller also captures independent facts;
+Step 8 notes complement these checkpoints rather than replacing them.
+
+A crash, quota limit, failing test or merge conflict is recoverable by the agent. Only an actual
+owner decision or access requirement is a human blocker. Report `needs_input: true` and one
+specific `input_question` in that case; otherwise use `needs_input: false`. Human-blocked work is
+parked while other repos proceed, and revalidated when relevant human input changes. Do not ask
+Jake to resolve an ordinary implementation problem.
+
 ## Step 8 — Update run memory
 
 Run memory is **one file per repo** under `$(~/.ai-tools/bin/personal-code-dir --memory-dir)/advance-roadmap-runs/`
@@ -548,6 +542,7 @@ archive plus cross-repo notes; don't write to it.)
 
 The **outcome token** is exactly one of:
 - `shipped` — an item's PR merged to `main` and its deploy is green (or the repo has none);
+- `yielded` — a bounded unit reached a milestone and the assigned branch remains available for continuation;
 - `shipped-deploy-failed` — an item's PR merged to `main` but Step 7b ran out of fix attempts and production is
   still red. **Name the repo, the failing SHA, and the deployment URL** in the notes — the next run's
   orchestrator skips new work in that repo until its deploy is green again;

@@ -1,0 +1,3 @@
+## Budgeted Fan-out (personal repos only)
+
+The shared Claude/Codex quota budget exists for the personal `advance-roadmap` automation, so it applies only to `jnelken`-owned targets. In those repos, size a fan-out with `bin/agent-budget allow --provider P --role R --want N`, then launch each piece through `bin/fanout spawn --label L --provider claude|codex --role R --prompt-file F`. Fan-outs run in Superset terminals: headless by default, or `--interactive` for an agent TUI. Each terminal waits on the shared budget without using a model. Read completion through `bin/fanout status` / `collect`; the exit file is authoritative. The in-process Agent / Workflow gate denies over-budget calls and points here. Work targets skip the budget and the gate entirely.

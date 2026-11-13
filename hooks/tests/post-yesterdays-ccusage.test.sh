@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Behaviour matrix for post-yesterdays-ccusage.sh. Run: bash hooks/tests/post-yesterdays-ccusage.test.sh
-# Stubs npx/npm/curl/osascript on PATH and isolates HOME, so no real Slack POST,
+# Stubs npx/npm/curl/osascript/superset on PATH and isolates HOME, so no real Slack POST,
 # npm cache or notification is ever touched.
 HOOK="${1:-$(cd "$(dirname "$0")/.." && pwd -P)/post-yesterdays-ccusage.sh}"
 pass=0; fail=0
@@ -40,20 +40,48 @@ done
 exit "${CURL_RC:-0}"
 EOF
 printf '#!/usr/bin/env bash\necho x >> "$TEST_DIR/notify-calls"\n' > "$STUBS/osascript"
+# superset: SUPERSET_MODE=ok | offline (jake2 listed offline) | badhash (one
+# base64 character changed on screen). `terminals read` shows $PEER_JSON framed
+# the way a peer's --collect prints it, wrapped at 120 columns between prompts.
+cat > "$STUBS/superset" <<'EOF'
+#!/usr/bin/env bash
+echo "$*" >> "$TEST_DIR/superset-calls"
+case "$1 $2" in
+  "hosts list")
+    online=yes; [ "${SUPERSET_MODE:-ok}" = offline ] && online=no
+    printf '[{"id":"h2","name":"jake2","online":"%s"}]' "$online" ;;
+  "ws list") printf '[{"id":"ws-old","archivedAt":"x"},{"id":"ws1","archivedAt":null,"worktreeExists":true}]' ;;
+  "terminals create") printf '{"terminalId":"t1","status":"active"}' ;;
+  "terminals wait") exit 0 ;;
+  "terminals read")
+    frame=$(printf '%s' "$PEER_JSON" | /usr/bin/python3 "$MERGE" --frame | fold -w 120)  # a mise shim fails under the test HOME
+    if [ "${SUPERSET_MODE:-ok}" = badhash ]; then
+      frame=$(printf '%s\n' "$frame" | awk 'NR==2 { $0 = (substr($0,1,1) == "A" ? "B" : "A") substr($0,2) } 1')
+    fi
+    jq -n --arg t "$(printf '~/code ❯ bash hook --collect\n%s\n~/code ❯' "$frame")" '{text: $t}' ;;
+  "terminals close") echo x >> "$TEST_DIR/close-calls" ;;
+esac
+EOF
 chmod +x "$STUBS"/*
+export MERGE="$(cd "$(dirname "$0")/.." && pwd -P)/lib/merge-usage.py"
 
-# run <npx mode> [curl rc] — fresh HOME and cache each time; prints nothing, sets $H
+# run <npx mode> [curl rc] [hook args] — fresh HOME and cache each time; sets $H and
+# prints the hook's stdout (only --collect and --dry-run write any). POSTER and
+# PEERS feed CCUSAGE_POSTER / CCUSAGE_PEERS; both default to empty (post alone).
 run() {
-  export TEST_DIR="$TMP/case-$((++n))" NPX_MODE="$1" CURL_RC="${2:-0}" CLAUDE_JSON CODEX_JSON
+  export TEST_DIR="$TMP/case-$((++n))" NPX_MODE="$1" CURL_RC="${2:-0}" CLAUDE_JSON CODEX_JSON PEER_JSON SUPERSET_MODE
+  shift; [ $# -gt 0 ] && shift
   unset CODEX_HOME
   H="$TEST_DIR/home"; export NPM_CACHE="$TEST_DIR/npmcache"
   mkdir -p "$H" "$NPM_CACHE/_npx/stale" "$NPM_CACHE/_npx/other"
   echo '{"_npx":{"packages":["ccusage@latest"]}}' > "$NPM_CACHE/_npx/stale/package.json"
   echo '{"_npx":{"packages":["ccusage@18"]}}'     > "$NPM_CACHE/_npx/other/package.json"
   [ -n "${SEED_FN:-}" ] && "$SEED_FN"
-  HOME="$H" SLACK_CCUSAGE_WEBHOOK_URL=http://hook.invalid PATH="$STUBS:$PATH" bash "$HOOK" 2>/dev/null
+  HOME="$H" SLACK_CCUSAGE_WEBHOOK_URL=http://hook.invalid PATH="$STUBS:$PATH" \
+    CCUSAGE_POSTER="${POSTER-}" CCUSAGE_PEERS="${PEERS-}" bash "$HOOK" "$@" 2>/dev/null
 }
-rerun() { HOME="$H" SLACK_CCUSAGE_WEBHOOK_URL=http://hook.invalid PATH="$STUBS:$PATH" bash "$HOOK" 2>/dev/null; }
+rerun() { HOME="$H" SLACK_CCUSAGE_WEBHOOK_URL=http://hook.invalid PATH="$STUBS:$PATH" \
+  CCUSAGE_POSTER="${POSTER-}" CCUSAGE_PEERS="${PEERS-}" bash "$HOOK" 2>/dev/null; }
 count() { [ -f "$TEST_DIR/$1" ] && wc -l < "$TEST_DIR/$1" | tr -d ' ' || echo 0; }
 yesterday=$(date -v-1d +%Y-%m-%d 2>/dev/null || date -d yesterday +%Y-%m-%d)
 marker() { cat "$H/.claude/.ccusage-state/last-posted" 2>/dev/null || echo none; }
@@ -172,7 +200,7 @@ expect no "codex without rollouts: no percent cells" "$(jq -r .text < "$TEST_DIR
 unset CODEX_JSON
 
 # 10. one table for both providers: models by output tokens, readable names, no cache
-#     columns, a Claude cache line, one total row per provider
+#     columns, no cache line, one total row per provider
 BOTH_CLAUDE='{"daily":[{"totalCost":30,"inputTokens":10,"outputTokens":600,"cacheCreationTokens":5000,"cacheReadTokens":90000,"modelBreakdowns":[
   {"modelName":"claude-opus-5-5","cost":20,"inputTokens":4,"outputTokens":100,"cacheCreationTokens":2000,"cacheReadTokens":50000},
   {"modelName":"claude-sonnet-5-5","cost":10,"inputTokens":6,"outputTokens":500,"cacheCreationTokens":3000,"cacheReadTokens":40000}]}]}'
@@ -186,7 +214,8 @@ order=$(grep -E '^(Opus|Sonnet|Luna|Codex [0-9]|Codex Spark)' <<<"$post" | grep 
 expect "Codex Spark,Sonnet 5.5,Luna 6,Opus 5.5,Codex 5.3," "all models sorted by output (ties keep Claude first), names cut to 12" "$order"
 expect yes "header is Model Cost Input Output only" "$(grep -q '^Model  *Cost  *Input  *Output$' <<<"$post" && echo yes || echo no)"
 expect no "no cache columns anywhere" "$(grep -q 'CacheW\|CacheR' <<<"$post" && echo yes || echo no)"
-expect yes "claude cache line under the header" "$(grep -q '^_Cache: 5.0K written · 90.0K read_$' <<<"$post" && echo yes || echo no)"
+expect no "no cache line in the post" "$(grep -q '^_Cache' <<<"$post" && echo yes || echo no)"
+expect no "no Claude/Codex subtotal line under the header" "$(grep -q '^_Claude ' <<<"$post" && echo yes || echo no)"
 expect yes "one Claude total row" "$(grep -q '^Claude  *\$30.00 .*600$' <<<"$post" && echo yes || echo no)"
 expect yes "one Codex total row, no cache figure" "$(grep -q '^Codex  *\$0.50 .*3.0K .*300$' <<<"$post" && echo yes || echo no)"
 expect 2 "exactly two total rows" "$(grep -cE '^(Claude|Codex) +\$' <<<"$post")"
@@ -196,6 +225,62 @@ post=$(jq -r .text < "$TEST_DIR/curl-payload")
 expect no "codex-only day: no cache line" "$(grep -q '^_Cache' <<<"$post" && echo yes || echo no)"
 expect 1 "codex-only day: one total row" "$(grep -cE '^(Claude|Codex) +\$' <<<"$post")"
 unset CODEX_JSON
+
+# 11. one poster for every machine: jake2's day is collected over a Superset
+#     terminal and summed into one post
+me=$(hostname -s)
+PEER_DAY='{"claude":{"daily":[{"totalCost":5,"inputTokens":1,"outputTokens":50,"cacheCreationTokens":1000,"cacheReadTokens":10000,"modelBreakdowns":[
+  {"modelName":"claude-opus-5-5","cost":5,"inputTokens":1,"outputTokens":50,"cacheCreationTokens":1000,"cacheReadTokens":10000}]}]},
+  "codex":[],"effort":{},"codex_effort":{}}'
+PEER_JSON=$(jq -c --arg d "$yesterday" --argjson b "$PEER_DAY" -n '{($d): $b}')
+POSTER="$me" PEERS=jake2 CLAUDE_JSON="$BOTH_CLAUDE" run ok 0
+post=$(jq -r .text < "$TEST_DIR/curl-payload")
+expect 1 "peers: one Slack post" "$(count curl-calls)"
+expect "$yesterday" "peers: marker advances" "$(marker)"
+expect yes "peers: header carries the summed total" "$(grep -q ': \$35.00\*$' <<<"$post" && echo yes || echo no)"
+expect yes "peers: shared model rows are summed" "$(grep -q '^Opus 5.5  *\$25.00 .*150$' <<<"$post" && echo yes || echo no)"
+expect no "peers: no cache line" "$(grep -q '^_Cache' <<<"$post" && echo yes || echo no)"
+expect yes "peers: Claude total row is summed" "$(grep -q '^Claude  *\$35.00 .*650$' <<<"$post" && echo yes || echo no)"
+expect yes "peers: asks jake2 for the day, in a live workspace" "$(grep -q "terminals create --host h2 --workspace ws1 .*--collect $yesterday $yesterday" "$TEST_DIR/superset-calls" && echo yes || echo no)"
+expect 1 "peers: terminal closed" "$(count close-calls)"
+
+# 12. a peer that is offline or returns a damaged frame holds the day
+for m in offline badhash; do
+  POSTER="$me" PEERS=jake2 SUPERSET_MODE=$m run ok 0
+  expect 0 "peer $m: no Slack post" "$(count curl-calls)"
+  expect none "peer $m: marker held" "$(marker)"
+  expect yes "peer $m: logged" "$(grep -q 'collecting from jake2 failed' "$H/.claude/.ccusage-state/errors.log" && echo yes || echo no)"
+done
+expect 1 "badhash: terminal still closed" "$(count close-calls)"
+unset SUPERSET_MODE
+
+# 13. a machine that is not the poster never posts (or runs ccusage)
+POSTER=not-this-host PEERS=jake2 run ok 0
+expect 0 "not poster: no Slack post" "$(count curl-calls)"
+expect 0 "not poster: no ccusage run" "$(count npx-calls)"
+expect 0 "not poster: no peer contact" "$(count superset-calls)"
+
+# 14. --collect prints a frame the poster can read back, without a webhook or state
+out=$(POSTER=not-this-host CLAUDE_JSON='{"daily":[{"totalCost":1.5,"modelBreakdowns":[]}]}' run ok 0 --collect "$yesterday")
+expect 1.5 "collect: frame round-trips the day" "$(printf '%s' "$out" | python3 "$MERGE" --unframe | jq -r --arg d "$yesterday" '.[$d].claude.daily[0].totalCost')"
+expect 0 "collect: no Slack post" "$(count curl-calls)"
+expect none "collect: no marker" "$(marker)"
+
+# 15. --dry-run prints the merged post and touches nothing
+out=$(POSTER="$me" PEERS=jake2 CLAUDE_JSON="$BOTH_CLAUDE" run ok 0 --dry-run "$yesterday")
+expect yes "dry run: prints the summed post" "$(grep -q ': \$35.00\*$' <<<"$out" && echo yes || echo no)"
+expect 0 "dry run: no Slack post" "$(count curl-calls)"
+expect no "dry run: no state dir" "$([ -d "$H/.claude/.ccusage-state" ] && echo yes || echo no)"
+unset PEER_JSON
+
+# 16. effort splits merge by weight, not by adding percentages
+A='{"effort":{"levels":["Med","High"],"rows":{"claude-opus-5-5":[0,100]},"total":[0,100],"weights":{"claude-opus-5-5":10}}}'
+B='{"effort":{"levels":["High","XHigh"],"rows":{"claude-opus-5-5":[50,50],"claude-haiku-5-5":[100,0]},"total":[60,40],"weights":{"claude-opus-5-5":30,"claude-haiku-5-5":10}}}'
+printf '%s' "$A" > "$TMP/a.json"; printf '%s' "$B" > "$TMP/b.json"
+merged=$(python3 "$MERGE" "$TMP/a.json" "$TMP/b.json")
+expect '["Med","High","XHigh"]' "merge: levels are the union, in effort order" "$(jq -c .effort.levels <<<"$merged")"
+expect '[0,63,37]' "merge: a shared model is weight-averaged" "$(jq -c '.effort.rows["claude-opus-5-5"]' <<<"$merged")"
+expect '[0,70,30]' "merge: total is weighted across every machine's models" "$(jq -c .effort.total <<<"$merged")"
 
 echo "post-yesterdays-ccusage: $pass passed, $fail failed"
 (( fail == 0 ))

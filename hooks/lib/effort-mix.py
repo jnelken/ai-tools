@@ -15,7 +15,8 @@ Usage: effort-mix.py [--codex] YYYY-MM-DD < ccusage-daily.json
 Prints one JSON object on stdout:
   {"levels": ["Med", "High"],                    # only levels used that day
    "rows":   {"claude-opus-5-5": [10, 90], ...}, # whole-number %, sums to 100
-   "total":  [14, 86]}                           # cost-weighted across models
+   "total":  [14, 86],                           # cost-weighted across models
+   "weights": {"claude-opus-5-5": 12.3, ...}}    # each row's weight in the total
 or {} when there is nothing to report. Rows for models with no effort data are
 left out, so the caller prints those without effort cells rather than "0%".
 
@@ -213,7 +214,10 @@ def build(per_model, costs):
         total_shares = [sum(costs[m] * shares[m][i] for m in per_model) / priced for i in range(len(columns))]
     else:  # nothing priced; weight every model equally
         total_shares = [sum(shares[m][i] for m in per_model) / len(per_model) for i in range(len(columns))]
-    return {"levels": [label for _, label in columns], "rows": rows, "total": whole_percents(total_shares)}
+    # weights: what each row counted for in the total (dollars for Claude, token weight
+    # for Codex), so merge-usage.py can combine rows from several machines.
+    return {"levels": [label for _, label in columns], "rows": rows, "total": whole_percents(total_shares),
+            "weights": {m: costs[m] for m in per_model}}
 
 
 def main():

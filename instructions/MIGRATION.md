@@ -20,6 +20,7 @@ Original source: dotfiles/claude/CLAUDE.md. Section text is preserved at migrati
 | File Location | reference/legacy-maintenance.md |
 | Keeping CLAUDE.md Lean | reference/legacy-maintenance.md |
 | Parallelize with Subagents | providers/claude-development.md |
+| Budgeted Fan-out (budget/fanout routing split out of Parallelize with Subagents) | providers/claude-personal.md |
 | Above-Sonnet Models (Opus, Fable): Prefer Sub-Agents | providers/claude-development.md |
 | Lunch Money MCP Cache | machine/personal-mac.md |
 | Cross-Session Continuity | providers/claude-development.md |

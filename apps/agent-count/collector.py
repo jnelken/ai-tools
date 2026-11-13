@@ -171,6 +171,15 @@ def merge_local(groups, snapshot):
     return sorted(result.values(), key=lambda g: g["provider"])
 
 
+def local_host_id(binary):
+    """This Mac's Superset host id; `hosts list` reports it as an ordinary online host."""
+    try:
+        status = json.loads(run([binary, "status", "--json"]))
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return None
+    return status.get("hostId") if isinstance(status, dict) else None
+
+
 def remote_hosts(binary):
     """Cache remote metadata for 30s; failures replace counts, never preserve them."""
     cached = read_json(CACHE / "hosts.json", {})
@@ -182,7 +191,12 @@ def remote_hosts(binary):
         hosts = json.loads(run([binary, "hosts", "list", "--json"]))
         if not isinstance(hosts, list):
             raise ValueError("Invalid host list")
-        targets = [h for h in hosts if h.get("online") != "local"]
+        # This Mac is already counted from its own snapshot; a remote row for it
+        # would add every local Superset terminal a second time.
+        self_id = local_host_id(binary)
+        if self_id is None:
+            result["errors"].append("Local Superset host id unknown; this Mac may be counted twice")
+        targets = [h for h in hosts if h.get("online") != "local" and h.get("id") != self_id]
         with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
             futures = {}
             for host in targets:

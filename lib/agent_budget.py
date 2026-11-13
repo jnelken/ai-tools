@@ -42,8 +42,9 @@ LONG_WINDOW_SEED_RATIOS = {'claude': .1, 'codex': .25}
 PROVIDER_WINDOWS = {'claude': ('five_hour', 'seven_day'), 'codex': ('five_hour', 'weekly')}
 MAX_AGE = 15 * 60
 ESTIMATE_MAX_AGE = 10 * 60
-ESTIMATE_VERSION = 5
-HISTORY_VERSION = 5
+ESTIMATE_VERSION = 7
+HISTORY_VERSION = 6
+ROLE_MIN_OBSERVATIONS = 5
 
 
 def claude_home():
@@ -289,14 +290,35 @@ def history(persist=True):
     records, calibration_records = [], []
     for row in rows(home / 'automations/advance-roadmap/runs.jsonl'):
         grouped = {}
+        incremental = row.get('incremental') or {}
+        admission = incremental.get('admission') or {}
+        continuation = incremental.get('continuation') or {}
         for call in (row.get('tokens') or {}).get('calls') or []:
             # Preserve each round's session/token association for calibration.
             calibration_records.append(call)
-            key = (call.get('provider'), role_name(call.get('role')))
+            role = role_name(call.get('role'))
+            # Each roadmap review round is one reviewer observation, matching the
+            # reservation ledger's one-row-per-review granularity.
+            key = (call.get('provider'), role, call.get('round') if role == 'reviewer' else None)
             record = grouped.setdefault(key, dict(provider=key[0], role=key[1], total=0,
-                                                   duration=row.get('duration_s')))
+                duration=row.get('duration_s'), round=key[2], model=call.get('model'),
+                effort=admission.get('effort'), phase=incremental.get('phase'),
+                continuation_mode=continuation.get('mode'), at=row.get('finished_at')))
+            if record['model'] != call.get('model'):
+                record['model'] = None  # a mixed-model total cannot identify one model's cost
             record['total'] += token_total(call)
         records.extend(grouped.values())
+    # G1's reservation ledger is an additional source of measured completed runs.
+    # Keep failed or unmeasured rows out of role cost estimates.
+    for row in rows(budget_dir() / 'ledger.jsonl'):
+        provider = row.get('agent') or row.get('provider')
+        if (row.get('outcome') != 'ok' or provider not in PROVIDERS
+                or not number(row.get('actual_total')) or row['actual_total'] <= 0):
+            continue
+        records.append(dict(provider=provider, role=role_name(row.get('role')),
+                            total=row['actual_total'], duration=row.get('duration_s'),
+                            source='ledger', session_id=row.get('session_id'),
+                            sessions=row.get('session_ids') or []))
     for path in (home / 'state/agent-usage.jsonl', budget_dir() / 'completions.jsonl'):
         source = list(rows(path))
         records.extend(source)
@@ -351,10 +373,23 @@ def history(persist=True):
             elif row.get('event') == 'finish' and key in starts:
                 pairs.append((key, starts.pop(key), row))
                 counts[key] = counts.get(key, 0) + 1
+        # Account-level deltas can include other sessions. This only detects
+        # sessions observed by the snapshot collector, not work on other hosts.
+        intervals = [(key, epoch(start.get('timestamp')), epoch(finish.get('timestamp')))
+                     for key, start, finish in pairs]
+        intervals += [(key, epoch(start.get('timestamp')), None) for key, start in starts.items()]
         long_intervals = []
         for key, start, finish in pairs:
             since, until = epoch(start.get('timestamp')), epoch(finish.get('timestamp'))
             bounded = since is not None and until is not None and since <= until
+            overlap = bounded and any(other != key and other_start is not None and other_end is not None
+                                      and other_start < until and other_end > since
+                                      for other, other_start, other_end in intervals)
+            open_overlap = bounded and any(other != key and other_start is not None
+                                           and other_start < until and other_end is None
+                                           for other, other_start, other_end in intervals)
+            quality = ('concurrent_sessions' if overlap else 'possible_open_session' if open_overlap
+                       else 'unverified_isolation' if bounded else 'unknown_interval')
             matched = [r for r in indexed.get(key, []) if r.get('provider') == 'claude']
             # Resumed sessions can have multiple snapshot intervals. Untimed
             # aggregate ledger totals cannot be reused for each interval.
@@ -376,14 +411,15 @@ def history(persist=True):
                     and reset5a and reset5b and abs(reset5a - reset5b) < 60):
                 samples.append({'id': f'quota:{key}:{start.get("timestamp")}', 'provider': 'claude',
                                 'tokens': tokens, 'pct': b5 - a5,
-                                'windows_pct': {'five_hour': b5 - a5}, 'source': 'quota_snapshots'})
+                                'windows_pct': {'five_hour': b5 - a5}, 'source': 'quota_snapshots',
+                                'quality': quality})
             before7 = (start.get('quota') or {}).get('windows', {}).get('seven_day', {})
             after7 = (finish.get('quota') or {}).get('windows', {}).get('seven_day', {})
             a7, b7 = before7.get('used_percentage'), after7.get('used_percentage')
             reset7a, reset7b = epoch(before7.get('resets_at')), epoch(after7.get('resets_at'))
             if (tokens > 0 and fresh and number(a7) and number(b7) and b7 >= a7
                     and reset7a and reset7b and abs(reset7a - reset7b) < 60):
-                long_intervals.append(dict(id=key, at=since, tokens=tokens, delta=b7 - a7,
+                long_intervals.append(dict(id=key, at=since, tokens=tokens, delta=b7 - a7, quality=quality,
                                            reset=reset7a,
                                            five_reset=(reset5a if reset5a and reset5b and abs(reset5a - reset5b) < 60 else None),
                                            five_delta=(b5 - a5 if number(a5) and number(b5) and b5 >= a5
@@ -391,11 +427,11 @@ def history(persist=True):
         # The weekly gauge is rounded to whole points. Keep same-reset intervals
         # together until their accumulated increase is large enough to measure.
         accumulated, accumulated_tokens, accumulated_five = 0, 0, 0
-        group_reset, group_id, group_five_reset, pairable_five = None, None, None, True
+        group_reset, group_id, group_five_reset, pairable_five, group_quality = None, None, None, True, set()
         for interval in sorted(long_intervals, key=lambda row: row['at'] or 0):
             if group_reset is not None and interval['reset'] != group_reset:
                 accumulated, accumulated_tokens, accumulated_five = 0, 0, 0
-                group_id, group_five_reset, pairable_five = None, None, True
+                group_id, group_five_reset, pairable_five, group_quality = None, None, True, set()
             if group_reset != interval['reset']:
                 group_reset = interval['reset']
             if group_id is None:
@@ -404,6 +440,7 @@ def history(persist=True):
             elif interval['five_reset'] != group_five_reset:
                 pairable_five = False
             accumulated += interval['delta']
+            group_quality.add(interval['quality'])
             accumulated_tokens += interval['tokens']
             accumulated_five += interval['five_delta']
             if accumulated >= 2:
@@ -412,9 +449,13 @@ def history(persist=True):
                                 'windows_pct': {'seven_day': accumulated,
                                                 **({'five_hour': accumulated_five}
                                                    if pairable_five and accumulated_five > 0 else {})},
-                                'source': 'quota_snapshots'})
+                                'source': 'quota_snapshots',
+                                'quality': ('concurrent_sessions' if 'concurrent_sessions' in group_quality
+                                            else 'unknown_interval' if 'unknown_interval' in group_quality
+                                            else 'possible_open_session' if 'possible_open_session' in group_quality
+                                            else 'unverified_isolation')})
                 accumulated, accumulated_tokens, accumulated_five = 0, 0, 0
-                group_id, group_five_reset, pairable_five = None, None, True
+                group_id, group_five_reset, pairable_five, group_quality = None, None, True, set()
         # Rebuild generated samples so upgrades also repair previously persisted
         # bad denominators. Preserve manually supplied/provider-specific samples.
         existing = {r.get('id'): r for r in rows(budget_dir() / 'samples.jsonl')
@@ -470,17 +511,60 @@ def estimates(records, samples):
                     factor = window_factors.get('five_hour', SEED_FACTORS[provider]) * ratio
             window_factors[window] = factor
             window_sources[window] = 'calibrated' if window_counts[window] >= 5 else 'seed'
+        role_records = {p: {r: [row for row in records
+                                if row.get('provider') == p and role_name(row.get('role')) == r]
+                             for r in ROLES} for p in PROVIDERS}
         roles = {}
+        comparable = {'reviewer': 'subagent', 'planner': 'subagent'}
         for role in ROLES:
-            matched = [r for r in records if r.get('provider') == provider and role_name(r.get('role')) == role]
-            tokens = pctl([token_total(r) for r in matched]) or SEED_TOKENS[provider][role]
+            matched = role_records[provider][role]
+            observed = pctl([token_total(r) for r in matched])
+            source = 'observed'
+            tokens = observed
+            if len(matched) < ROLE_MIN_OBSERVATIONS:
+                # Cross-provider role costs share token units even when provider
+                # quota factors differ, so proxy before converting to window pct.
+                other_provider_rows = [row for other in PROVIDERS if other != provider
+                                       for row in role_records[other][role]]
+                proxy = pctl([token_total(r) for r in other_provider_rows])
+                if proxy is None and role in comparable:
+                    proxy_rows = role_records[provider][comparable[role]]
+                    proxy = pctl([token_total(r) for r in proxy_rows])
+                if proxy is None:
+                    proxy = SEED_TOKENS[provider][role]
+                if observed is None:
+                    tokens, source = proxy, 'proxy'
+                else:
+                    weight = len(matched) / ROLE_MIN_OBSERVATIONS
+                    tokens = observed * weight + proxy * (1 - weight)
+                    source = 'blended'
+            tokens = tokens or SEED_TOKENS[provider][role]
             duration = pctl([r.get('duration', (r.get('duration_ms') or 0) / 1000) for r in matched], .9)
             roles[role] = {'tokens_p80': tokens,
                            'pct': {window: max(.1, tokens * factor) for window, factor in window_factors.items()},
                            'ttl': max(60, duration * 1.5) if duration else 1800,
-                           'observations': len(matched)}
+                           'observations': len(matched), 'sample_count': len(matched), 'source': source}
+        quality_counts = {}
+        for sample in provider_samples:
+            quality = sample.get('quality', 'unclassified')
+            quality_counts[quality] = quality_counts.get(quality, 0) + 1
+        cohort_rows = {}
+        for row in role_records[provider]['worker']:
+            key = tuple(row.get(k) for k in ('model', 'effort', 'phase', 'continuation_mode'))
+            if not all(key):
+                continue
+            cohort_rows.setdefault(key, []).append(row)
+        cohorts = []
+        for key, matched in cohort_rows.items():
+            timestamps = [epoch(row.get('at')) for row in matched]
+            timestamps = [value for value in timestamps if value is not None]
+            cohorts.append(dict(zip(('model', 'effort', 'phase', 'continuation_mode'), key),
+                sample_count=len(matched), tokens_p80=pctl([token_total(row) for row in matched]),
+                newest_at=max(timestamps) if timestamps else None,
+                quality='sparse' if len(matched) < ROLE_MIN_OBSERVATIONS else 'observed'))
         result[provider] = {'factor': window_factors, 'factor_source': window_sources,
-                            'factor_samples': window_counts, 'roles': roles}
+                            'factor_samples': window_counts, 'sample_quality': quality_counts,
+                            'worker_cohorts': cohorts, 'roles': roles}
     return result
 
 
@@ -526,7 +610,7 @@ def readings(provider, root=None, probe=True):
             if q.get('source') != 'oauth_usage':
                 q['windows'] = {}
         fresh = number(q.get('age_seconds')) and q['age_seconds'] <= MAX_AGE
-        return {'source': q.get('source'), 'observed_at': q.get('observed_at'), 'windows': {
+        return {'source': q.get('source'), 'observed_at': q.get('observed_at'), 'error': q.get('error'), 'windows': {
             name: {'live': value.get('used_percentage') if fresh else None, 'cap': cap}
             for name, cap in [('five_hour', usage.MAX_FIVE_HOUR_PCT), ('seven_day', usage.MAX_SEVEN_DAY_PCT)]
             for value in [q.get('windows', {}).get(name, {})]}}
@@ -688,7 +772,8 @@ def acquire(provider, role, pid=None, ttl=None, label=None, reading=None, unknow
 
 
 def reserve_bundle(requests, *, replace_ids=(), reading_by_provider=None, models=None,
-                   label=None, pid=None, ttl=None, commit=True, extra_leases=(), reduce_only=False):
+                   label=None, pid=None, ttl=None, commit=True, extra_leases=(), reduce_only=False,
+                   diagnostics=None):
     """Atomically admit/replace a whole job, or leave its existing leases intact.
 
     One lease per provider includes all roles of this job. Unknown quota still
@@ -725,8 +810,19 @@ def reserve_bundle(requests, *, replace_ids=(), reading_by_provider=None, models
                 if any(group['pct'].get(window, 0) > value + 1e-9 for window, value in prior.items()):
                     raise ValueError('a reduction cannot add reserved cost')
                 continue
-            if not all(capacity(reading_by_provider[provider], remaining, provider,
-                                role, group['pct'], 1, model=models[provider]) for role in group['roles']):
+            fits = all(capacity(reading_by_provider[provider], remaining, provider,
+                                role, group['pct'], 1, model=models[provider]) for role in group['roles'])
+            if diagnostics is not None:
+                reading = reading_by_provider[provider]
+                active = [lease for lease in remaining if lease['provider'] == provider]
+                diagnostics.append({'provider': provider, 'roles': group['roles'],
+                    'observed_at': reading.get('observed_at'), 'source': reading.get('source'),
+                    'windows': {name: {'live': window.get('live'), 'cap': window.get('cap'),
+                        'reserved': sum(lease_pct(lease, name, models[provider]) for lease in active),
+                        'proposed': group['pct'].get(name, 0)}
+                        for name, window in reading['windows'].items()},
+                    'decision': 'fits' if fits else 'insufficient or unknown shared headroom'})
+            if not fits:
                 return None
         owner = pid or os.getpid()
         started = process_start(owner)

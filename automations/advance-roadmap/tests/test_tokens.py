@@ -87,6 +87,18 @@ class TokensTests(unittest.TestCase):
         self.assertEqual((r["input"], r["cache_read"], r["output"], r["total"]), (200, 800, 50, 250))
         self.assertEqual(r["source"], "codex-rollout")
 
+    def test_codex_resumed_json_counts_only_current_turn(self):
+        sid = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
+        src = self.write('stream.jsonl', '\n'.join(json.dumps(event) for event in [
+            {'type': 'thread.started', 'thread_id': sid},
+            {'type': 'turn.completed', 'usage': {'input_tokens': 1000,
+                'cached_input_tokens': 800, 'output_tokens': 50}}]))
+        tokens.cmd_codex(Args(input=src, log=self.log, model='codex'))
+        (row,) = self.rows()
+        self.assertEqual((row['session_id'], row['input'], row['cache_read'], row['output']),
+                         (sid, 200, 800, 50))
+        self.assertEqual(row['source'], 'codex-turn')
+
     def test_codex_falls_back_to_total_line(self):
         src = self.write("codex.txt", "no header here\ntokens used\n111,291\n")
         tokens.cmd_codex(Args(input=src, log=self.log, model="m", role="orchestrator"))

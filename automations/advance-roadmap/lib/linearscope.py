@@ -5,8 +5,8 @@ A daily batch plans one repo per planner, but the snapshot holds every DEV issue
 issues): each planner read all of it, and the verdict fingerprint hashed all of it, so a ticket
 edit in one repo reopened triage in every other.
 
-An issue is in a repo's scope when it carries that repo's `repo/<dir>` label or no `repo/*` label
-at all (the planner may be the one to notice it names this repo). Issues that an in-scope issue is
+An issue is in scope when it carries the repo label or an explicit directive for that repo.
+Unrouted issues are shown centrally on the dashboard; they do not invalidate every repo. Issues that an in-scope issue is
 blocked by come along whatever their label or state, so a blocker finishing elsewhere still moves
 this repo's fingerprint and the planner never sees a blocker id with no state.
 
@@ -18,6 +18,7 @@ tree. The fingerprint keeps closed in-scope issues (`scope_issues(..., open_only
 """
 import argparse
 import json
+import re
 import sys
 
 CLOSED_TYPES = {"completed", "canceled"}
@@ -29,7 +30,12 @@ def repo_labels(issue):
 
 def in_repo(issue, repo):
     labels = repo_labels(issue)
-    return not labels or f"repo/{repo}" in labels
+    if labels:
+        return f"repo/{repo}" in labels
+    # Unrouted work is shown centrally instead of invalidating every repository.
+    # Preserve an explicit directive addressed to this repository even before labeling.
+    return bool(re.search(r'<!--\s*advance-roadmap:directive:' + re.escape(repo) + r'\s*-->',
+                          issue.get('description') or ''))
 
 
 def scope_issues(issues, repo, open_only=False):

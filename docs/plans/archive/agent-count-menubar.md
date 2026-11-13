@@ -1,5 +1,7 @@
 # Agent count menu bar
 
+> **Status:** Implemented before 2026-11-06; archived by advance-roadmap. Evidence: apps/agent-count/collector.py, test_collector.py, agents.5s.sh, install.py, README.md; commits 7ddea0a and 4b4575c.
+
 ## Status
 
 Complete. Implemented, tested, pushed, deployed, and installed on this Mac.

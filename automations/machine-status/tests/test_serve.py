@@ -1,0 +1,171 @@
+#!/usr/bin/env python3
+
+import importlib.util
+import json
+import os
+import subprocess
+import tempfile
+import unittest
+from pathlib import Path
+from unittest import mock
+
+SCRIPT = Path(__file__).resolve().parents[1] / "serve.py"
+spec = importlib.util.spec_from_file_location("machine_status", SCRIPT)
+ms = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(ms)
+
+RC_OK = """launchd: loaded (running
+pid 10879 )
+plist:   /Users/jake/Library/LaunchAgents/com.jake.claude-remote-control.plist
+tmux:    session 'claude-rc' running
+--- last 40 lines ---
+·✔︎· Connected · code
+"""
+
+
+class ParseTest(unittest.TestCase):
+    def test_remote_control(self):
+        self.assertEqual(ms.parse_rc(RC_OK)[0], "ok")
+        self.assertEqual(ms.parse_rc(RC_OK.replace("Connected", "Reconnecting"))[0], "problem")
+        later_drop = RC_OK + "·✘· Reconnecting · code\n"
+        self.assertEqual(ms.parse_rc(later_drop)[0], "problem")     # the latest state wins
+        self.assertEqual(ms.parse_rc(later_drop + "·✔︎· Connected\n")[0], "ok")
+        self.assertEqual(ms.parse_rc(later_drop + "·✔︎· Reconnected\n")[0], "ok")
+        self.assertEqual(ms.parse_rc(RC_OK + "Ready\n")[0], "ok")
+        down = "launchd: loaded\ntmux:    no session\n"
+        state, summary = ms.parse_rc(down)
+        self.assertEqual(state, "problem")
+        self.assertIn("tmux session", summary)
+        self.assertEqual(ms.parse_rc("launchd: not loaded\nplist:   (none)\n")[0], "absent")
+        self.assertEqual(ms.parse_rc("launchd: not loaded\nplist:   /x/com.jake.claude-remote-control.plist\n"),
+                         ("problem", "installed but not loaded"))
+
+    def test_superset_host_and_crash_check(self):
+        self.assertEqual(ms.parse_superset_host("launchd: not loaded\nplist:   (none)\n")[0], "absent")
+        self.assertEqual(ms.parse_superset_host("launchd: not loaded\nplist:   /x/y.plist\n")[0], "problem")
+        self.assertEqual(ms.parse_superset_host("launchd: loaded (running\npid 4 )\n")[0], "ok")
+        self.assertEqual(ms.parse_superset_host("launchd: loaded\n")[0], "problem")
+        self.assertEqual(ms.parse_crash_check("launchd: loaded\nRESUME candidates found: 0\n", boot=0)[0], "ok")
+        state, summary = ms.parse_crash_check("launchd: loaded\nRESUME candidates found: 2\n", boot=0)
+        self.assertEqual((state, "2 in Superset tabs" in summary), ("warn", True))
+        import tempfile
+        with tempfile.NamedTemporaryFile("w", suffix=".log", delete=False) as f:
+            f.write("== Workspace: x ==\n== Global sweep: sessions outside Superset tabs ==\n"
+                    "  session e7b1c30a-cd68-5686-b7c5-56b680023a9c\n    manual resume: ...\n"
+                    "  session 61badfd3-5621-4d90-b16d-0a579fba13cb\n== Summary ==\nRESUME candidates found: 0\n")
+        try:
+            state, summary = ms.parse_crash_check(f"launchd: loaded\nlatest:  {f.name}\nRESUME candidates found: 0\n", boot=1)
+            stale = ms.parse_crash_check(f"launchd: loaded\nlatest:  {f.name}\nRESUME candidates found: 0\n",
+                                         boot=os.path.getmtime(f.name) + 60)
+        finally:
+            os.unlink(f.name)
+        self.assertEqual(stale, ("warn", "pending: no report since this boot yet"))   # last boot's report
+        self.assertEqual(state, "warn")                      # zero in tabs, but two outside Superset
+        self.assertIn("2 outside Superset", summary)
+
+    def test_host_parsers(self):
+        self.assertEqual(ms.parse_boottime("{ sec = 1793579792, usec = 671044 } Sun Nov  1"), 1793579792)
+        self.assertEqual(ms.parse_batt("Now drawing from 'AC Power'\n -InternalBattery-0 (id=1)\t24%; charging; 2:50"),
+                         ("AC Power", "24% (charging)"))
+        log = ("2026-11-07 21:30:14 -0500 Sleep               \tEntering Sleep state due to 'Maintenance'\n"
+               "2026-11-07 21:31:14 -0500 Wake                \tDarkWake to FullWake\n")
+        sl = ms.parse_sleep_log(log)
+        self.assertEqual(sl["Sleep"][0], "2026-11-07 21:30:14")
+        self.assertIn("FullWake", sl["Wake"][1])
+        held = ms.parse_assertions('   pid 84196(Maschine 3): [0x1] 01:11:21 PreventUserIdleSystemSleep named: "Avoiding audio dropouts"')
+        self.assertEqual(held, ["Avoiding audio dropouts (Maschine 3)"])
+
+
+class CheckTest(unittest.TestCase):
+    def test_missing_binary_and_timeout(self):
+        with mock.patch.object(ms.subprocess, "run", side_effect=FileNotFoundError()):
+            self.assertEqual(ms.run(["nope"]), (None, "not installed"))
+            self.assertEqual(ms.check_daemon("claude-rc-daemon", "RC", ms.parse_rc)["state"], "absent")
+        with mock.patch.object(ms.subprocess, "run", side_effect=subprocess.TimeoutExpired("x", 8)):
+            rc, out = ms.run(["slow"])
+            self.assertIsNone(rc)
+            self.assertIn("timed out", out)
+            self.assertEqual(ms.check_daemon("claude-rc-daemon", "RC", ms.parse_rc)["state"], "problem")
+
+    def test_tailscale_online_and_offline(self):
+        def fake(argv, **kw):
+            if "serve" in argv:
+                return mock.Mock(returncode=0, stdout=json.dumps({"Web": {"h:443": {"Handlers": {"/": {}, "/x": {}}}}}), stderr="")
+            return mock.Mock(returncode=0, stdout=json.dumps({"Self": {"Online": True, "DNSName": "jmiv.c.ts.net.",
+                                                                       "TailscaleIPs": ["100.1.2.3"]}}), stderr="")
+        with mock.patch.object(ms.subprocess, "run", side_effect=fake):
+            c = ms.check_tailscale()
+        self.assertEqual(c["state"], "ok")
+        self.assertIn(("served pages", "2"), c["lines"])
+        self.assertIn(("name", "jmiv.c.ts.net"), c["lines"])
+        off = mock.Mock(returncode=0, stdout=json.dumps({"Self": {"Online": False}}), stderr="")
+        with mock.patch.object(ms.subprocess, "run", return_value=off):
+            self.assertEqual(ms.check_tailscale()["state"], "problem")
+
+    def test_providers_file_absent_and_gated(self):
+        with mock.patch.object(ms, "USAGE", "/nonexistent/providers-usage.json"):
+            self.assertEqual(ms.check_providers()["state"], "absent")
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as f:
+            json.dump({"providers": {"codex": {"gate": {"state": "quota-paused"}, "five_hour": {"used_pct": 91.0},
+                                               "weekly": {"used_pct": 34.0}},
+                                     "claude": {"gate": {"state": "ok"}, "seven_day": {"used_pct": 43.0}},
+                                     "cursor": {"gate": {"state": "ok"}, "included": {"total_pct": 12.0}}}}, f)
+        try:
+            with mock.patch.object(ms, "USAGE", f.name), mock.patch.object(ms, "live_gate", return_value=None):
+                c = ms.check_providers()
+            self.assertEqual(c["state"], "warn")
+            self.assertIn(("codex", "gate quota-paused · 5 h 91% · week 34%"), c["lines"])
+            self.assertIn(("claude", "gate ok · 7 d 43%"), c["lines"])
+            self.assertIn(("cursor", "gate ok · month 12%"), c["lines"])
+
+        finally:
+            os.unlink(f.name)
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as f:
+            json.dump({"providers": {"codex": {"gate": {"state": "limited", "reset_epoch": 1.0}}}}, f)
+        try:
+            # The live gate (advance-roadmap's provider_gate) decides, not the stored one.
+            live = mock.Mock(return_value={"state": "ok", "reason": None, "reset_epoch": None})
+            with mock.patch.object(ms, "USAGE", f.name), mock.patch.object(ms, "live_gate", return_value=live):
+                self.assertEqual(ms.check_providers()["state"], "ok")
+            blocked = mock.Mock(return_value={"state": "quota-paused", "reason": "weekly 99%", "reset_epoch": None})
+            with mock.patch.object(ms, "USAGE", f.name), mock.patch.object(ms, "live_gate", return_value=blocked):
+                self.assertEqual(ms.check_providers()["state"], "warn")   # an expired limit, but weekly still blocks
+            with mock.patch.object(ms, "USAGE", f.name), mock.patch.object(ms, "live_gate", return_value=None):
+                self.assertEqual(ms.check_providers()["state"], "warn")   # no router: the stored gate stands
+        finally:
+            os.unlink(f.name)
+
+    def test_superset_needs_sign_in_and_the_local_host(self):
+        def fake(answer_host):
+            def run(argv, **kw):
+                if "whoami" in argv:
+                    return mock.Mock(returncode=0, stdout='{"email": "j@x"}', stderr="")
+                return mock.Mock(returncode=0 if answer_host else 1, stdout="[]" if answer_host else "",
+                                 stderr="" if answer_host else "host service not running")
+            return run
+        with mock.patch.object(ms.subprocess, "run", side_effect=fake(True)):
+            self.assertEqual(ms.check_superset()["state"], "ok")
+        with mock.patch.object(ms.subprocess, "run", side_effect=fake(False)):
+            c = ms.check_superset()
+        self.assertEqual(c["state"], "problem")
+        self.assertIn("not answering", dict(c["lines"])["local host"])
+
+    def test_one_broken_check_does_not_take_the_page_down(self):
+        boom = mock.Mock(side_effect=RuntimeError("kaput"), __name__="check_host")
+        with mock.patch.object(ms, "check_host", boom), \
+             mock.patch.object(ms, "run", return_value=(None, "not installed")):
+            cards = ms.collect()
+        self.assertTrue(any(c["state"] == "problem" and "kaput" in str(c["lines"]) for c in cards))
+
+    def test_page_banner_reflects_the_worst_state(self):
+        ok = [ms.card("A", "ok", [("k", "v")]), ms.card("B", "absent")]
+        self.assertIn("All good", ms.build(ok))
+        page = ms.build(ok + [ms.card("C", "warn", [("disk free", "9%")], raw="<b>raw</b>")])
+        self.assertIn("Needs a look", page)
+        self.assertIn("&lt;b&gt;raw&lt;/b&gt;", page)        # raw output escaped
+        self.assertIn("<title>Machine status</title>", page)
+        self.assertIn('<a href="">reload</a>', page)       # reloads /status itself, not the index
+
+
+if __name__ == "__main__":
+    unittest.main()

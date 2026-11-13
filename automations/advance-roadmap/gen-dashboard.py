@@ -80,7 +80,24 @@ GRID_BASE = 2  # the :45 grid's base cadence, for judging that era's history
 SPRINT_SINCE = datetime(2026, 10, 7, 0, 0)
 SPRINT_TICKS = [(10, 30), (11, 30), (12, 30), (13, 30), (14, 30), (16, 0), (17, 0), (18, 0), (19, 0), (20, 0)]
 BATCH_SINCE = datetime(2026, 10, 10, 0, 0)
-BATCH_DESCRIPTION = "10:30 daily; one item per repo"
+TWO_BATCHES_SINCE = datetime(2026, 11, 10, 0, 0)
+
+
+def quota_scheduler_settings():
+    import sqlite3
+    from contextlib import closing
+    try:
+        with closing(sqlite3.connect('file:' + os.path.join(ROOT, 'workqueue.sqlite3') + '?mode=ro', uri=True)) as con:
+            values = {key: json.loads(value) for key, value in con.execute(
+                "SELECT key,value FROM settings WHERE key IN ('quota_scheduler_enabled','quota_scheduler_started','quota_schedule')")}
+        return values
+    except (sqlite3.Error, ValueError):
+        return {}
+
+
+QUOTA_SETTINGS = quota_scheduler_settings()
+BATCH_DESCRIPTION = ('Quota-driven; up to two workers, fresh usage checked before each unit'
+                     if QUOTA_SETTINGS.get('quota_scheduler_enabled') else '10:30 and 15:30 daily; carried work first')
 
 
 def slots_on(day):
@@ -100,7 +117,10 @@ def slots_on(day):
             out.append(day.replace(hour=h, minute=m))
     if day.replace(hour=10, minute=30) >= BATCH_SINCE:
         out.append(day.replace(hour=10, minute=30))
-    return sorted(out)
+    if day.replace(hour=15, minute=30) >= TWO_BATCHES_SINCE:
+        out.append(day.replace(hour=15, minute=30))
+    started = QUOTA_SETTINGS.get('quota_scheduler_started') if QUOTA_SETTINGS.get('quota_scheduler_enabled') else None
+    return sorted(slot for slot in out if not isinstance(started, (int, float)) or slot.timestamp() < started)
 
 QUOTA_RE = re.compile(r"skipping — (\S+) usage (\d+)% >= (\d+)%")
 NO_ORCH_RE = re.compile(r"skipping — no orchestrator available")
@@ -312,11 +332,27 @@ def parse_runs(ledger, records=None):
                     rec.get("review_strategy"),
                     rec.get("reviewer"), rec.get("review_verdict"),
                     f'{rec.get("review_rounds")} round(s)' if rec.get("review_rounds") else None) if x)
+            inc = rec.get('incremental') or {}
+            cont = inc.get('continuation') or {}
+            lifecycle = inc.get('lifecycle') or {}
+            admission = inc.get('admission') or {}
+            estimate = admission.get('estimate') or {}
+            continuation = ' · '.join(str(x) for x in (
+                inc.get('phase'), cont.get('mode'), cont.get('reason'), lifecycle.get('reason')) if x)
+            budget = ' · '.join(str(x) for x in (
+                'job-only 100% ceiling' if inc.get('job_override') else None,
+                admission.get('decision'),
+                f"{estimate.get('sample_count')} worker samples" if estimate.get('sample_count') is not None else None,
+                f"quality {estimate.get('sample_quality')}" if estimate.get('sample_quality') else None) if x)
+            timing = ' · '.join(str(x) for x in (
+                f"{inc['active_seconds']:.0f}s active" if isinstance(inc.get('active_seconds'), (int, float)) else None,
+                f"{inc['waiting_and_other_seconds']:.0f}s waiting/other" if isinstance(inc.get('waiting_and_other_seconds'), (int, float)) else None) if x)
             fields = {k: v for k, v in (
                 ("Repo", rec.get("repo")), ("Item", rec.get("item")),
                 ("Branch", rec.get("branch")), ("Merge", rec.get("merge_commit")),
                 ("Route", " → ".join(x for x in (rec.get("orchestrator"), rec.get("worker")) if x)),
-                ("Review", review), ("Summary", rec.get("summary")), ("Detail", detail)) if v}
+                ("Review", review), ("Continuation", continuation), ("Budget", budget),
+                ("Timing", timing), ("Summary", rec.get("summary")), ("Detail", detail)) if v}
             mm_model = rec.get("orchestrator")
         else:
             mm_model = mm.group(1) if mm else None
@@ -375,44 +411,13 @@ def missed_slots(runs):
     return [s for s in expected if s not in covered]
 
 
-# ── leaderboard ───────────────────────────────────────────────────────────────
+# ── paradev link ──────────────────────────────────────────────────────────────
 
-def leaderboard_html():
-    """Jake's Production Run ranks, refreshed by lib/leaderboard.py when older than 10 minutes."""
-    script = os.path.join(os.path.dirname(os.path.realpath(__file__)), "lib", "leaderboard.py")
-    if os.path.exists(script):
-        try:
-            subprocess.run([sys.executable, script, "snapshot"], capture_output=True, timeout=90,
-                           env={**os.environ, "ADVANCE_ROADMAP_ROOT": ROOT})
-        except subprocess.SubprocessError:
-            pass
-    try:
-        lb = json.load(open(os.path.join(ROOT, "leaderboard.json")))
-    except (OSError, ValueError):
-        return ""
-
-    def tile(label, r, note=""):
-        if not r or not r.get("rank"):
-            return (f'<div class=stat><div class="n dim">—</div><div class=l>{esc(label)}</div></div>')
-        total = f'{r["total"]:,}' if isinstance(r.get("total"), int) else "?"
-        return (f'<div class=stat><div class=n>#{r["rank"]:,}<span class=dim style="font-size:14px;font-weight:500">'
-                f' / {total}</span></div><div class=l>{esc(label)}</div>'
-                + (f'<div class=dim style="font-size:12px">{esc(note)}</div>' if note else "") + '</div>')
-
-    best = lb.get("best_7d") or {}
-    best_note = ""
-    if best.get("day"):
-        best_note = f'{best["day"]} · {best.get("days_recorded", 0)} of 7 days recorded'
-    roll = lb.get("rolling_7d") or {}
-    tiles = (tile("all-time rank", lb.get("all_time"))
-             + tile("7-day best (daily)", best, best_note)
-             + tile("today (UTC day)", lb.get("today"))
-             + tile("rolling 7 days", roll))
-    when = lb.get("fetched_at") or ""
-    stale = "" if lb.get("ok") else f' · <span style="color:var(--fail)">last fetch failed: {esc(lb.get("error") or "?")}</span>'
-    return (f'<div class=stats>{tiles}</div>'
-            f'<div class=sub style="margin:4px 0 18px">Superset Production Run · @{esc(lb.get("handle") or "?")}'
-            f' · fetched {esc(when[:16].replace("T", " "))} UTC{stale}</div>')
+# The Paradev leaderboard has its own page now (automations/paradev): /paradev on the
+# tailnet, http://127.0.0.1:8422/ on this Mac. "/paradev/" resolves on the tailnet host; on
+# 127.0.0.1:8421 it doesn't, so the local link sits beside it.
+PARADEV_LINK = ('<div class=sub style="margin:-8px 0 18px">Paradev leaderboard standing: '
+                '<a href="/paradev/">tailnet page</a> · <a href="http://127.0.0.1:8422/">on this Mac</a></div>')
 
 
 # ── repos ─────────────────────────────────────────────────────────────────────
@@ -463,21 +468,21 @@ def survey_repos():
             unpushed = c if c and c != "0" else ""
         rel, n_block, text = blockers(repo)
 
-        blocks = []
+        blocks, notes = [], []
         if os.path.exists(os.path.join(repo, ".noroadmap")):
             blocks.append(".noroadmap opt-out")
         if not roadmap and not plans:
             blocks.append("no roadmap or docs/plans")
         if dirty:
-            blocks.append(f"dirty tree ({len(dirty.splitlines())} files)")
+            notes.append(f"primary checkout has {len(dirty.splitlines())} uncommitted file(s); isolated worktrees can still run")
         if not has_origin_main:
             blocks.append("no origin/main — push flow has no target")
         if unpushed:
-            blocks.append(f"{unpushed} unpushed commit(s) — ff-only merge would refuse")
+            notes.append(f"primary checkout has {unpushed} unpushed commit(s)")
 
         out.append({
             "name": name, "roadmap": roadmap, "plans": plans, "blocks": blocks,
-            "eligible": not blocks, "blockers": n_block, "blockfile": rel, "blocktext": text,
+            "eligible": not blocks, "notes": notes, "blockers": n_block, "blockfile": rel, "blocktext": text,
         })
     out.sort(key=lambda r: (not r["eligible"], r["name"]))
     return out
@@ -504,7 +509,7 @@ def quota():
             def ok(name, role):
                 return (providers.get(name) or {}).get(f"available_for_{role}", role == "worker")
             orch = next((n for n in ("codex", "claude") if ok(n, "orchestrator")), None)
-            workers = [n for n in ("cursor", "codex", "claude") if ok(n, "worker")]
+            workers = [n for n in ("codex", "claude") if ok(n, "worker")]
 
         updated = p.get("updated_at")
         age = 0
@@ -821,6 +826,7 @@ BADGE = {
     "blocked-no-item": ("unk", "◦ blocked"), "blocked": ("unk", "◦ blocked"),
     "skipped-quota": ("off", "⏸ quota skip"), "skipped-lock": ("off", "⏸ lock skip"),
     "quota-paused": ("off", "⏸ quota paused"),
+    "yielded": ("unk", "◦ yielded"),
     "skipped-backoff": ("off", "⏸ backoff skip"),
     "skipped-superset": ("off", "⏸ Superset down"),
     "skipped-unchanged": ("off", "⏸ unchanged skip"),
@@ -905,9 +911,115 @@ def token_summary(runs):
             f'Hover a cell for the split. Cursor reports its Auto pool, not the model it routed to.</p>')
 
 
+def queue_panel():
+    """Read-only projection; refreshing the page cannot create or advance work."""
+    import sqlite3
+    from contextlib import closing
+    path = os.path.join(ROOT, 'workqueue.sqlite3')
+    if not os.path.exists(path):
+        return '<p class=dim>No durable queue observations yet.</p>'
+    try:
+        with closing(sqlite3.connect('file:' + path + '?mode=ro', uri=True, timeout=3)) as con:
+            con.row_factory = sqlite3.Row
+            settings = {r['key']: json.loads(r['value']) for r in con.execute(
+                "SELECT * FROM settings WHERE key IN ('mode','last_tick','last_error','shadow_started','rollout_wait','archive_wait','plan_archived','incremental_starvation','quota_scheduler_enabled','quota_schedule')")}
+            work = list(con.execute("SELECT * FROM work WHERE state!='done' ORDER BY updated DESC LIMIT 80"))
+    except (sqlite3.Error, ValueError):
+        return '<p class=dim>Queue state temporarily unavailable; existing work is preserved.</p>'
+    mode = settings.get('mode', 'shadow')
+    tick = settings.get('last_tick') or {}
+    observed = datetime.fromtimestamp(tick['at']).strftime('%b %d %H:%M') if tick.get('at') else 'not yet observed'
+    out = [f'<p>Scheduler: <strong>{esc(mode)}</strong> · last check {esc(observed)}</p>']
+    if settings.get('quota_scheduler_enabled'):
+        wake = settings.get('quota_schedule') or {}
+        at = datetime.fromtimestamp(wake['wake_at']).strftime('%b %d %H:%M:%S') if wake.get('wake_at') else 'not scheduled'
+        out.append('<p>Quota scheduler: up to two workers · next check ' + esc(at) + ' · '
+                   + esc(wake.get('reason') or 'unknown') + '</p>')
+    starvation = settings.get('incremental_starvation') or {}
+    if starvation:
+        oldest = starvation.get('oldest_eligible_age_seconds')
+        message = f"{starvation.get('consecutive_zero_admission', 0)} consecutive batches admitted no worker"
+        if oldest is not None:
+            message += f" · oldest eligible work {int(oldest / 3600)}h old"
+        exception = starvation.get('job_override')
+        if exception:
+            message += f" · job-only override: {exception.get('repo')} ({exception.get('outcome')})"
+        out.append('<p class=dim>' + esc(message) + '</p>')
+    if settings.get('shadow_started') and mode == 'shadow':
+        elapsed = (datetime.now().timestamp() - settings['shadow_started']) / 86400
+        out.append('<p class=dim>Shadow evidence: ' + esc(f'{elapsed:.1f}') + ' of at least 7 days.</p>')
+    if settings.get('archive_wait'):
+        out.append('<p>' + esc(settings['archive_wait']) + '</p>')
+    if settings.get('last_error'):
+        out.append('<p class=bad>' + esc(settings['last_error']['error']) + '</p>')
+    if work:
+        out.append('<div class=card><table><thead><tr><th>Item</th><th>Phase</th><th>Next action / waiting reason</th></tr></thead><tbody>')
+        for w in work:
+            cp = json.loads(w['checkpoint'])
+            wake = (' · eligible after ' + datetime.fromtimestamp(w['not_before']).strftime('%b %d %H:%M')) if w['not_before'] else ''
+            action = w['reason'] if w['state'] in ('human', 'retry') else cp.get('next_action')
+            out.append('<tr><td>' + esc(w['repo'] + ' / ' + w['item']) + '</td><td>'
+                       + esc(w['phase'] + ' · ' + w['state']) + '</td><td>'
+                       + esc((action or 'Reconcile saved assignment') + wake) + '</td></tr>')
+        out.append('</tbody></table></div>')
+    else:
+        out.append('<p class=dim>No unfinished assignments.</p>')
+    decisions = tick.get('decisions', [])
+    if decisions:
+        out.append('<details><summary>Eligibility decisions</summary><ul>' + ''.join(
+            '<li>' + esc(d['repo'] + ': ' + d['decision'] + ' — ' + d['reason']) + '</li>'
+            for d in decisions) + '</ul></details>')
+    # Keep unrouted issues accessible without asking an agent to fetch them.
+    snapshots = [os.path.join(ROOT, 'scheduler-snapshot.json'), os.path.join(ROOT, 'live-snapshot.json')]
+    snapshots += glob.glob(os.path.join(ROOT, 'batches', '*', 'linear-snapshot.json'))
+    available = [p for p in snapshots if os.path.isfile(p)]
+    latest = max(available, key=os.path.getmtime) if available else None
+    try:
+        with open(latest) as stream:
+            snap = json.load(stream)
+    except (OSError, ValueError, TypeError):
+        snap = {}
+    unassigned = [i for i in (snap or {}).get('issues', [])
+                  if not any(l.startswith('repo/') for l in i.get('labels', []) if isinstance(l, str))
+                  and i.get('state_type') not in ('completed', 'canceled')]
+    if unassigned:
+        out.append('<details><summary>' + str(len(unassigned)) + ' issues need a repository label</summary>'
+                   '<p>Assign a repo/* label in Linear to make each issue eligible. These issues remain visible here.</p><ul>')
+        for i in unassigned:
+            label = esc(str(i.get('id', '')) + ': ' + str(i.get('title', '')))
+            url = i.get('url') or ''
+            if url.startswith('https://linear.app/'):
+                label = '<a href="' + esc(url) + '">' + label + '</a>'
+            out.append('<li>' + label + '</li>')
+        out.append('</ul></details>')
+    return ''.join(out)
+
+
+def continuation_comparison(records):
+    import importlib.util
+    path = Path(__file__).resolve().parent / 'lib/continuation_metrics.py'
+    spec = importlib.util.spec_from_file_location('roadmap_continuation_metrics', path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    comparison = module.compare(records.values())
+    parts = ['<details><summary>Continuation overhead observations</summary>']
+    for mode in ('native', 'fallback', 'fresh'):
+        row = comparison[mode]
+        parts.append('<p>' + esc(f"{mode}: {row['samples']} units · worker tokens p80 {row['worker_tokens_p80']}"
+                     f" · cache-read p80 {row['cache_read_p80']} · active seconds p80 {row['active_seconds_p80']}"
+                     f" · milestone observed by seconds p80 {row['milestone_observed_by_seconds_p80']}") + '</p>')
+    parts.append('<p class=dim>' + esc(comparison['limitations']) + '</p>')
+    if not comparison['matched_cohorts']:
+        parts.append('<p class=dim>No matching model, effort and phase has both native and fallback observations yet.</p>')
+    else:
+        parts.append('<pre>' + esc(json.dumps(comparison['matched_cohorts'], indent=2)) + '</pre>')
+    return ''.join(parts) + '</details>'
+
+
 def build():
     ledger = merge_cache(read_ledger())
-    runs = parse_runs(ledger, read_records())
+    records = read_records()
+    runs = parse_runs(ledger, records)
     repos = survey_repos()
     missed = missed_slots(runs)
     q = quota()
@@ -983,6 +1095,7 @@ def build():
             state = '<span class="badge ok">eligible</span>'
         else:
             state = "".join(f'<span class="badge unk">{esc(b)}</span> ' for b in r["blocks"])
+        state += "".join(f'<div class="dim">{esc(note)}</div>' for note in r.get("notes", []))
         bl = (f'<div class=kv><span class=k>decisions</span> {r["blockers"]} open '
               f'<span class=dim>({esc(r["blockfile"])})</span></div>') if r["blockers"] else ""
         for st, cls in (("Needs Input", "unk"), ("Paused", "off")):
@@ -1000,7 +1113,9 @@ def build():
 
     if q:
         orch, workers = q["orch"], q["workers"]
-        verdict = ('<span class="badge fail">next run would be SKIPPED — no orchestrator available</span>'
+        verdict = ('<span class="badge unk">next admission rechecks current quota</span>'
+                   if QUOTA_SETTINGS.get('quota_scheduler_enabled') else
+                   '<span class="badge fail">next run would be SKIPPED — no orchestrator available</span>'
                    if not orch else '<span class="badge ok">next run would proceed</span>')
         route = (f'<span class=dim>orchestrator</span> <b>{esc(orch or "none")}</b> '
                  f'<span class=dim>· workers</span> <b>{esc(" → ".join(workers) or "none")}</b>')
@@ -1011,9 +1126,8 @@ def build():
             checked_html = f'{ab} <span class=dim>(<time data-epoch="{int(ts)}">{rel}</time>)</span>'
         except (TypeError, ValueError):
             checked_html = '<span class=dim>unknown</span>'
-        cad_html = (f'<div class=checkline style="border-bottom:0;padding-bottom:0;margin-bottom:0">'
-                    '<strong>Schedule:</strong> one batch daily at 10:30'
-                    ' <span class=dim>— one item per repo; no automatic refill</span></div>')
+        cad_html = ('<div class=checkline style="border-bottom:0;padding-bottom:0;margin-bottom:0">'
+                    '<strong>Schedule:</strong> ' + esc(BATCH_DESCRIPTION) + '</div>')
         quota_html = (f'<div class=card><div class=checkline>{verdict} &nbsp;{route}</div>'
                       f'<div class=provs>{provider_rows(q["providers"])}</div>'
                       f'<div class="checkline dim" style="font-size:12.5px">Last usage check {checked_html} · '
@@ -1022,7 +1136,7 @@ def build():
     else:
         quota_html = '<p class=dim>No usage reading available — the gate would let a run proceed.</p>'
 
-    token_html = token_summary(runs)
+    token_html = token_summary(runs) + continuation_comparison(records)
 
     missed_html = ('<p class=dim>None — every scheduled slot since the first run produced a log.</p>'
                    if not missed else
@@ -1036,11 +1150,11 @@ def build():
                  if last else '<span class=dim>no runs yet</span>')
 
     return TEMPLATE.format(
-        gen=esc(datetime.now().strftime("%Y-%m-%d %H:%M:%S")), rank_html=leaderboard_html(),
+        gen=esc(datetime.now().strftime("%Y-%m-%d %H:%M:%S")), rank_html=PARADEV_LINK,
         cadence=base_cadence(), windows=esc(BATCH_DESCRIPTION),
         total=n, shipped=shipped, blocked=blocked, skipped=skipped, errored=errored,
         last_line=last_line, run_cards=run_cards, run_panels=run_panels, repo_cards=repo_cards,
-        waiting=waiting, quota_html=quota_html, token_html=token_html, missed_html=missed_html, **{f"n_{k}": v for k, v in counts.items()},
+        waiting=waiting, queue_html=queue_panel(), quota_html=quota_html, token_html=token_html, missed_html=missed_html, **{f"n_{k}": v for k, v in counts.items()},
     )
 
 
@@ -1193,6 +1307,9 @@ TEMPLATE = """<!doctype html>
 
   <h2>Token usage</h2>
   {token_html}
+
+  <h2>Work queue and continuation</h2>
+  {queue_html}
 
   <h2>Waiting on you</h2>
   {waiting}

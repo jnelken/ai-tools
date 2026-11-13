@@ -85,9 +85,12 @@ def _pct_env(name: str, default: float) -> float:
 # plan approver): stop routing to a provider well before its hard limit, not at it.
 MAX_FIVE_HOUR_PCT = _pct_env("ADVANCE_ROADMAP_MAX_FIVE_HOUR_PCT", 70)
 MAX_SEVEN_DAY_PCT = _pct_env("ADVANCE_ROADMAP_MAX_WEEKLY_PCT", 90)
-# Cursor quotas are monthly and worker.sh fails over within the tick, so gate
-# only when the pool is fully spent (Jake, 2026-10-19: use Cursor to 100%).
+# Cursor's dashboard pool is monthly; use it through 100%, while observed CLI limits
+# keep it gated through the next daily batch when no reset time is available.
 MAX_CURSOR_PCT = _pct_env("ADVANCE_ROADMAP_MAX_CURSOR_PCT", 100)
+# If Cursor reports a limit without a reset time, keep it out of the next daily batch.
+# The one-hour generic cooldown expires before the next 10:30 run and repeated the same failure.
+UNKNOWN_CURSOR_LIMIT_COOLDOWN_S = 24 * 60 * 60
 
 # `gate`'s exit code for "over its gate". Not 1 (a crash) or 2 (bad arguments): callers skip a
 # provider only on this code, so a broken usage.py never silently skips every provider.
@@ -100,6 +103,8 @@ ROLE_PROVIDERS = {
     "worker": ("cursor", "codex", "claude"),
     "reviewer": ("codex", "cursor", "claude"),
 }
+# Cursor is not routed to any unattended role, regardless of its reported quota.
+ROUTED_PROVIDERS = {"worker": ("codex", "claude"), "reviewer": ("codex", "claude")}
 # Cursor draws on a different pool per role: Auto, or the API pool for a named model.
 CURSOR_MODEL_ENV = {"worker": "ADVANCE_ROADMAP_CURSOR_WORKER_MODEL",
                     "reviewer": "ADVANCE_ROADMAP_CURSOR_REVIEW_MODEL"}
@@ -108,7 +113,7 @@ CURSOR_MODEL_ENV = {"worker": "ADVANCE_ROADMAP_CURSOR_WORKER_MODEL",
 # (ORCHESTRATOR.md and old logs say "session limit" too). Same pattern as the rg calls in
 # run.sh, worker.sh and review.sh.
 LIMIT_BANNER = re.compile(
-    r"^(?:you.?ve hit your (?:session |usage )?limit|hit your session limit|rate limit exceeded"
+    r"^(?:ActionRequiredError:\s*)?(?:you.?ve hit your (?:session |usage )?limit|hit your session limit|rate limit exceeded"
     r"|quota exceeded|out of (?:usage|credits|quota)\b)", re.I | re.M)
 
 LIMIT_PATTERNS = [
@@ -172,7 +177,7 @@ def load(root: Path) -> dict[str, Any]:
     except (OSError, json.JSONDecodeError):
         return empty_state()
     base = empty_state()
-    base.update({k: v for k, v in data.items() if k in ("updated_at", "history")})
+    base.update({k: v for k, v in data.items() if k in ("updated_at", "history", "continuous_usage_probed_at")})
     for name, defaults in base["providers"].items():
         got = (data.get("providers") or {}).get(name) or {}
         merged = dict(defaults)
@@ -277,8 +282,8 @@ def cursor_gate(prov: dict[str, Any], now: float, role: str = "worker") -> dict[
                                            "reset_epoch": inc.get("reset_epoch")}, MAX_CURSOR_PCT)], now)
 
 
-def limit_gate(prov: dict[str, Any], now: float) -> dict[str, Any] | None:
-    if provider_available_from_limit(prov, now):
+def limit_gate(prov: dict[str, Any], now: float, provider: str | None = None) -> dict[str, Any] | None:
+    if provider_available_from_limit(prov, now, provider):
         return None
     reset = _num((prov.get("last_limit_hit") or {}).get("reset_epoch"))
     when = epoch_to_iso(reset)
@@ -295,7 +300,7 @@ def provider_gate(state: dict[str, Any], name: str, role: str, now: float | None
         return {"available": False, "state": "n/a", "reason": f"{name} does not fill the {role} role",
                 "reset_epoch": None}
     prov = state["providers"][name]
-    gate = limit_gate(prov, now)
+    gate = limit_gate(prov, now, name)
     if gate is None:
         if name == "cursor":
             gate = cursor_gate(prov, now, role)
@@ -306,7 +311,7 @@ def provider_gate(state: dict[str, Any], name: str, role: str, now: float | None
     return {"available": gate["state"] in ("ok", "unknown"), **gate}
 
 
-def provider_available_from_limit(prov: dict[str, Any], now: float) -> bool:
+def provider_available_from_limit(prov: dict[str, Any], now: float, provider: str | None = None) -> bool:
     hit = prov.get("last_limit_hit") or {}
     reset_epoch = hit.get("reset_epoch")
     if reset_epoch:
@@ -318,7 +323,8 @@ def provider_available_from_limit(prov: dict[str, Any], now: float) -> bool:
     if hit.get("observed_at") and not reset_epoch:
         try:
             observed = datetime.fromisoformat(hit["observed_at"]).timestamp()
-            if now - observed < 3600:
+            cooldown = UNKNOWN_CURSOR_LIMIT_COOLDOWN_S if provider == "cursor" else 3600
+            if now - observed < cooldown:
                 return False
         except (TypeError, ValueError):
             pass
@@ -762,9 +768,15 @@ def recompute_flags(state: dict[str, Any]) -> None:
 def refresh(root: Path) -> dict[str, Any]:
     with state_lock(root):
         state = load(root)
-        probe_claude(state)
-        probe_codex(state)
-        probe_cursor_into(state)
+        now = time.time()
+        last = state.get('continuous_usage_probed_at', 0)
+        if (os.environ.get('ADVANCE_ROADMAP_CONTINUOUS') != '1'
+                or not isinstance(last, (int, float)) or not 0 <= now - last < 120):
+            probe_claude(state)
+            probe_codex(state)
+            probe_cursor_into(state)
+            if os.environ.get('ADVANCE_ROADMAP_CONTINUOUS') == '1':
+                state['continuous_usage_probed_at'] = time.time()
         recompute_flags(state)
         save(root, state)
     return state
@@ -783,8 +795,8 @@ def pick_orchestrator(state: dict[str, Any]) -> str | None:
 
 
 def pick_worker_chain(state: dict[str, Any]) -> list[str]:
-    """Cursor → Codex → Claude, skipping providers over their gates."""
-    return [n for n in ROLE_PROVIDERS["worker"] if state["providers"][n].get("available_for_worker")]
+    """Codex → Claude, skipping providers over their gates."""
+    return [n for n in ROUTED_PROVIDERS["worker"] if state["providers"][n].get("available_for_worker")]
 
 
 _CLOCK_RESET = re.compile(
@@ -1155,12 +1167,7 @@ def effective_review_strategy(configured: str, reviewer_gates: list[dict[str, An
     decision = {"configured": configured, "strategy": configured, "reason": None, "reset_at": None}
     if configured == "cross-provider":
         return decision
-    cursor = next((g for g in reviewer_gates if g.get("provider") == "cursor"), {})
-    if cursor.get("state") in OUT_STATES:
-        reset_at = cursor.get("reset_at")
-        reason = f"cursor gated until {reset_at}" if reset_at else (
-            f"cursor gated ({cursor.get('reason') or cursor.get('state')})")
-        decision.update(strategy="cross-provider", reason=reason, reset_at=reset_at)
+    decision.update(strategy="cross-provider", reason="Cursor is disabled for roadmap routing")
     return decision
 
 

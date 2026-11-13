@@ -32,7 +32,7 @@ class RunRecordTest(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
-    def append(self, orch=None, wstatus=None, wresult=None):
+    def append(self, orch=None, wstatus=None, wresult=None, assigned_repo=None):
         self.n += 1
         paths = {}
         for name, value in (("orch", orch), ("status", wstatus), ("result", wresult)):
@@ -41,9 +41,39 @@ class RunRecordTest(unittest.TestCase):
                 p.write_text(json.dumps(value))
             paths[name] = str(p)
         runrecord.main(["--root", str(self.root), "append", "--stamp", f"20261013-1030{self.n:02d}",
-                        "--status", "ran", "--orch-provider", "claude", "--orch-result", paths["orch"],
+                        "--status", "ran", *(["--repo", assigned_repo] if assigned_repo else []), "--orch-provider", "claude", "--orch-result", paths["orch"],
                         "--worker-status", paths["status"], "--worker-result", paths["result"]])
         return runrecord.read_records(str(self.root))[-1]
+
+    def test_assigned_repo_is_preserved_when_result_reports_a_fallback_repo(self):
+        rec = self.append({'action': 'blocked_no_item', 'repo': 'fallback'},
+                          {'used': 'none', 'exit': 0}, {'outcome': 'bookkeeping', 'repo': 'fallback'},
+                          assigned_repo='actual')
+        self.assertEqual(rec['repo'], 'actual')
+        self.assertEqual(rec['assigned_repo'], 'actual')
+        self.assertEqual(rec['reported_repo'], 'fallback')
+
+    def test_forced_stop_is_yielded_even_if_partial_result_claims_shipped(self):
+        rec = self.append({'action': 'resume_worker', 'repo': 'demo'},
+                          {'used': 'codex', 'exit': 124,
+                           'lifecycle': {'forced': True, 'reason': 'watchdog'}},
+                          {'outcome': 'shipped', 'provider': 'codex', 'summary': 'partial'})
+        self.assertEqual(rec['outcome'], 'yielded')
+        self.assertIn('watchdog', rec['detail'])
+
+    def test_incremental_record_exposes_mode_forecast_and_timing(self):
+        run = self.root / 'runs/20261013-103001'
+        run.mkdir(parents=True)
+        (run / 'batch-budget.json').write_text(json.dumps({'phase': 'reviewing', 'job_override': True}))
+        (run / 'continuation-codex.json').write_text(json.dumps({'mode': 'native', 'selection_seconds': .1}))
+        (run / 'admission.jsonl').write_text(json.dumps({'decision': 'admitted', 'estimate': {'sample_count': 3}}) + '\n')
+        rec = self.append({'action': 'resume_worker', 'repo': 'demo', 'item': 'item'},
+                          {'used': 'codex', 'exit': 0, 'lifecycle': {'elapsed_seconds': 5}},
+                          {'outcome': 'yielded', 'provider': 'codex', 'summary': 'done'})
+        self.assertEqual(rec['incremental']['continuation']['mode'], 'native')
+        self.assertEqual(rec['incremental']['admission']['estimate']['sample_count'], 3)
+        self.assertEqual(rec['incremental']['active_seconds'], 5)
+        self.assertTrue(rec['incremental']['job_override'])
 
     def test_planner_quota_is_a_quota_pause_with_its_details(self):
         rec = self.append(QUOTA_PLAN)
@@ -80,6 +110,23 @@ class RunRecordTest(unittest.TestCase):
         self.assertEqual(rec["outcome"], "quota-paused")
         self.assertEqual(rec["quota"], status["quota"])
         self.assertEqual((rec["quota"]["provider"], rec["quota"]["reset_epoch"]), ("codex", 1791910000))
+
+    def test_leased_worker_limit_without_result_is_a_quota_pause(self):
+        limited = [{"provider": "cursor", "state": "limited",
+                    "cause": "ActionRequiredError: You've hit your usage limit"}]
+        status = {"used": "cursor", "exit": 1, "fatal": None, "missing": [], "limited": limited,
+                  "quota": quota("worker", limited, "cursor")}
+        rec = self.append({"action": "dispatch_worker", "repo": "demo"}, status)
+        self.assertEqual(rec["outcome"], "quota-paused")
+        self.assertIn("no unleased fallback", rec["detail"])
+        self.assertEqual(rec["quota"], status["quota"])
+
+    def test_failure_after_a_different_provider_limit_remains_an_error(self):
+        status = {"used": "codex", "exit": 1, "fatal": None, "missing": [],
+                  "limited": [{"provider": "cursor", "state": "limited", "cause": "usage limit"}]}
+        rec = self.append({"action": "dispatch_worker", "repo": "demo"}, status)
+        self.assertEqual(rec["outcome"], "error")
+        self.assertEqual(rec["detail"], "worker exited 1 without a result")
 
     def test_worker_quota_pause_with_no_known_reset_still_names_a_provider(self):
         limited = [{"provider": "cursor", "state": "over", "reason": "auto pool 96% >= 95%"},
@@ -196,6 +243,69 @@ class RunRecordTest(unittest.TestCase):
         records = runrecord.read_records(str(self.root))
         self.assertEqual(runrecord.error_streak(records), 1)
         self.assertEqual(runrecord.alert_text(records), "")
+
+
+
+
+class RecoveryAlertTest(unittest.TestCase):
+    def row(self, stamp, outcome, repo=None, item=None, **extra):
+        return dict(stamp=stamp, outcome=outcome, repo=repo, linear_id=item, **extra)
+
+    def failures(self):
+        return [self.row('a', 'error', 'ai-tools', 'DEV-324'),
+                self.row('b', 'error', 'typey.site', 'DEV-211')]
+
+    def shipped(self, stamp='c', repo='ai-tools', item='DEV-324', **extra):
+        return self.row(stamp, 'shipped', repo, item, worker='codex', worker_exit=0, **extra)
+
+    def test_unrelated_no_work_never_claims_recovery(self):
+        records = self.failures()
+        self.assertIn('failed 2 runs in a row', runrecord.alert_text(records))
+        records.append(self.row('c', 'blocked-no-item'))
+        self.assertEqual(runrecord.alert_text(records), '')
+        records.append(self.row('d', 'blocked-no-item', 'ai-tools', 'DEV-324'))
+        self.assertEqual(runrecord.alert_text(records), '')
+
+    def test_different_repository_or_ticket_success_does_not_recover_failed_work(self):
+        for success in [self.shipped(repo='other'), self.shipped(item='DEV-999')]:
+            self.assertEqual(runrecord.alert_text(self.failures() + [success]), '')
+
+    def test_one_worker_recovery_is_scoped_and_keeps_other_failures_visible(self):
+        text = runrecord.alert_text(self.failures() + [self.shipped()])
+        self.assertIn('recovered ai-tools · DEV-324', text)
+        self.assertIn('other failed work remains unresolved', text)
+
+    def test_recovery_survives_interleaved_noops_and_quota_pauses(self):
+        records = self.failures() + [self.row('c', 'blocked-no-item'), self.row('d', 'quota-paused'),
+                                    self.row('e', 'skipped-quota')]
+        records.append(self.shipped(stamp='f'))
+        self.assertIn('recovered ai-tools', runrecord.alert_text(records))
+        records.append(self.shipped(stamp='g', repo='typey.site', item='DEV-211'))
+        text = runrecord.alert_text(records)
+        self.assertIn('recovered typey.site', text)
+        self.assertNotIn('remain', text)
+        records.append(self.shipped(stamp='h', repo='typey.site', item='DEV-211'))
+        self.assertEqual(runrecord.alert_text(records), '')
+
+    def test_missing_worker_or_nonzero_exit_cannot_confirm_recovery(self):
+        for patch in [{'worker': None}, {'worker_exit': None}, {'worker_exit': 1}, {'outcome': 'shipped-deploy-failed'}]:
+            success = self.shipped(); success.update(patch)
+            self.assertNotIn('recovered', runrecord.alert_text(self.failures() + [success]))
+
+    def test_missing_work_identity_cannot_establish_same_item_recovery(self):
+        records = [self.row('a', 'error', 'demo'), self.row('b', 'error', 'demo')]
+        self.assertEqual(runrecord.alert_text(records + [self.shipped(repo='demo', item=None)]), '')
+
+    def test_branch_or_item_can_identify_ticketless_work(self):
+        for field in ['branch', 'item']:
+            records = [dict(self.row('a', 'error', 'demo'), **{field: 'same-work'}),
+                       dict(self.row('b', 'error', 'demo'), **{field: 'same-work'}),
+                       dict(self.shipped(repo='demo', item=None), **{field: 'same-work'})]
+            self.assertIn('recovered demo · same-work', runrecord.alert_text(records))
+
+    def test_unidentified_planner_failure_is_not_cleared_by_any_worker(self):
+        records = [self.row('a', 'error'), self.row('b', 'error')]
+        self.assertEqual(runrecord.alert_text(records + [self.shipped()]), '')
 
 
 if __name__ == "__main__":

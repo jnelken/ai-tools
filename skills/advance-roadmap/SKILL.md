@@ -4,10 +4,10 @@ description: >-
   Ship planned items from personal repos' ROADMAP.md, docs/plans, or repo-labeled Linear issues
   through isolated branches, reviewed PRs, merge, and successful production deploy. Use for
   "advance the roadmap", "ship a roadmap item", or scheduled roadmap runs. Plans independent
-  threads before dispatching workers. With no actionable feature, performs a bounded
-  behavior-preserving code-health pass and logs hygiene observations without creating tickets.
-  Stops with evidenced blockers when work cannot proceed. Unlike unblock-roadmap, implements
-  and merges the work rather than only recording decisions.
+  threads before dispatching workers. With no actionable item, reports that and stops; it never
+  substitutes a code-health or cleanup pass. Stops with evidenced blockers when work cannot
+  proceed. Unlike unblock-roadmap, implements and merges the work rather than only recording
+  decisions.
 ---
 
 > **Personal machines only (OMEN, JXIV).** `install.sh` doesn't link this skill or its automation on
@@ -27,21 +27,16 @@ passes. That's the only output Superset's Production Run leaderboard credits —
 and its plan kept for the next run. Merged workspaces are deleted by the next run, once Superset
 has recorded the merge (`lib/workspaces.py`). Why and how: [`../../docs/plans/production-run.md`](../../docs/plans/production-run.md).
 
-**Every item gets a Cursor review cycle; once that cycle is clean, Codex gets one final pass.**
-Cursor reviews each round read-only, including its own work. Cursor handles findings from either
-reviewer; Codex is never repeated after feedback. If findings remain after 3 Cursor rounds, mark
-them in the code as `FIXME(advance-roadmap review)` (bugs) or
-`TODO(advance-roadmap review)` (lesser) and list them in the summary. If either required reviewer is
-unavailable, stop before merging. Codex runs only after the initial Cursor cycle is clean. If Codex
-finds issues, Cursor handles them and gets up to 3 follow-up rounds. `runs.jsonl` records the review
-phases and flags an unreviewed ship.
+**Every item gets cross-provider review before merge.** Claude reviews Codex work, and Codex
+reviews Claude work. Cursor is disabled for roadmap routing. If the other provider is unavailable,
+stop before merging; record the review and verdict in `runs.jsonl`.
 
-**Nothing to ship? Clean something up.** When a repo has no dispatchable item, its first thread runs
-one bounded, behavior-preserving refactor (`work_kind: code_health`) — an open `code-health` ticket
-first, otherwise an audit against a shared rubric — instead of stopping. And after every clean ship,
-the worker runs a short retrospective and records structured hygiene observations rather than
-creating tickets. Existing planned tickets rank below feature work. Rubric, retrospective and
-refactor caps: [`CODE_HEALTH.md`](CODE_HEALTH.md). A code-health pass never runs beside a feature thread.
+**Nothing to ship? Say so and stop.** When a repo has no dispatchable item, the run ends
+`blocked_no_item` with its reasons. There is no fallback work: the old code-health pass
+(`work_kind: code_health`) is retired, and `run.sh` refuses a plan that asks for one. Open
+`code-health` tickets are skipped unless Jake labels one `do-next`. After every clean ship, the
+worker still runs a short retrospective and records structured hygiene observations rather than
+creating tickets ([`CODE_HEALTH.md`](CODE_HEALTH.md)).
 
 **One batch a day: 10:30, `daily_batch.py`.** launchd starts it once; it lists the personal repos and
 plans each one in parallel, with a hard ceiling of five active agents across planning, approval,
@@ -52,7 +47,7 @@ windows are the retired scheduler; its helpers are still imported.) The batch ru
 
 1. **Plan.** One planner per repo (*thread 1*), read-only, picks one item and lists its
    `touchpoints`. Once thread 1 has planned a *feature*, a planner for the repo's *next thread*
-   starts, shown the earlier threads' plans, up to `ADVANCE_ROADMAP_THREADS_PER_REPO` (default 2,
+   starts, shown the earlier threads' plans, up to `ADVANCE_ROADMAP_THREADS_PER_REPO` (default 1,
    at most 3; `--threads`). A later thread picks the next item that isn't theirs, owns no bookkeeping,
    and answers `no second thread` when there's nothing independent to do.
 2. **Approve.** At the barrier — every planner finished, no worker started — each repo with two or
@@ -66,23 +61,19 @@ windows are the retired scheduler; its helpers are still imported.) The batch ru
    serialized thread only after its predecessor ends. Each worker's brief carries the approver's
    acknowledged conflicts and the sibling threads (WORKER.md *Threads*).
 4. **Summarize.** When the last thread has stopped, `daily_batch.py` posts **one** Slack summary
-   through Slackagent (ships first, no-item repos collapsed, threads grouped by repo). Individual
-   runs inside a batch post nothing; the consecutive-failure alert is separate and still fires.
+   through Slackagent (ships first, no-item repos collapsed, threads grouped by repo). Daily-batch runs post one batch summary; quota-driven runs post each run individually.
+   The consecutive-failure alert is separate and still fires.
    A lone `run.sh` outside a batch still posts its own line.
 
-**Never depends on Claude.** Every role has a non-Claude first choice: Codex orchestrates, Cursor
-builds, the reviewer is never Claude first, and the scheduling around them is plain shell and
-Python. Claude is only ever a fallback, so the job keeps shipping when Jake's Claude usage is spent.
-Anything added here (a scheduler, a slicer, the plan approver) must keep that true: the approver is
-Codex Sol first, Claude Sonnet (medium effort) only as the fallback. Code review uses Cursor rounds, then one Codex
-final pass by default; the selectable `cross-provider` review strategy keeps the earlier Claude
-fallbacks.
+**Use Codex and Claude.** Codex is the first planner, with Claude as fallback. Workers use either
+provider and require review from the other. Cursor is disabled, so reviews wait when the other
+provider is unavailable.
 
 **Keep going while there's time (lone runs).** A `run.sh` outside a batch — a manual run — that
 ships a feature cleanly (`shipped`, deploy green) starts another run — fresh orchestrator pass,
 fresh item — as long as fewer than `ADVANCE_ROADMAP_CHAIN_MINUTES` (default 40; `0` = one item)
 have passed since the first run started. Anything else (blocked, failed, red deploy, no item,
-quota) ends the chain, and so does leaving the sprint window. A code-health ship never chains.
+quota) ends the chain, and so does leaving the sprint window.
 Interactive runs follow the same rule: after the worker reports a
 feature `shipped`, go back to [`../conductor/ORCHESTRATOR.md`](../conductor/ORCHESTRATOR.md) Step 0 if
 under 40 minutes. (For one-off human-driven work, use [[conductor]] instead.)
@@ -91,16 +82,16 @@ Candidate repos: direct children of the personal code dir, `CODE_DIR=$(~/.ai-too
 the personal machines; if it exits non-zero, this machine has no personal repos — stop). Check
 `~/.claude/automations/advance-roadmap/allowlist.txt` first when present, and query Linear once for
 pending directives — tickets carrying an unconsumed `## Directive` section, via the `linear` CLI
-only (see `SAFETY.md`) — from [[unblock-roadmap]] (the only dirty-tree exception).
+only (see `SAFETY.md`) — from [[unblock-roadmap]] for authorized changes to existing dirty work.
 
 ## Architecture (orchestrator / worker)
 
 | Role | Default | May mutate? | Doc |
 |---|---|---|---|
 | **Orchestrator** | Codex **Sol** high → Claude Sonnet medium | **No** | [`../conductor/ORCHESTRATOR.md`](../conductor/ORCHESTRATOR.md) |
-| **Worker** | Cursor Auto → Codex Sol → Claude Opus | **Yes** | [`WORKER.md`](WORKER.md) |
+| **Worker** | Codex → Claude | **Yes** | [`WORKER.md`](WORKER.md) |
 | **Plan approver** | Codex **Sol** high → Claude Sonnet medium | **No** | [`PLAN_APPROVAL.md`](PLAN_APPROVAL.md) |
-| **Reviewer** | Selected strategy: Cursor rounds, then one Codex final pass by default | **No** | [`WORKER.md`](WORKER.md) Step 5b |
+| **Reviewer** | Claude for Codex work; Codex for Claude work | **No** | [`WORKER.md`](WORKER.md) Step 5b |
 | **Safety** | — | binds both | [`SAFETY.md`](SAFETY.md) |
 
 `run.sh` owns routing and `providers-usage.json` (`lib/usage.py`):
@@ -110,7 +101,7 @@ only (see `SAFETY.md`) — from [[unblock-roadmap]] (the only dirty-tree excepti
    when one prints a limit banner.
 3. Parse the `ORCHESTRATOR_RESULT_JSON` fence. No valid plan → record a `planner_error` and
    dispatch nothing (no worker, bookkeeping, pending plan or carried verdict).
-4. Dispatch `worker.sh` (Cursor → Codex → Claude) in the item's Superset workspace terminal, with
+4. Dispatch `worker.sh` (Codex → Claude) in the item's Superset workspace terminal, with
    same-run failover on limits.
 5. Persist usage for the next tick. Skip only when **no orchestrator** remains.
 
@@ -141,7 +132,7 @@ For human-driven work on an item you name, call `/conductor` directly.
 | | `wrapup-repos` | `advance-roadmap` |
 |---|---|---|
 | Input | dirty / recent | roadmap / Linear / plans item |
-| Tree | expects dirty | **requires clean** (directive exception) |
+| Tree | expects dirty | assigned worktree clean; unrelated trees preserved |
 | Remote | never | **merges a PR into `main`** |
 
 ## What to read next
@@ -149,5 +140,5 @@ For human-driven work on an item you name, call `/conductor` directly.
 1. [`SAFETY.md`](SAFETY.md)
 2. [`../conductor/ORCHESTRATOR.md`](../conductor/ORCHESTRATOR.md) — Steps 0–2d + JSON protocol (lives in the [[conductor]] skill)
 3. [`PLAN_APPROVAL.md`](PLAN_APPROVAL.md) — only if you are the plan approver
-4. [`WORKER.md`](WORKER.md) — Steps 3–8 (including Step 5b's Cursor/Codex review cycle, Step 7b's deploy watch and Step 7c's retrospective) + worker result fence
-5. [`CODE_HEALTH.md`](CODE_HEALTH.md) — the code-health rubric, retrospective, and refactor pass
+4. [`WORKER.md`](WORKER.md) — Steps 3–8 (including Step 5b's cross-provider review, Step 7b's deploy watch and Step 7c's retrospective) + worker result fence
+5. [`CODE_HEALTH.md`](CODE_HEALTH.md) — the code-health rubric and Step 7c's retrospective

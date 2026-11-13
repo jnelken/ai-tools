@@ -4,7 +4,7 @@
 # Architecture:
 #   1. Refresh providers-usage.json (lib/usage.py — Claude/Codex/Cursor quota probes ∪ prior limits).
 #   2. Read-only orchestrator: Codex Sol (high) default; Claude Sonnet (medium) fallback.
-#   3. Parse ORCHESTRATOR_RESULT_JSON; dispatch worker.sh (Cursor → Codex → Claude) in the
+#   3. Parse ORCHESTRATOR_RESULT_JSON; dispatch worker.sh (Codex → Claude) in the
 #      item's own Superset workspace terminal, so the PR it merges is credited (lib/workspaces.py).
 #   4. Record limit hits for the next tick.
 #   5. Append exactly one row to runs.jsonl (lib/runrecord.py) — the run record the
@@ -179,6 +179,7 @@ record() {
   [ "$RECORDED" -eq 0 ] || return 0
   RECORDED=1
   local -a extra=()
+  [ -n "$TARGET_REPO" ] && extra+=(--repo "$TARGET_REPO")
   [ -n "${3:-}" ] && extra+=(--exit "$3")
   [ -n "$LANE" ] && extra+=(--lane "$LANE")
   [ -f "$RUN_DIR/workspace.json" ] && extra+=(--expect-pr)  # a workspace run must ship a PR
@@ -219,9 +220,57 @@ save_quota_gates() {
 on_exit() {
   local rc=$?
   [ -n "${LOCK:-}" ] && [ "${HOLDS_LOCK:-0}" -eq 1 ] && rm -rf "$LOCK"
-  [ "$RECORDED" -eq 1 ] && return
-  record aborted "run.sh exited $rc before recording" "$rc"
-  regen_dashboard
+  if [ "$RECORDED" -ne 1 ]; then
+    record aborted "run.sh exited $rc before recording" "$rc"
+    regen_dashboard
+  fi
+  post_continuous_summary
+  cleanup_workspaces
+}
+post_continuous_summary() {
+  [ "${ADVANCE_ROADMAP_CONTINUOUS:-0}" = "1" ] && [ -n "$BATCH_PID" ] || return 0
+  [ "${ADVANCE_ROADMAP_RUN_SUMMARY:-1}" = "1" ] || return 0
+  local slackagent_dir="${ADVANCE_ROADMAP_SLACKAGENT_DIR:-$CODE_DIR/slackagent}"
+  local script="$slackagent_dir/scripts/post-roadmap-summary.mjs"
+  if [ -f "$script" ] && python3 - "$ROOT/lib/post_run_summary.mjs" "$script" "$STAMP" "$ROOT/runs.jsonl" >> "$LOG" 2>&1 <<'PY'
+import subprocess, sys
+try:
+    sys.exit(subprocess.run(['node', sys.argv[1], '--script', sys.argv[2], '--stamp', sys.argv[3],
+                             '--runs', sys.argv[4]], timeout=120, stdin=subprocess.DEVNULL).returncode)
+except (OSError, subprocess.TimeoutExpired) as error:
+    print(f'slackagent run post failed: {error}', file=sys.stderr)
+    sys.exit(1)
+PY
+  then
+    echo "=== slack: continuous run summary posted ===" >> "$LOG"
+    return 0
+  fi
+  echo "=== slack: continuous run summary failed; trying webhook ===" >> "$LOG"
+  [ -n "$SLACK_WEBHOOK" ] && command -v jq >/dev/null 2>&1 || return 0
+  local summary payload
+  summary="$(python3 - "$ROOT/runs.jsonl" "$STAMP" <<'PY'
+import json, sys
+for line in open(sys.argv[1]):
+    try:
+        row = json.loads(line)
+    except ValueError:
+        continue
+    if row.get('stamp') == sys.argv[2]:
+        detail = row.get('slack_summary') or row.get('summary') or row.get('detail') or ''
+        print(' '.join(f"{row.get('repo') or 'roadmap'}: {row.get('outcome') or 'unknown'} — {detail}".split())[:300])
+        break
+PY
+)"
+  [ -n "$summary" ] || return 0
+  payload="$(jq -n --arg t "*advance-roadmap* $summary" '{text:$t}')"
+  curl -sf -m 15 -X POST -H 'Content-Type: application/json' -d "$payload" "$SLACK_WEBHOOK" >/dev/null \
+    && echo "=== slack: continuous run webhook posted ===" >> "$LOG" \
+    || echo "=== slack: continuous run webhook failed ===" >> "$LOG"
+}
+cleanup_workspaces() {
+  if [ "$SUPERSET_MODE" = "1" ] && [ -f "$WORKSPACES_PY" ]; then
+    python3 "$WORKSPACES_PY" cleanup --root "$ROOT" --min-idle-minutes 0 >> "$LOG" 2>&1 || echo "(workspace cleanup failed — non-fatal)" >> "$LOG"
+  fi
 }
 trap on_exit EXIT
 trap 'exit 130' INT
@@ -408,10 +457,10 @@ run_worker_in_workspace() {
     print -r -- "rc=\${pipestatus[1]}; print -r -- \$rc > ${(q)RUN_DIR}/worker.exit; rm -f ${(q)inflight}"
     # Settle here too: if run.sh timed out and moved on, nothing else would, and the next
     # tick would relaunch an item this worker already shipped.
-    print -r -- "python3 ${(q)PLAN_PY} --file ${(q)PENDING_PLAN} settle --worker-result ${(q)WORKER_RESULT} --worker-rc \$rc --request-file ${(q)req} >/dev/null 2>&1"
+    print -r -- "if python3 ${(q)PLAN_PY} --file ${(q)PENDING_PLAN} settle --worker-result ${(q)WORKER_RESULT} --worker-rc \$rc --request-file ${(q)req} >/dev/null 2>&1; then print -r -- complete > ${(q)RUN_DIR}/worker.complete; fi"
   } > "$launcher"
   chmod 700 "$launcher"
-  rm -f "$RUN_DIR/worker.pid" "$RUN_DIR/worker.exit"
+  rm -f "$RUN_DIR/worker.pid" "$RUN_DIR/worker.exit" "$RUN_DIR/worker.complete"
   if ! python3 "$WORKSPACES_PY" launch --repo "$CODE_DIR/$repo" --branch "$branch" --name "${name//  / }" \
        --command "/bin/zsh ${(q)launcher}" --out "$RUN_DIR/workspace.json" >> "$LOG" 2>&1; then
     superset_skip="could not create the Superset workspace for $repo ($branch)"; return 1
@@ -610,7 +659,6 @@ fi
   [ -f "$SKILL_DIR/SAFETY.md" ] || { echo "FATAL: missing SAFETY.md"; exit 1; }
 
   ORCH_PROMPT="Read and follow $CONDUCTOR_DIR/ORCHESTRATOR.md and $SKILL_DIR/SAFETY.md exactly.
-Step 2d's code-health fallback uses the rubric in $SKILL_DIR/CODE_HEALTH.md.
 
 This is an unattended scheduled ORCHESTRATOR run (stamp=$STAMP). You are READ-ONLY.
 Emit one \`\`\`ORCHESTRATOR_RESULT_JSON fence per ORCHESTRATOR.md. Do not implement.
@@ -635,12 +683,7 @@ or include another repo's archives, blockers, directives, or bookkeeping.
 Other batch planners own every other repo. Keep considered and summary scoped to $TARGET_REPO."
     if [ "$THREAD" -le 1 ]; then
       ORCH_PROMPT="$ORCH_PROMPT
-If no feature item is actionable, apply Step 2d's bounded code-health (hygiene) fallback to this repo.
-For this daily batch the fallback is PER REPO: feature work in another repo does not block it.
-Prefer an existing code-health ticket; otherwise queue one ad-hoc pass under CODE_HEALTH.md.
-Keep every Step 2d eligibility gate, including the clean tree and 24-hour cooldown.
-Emit work_kind=code_health for a hygiene pass; if the repo is ineligible, return no work.
-A code-health pass is only for a repo with no feature item; it never runs beside a feature thread.
+If no feature item is actionable, return blocked_no_item (Step 2d): there is no code-health fallback.
 Later threads of this repo are planned after yours and approved against it, so plan yours as if alone."
     else
       ORCH_PROMPT="$ORCH_PROMPT
@@ -648,7 +691,7 @@ Earlier threads of $TARGET_REPO already hold the items in $PEER_PLANS (read it).
 those items or anything that needs their branch. Pick the next-ranked eligible item whose
 touchpoints are as disjoint from theirs as you can make them; if the only candidates collide, say
 so in conflict_notes rather than hiding it, and the plan approver will decide.
-You own NO bookkeeping: no Step 2d code-health pass, no archives, no blockers, no Linear comments,
+You own NO bookkeeping: no archives, no blockers, no Linear comments,
 no directive. If no second independent item exists, return blocked_no_item with the summary
 \"no second thread\" and nothing else."
     fi
@@ -667,17 +710,28 @@ If a PushNotification probe would have been useful, set a note in summary; the w
   # Oldest first; another lane's repo is not ours to resume. A plan that can't be reused is
   # dead (too old, retried out, repo unsafe) — drop it, as a fresh plan would have replaced it.
   reused=0
+  held_pending=0
   # Only a repo's first thread resumes a saved plan; a later thread always plans fresh.
   for f in "$PENDING_DIR"/pending-plan*.json(N.Om); do
     [ "$THREAD" -gt 1 ] && break
     prepo="$(jq -r '.orchestrator.repo // empty' "$f" 2>/dev/null)"
     [ -n "$TARGET_REPO" ] && [ "$prepo" != "$TARGET_REPO" ] && continue
     [[ " $BUSY_REPOS " == *" $prepo "* ]] && continue
-    if python3 "$PLAN_PY" --file "$f" reuse --out "$result"; then
+    python3 "$PLAN_PY" --file "$f" reuse --out "$result"
+    reuse_rc=$?
+    if [ "$reuse_rc" -eq 0 ]; then
       PENDING_PLAN="$f"; reused=1; break
+    elif [ "$reuse_rc" -eq 2 ]; then
+      held_pending=1
+      continue
     fi
-    python3 "$PLAN_PY" --file "$f" clear
+    # Preserve the rejected source for diagnosis rather than silently dropping its history.
+    mv "$f" "$f.rejected-$STAMP"
   done
+  if [ "$reused" -eq 0 ] && [ "$held_pending" -eq 1 ]; then
+    record skipped-backoff "saved assignments are held or completed; no fresh planning"
+    exit 0
+  fi
   if [ "$reused" -eq 1 ]; then
     orch_rc=0
     ORCH=pending-plan  # the run record shows no planning pass ran
@@ -900,9 +954,9 @@ target, thread = sys.argv[4], int(sys.argv[5])
 r = json.load(open(path))
 repo = r.get("repo")
 if thread > 1:
-    # Bookkeeping belongs to a repo's first thread, and a code-health pass never runs beside a feature.
+    # Bookkeeping belongs to a repo's first thread.
     r["blockers"], r["archives"], r["closeouts"] = [], [], []
-    if r.get("action") == "resume_worker" or r.get("work_kind") == "code_health":
+    if r.get("action") == "resume_worker":
         r.update(action="blocked_no_item", outcome_token="blocked-no-item", repo=None, item=None,
                  branch=None, linear_id=None, directive_ticket=None, worker_brief=None,
                  summary="no second thread")
@@ -919,7 +973,10 @@ if target:
                  summary=f"Planner returned bookkeeping outside assigned repo {target}; ignored")
 if r.get("action") in ("dispatch_worker", "resume_worker"):
     why = None
-    if not repo or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", repo) or not os.path.isdir(os.path.join(code, repo)):
+    if r.get("work_kind", "feature") != "feature":
+        # The code-health fallback is retired: a run with nothing actionable reports that and stops.
+        why = f"orchestrator asked for a {r.get('work_kind')!r} pass, which advance-roadmap no longer runs"
+    elif not repo or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", repo) or not os.path.isdir(os.path.join(code, repo)):
         why = f"orchestrator named an invalid repo {repo!r}"
     elif repo in busy:
         why = f"orchestrator picked {repo}, which another lane holds"
@@ -945,7 +1002,10 @@ PY
     if [ -n "$plan_repo" ]; then
       PENDING_PLAN="$PENDING_DIR/pending-plan-$plan_repo.json"
       [ "$THREAD" -gt 1 ] && PENDING_PLAN="$PENDING_DIR/pending-plan-$plan_repo.t$THREAD.json"
-      python3 "$PLAN_PY" --file "$PENDING_PLAN" save --result "$result" --stamp "$STAMP"
+      if ! python3 "$PLAN_PY" --file "$PENDING_PLAN" save --result "$result" --stamp "$STAMP"; then
+        record aborted "could not durably save assignment; no worker launched"
+        exit 1
+      fi
     fi
   fi
 
@@ -997,16 +1057,23 @@ PY
     done
     # The first plan may have waited for slower planners: route on the current pool state.
     WORKERS="$(python3 "$USAGE_PY" --root "$ROOT" pick-worker-chain 2>/dev/null | tr -d '\r' || true)"
-    # Release is an atomic budget conversion. Use exactly its worker/review route;
-    # later live gates may stop it, but may never spill into an unleased provider.
+    # Release reserves one worker. Try that provider first; keep the eligible chain for
+    # auth/missing failover. worker.sh still stops at a live limit so it cannot spend an
+    # unleased fallback.
     if [ -n "${ADVANCE_ROADMAP_BUDGET_PLANNER:-}" ]; then
-      WORKERS="$(jq -r '.worker // empty' "$RUN_DIR/batch-budget.json")"
+      reserved="$(jq -r '.worker // empty' "$RUN_DIR/batch-budget.json")"
+      export ADVANCE_ROADMAP_BUDGET_WORKER="$reserved"
       export ADVANCE_ROADMAP_BUDGET_REVIEWERS="$(jq -r '.reviewers | join(" ")' "$RUN_DIR/batch-budget.json")"
       export ADVANCE_ROADMAP_BUDGET_REVIEW_STRATEGY="$(jq -r '.review_strategy // empty' "$RUN_DIR/batch-budget.json")"
       export ADVANCE_ROADMAP_BUDGET_REVIEW_FALLBACK_REASON="$(jq -r '.review_fallback_reason // empty' "$RUN_DIR/batch-budget.json")"
-      if [ -z "$WORKERS" ]; then
+      export ADVANCE_ROADMAP_INCREMENTAL_PHASE="$(jq -r '.phase // empty' "$RUN_DIR/batch-budget.json")"
+      export ADVANCE_ROADMAP_JOB_OVERRIDE="$(jq -r 'if .job_override == true then "1" else "0" end' "$RUN_DIR/batch-budget.json")"
+      if [ -z "$reserved" ]; then
         record skipped-quota "batch release has no worker reservation"; exit 0
       fi
+      WORKERS="$(python3 -c 'import sys
+reserved, chain = sys.argv[1], sys.argv[2].split()
+print(" ".join([reserved] + [p for p in chain if p != reserved]))' "$reserved" "$WORKERS")"
     fi
   fi
 
@@ -1064,6 +1131,13 @@ PY
       ;;
   esac
 
+  cp "$req" "$RUN_DIR/worker-request.json"; req="$RUN_DIR/worker-request.json"
+  if [[ "$action" == (dispatch_worker|resume_worker) ]] && [ -f "$ROOT/lib/workqueue.py" ]; then
+    if ! python3 "$ROOT/lib/workqueue.py" --root "$ROOT" checkpoint --request-file "$req" --phase implementing; then
+      record aborted "checkpoint storage failed; assignment retained and no worker launched"
+      exit 1
+    fi
+  fi
   worker_rc=0
   chmod +x "$WORKER_SH" 2>/dev/null || true
   if [ -z "${WORKERS:-}" ] && [ "$action" = "dispatch_worker" -o "$action" = "resume_worker" ]; then
@@ -1089,7 +1163,6 @@ PY
     jq -n '{outcome:"bookkeeping",provider:"none",summary:"no-op no-work result: nothing to post, no bookkeeping worker ran"}' > "$WORKER_RESULT"
   elif [ "$SUPERSET_MODE" = "1" ] && [ -n "${WORKERS:-}" ] && [ "$action" = "dispatch_worker" -o "$action" = "resume_worker" ]; then
     # Keep the request where the workspace terminal can read it after this block's cleanup.
-    cp "$req" "$RUN_DIR/worker-request.json"; req="$RUN_DIR/worker-request.json"
     run_worker_in_workspace "$req" || true
   else
     "$WORKER_SH" --stamp "$STAMP" --request-file "$req" --providers "${WORKERS:-}" \
@@ -1220,17 +1293,14 @@ fi
 
 # ── Chain ─────────────────────────────────────────────────────────────────────
 # Only a clean feature ship continues: blocked, failed, red deploys and quota
-# skips all mean the next link would likely hit the same wall, and a code-health
-# ship means the queue was empty — chaining would just be a refactor spree. The
-# next link re-picks providers and re-plans from scratch, exactly like a fresh tick.
+# skips all mean the next link would likely hit the same wall. The next link re-picks providers and re-plans from scratch, exactly like a fresh tick.
 last_outcome="$(python3 -c 'import json,sys; r=json.loads(open(sys.argv[1]).readlines()[-1]); print(r.get("outcome",""), r.get("work_kind") or "feature")' "$ROOT/runs.jsonl" 2>/dev/null || true)"
 elapsed=$(( $(date +%s) - CHAIN_START ))
-if [ "$last_outcome" = "shipped code_health" ]; then
-  echo "=== chain: code-health pass shipped — not chaining ===" >> "$LOG"
-elif [ "$last_outcome" = "shipped feature" ] && ! in_window; then
+if [ "$last_outcome" = "shipped feature" ] && ! in_window; then
   echo "=== chain: past the sprint window — not chaining ===" >> "$LOG"
 elif [ "$last_outcome" = "shipped feature" ] && [ "$elapsed" -lt $(( CHAIN_MINUTES * 60 )) ]; then
   echo "=== chain: shipped at $(( elapsed / 60 ))m of ${CHAIN_MINUTES}m — starting link $(( CHAIN_LINK + 1 )) ===" >> "$LOG"
+  cleanup_workspaces
   trap - EXIT
   rm -rf "$LOCK"
   export ADVANCE_ROADMAP_CHAIN_START="$CHAIN_START" ADVANCE_ROADMAP_CHAIN_LINK=$(( CHAIN_LINK + 1 ))

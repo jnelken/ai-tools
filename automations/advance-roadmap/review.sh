@@ -16,6 +16,10 @@ set -u
 ROOT="${ADVANCE_ROADMAP_ROOT:-/Users/jake/.claude/automations/advance-roadmap}"
 # Unattended: the status-glyph Stop hook must not force a sign-off turn over a result fence.
 export ADVANCE_ROADMAP_HEADLESS=1
+if [ "${ADVANCE_ROADMAP_INCREMENTAL:-0}" = 1 ] && [ -z "${ADVANCE_ROADMAP_BUDGET_REVIEWERS:-}" ]; then
+  echo 'REVIEW REQUIRED: no reviewer capacity was reserved for this bounded unit; yield before review.' >&2
+  exit 3
+fi
 [ -r "$ROOT/lib/models.sh" ] || { echo "review: missing model defaults: $ROOT/lib/models.sh" >&2; exit 1; }
 . "$ROOT/lib/models.sh"
 USAGE_PY="$ROOT/lib/usage.py"
@@ -89,10 +93,16 @@ else
   REVIEW_FALLBACK_REASON="${REVIEW_FALLBACK_REASON:-}"
 fi
 
+# Cursor is disabled for roadmap routing even when an older saved allocation or
+# explicit legacy strategy requests it.
+if [ "$REVIEW_STRATEGY" = cursor-then-codex ]; then
+  REVIEW_STRATEGY=cross-provider
+  REVIEW_FALLBACK_REASON="Cursor is disabled for roadmap routing"
+fi
 case "$WORKER" in
   cursor) cross_provider_reviewers=(codex claude) ;;
-  codex) cross_provider_reviewers=(cursor claude) ;;
-  claude) cross_provider_reviewers=(codex cursor) ;;
+  codex) cross_provider_reviewers=(claude) ;;
+  claude) cross_provider_reviewers=(codex) ;;
 esac
 
 git -C "$REPO" diff --quiet "$BASE...HEAD" && { echo "FATAL: no changes vs $BASE to review" >&2; exit 2; }
@@ -108,6 +118,11 @@ You are read-only: do not edit files, commit, or run anything that writes.
 The diff (git diff $BASE...HEAD) is below. Read surrounding files in the repo as needed.
 Report only real problems — bugs, broken edge cases, security issues, missing or wrong tests for new logic, clear violations of the repo's CLAUDE.md. Skip style
 nits and preferences.
+
+Classify each finding as an instance (one defect at one place) or an invariant (a rule that must hold
+on every path reaching a write, network call, payment, permission check or secret read). For an
+invariant, list every code path in the repo that reaches that side effect and say whether the change
+has a single owner enforcing the rule; flag any changed path that bypasses it.
 
 For each finding: file:line, severity (bug | risk | test), one sentence on what is wrong, one on the fix.
 End with exactly one line, the last line of your reply:
@@ -227,13 +242,28 @@ with open(log, "a", encoding="utf-8") as f:
 PY
 }
 
+claim_bounded_review() {
+  [ "${ADVANCE_ROADMAP_INCREMENTAL:-0}" = 1 ] || return 0
+  local allowed=( ${=ADVANCE_ROADMAP_BUDGET_REVIEWERS:-} )
+  python3 "$ROOT/lib/reviewlease.py" "${LOG:h}/review-spend.json" "$1" "${allowed[@]}"
+}
+
 run_required_review() {
+  if [ -n "${ADVANCE_ROADMAP_REQUEST_FILE:-}" ] && [ -f "$ROOT/lib/workqueue.py" ]; then
+    python3 "$ROOT/lib/workqueue.py" --root "$ROOT" checkpoint --request-file "$ADVANCE_ROADMAP_REQUEST_FILE" --phase reviewing || return 2
+  fi
   local who="$1" phase="$2" rc=0 verdict text gate
   rm -f "$out.last" "$out.json" "$out.session"
   gate="$(python3 "$USAGE_PY" --root "$ROOT" gate --role reviewer --provider "$who" 2>/dev/null)"
   if [ "$?" -eq 3 ]; then
     record_review "$who" unavailable "$phase"
     echo "REVIEW REQUIRED: $who is over its usage gate ($gate); do not merge until this review stage succeeds."
+    echo "VERDICT: unavailable"
+    return 3
+  fi
+  if ! claim_bounded_review "$who"; then
+    record_review "$who" unavailable "$phase"
+    echo "REVIEW REQUIRED: $who's reserved review was already used; yield before another review."
     echo "VERDICT: unavailable"
     return 3
   fi
@@ -275,6 +305,9 @@ run_required_review() {
 }
 
 run_cross_provider_review() {
+  if [ -n "${ADVANCE_ROADMAP_REQUEST_FILE:-}" ] && [ -f "$ROOT/lib/workqueue.py" ]; then
+    python3 "$ROOT/lib/workqueue.py" --root "$ROOT" checkpoint --request-file "$ADVANCE_ROADMAP_REQUEST_FILE" --phase reviewing || return 2
+  fi
   local used="" verdict="unavailable" who rc text gate hits="" hit
   gated_list="" capacity_list=""   # read by record_review: reviewers skipped over their gate / at capacity
   for who in "${cross_provider_reviewers[@]}"; do
@@ -286,6 +319,11 @@ run_cross_provider_review() {
     if [ "$?" -eq 3 ]; then
       echo "(skipping reviewer $who — over its usage gate: $gate)"
       gated_list="$gated_list $who"
+      continue
+    fi
+    if ! claim_bounded_review "$who"; then
+      echo "(reviewer $who has no unused reservation in this unit)"
+      capacity_list="$capacity_list $who"
       continue
     fi
     rm -f "$out.last" "$out.json" "$out.session"

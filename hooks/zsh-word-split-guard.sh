@@ -59,9 +59,16 @@ strip_heredocs() {
     }'
 }
 
-# Then drop single-quoted spans, then double-quoted spans, so quoted text
-# (commit messages, jq programs, echo '===') cannot match.
-bare=$(printf '%s\n' "$cmd" | strip_heredocs | sed -E "s/'[^']*'//g; s/\"([^\"\\\\]|\\\\.)*\"//g")
+# Then drop quoted spans so quoted text (commit messages, jq programs, a
+# `python3 -c "…"` body, echo '===') cannot match. One left-to-right pass over
+# the WHOLE command, not per line and not one quote type at a time: a quoted
+# span may cross lines (a multi-line `python3 -c "…"` once left its
+# `t = m.get(...)` line bare), and an apostrophe inside "…" must not pair with
+# a later one. A backslash-escaped character outside quotes is kept as-is.
+strip_quotes() {
+  perl -0777 -pe 's/(\\.)|\x27[^\x27]*\x27|"(?:[^"\\]|\\.)*"/defined $1 ? $1 : ""/gse'
+}
+bare=$(printf '%s\n' "$cmd" | strip_heredocs | strip_quotes)
 
 problems=()
 if printf '%s' "$bare" | grep -Eq '(^|[;&|[:space:]])set[[:space:]]+--[[:space:]]+\$[A-Za-z_]'; then

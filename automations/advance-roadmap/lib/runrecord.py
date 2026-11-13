@@ -13,6 +13,7 @@ from result files the agents wrote; nothing here reads the run log.
 """
 import argparse
 import fcntl
+import hashlib
 import json
 import os
 import sys
@@ -40,6 +41,27 @@ def load_json(path):
         return v if isinstance(v, dict) else None
     except (OSError, ValueError):
         return None
+
+
+def work_id(plan):
+    repo, item, action = plan.get('repo'), plan.get('linear_id') or plan.get('item'), plan.get('action')
+    if not repo or not item or action not in ('dispatch_worker', 'resume_worker'):
+        return None
+    return hashlib.sha256(json.dumps([repo, item], ensure_ascii=False).encode()).hexdigest()[:32]
+
+
+def json_lines(path):
+    try:
+        with open(path, encoding='utf-8') as stream:
+            for line in stream:
+                try:
+                    value = json.loads(line)
+                    if isinstance(value, dict):
+                        yield value
+                except ValueError:
+                    continue
+    except OSError:
+        return
 
 
 def stamp_epoch(stamp):
@@ -71,6 +93,17 @@ def derive(a, orch, wstatus, wresult):
         return "error", "worker.sh left no status"
     if wstatus.get("fatal"):
         return "error", f"worker.sh: {wstatus['fatal']}"
+    lifecycle = wstatus.get('lifecycle') or {}
+    if lifecycle.get('forced'):
+        return 'yielded', f"worker stopped by {lifecycle.get('reason') or 'signal'}; continuation retained"
+    # A leased provider can hit a live limit and stop without writing a result: worker.sh
+    # records it as `used` so the batch does not spend an unleased fallback. Preserve that
+    # quota pause instead of treating its non-zero exit as a worker crash.
+    if w_exit not in (0, None) and not wresult:
+        used = wstatus.get("used")
+        if used and any(limit.get("provider") == used and limit.get("state") == "limited"
+                        for limit in wstatus.get("limited") or () if isinstance(limit, dict)):
+            return "quota-paused", f"worker {used} hit its usage limit; no unleased fallback was used"
     if not wstatus.get("used"):
         if wstatus.get("limited") and not wstatus.get("missing"):
             names = ", ".join(l.get("provider") or "?" for l in wstatus["limited"])
@@ -85,7 +118,7 @@ def derive(a, orch, wstatus, wresult):
             return "blocked", wresult.get("summary", "")[:200]
         if o == "limit_hit":
             return "quota-paused", f"worker hit a limit: {wresult.get('limit_text') or '?'}"
-        if o in ("shipped", "failed", "archive-only"):
+        if o in ("shipped", "failed", "archive-only", "yielded"):
             return o, ""
         if o == "shipped-deploy-failed":
             d = wresult.get("deploy") or {}
@@ -202,6 +235,26 @@ def cmd_append(a):
     now = time.time()
     w = wresult or {}
     o = orch or {}
+    run_dir = os.path.join(a.root, 'runs', a.stamp)
+    allocation = load_json(os.path.join(run_dir, 'batch-budget.json')) or {}
+    continuation = load_json(os.path.join(run_dir, f"continuation-{(wstatus or {}).get('used')}.json"))
+    lifecycle = (wstatus or {}).get('lifecycle')
+    admissions = list(json_lines(os.path.join(run_dir, 'admission.jsonl')))
+    incremental = None
+    if allocation.get('phase'):
+        active = (lifecycle or {}).get('elapsed_seconds')
+        total = int(now - started) if started else None
+        incremental = {'work_id': work_id(o), 'phase': allocation.get('phase'),
+                       'job_override': allocation.get('job_override', False),
+                       'continuation': continuation, 'lifecycle': lifecycle,
+                       'admission': admissions[-1] if admissions else None,
+                       'active_seconds': active,
+                       'milestone': (w.get('summary') or '')[:500] if outcome == 'yielded'
+                                    and (wstatus or {}).get('exit') == 0 else None,
+                       'milestone_observed_by_seconds': active if outcome == 'yielded'
+                                    and (wstatus or {}).get('exit') == 0 else None,
+                       'waiting_and_other_seconds': max(0, total - active)
+                       if total is not None and isinstance(active, (int, float)) else None}
     rec = {
         "stamp": a.stamp,
         "started_at": datetime.fromtimestamp(started).isoformat(timespec="seconds") if started else None,
@@ -218,8 +271,11 @@ def cmd_append(a):
         "worker": (wstatus or {}).get("used"),
         "worker_exit": (wstatus or {}).get("exit"),
         "worker_session": (wstatus or {}).get("session_id"),
+        "incremental": incremental,
         "worker_result_source": w.get("_source") or ("agent" if wresult else None),
-        "repo": w.get("repo") or o.get("repo") or a.repo or None,
+        "repo": a.repo or w.get("repo") or o.get("repo") or None,
+        "assigned_repo": a.repo or None,
+        "reported_repo": w.get("repo") or o.get("repo"),
         "item": w.get("item") or o.get("item"),
         "work_kind": o.get("work_kind") or "feature",
         "branch": w.get("branch") or o.get("branch"),
@@ -277,6 +333,42 @@ def error_streak(records):
     return n
 
 
+def work_identity(record):
+    """Unknown targets cannot be proven recovered by a later unrelated planner."""
+    repo = record.get("repo")
+    if not repo:
+        return (None, record.get("stamp"))
+    return (repo, record.get("linear_id") or record.get("branch") or record.get("item"))
+
+
+def verified_recovery(records):
+    # Keep outstanding work independent of the global arrival-order error streak:
+    # a parallel lane's no-op, quota skip or unrelated success proves nothing about it.
+    pending, alerted = {}, set()
+    streak = 0
+    recovery = None
+    for record in records:
+        outcome = record.get("outcome")
+        if outcome in SKIP_OUTCOMES + QUOTA_OUTCOMES:
+            continue
+        recovery = None
+        key = work_identity(record)
+        if outcome in ERROR_OUTCOMES:
+            pending[key] = pending.get(key, 0) + 1
+            streak += 1
+            if streak >= ALERT_FIRST:
+                alerted.update(pending)
+            continue
+        streak = 0
+        if not all(key) or outcome != "shipped" or record.get("worker_exit") != 0 or not record.get("worker"):
+            continue
+        count = pending.pop(key, 0)
+        if count and key in alerted:
+            recovery = (key, count, bool(pending))
+        alerted.discard(key)
+    return recovery
+
+
 def alert_text(records):
     ran = [r for r in records if r.get("outcome") not in SKIP_OUTCOMES + QUOTA_OUTCOMES]
     if not ran:
@@ -286,11 +378,14 @@ def alert_text(records):
     if streak >= ALERT_FIRST and (streak - ALERT_FIRST) % ALERT_EVERY == 0:
         return (f"<!here> :rotating_light: advance-roadmap has failed {streak} runs in a row — "
                 f"latest `{last['stamp']}`: {last.get('detail') or last.get('outcome')}")
-    if streak == 0 and len(ran) >= 2:
-        prior = error_streak(records[:records.index(last)])
-        if prior >= ALERT_FIRST:
-            return (f":white_check_mark: advance-roadmap recovered after {prior} failed runs — "
-                    f"`{last['stamp']}` {last.get('outcome')}")
+    recovery = verified_recovery(ran)
+    if recovery:
+        key, count, remaining = recovery
+        scope = key[0] + (f" · {key[1]}" if key[1] else "")
+        suffix = "; other failed work remains unresolved" if remaining else ""
+        runs = "run" if count == 1 else "runs"
+        return (f":white_check_mark: advance-roadmap recovered {scope} after {count} failed {runs} — "
+                f"`{last['stamp']}` verified shipped worker{suffix}")
     return ""
 
 

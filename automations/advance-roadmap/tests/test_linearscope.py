@@ -34,16 +34,21 @@ def ids(issues):
 
 
 class ScopeTests(unittest.TestCase):
-    def test_repo_label_or_no_repo_label(self):
-        self.assertEqual(ids(linearscope.scope_issues(ISSUES, "b")), ["DEV-2", "DEV-3", "DEV-7", "DEV-8"])
+    def test_repo_label_excludes_unrouted_work_from_other_repos(self):
+        self.assertEqual(ids(linearscope.scope_issues(ISSUES, "b")), ["DEV-2", "DEV-7"])
 
     def test_fingerprint_scope_keeps_closed_issues_and_blockers_of_any_repo(self):
         self.assertEqual(ids(linearscope.scope_issues(ISSUES, "a")),
-                         ["DEV-1", "DEV-3", "DEV-4", "DEV-5", "DEV-6", "DEV-7", "DEV-8"])
+                         ["DEV-1", "DEV-4", "DEV-5", "DEV-6", "DEV-7"])
 
     def test_planner_scope_drops_closed_work_but_not_directives_or_blockers(self):
         self.assertEqual(ids(linearscope.scope_issues(ISSUES, "a", open_only=True)),
-                         ["DEV-1", "DEV-3", "DEV-5", "DEV-6", "DEV-7", "DEV-8"])
+                         ["DEV-1", "DEV-5", "DEV-6", "DEV-7"])
+
+    def test_unlabeled_explicit_directive_is_still_in_its_own_repos_scope(self):
+        directive = issue('DEV-9', description='## Directive\n<!-- advance-roadmap:directive:a -->')
+        self.assertEqual(ids(linearscope.scope_issues([directive], 'a')), ['DEV-9'])
+        self.assertEqual(ids(linearscope.scope_issues([directive], 'b')), [])
 
     def test_an_unknown_blocker_id_is_ignored(self):
         self.assertEqual(ids(linearscope.scope_issues([issue("DEV-1", ["repo/a"], blocked_by=["DEV-99"])], "a")),
@@ -52,8 +57,8 @@ class ScopeTests(unittest.TestCase):
     def test_scoped_snapshot_keeps_the_shape_and_counts_what_it_omitted(self):
         snap = {"ok": True, "fetched_at": "t", "count": 8, "issues": ISSUES}
         out = linearscope.scoped_snapshot(snap, "b")
-        self.assertEqual((out["ok"], out["scoped_to"], out["count"], out["omitted"]), (True, "b", 3, 5))
-        self.assertEqual(ids(out["issues"]), ["DEV-2", "DEV-3", "DEV-8"])
+        self.assertEqual((out["ok"], out["scoped_to"], out["count"], out["omitted"]), (True, "b", 1, 7))
+        self.assertEqual(ids(out["issues"]), ["DEV-2"])
 
     def test_cli_writes_the_planner_copy(self):
         with tempfile.TemporaryDirectory() as tmp:

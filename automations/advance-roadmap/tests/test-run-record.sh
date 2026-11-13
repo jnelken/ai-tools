@@ -12,8 +12,14 @@ trap 'rm -rf "$TMP"' EXIT INT TERM
 
 ROOT="$TMP/root"; SKILLS="$TMP/skills"; BIN="$TMP/bin"
 mkdir -p "$ROOT/lib" "$SKILLS" "$BIN" "$TMP/code/demo"
+git init -q "$TMP/code/demo"
+git -C "$TMP/code/demo" -c user.name=Test -c user.email=test@example.invalid -c commit.gpgsign=false -c core.hooksPath=/dev/null commit -q --allow-empty -m base
+git -C "$TMP/code/demo" update-ref refs/remotes/origin/main HEAD
 cp "$HERE/run.sh" "$HERE/worker.sh" "$ROOT/"
-cp "$HERE/lib/runrecord.py" "$HERE/lib/tokens.py" "$HERE/lib/workspaces.py" "$HERE/lib/models.sh" "$ROOT/lib/"
+cp "$HERE/lib/workqueue.py" "$HERE/lib/runrecord.py" "$HERE/lib/tokens.py" "$HERE/lib/workspaces.py" "$HERE/lib/models.sh" "$ROOT/lib/"
+cp "$HERE/lib/post_run_summary.mjs" "$ROOT/lib/"
+# This suite exercises records, not plan reuse; each fake orchestrator result is independent.
+print -r -- 'raise SystemExit(0)' > "$ROOT/lib/pendingplan.py"
 . "$ROOT/lib/models.sh"
 for f in ORCHESTRATOR.md SAFETY.md WORKER.md; do echo stub > "$SKILLS/$f"; done
 
@@ -97,22 +103,29 @@ case "$1 $2" in
   "workspaces create")
     cmd=""; while [ $# -gt 0 ]; do [ "$1" = "--command" ] && { cmd="$2"; shift; }; shift; done
     mkdir -p "$FAKE_WS"
+    git init -q "$FAKE_WS"
     ( cd "$FAKE_WS" && SUPERSET_WORKSPACE_PATH="$FAKE_WS" SUPERSET_TERMINAL_ID=t1 zsh -c "$cmd" ) >/dev/null 2>&1 &!
     print '{"workspace":{"id":"w1"},"terminals":[{"terminalId":"t1"}],"alreadyExists":false}' ;;
   *) print '{}' ;;
 esac
 SH
 chmod +x "$BIN/codex" "$BIN/agent" "$BIN/superset"
+cat > "$BIN/preflight" <<'SH'
+#!/bin/zsh
+git -C "$1" symbolic-ref -q HEAD >/dev/null
+SH
+chmod +x "$BIN/preflight"
 
 # The results path must be on its own line for the fake to find it.
 grep -q '^(raw JSON, no fence) to: ' "$ROOT/worker.sh" || { echo "FAIL: prompt format changed"; exit 1; }
 
 run() {
   env -u SLACK_CCUSAGE_WEBHOOK_URL -u ADVANCE_ROADMAP_SLACK_WEBHOOK \
-    ADVANCE_ROADMAP_SLACKAGENT_DIR="$TMP/no-slackagent" PERSONAL_CODE_DIR="$TMP/code" DOTFILES_PERSONAL_MACHINE=1 \
+    ADVANCE_ROADMAP_SLACKAGENT_DIR="${TEST_SLACKAGENT_DIR:-$TMP/no-slackagent}" PERSONAL_CODE_DIR="$TMP/code" DOTFILES_PERSONAL_MACHINE=1 \
     ADVANCE_ROADMAP_ROOT="$ROOT" ADVANCE_ROADMAP_SKILL_DIR="$SKILLS" ADVANCE_ROADMAP_CONDUCTOR_DIR="$SKILLS" \
     ADVANCE_ROADMAP_SECRETS=/dev/null ADVANCE_ROADMAP_NOTIFY=0 \
     ADVANCE_ROADMAP_SUPERSET="${SUPERSET:-0}" ADVANCE_ROADMAP_SUPERSET_BIN="$BIN/superset" ADVANCE_ROADMAP_WORKER_POLL_S=1 \
+    ADVANCE_ROADMAP_PREFLIGHT="$BIN/preflight" \
     FAKE_SUPERSET="${FAKE_SUPERSET:-up}" FAKE_CODE="$TMP/code" FAKE_WS="$TMP/ws" ADVANCE_ROADMAP_TEST_TOKEN=s3cret \
     ADVANCE_ROADMAP_CODEX_BIN="$BIN/codex" ADVANCE_ROADMAP_AGENT_BIN="$BIN/agent" \
     ADVANCE_ROADMAP_CADENCE_HOURS="${CADENCE_HOURS:-1}" \
@@ -161,12 +174,14 @@ check "chain runs until a link fails to ship" "$(wc -l < "$ROOT/runs.jsonl" | tr
 check "chain's last link is the failure"      "$(last outcome)" error
 grep -q "starting link 3" "$ROOT"/logs/run-*.log && echo "ok   chain logged its links" || { echo "FAIL: no chain log line"; exit 1; }
 check "a feature ship records its kind"     "$(last work_kind)" feature
-# A code-health ship never chains, even well inside the time cap.
+# The code-health fallback is retired: a planner that still asks for one is refused, no worker runs.
 rm -f "$TMP/chain-count"
 CHAIN_MINUTES=40 run health chain
-check "code-health ship does not chain"      "$(wc -l < "$ROOT/runs.jsonl" | tr -d ' ')" 11
-check "code-health kind recorded"            "$(last work_kind)" code_health
-check "code-health ship is still shipped"    "$(last outcome)" shipped
+check "code-health dispatch records one row"  "$(wc -l < "$ROOT/runs.jsonl" | tr -d ' ')" 11
+check "code-health dispatch is refused"       "$(last action)" blocked_no_item
+check "code-health dispatch runs no worker"   "$(last worker)" none
+check "code-health dispatch records no work"  "$(last outcome)" blocked-no-item
+grep -q "no longer runs" "$ROOT/logs/latest.log" && echo "ok   code-health refusal logged" || { echo "FAIL: no code-health refusal line"; exit 1; }
 # Past the time cap, a shipped run does not chain.
 ADVANCE_ROADMAP_CHAIN_START=$(( $(date +%s) - 2401 )) CHAIN_MINUTES=40 run good file
 check "no chain past the time cap"            "$(wc -l < "$ROOT/runs.jsonl" | tr -d ' ')" 12
@@ -198,24 +213,6 @@ kill $holder 2>/dev/null; wait $holder 2>/dev/null || true
 ADVANCE_ROADMAP_LANE=1 ADVANCE_ROADMAP_TARGET_REPO=other run good file
 check "wrong target repo is not dispatched"    "$(last action)" blocked_no_item
 check "wrong target runs no worker"             "$(last worker)" none
-
-# A hygiene fallback uses the same batch barrier and never refills its repo's slot.
-batch_stamp=20990101-000001
-batch_rows_before=$(wc -l < "$ROOT/runs.jsonl" | tr -d ' ')
-ADVANCE_ROADMAP_LANE=1 ADVANCE_ROADMAP_TARGET_REPO=demo ADVANCE_ROADMAP_BATCH_PID=$$ \
-  ADVANCE_ROADMAP_STAMP=$batch_stamp ADVANCE_ROADMAP_BATCH_POLL_S=0.05 CHAIN_MINUTES=40 run health file &
-batch_pid=$!
-for n in {1..200}; do
-  [ -f "$ROOT/runs/$batch_stamp/batch-ready" ] && break
-  sleep .1
-done
-[ -f "$ROOT/runs/$batch_stamp/batch-ready" ] || { echo "FAIL: batch never reached barrier"; exit 1; }
-[ ! -f "$ROOT/runs/$batch_stamp/worker-result.json" ] || { echo "FAIL: worker ran before release"; exit 1; }
-touch "$ROOT/runs/$batch_stamp/batch-release"
-wait $batch_pid
-check "released batch hygiene plan ships" "$(last outcome)" shipped
-check "batch hygiene retains its work kind" "$(last work_kind)" code_health
-check "batch hygiene runs exactly once" "$(wc -l < "$ROOT/runs.jsonl" | tr -d ' ')" $(( batch_rows_before + 1 ))
 
 batch_stamp=20990101-000002
 ADVANCE_ROADMAP_LANE=1 ADVANCE_ROADMAP_TARGET_REPO=demo ADVANCE_ROADMAP_BATCH_PID=$$ \
@@ -281,4 +278,22 @@ fi
 run good echo
 check "echoed example fence is not a result" "$(last worker_result_source)" None
 check "echoed example does not ship"         "$(last outcome)" incomplete
+
+# Continuous quota skips also post exactly once; the fake Slack module records locally.
+mock_slack="$TMP/slackagent"
+mkdir -p "$mock_slack/scripts" "$mock_slack/src" "$mock_slack/node_modules/dotenv" "$mock_slack/node_modules/@slack/web-api"
+print '{"type":"module"}' > "$mock_slack/package.json"
+touch "$mock_slack/scripts/post-roadmap-summary.mjs"
+print 'exports.config = () => ({});' > "$mock_slack/node_modules/dotenv/index.js"
+print 'exports.WebClient = class {};' > "$mock_slack/node_modules/@slack/web-api/index.js"
+cat > "$mock_slack/src/roadmap-summary.js" <<'JS'
+import {readFileSync, appendFileSync} from 'node:fs';
+export const DEFAULT_ROADMAP_CHANNEL = '#eng';
+export const loadRunRecord = (path, stamp) => readFileSync(path, 'utf8').trim().split('\n').map(JSON.parse).find(r => r.stamp === stamp);
+export const postRoadmapSummary = async ({record}) => appendFileSync(process.env.TEST_POSTS, record.outcome + '\n');
+JS
+TEST_SLACKAGENT_DIR="$mock_slack" TEST_POSTS="$TMP/slack-posts" SLACK_BOT_TOKEN=test \
+  ADVANCE_ROADMAP_CONTINUOUS=1 ADVANCE_ROADMAP_BATCH_PID=$$ ADVANCE_ROADMAP_LANE=1 \
+  FAKE_NO_PLANNER=1 run good file
+check "continuous quota skip sends one run summary" "$(cat "$TMP/slack-posts")" skipped-quota
 echo "all passed"

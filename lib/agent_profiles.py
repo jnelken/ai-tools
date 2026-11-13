@@ -90,6 +90,7 @@ def resolve(profile, target, harness, config):
         if profile != 'development/unknown': sources += [profile + '.md']
         if machine_name: sources += MACHINE_SOURCES[machine_name]
         if harness == 'claude': sources += ['providers/claude-development.md']
+        if harness == 'claude' and profile == 'development/personal': sources += ['providers/claude-personal.md']
     else:
         sources += ['runtime/shared.md', 'runtime/text.md' if profile == 'runtime/text' else 'runtime/slackagent.md']
     files = [ROOT / 'instructions' / source for source in sources]

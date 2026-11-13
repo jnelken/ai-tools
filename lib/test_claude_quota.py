@@ -45,6 +45,30 @@ class QuotaTests(unittest.TestCase):
         self.assertEqual(data['windows'], {})
         self.assertEqual(data['error'], 'http_429')
 
+    def test_rate_limit_backoff_and_successful_probe_interval(self):
+        success = {'five_hour': {'used_percentage': 12}}
+        with patch.object(q.time, 'time', return_value=1000) as clock, patch.object(
+                q, 'probe', side_effect=[(None, 'http_429'), (None, 'http_429'), (success, None)]) as probe:
+            q.quota()
+            clock.return_value = 1299
+            q.quota()
+            self.assertEqual(probe.call_count, 1)
+            clock.return_value = 1300
+            q.quota()
+            self.assertEqual(probe.call_count, 2)
+            clock.return_value = 1899
+            q.quota()
+            self.assertEqual(probe.call_count, 2)
+            clock.return_value = 1900
+            self.assertEqual(q.quota()['windows']['five_hour']['used_percentage'], 12)
+            clock.return_value = 2019
+            q.quota()
+            self.assertEqual(probe.call_count, 3)
+            clock.return_value = 2020
+            q.probe.side_effect = [(success, None)]
+            q.quota()
+            self.assertEqual(probe.call_count, 4)
+
     def test_old_statusline_is_explicitly_stale(self):
         (self.state / 'claude-usage.json').write_text(json.dumps({
             'timestamp': time.time() - 3600,

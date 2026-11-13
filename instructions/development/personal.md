@@ -11,6 +11,17 @@ A corollary worth knowing: anything left merged on local `main` in one of these 
 When a `git push` to a feature branch you own is rejected as non-fast-forward (local diverged from origin, typically from a local rebase onto main), use `git push --force-with-lease` without asking — the lease refuses to overwrite if origin moved since the last fetch, so it can't clobber an unseen collaborator push. Still confirm before a raw `--force` (no lease) or any force-push of `main`. Flag the divergence's cause in conversation (e.g. "local was rebased onto main") even when no confirmation is needed for the push itself.
 
 
+## Linear magic words in commits (personal repos only)
+
+In `jnelken`-owned repos, put a Linear magic word right before a DEV ticket ID in the commit message. Pick the word that matches what that commit does for the ticket:
+
+- `Fixes DEV-N`: the commit finishes the ticket. It moves to Done when the commit reaches the default branch.
+- `Part of DEV-N`: an intermediate commit. The ticket moves through its workflow but is not marked Done.
+- `Related to DEV-N`: the commit touches the ticket without implementing it. The status does not change.
+
+Several IDs can share one word, e.g. `Fixes DEV-317, DEV-318`. Only commit messages carry these words: don't put them in PR titles or descriptions, and don't invent a ticket to attach one to (filing tickets is a separate decision). Never use them in Concentro repos (`woodrow`, `api`, `folio-platform`).
+
+
 ## ROADMAP.md in Personal Repos
 
 In `jnelken` repos with no `ROADMAP.md`, propose one (don't create it unannounced) once there is genuine directional signal; never invent filler. Details: `~/.claude/instructions/roadmap-md.md` (modeled on dubsketch's).
