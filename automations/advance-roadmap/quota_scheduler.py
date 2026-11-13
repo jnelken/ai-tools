@@ -205,7 +205,10 @@ def _tick(root):
                             job.budget.release(item)
             outcomes = [item.get('outcome') for item in job.state['queue']]
             admitted = any(item.get('released_at') for item in job.state['queue'])
-            if ((admitted and any(outcome in {'yielded', 'shipped', 'shipped-deploy-failed', 'blocked'}
+            if outcomes and all(outcome == 'skipped-unchanged' for outcome in outcomes):
+                set_schedule(store, wake_at=time.time() + 900, reason='unchanged verdict cooldown',
+                             repos=[repo for repo, _ in chosen], outcomes=outcomes)
+            elif ((admitted and any(outcome in {'yielded', 'shipped', 'shipped-deploy-failed', 'blocked'}
                                   for outcome in outcomes))
                     or any(outcome in {'blocked-no-item', 'nothing-qualified', 'skipped-unchanged'}
                            for outcome in outcomes)):

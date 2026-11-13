@@ -163,6 +163,21 @@ class SchedulerTest(unittest.TestCase):
         self.assertEqual(self.decide()['decision'], 'wait')
         self.assertEqual(s.policy(self.store, ['a'], self.snapshot, now=13601)[0]['decision'], 'plan')
 
+    def test_skipped_unchanged_after_expired_no_item_backoff_stays_quiet(self):
+        fp = self.decide()['fingerprint']
+        self.store.set('no_item_yield:a', {'fingerprint': fp, 'stamp': '20261112-100000',
+                                           'not_before': 9000})
+        self.store.set('eligibility_at_start:20261113-100000', fp)
+        row = {'stamp': '20261113-100000', 'assigned_repo': 'a', 'outcome': 'skipped-unchanged'}
+        (self.root / 'runs.jsonl').write_text(json.dumps(row) + '\n')
+        with patch.object(s.time, 'time', return_value=9999):
+            s.observe_completed(self.store, self.root)
+            s.observe_completed(self.store, self.root)
+        self.assertEqual(self.decide()['decision'], 'wait')
+        self.assertEqual(s.policy(self.store, ['a'], self.snapshot, now=9999 + 72 * 3600)[0]['decision'], 'plan')
+        self.write([{'id': 'DEV-1', 'labels': ['repo/a'], 'title': 'new work'}])
+        self.assertEqual(self.decide()['decision'], 'plan')
+
     def test_no_item_yield_hold_does_not_block_actual_saved_assignment(self):
         fp = self.decide()['fingerprint']
         self.store.set('no_item_yield:a', {'fingerprint': fp, 'not_before': 20000})

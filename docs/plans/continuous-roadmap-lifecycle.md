@@ -23,3 +23,10 @@ Update the existing continuous-mode paths and exercise them with isolated tests 
 
 - No-item bookkeeping is retained in its run artifacts and marked pending, rather than silently claiming it was completed.
 - Continuous watchdogs use output inactivity; the independent guard still reaps orphaned workers.
+
+## Follow-up: unchanged-verdict loop
+
+- [x] The expired no-assignment backoff took precedence over a later `skipped-unchanged` verdict, repeatedly selecting apt-sqft and brew-radar. A newer unchanged verdict now wins until inputs change or the 72-hour audit is due.
+- [x] An unchanged-only batch receives a 15-minute safety cooldown, and unchanged skips do not generate Slack messages.
+- [x] Replayed the live scheduler database in an isolated copy: both affected repositories now wait. Tests cover the expiry, retry, and input-change paths.
+- [ ] Deploy and monitor the resumed scheduler.

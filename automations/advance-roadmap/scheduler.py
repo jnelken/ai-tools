@@ -52,6 +52,10 @@ def policy(store, repos, snapshot, now=None, daily_limit=True):
             decision, reason = 'resume', 'unfinished assignment is eligible; reuse checkpoint before planning'
         elif no_item_matches and no_item.get('not_before', 0) > now:
             decision, reason = 'wait', 'repeated bookkeeping yields without an assignment or input change'
+        elif (no_item_matches and cached.get('outcome') == 'skipped-unchanged'
+              and cached.get('stamp', '') > no_item.get('stamp', '')
+              and cached.get('fingerprint') == fp and now - cached.get('checked', 0) < 72 * 3600):
+            decision, reason = 'wait', 'newer unchanged verdict; wake on relevant change or safety audit'
         elif no_item_matches:
             decision, reason = 'plan', 'no-assignment backoff expired; recheck for work'
         elif cached.get('fingerprint') == fp and now - cached.get('checked', 0) < 72 * 3600:
@@ -112,8 +116,7 @@ def observe_completed(store, root):
             continue  # historical or uncorrelated fingerprints cannot establish a new cache
         outcome = row.get('outcome')
         if outcome in {'blocked-no-item', 'nothing-qualified', 'skipped-unchanged'}:
-            cached = store.get('eligibility:' + repo, {})
-            checked = cached.get('checked', time.time()) if outcome == 'skipped-unchanged' else time.time()
+            checked = time.time()
             store.set('eligibility:' + repo, {'fingerprint': fingerprint, 'checked': checked,
                                             'stamp': stamp, 'outcome': outcome})
         decision = last_decisions.get(repo, {})

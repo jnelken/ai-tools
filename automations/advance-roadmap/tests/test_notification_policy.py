@@ -15,6 +15,7 @@ class NotificationPolicyTest(unittest.TestCase):
             ('yielded', 'watchdog', False, False),
             ('shipped', 'provider-exit', False, False),
             ('error', '', False, False),
+            ('skipped-unchanged', '', False, True),
         ]:
             with self.subTest(outcome=outcome, reason=reason, needs_input=needs_input):
                 row = {'outcome': outcome, 'incremental': {'lifecycle': {'reason': reason}}}
