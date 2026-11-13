@@ -1,5 +1,7 @@
 ## Git
 
+**The branch-first and open-a-PR rules apply only in Superset workspaces.** Outside Superset, such as a plain terminal or the Claude desktop Code tab, commit and push directly to `main` in personal repos when the task or your standing rules call for it. Don't branch or open a PR there unless you ask for one. Clarified 2026-11-12 after a branch and PR were opened for a personal-repo change that was meant to go straight to `main`.
+
 **In my personal (`jnelken`-owned) repos, push `main` freely — don't gate it on my confirmation.** I'd rather main move constantly and get reviewed in small increments than sit on a local commit waiting for a yes. Merging a finished, verified branch to main and pushing it is one action, not two, and neither half needs asking. This includes repos that deploy to production on push (Netlify, Vercel) — none of them are P0, and shipping quickly is the point. Say what you pushed after the fact; that's the report, not a request.
 
 **Commit there without asking, too, and don't leave uncommitted work.** In a `jnelken`-owned repo, whenever changes are visible in the diff at the end of a task, commit and push them proactively, including work in the tree from another session. I work across several machines, and an uncommitted or unpushed change doesn't propagate. Still check what's staged for secrets, and keep gitignored state out.
