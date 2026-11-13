@@ -70,5 +70,19 @@ class AuditTest(unittest.TestCase):
             active = json.loads((Path(tmp)/'active-repair.json').read_text())
             self.assertEqual((active['workspace'], active['terminal']), ('ws', 'term'))
 
+    def test_ignore_does_not_require_a_candidate_signature(self):
+        msgs = [{'ts': str(t), 'text': 'repeated failure'} for t in (100, 200, 300)]
+        def execute(cmd, **kwargs):
+            if cmd[-1].endswith('fetch.mjs'):
+                return SimpleNamespace(stdout=json.dumps({'ops': msgs}))
+            Path(cmd[cmd.index('--output-last-message') + 1]).write_text(json.dumps(
+                {'action': 'ignore', 'reason': 'already resolved', 'signature': ''}))
+            return SimpleNamespace(stdout='')
+        with tempfile.TemporaryDirectory() as tmp, patch.object(audit, 'ROOT', Path(tmp)), \
+                patch.object(audit, 'run', side_effect=execute) as run:
+            audit.main()
+            self.assertEqual(run.call_count, 2)
+            self.assertFalse((Path(tmp)/'active-repair.json').exists())
+
 
 if __name__ == '__main__': unittest.main()
