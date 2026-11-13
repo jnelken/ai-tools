@@ -15,17 +15,6 @@ The one place `/post-pr` asks: if a PR into `main` has a screenshot in its descr
 When local Codex is throttled or out of credits, fall back to a GitHub-triggered review on the *other* credential pool: local on a ChatGPT login (`auth_mode: chatgpt` in `~/.codex/auth.json`) → `/codex-action-review` (API key); local on an API key → `@codex review` (ChatGPT plan). Either may be posted without asking; say in the report that you switched and why. `/babysit-pr` only addresses review threads that already exist.
 
 
-## Superset Workspaces (sswt)
-
-Read `~/.claude/instructions/superset-workspaces.md` before creating, renaming or reasoning about a workspace. Hard rules:
-
-- **Never build a feature in a root checkout** (`/Users/jake/code/woodrow`, `/Users/jake/code/api`) — create a sswt first. Exception: a repo whose own `CLAUDE.md` says to work in its root checkout (folio-platform's batch-branch flow).
-- **Never switch branches in a worktree.** In a sswt, new work stays on its branch; a new branch means a new sswt.
-- **Use the local `superset` CLI**, not host-scoped `mcp__superset__*` tools — the relay never connects on this machine.
-- **Default to jake2 for non-UI sswts.** jake1 freezes under memory pressure during parallel agent work, so create sswts with `--host` jake2 when it is online and the work doesn't impact UI; UI work stays on jake1. Mechanics in the doc above.
-- **Title** is `#<pr> <CON-ID> <short-slug>`; add the PR number as soon as the PR opens.
-
-
 ## Datadog
 
 Default to the `pup` CLI; reach for the `claude.ai Datadog` MCP connector only when `pup` lacks the surface. After a Datadog debugging session that hit observability gaps, close with a **Follow-up** note and file one `telemetry`-labeled Linear ticket. Details: `~/.claude/instructions/datadog.md`.

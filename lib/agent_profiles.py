@@ -13,8 +13,34 @@ ROOT = Path(__file__).resolve().parents[1]
 PROFILES = ('development/auto', 'development/work', 'development/personal', 'development/unknown',
             'runtime/slackagent', 'runtime/text')
 
+# Machine layer: facts about where a session runs (paths, hosts, tools). It never grants anything;
+# permissions come only from classify() on the target repository.
+MACHINES = ('work-mac', 'personal-mac', 'personal-pc', 'personal-cloud')
+MACHINE_SOURCES = {
+    'work-mac': ['machine/mac.md', 'machine/superset.md', 'machine/work-mac.md'],
+    'personal-mac': ['machine/mac.md', 'machine/superset.md', 'machine/personal-mac.md'],
+    'personal-pc': ['machine/personal-pc.md'],
+    'personal-cloud': ['machine/personal-cloud.md'],
+    # Unconfigured macOS keeps the Mac-wide rules so a Mac without a `machine` key does not lose them.
+    'mac': ['machine/mac.md', 'machine/superset.md'],
+}
+
 def path(value):
     return Path(os.path.expandvars(os.path.expanduser(str(value)))).resolve()
+
+def machine(config):
+    """(name, reason); name is None when nothing identifies the machine."""
+    name, reason = os.environ.get('AGENT_MACHINE'), 'AGENT_MACHINE'
+    if not name:
+        name, reason = config.get('machine'), 'config machine key'
+    if name:
+        if name not in MACHINES: raise ValueError('invalid machine: ' + str(name))
+        return name, reason
+    if os.environ.get('CLAUDE_CODE_REMOTE', '').lower() in ('1', 'true'):
+        return 'personal-cloud', 'CLAUDE_CODE_REMOTE'
+    if sys.platform == 'darwin':
+        return 'mac', 'unconfigured macOS; set "machine" in the agent-profiles config'
+    return None, 'no machine configured'
 
 def within(target, parent):
     return target == parent or parent in target.parents
@@ -57,9 +83,12 @@ def resolve(profile, target, harness, config):
         if environment not in ('personal', 'work', 'unknown'): raise ValueError('invalid environment mapping')
         profile = 'development/' + environment
     sources = ['shared.md']
+    machine_name, machine_reason = None, 'runtime profiles ignore the machine layer'
     if profile.startswith('development/'):
+        machine_name, machine_reason = machine(config)
         sources += ['development/switching.md', 'development/shared.md']
         if profile != 'development/unknown': sources += [profile + '.md']
+        if machine_name: sources += MACHINE_SOURCES[machine_name]
         if harness == 'claude': sources += ['providers/claude-development.md']
     else:
         sources += ['runtime/shared.md', 'runtime/text.md' if profile == 'runtime/text' else 'runtime/slackagent.md']
@@ -67,6 +96,7 @@ def resolve(profile, target, harness, config):
     text = '\n\n'.join('# Source: ' + source + '\n\n' + f.read_text(encoding='utf-8') for source, f in zip(sources, files))
     text = text.replace('${AI_TOOLS_HOME}', str(ROOT))
     return {'profile': profile, 'target': str(target), 'reason': reason,
+            'machine': machine_name, 'machine_reason': machine_reason,
             'sources': [str(f) for f in files], 'instructions': text}
 
 def toml(value):

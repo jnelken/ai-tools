@@ -16,11 +16,6 @@ When a `git push` to a feature branch you own is rejected as non-fast-forward (l
 In `jnelken` repos with no `ROADMAP.md`, propose one (don't create it unannounced) once there is genuine directional signal; never invent filler. Details: `~/.claude/instructions/roadmap-md.md` (modeled on dubsketch's).
 
 
-## Lunch Money MCP Cache
-
-Before calling any `mcp__Lunch_Money__*` tool, check the local cache first. Details: `~/.claude/instructions/lunch-money.md`.
-
-
 ## Who Jake Is (cross-project context)
 
 @~/.claude/JAKE.md

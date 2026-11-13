@@ -15,6 +15,7 @@ class Profiles(unittest.TestCase):
         self.base=Path(self.temp.name);self.home=self.base/'home';self.home.mkdir()
         self.env=patch.dict(os.environ,{'HOME':str(self.home),'USERPROFILE':str(self.home),'PERSONAL_CODE_DIR':str(self.home/'personal code')})
         self.env.start();self.addCleanup(self.env.stop)
+        for k in ('AGENT_MACHINE','CLAUDE_CODE_REMOTE'): os.environ.pop(k,None)
         (self.home/'personal code').mkdir()
     def repo(self,owner='jnelken'):
         r=self.base/('repo '+owner);r.mkdir();subprocess.run(['git','init','-q',str(r)],check=True)
@@ -48,6 +49,43 @@ class Profiles(unittest.TestCase):
         self.assertNotIn('Superset Workspaces',r['instructions'])
         self.assertNotIn('push `main` freely',r['instructions'])
         self.assertEqual(len(r['sources']),3)
+    def test_machine_precedence_and_validation(self):
+        self.assertEqual(p.machine({})[0],None if os.uname().sysname!='Darwin' else 'mac')
+        os.environ['CLAUDE_CODE_REMOTE']='true'
+        self.assertEqual(p.machine({}),('personal-cloud','CLAUDE_CODE_REMOTE'))
+        self.assertEqual(p.machine({'machine':'work-mac'})[0],'work-mac')
+        os.environ['AGENT_MACHINE']='personal-pc'
+        self.assertEqual(p.machine({'machine':'work-mac'})[0],'personal-pc')
+        os.environ.pop('AGENT_MACHINE')
+        with self.assertRaises(ValueError):p.machine({'machine':'laptop'})
+        os.environ['AGENT_MACHINE']='bogus'
+        with self.assertRaises(ValueError):p.machine({})
+    def test_unconfigured_macos_keeps_mac_rules(self):
+        with patch.object(p.sys,'platform','darwin'):
+            self.assertEqual(p.machine({})[0],'mac')
+            r=p.resolve('development/work',self.base,'claude',{})
+        self.assertIn('Superset Workspaces',r['instructions'])
+    def test_machine_layer_in_development_not_runtime(self):
+        for name,has_superset in (('work-mac',True),('personal-mac',True),('personal-pc',False),('personal-cloud',False)):
+            r=p.resolve('development/personal',self.base,'claude',{'machine':name})
+            self.assertEqual(r['machine'],name)
+            self.assertEqual('Superset Workspaces' in r['instructions'],has_superset,name)
+            self.assertTrue(any('/machine/' in s for s in r['sources']),name)
+        for profile in ('runtime/slackagent','runtime/text'):
+            r=p.resolve(profile,self.base,'claude',{'machine':'work-mac'})
+            self.assertIsNone(r['machine']);self.assertFalse(any('/machine/' in s for s in r['sources']))
+    def test_machine_does_not_change_classification(self):
+        other,mine=self.repo('someone'),self.repo()
+        for name in p.MACHINES:
+            self.assertEqual(p.resolve('development/auto',other,'claude',{'machine':name})['profile'],'development/unknown')
+            self.assertEqual(p.resolve('development/auto',mine,'claude',{'machine':name})['profile'],'development/personal')
+    def test_lunch_money_only_on_personal_mac(self):
+        for name,expected in (('personal-mac',True),('work-mac',False),('personal-cloud',False)):
+            r=p.resolve('development/personal',self.base,'claude',{'machine':name})
+            self.assertEqual('Lunch Money MCP Cache' in r['instructions'],expected,name)
+    def test_machine_fragments_exist(self):
+        for sources in p.MACHINE_SOURCES.values():
+            for s in sources: self.assertTrue((p.ROOT/'instructions'/s).is_file(),s)
     def test_toml_array_of_inline_tables(self):
         # Python 3.11+ validates the exact syntax passed to Codex -c.
         import tomllib
