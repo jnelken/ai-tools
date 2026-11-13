@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>Label</key><string>com.jake.channel-loop-audit</string>
+<key>ProgramArguments</key><array><string>/opt/homebrew/bin/python3</string><string>/Users/jake/.claude/automations/channel-loop-audit/audit.py</string></array>
+<key>EnvironmentVariables</key><dict><key>PATH</key><string>/opt/homebrew/bin:/opt/homebrew/opt/node@22/bin:/usr/bin:/bin:/usr/sbin:/sbin:/Users/jake/.local/bin</string></dict>
+<key>RunAtLoad</key><false/>
+<key>StartInterval</key><integer>900</integer>
+<key>ProcessType</key><string>Background</string>
+<key>StandardOutPath</key><string>/Users/jake/.claude/automations/channel-loop-audit/audit.log</string>
+<key>StandardErrorPath</key><string>/Users/jake/.claude/automations/channel-loop-audit/audit.err</string>
+</dict></plist>
