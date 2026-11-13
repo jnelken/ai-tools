@@ -55,7 +55,7 @@ after installing SwiftBar (`brew install --cask swiftbar`).
 | [`unblock-roadmap`](skills/unblock-roadmap) | Interactive sweep of the repos `advance-roadmap` is blocked on — asks how to resolve each, records answers as directives for a later run |
 | [`unblock-sessions`](skills/unblock-sessions) | Walk every Claude session in a Superset tab on any online host (or one via `--host`) one at a time, ask Jake (with full context) about whatever each is waiting on, relay the answer or `reap`, and rescan for follow-ups; Skip for now / Skip forever on every prompt |
 | [`use-spark`](skills/use-spark) | Query the Spark email client CLI — emails, calendar, contacts, scheduling |
-| [`weekly-product-changelog-and-announcement`](skills/weekly-product-changelog-and-announcement) | Generate + post a weekly per-engineer changelog (internal) and a customer-facing product announcement (external) from cross-repo git history |
+| [`weekly-product-changelog-and-announcement`](skills/weekly-product-changelog-and-announcement) | Generate + post a weekly per-engineer changelog (internal) and a customer-facing product announcement (external) from cross-repo git history; also adds the week to the team demo checklist artifact |
 | [`wrapup-repos`](skills/wrapup-repos) | Wrap up in-progress work in one repo unattended — commit + record decisions in `.claude/IN_PROGRESS.md` |
 
 Each skill is a directory with a `SKILL.md` (required) plus optional `scripts/`, `references/`, `assets/`.
