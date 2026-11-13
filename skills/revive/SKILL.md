@@ -35,6 +35,17 @@ Subcommands: `parse <arg>`, `locate <uuid>`, `match --created ISO [--updated ISO
   (`entrypoint: sdk-cli`) and terminal (`cli`) sessions write `~/.claude/projects/*/<uuid>.jsonl`
   on that host only. Check both machines: this one, then `omen-wsl`, or `mcp__memex__search`
   the title, which searches both.
+- **When `match` finds nothing, grep for the bridge id.** A terminal session that turned on
+  Remote Control later has a claude.ai `created_at` at attach time, not at its first
+  transcript line, so `match` misses it. Its transcript still records the id:
+  `grep -l <session_ id without the "session_" prefix> ~/.claude/projects/*/*.jsonl`. Get the
+  title and times without a listing tool by running `fetch('/v1/code/sessions/<session_…>')`
+  in the claude.ai tab: `title`, `created_at`, `last_event_at`, `connection_status`.
+- **Transcripts expire after 30 days.** Claude Code deletes a `~/.claude/projects/**/*.jsonl`
+  once it hasn't been written for `cleanupPeriodDays` (default 30, unset on these machines).
+  Any `claude` start can run the sweep. A session whose `last_ts` is near that age can vanish
+  between the autopsy and the revive; this happened on 2026-11-12. Once it's gone,
+  `--resume` fails with "No conversation found", and only memex's index of it is left.
 - **Remote Control can reattach to the original thread** (per `claude remote-control --help`; not yet verified for a session dead for days — the step 4 check decides). `claude remote-control
   --session-id <session_…>`, run in the original cwd on the original host, reattaches to that
   claude.ai thread. `claude --resume <uuid> --remote-control "<title>"` keeps the
@@ -74,6 +85,12 @@ title or first prompt, the host, the cwd and when it died. With exactly one, say
 **Confirm it is actually dead.** Check `live` in the autopsy and claude.ai's connection
 state. If a process still holds it, the session isn't dead: tell the user where it is running
 and stop.
+
+**Protect the transcript if it's near expiry.** If `last_ts` is more than about 25 days old,
+copy the `.jsonl` to the scratchpad before doing anything else, and `touch` the original so
+the 30-day sweep can't delete it while you diagnose and wait for answers. If it's already
+gone, say so. The options are then a fresh session briefed from memex in the original cwd,
+or leaving it dead. Ask which.
 
 ## 2. Autopsy: why did it die?
 
@@ -168,6 +185,9 @@ Revive only after step 3 is answered. Start in the original **cwd** on the origi
   - "Environment env_… is already being served by … (pid N)": threads from the same dead
     server share one environment, and only one process can serve it. Never kill a reattach
     another session started.
+  - "Session session_… has no environment_id. It may never have been attached to a bridge.":
+    the thread's `environment_id` is empty, as with sessions that went through an OAuth
+    failure (`env_id: ""` from the sessions API). Reattach can't work.
 - **Terminal or Superset session.** Run `claude --resume <uuid>` in a new tab in that cwd.
 - **OMEN-hosted.** Try launching on the Windows side from SSH, for example
   `ssh omen-wsl "cd /mnt/d/code && powershell.exe -NoProfile -Command \"Start-Process wt.exe -WorkingDirectory 'D:\code' -ArgumentList 'claude','remote-control','--session-id','session_…'\""`.
