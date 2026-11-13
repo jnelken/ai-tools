@@ -16,6 +16,16 @@ Composes with `/loop` for iterative convergence in either mode.
 
 For addressing comments **already posted** on a GitHub PR by a bot reviewer, see [[babysit-pr]] instead — this skill runs fresh review passes. For driving Codex on GitHub itself (not a local pass), see [[cycle-review-pr]].
 
+## Reviewer models and effort (defaults)
+
+Review rounds use the **latest sol** for Codex and the **latest Opus** for Claude, both at **high** effort. Name the tier, not a version: a newer model of that tier replaces the current one when it ships.
+
+- **Codex:** the latest sol (`gpt-6.1-sol` today). `codex review` has no `-m` flag, so the model comes from `model` in `~/.codex/config.toml`, which must name it; a default that drifts to another tier (this once ran a review on `gpt-6-astra`) is a bug to fix there, not to work around per call.
+- **Claude:** the latest Opus, via `model: opus` in `agents/claude-reviewer.md` (the alias tracks the latest).
+- **Effort:** high. The one documented exception is step 2's step-down to medium on a round 3+ that follows a P1-free round; never go below medium.
+
+A round whose recorded reviewer model is not the latest sol or Opus is not a completed default round; say so in the report instead of passing it off.
+
 ## How to invoke
 
 Single pass, default (push) mode:
