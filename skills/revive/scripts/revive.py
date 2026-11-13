@@ -31,11 +31,14 @@ UUID_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{
 
 # Text that shows up in a transcript tail when the host died for a known reason.
 SIGNALS = [
-    ("auth", re.compile(r"authentication_error|OAuth token (has )?expired|Please run /login|invalid x-api-key|401\b.*(auth|token)|not logged in", re.I)),
+    ("auth", re.compile(r"authentication_error|OAuth token (has )?expired|OAuth token (refresh failed|unavailable)|Please run /login|invalid x-api-key|401\b.*(auth|token)|not logged in", re.I)),
     ("rate_limit", re.compile(r"rate_limit_error|\b429\b|usage limit|limit reached|resets at", re.I)),
     ("overloaded", re.compile(r"overloaded_error|\b529\b|\b503\b", re.I)),
     ("context", re.compile(r"prompt is too long|context (window|length) exceeded|max_tokens", re.I)),
     ("network", re.compile(r"ECONNRESET|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|socket hang up|fetch failed|Connection error", re.I)),
+    # Harness "informational" rows; the process can outlive this by days, so the
+    # thread is dead on claude.ai while `live` still says the process is up.
+    ("remote_control", re.compile(r"Remote Control disconnected|Remote Control server rejected", re.I)),
     ("interrupted", re.compile(r"\[Request interrupted by user", re.I)),
     ("killed", re.compile(r"SIGTERM|SIGKILL|SIGHUP|0xC000013A|terminated", re.I)),
 ]
@@ -189,6 +192,10 @@ def summarize(path, live):
         + [json.dumps(r)[:400] for r in tail if r.get("type") in ("system", "_corrupt")]
         + [text_of(r)[:80] for r in tail if r.get("type") == "user" and text_of(r).startswith("[Request interrupted")])
     signals = sorted({name for name, rx in SIGNALS if rx.search(tail_text)})
+    # Whole-transcript timeline: earlier disconnects (e.g. an OAuth refresh failure
+    # weeks before the fatal 403) fall outside the tail but explain the death.
+    rc_disconnects = [{"ts": r.get("timestamp"), "text": text_of(r)[:200]} for r in rows
+                      if r.get("type") == "system" and "Remote Control disconnected" in text_of(r)]
     versions = sorted({r.get("version") for r in rows if r.get("version")})
     first_ts, last_ts = first_last_ts(path)
     proc = live.get(uuid)
@@ -208,6 +215,7 @@ def summarize(path, live):
         "api_errors": api_errors[-5:],
         "tail_api_error": any(r.get("isApiErrorMessage") for r in tail),
         "signals": signals,
+        "rc_disconnects": rc_disconnects[-5:],
         "live": proc,  # null = no running process holds it
         "corrupt_lines": sum(1 for r in rows if r.get("type") == "_corrupt"),
     }

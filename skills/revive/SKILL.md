@@ -118,6 +118,7 @@ direct signal), **likely** (circumstantial) or **unknown**. Never invent one.
 | OAuth expired or logged out | `signals: auth`; the later session starts with /login | `claude setup-token` with `CLAUDE_CODE_OAUTH_TOKEN` exported to every launcher (WSLENV on the OMEN) |
 | Rate or usage limit | `signals: rate_limit`, `tail_api_error` | none, or a scheduling change; not a host bug |
 | Context exhausted | `signals: context` | earlier `/compact` or `/handoff`; not a revival candidate without compacting |
+| Remote Control dropped (process kept running) | `signals: remote_control`; `rc_disconnects` lists each "Remote Control disconnected — …" with its time. `last_ts` often *is* the disconnect, days before the process died | auth reason → the OAuth row; HTTP 403 on one thread → revive with `--fork-session` (a plain `--resume --remote-control` keeps getting 403) |
 | Network or VPN drop | `signals: network`; agenton shows a Wi-Fi change | none usually; mention it |
 | Killed or closed by hand | `signals: killed` or `interrupted`, no power event | none; ask the user whether it was on purpose |
 | WSL shut down (OMEN) | WSL uptime starts after `last_ts`; no Windows reboot | `vmIdleTimeout` / `instanceIdleTimeout`; launch RC from Windows, not inside WSL |
