@@ -7,6 +7,7 @@ import tempfile
 import time
 import subprocess
 import unittest
+from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
 
@@ -114,6 +115,50 @@ class SchedulerTest(unittest.TestCase):
         s.observe_completed(self.store, self.root)
         self.assertEqual(self.store.get('eligibility:a')['fingerprint'], 'older-inputs')
         self.assertEqual(self.decide()['decision'], 'plan')
+
+    def test_repeated_no_item_yields_back_off_until_inputs_change(self):
+        fingerprint = self.decide()['fingerprint']
+        rows = []
+        for stamp in ('20261112-100001', '20261112-100002'):
+            self.store.attempt(stamp, 'a')
+            self.store.set('eligibility_at_start:' + stamp, fingerprint)
+            rows.append({'stamp': stamp, 'assigned_repo': 'a', 'action': 'blocked_no_item',
+                         'outcome': 'yielded', 'worker_exit': 0, 'item': None, 'linear_id': None,
+                         'finished_at': datetime.fromtimestamp(10000).isoformat()})
+        (self.root / 'runs.jsonl').write_text(''.join(json.dumps(r) + '\n' for r in rows))
+        # Existing observed rows from before this fix must be recovered once too.
+        for row in rows:
+            self.store.set('observed:' + row['stamp'], s.digest(row))
+        with patch.object(s.time, 'time', return_value=10000):
+            s.observe_completed(self.store, self.root)
+            s.observe_completed(self.store, self.root)
+        state = self.store.get('no_item_yield:a')
+        self.assertEqual((state['count'], state['not_before']), (2, 13600))
+        self.assertEqual(self.decide()['decision'], 'wait')
+        self.write([{'id': 'DEV-1', 'labels': ['repo/a'], 'human_comments_sha': 'new'}])
+        self.assertEqual(self.decide()['decision'], 'plan')
+        self.assertEqual(s.policy(self.store, ['b'], self.snapshot, now=10000)[0]['decision'], 'plan')
+
+    def test_no_item_yield_hold_does_not_block_actual_saved_assignment(self):
+        fp = self.decide()['fingerprint']
+        self.store.set('no_item_yield:a', {'fingerprint': fp, 'not_before': 20000})
+        self.store.register({'repo': 'a', 'action': 'resume_worker', 'item': 'DEV-1'}, '20261112-100000')
+        self.assertEqual(self.decide()['decision'], 'resume')
+
+    def test_no_item_yields_repeat_even_if_fingerprints_changed_between_attempts(self):
+        current = self.decide()['fingerprint']
+        records = []
+        for stamp, fingerprint in [('20261112-100001', 'older'), ('20261112-100002', current)]:
+            self.store.attempt(stamp, 'a')
+            self.store.set('eligibility_at_start:' + stamp, fingerprint)
+            records.append({'stamp': stamp, 'assigned_repo': 'a', 'action': 'blocked_no_item',
+                            'outcome': 'yielded', 'worker_exit': 0,
+                            'finished_at': datetime.fromtimestamp(10000).isoformat()})
+        (self.root / 'runs.jsonl').write_text(''.join(json.dumps(r) + '\n' for r in records))
+        with patch.object(s.time, 'time', return_value=10000):
+            s.observe_completed(self.store, self.root)
+        self.assertEqual(self.store.get('no_item_yield:a')['count'], 2)
+        self.assertEqual(self.decide()['decision'], 'wait')
 
     def test_daily_planning_cap_counts_unrecorded_attempts(self):
         stamp = time.strftime('%Y%m%d')

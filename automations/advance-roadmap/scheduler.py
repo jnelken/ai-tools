@@ -38,6 +38,7 @@ def policy(store, repos, snapshot, now=None, daily_limit=True):
                                      batch.shared.HERE.parents[1] / 'skills/advance-roadmap')
         hold = store.hold(repo, now)
         active = [w for w in store.list(repo) if w['state'] != 'done']
+        no_item = store.get('no_item_yield:' + repo, {})
         changed_human = any(w['state'] == 'human' and human_changed(store, w, snapshot_data) for w in active)
         capped = daily_limit and repo not in daily_admission(store, [repo])
         if capped:
@@ -46,6 +47,8 @@ def policy(store, repos, snapshot, now=None, daily_limit=True):
             decision, reason = 'wait', hold['reason'] or hold['state']
         elif active or batch.pending_action(repo):
             decision, reason = 'resume', 'unfinished assignment is eligible; reuse checkpoint before planning'
+        elif no_item.get('fingerprint') == fp and no_item.get('not_before', 0) > now:
+            decision, reason = 'wait', 'repeated bookkeeping yields without an assignment or input change'
         elif cached.get('fingerprint') == fp and now - cached.get('checked', 0) < 72 * 3600:
             decision, reason = 'wait', 'inputs unchanged; wake on relevant change or 72-hour safety audit'
         else:
@@ -73,11 +76,32 @@ def observe_completed(store, root):
     for row in rows(root / 'runs.jsonl'):
         stamp = row.get('stamp') or ''
         signature = digest(row)
+        repo = row.get('assigned_repo') or assignments.get(stamp)
+        fingerprint = store.get('eligibility_at_start:' + stamp)
+        no_item = (repo and fingerprint and row.get('outcome') == 'yielded'
+                   and row.get('action') in {'blocked_no_item', 'nothing_qualified'}
+                   and not row.get('item') and not row.get('linear_id') and row.get('worker_exit') == 0)
+        if no_item and store.get('observed_no_item:' + stamp) != signature:
+            prior = store.get('no_item_yield:' + repo, {})
+            # A late completion must not replace a newer observation.
+            if stamp > prior.get('stamp', ''):
+                try:
+                    completed = datetime.fromisoformat(row['finished_at']).timestamp()
+                except (KeyError, ValueError, TypeError):
+                    completed = time.time()
+                # Unrelated branch or checkout changes can alter the input fingerprint
+                # while each run still finds no assignment. They must not reset the
+                # repetition count, though later input changes should wake the repo.
+                age = completed - prior.get('completed', 0)
+                count = prior.get('count', 0) + 1 if 0 <= age <= 24 * 3600 else 1
+                delay = min(24 * 3600, 3600 * 2 ** min(max(count - 2, 0), 5)) if count >= 2 else 0
+                store.set('no_item_yield:' + repo, {'fingerprint': fingerprint, 'count': count,
+                                                   'stamp': stamp, 'completed': completed,
+                                                   'not_before': completed + delay})
+            store.set('observed_no_item:' + stamp, signature)
         if store.get('observed:' + stamp) == signature:
             continue
         store.set('observed:' + stamp, signature)
-        repo = row.get('assigned_repo') or assignments.get(stamp)
-        fingerprint = store.get('eligibility_at_start:' + stamp)
         if not fingerprint:
             continue  # historical or uncorrelated fingerprints cannot establish a new cache
         outcome = row.get('outcome')
