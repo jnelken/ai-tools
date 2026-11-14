@@ -66,6 +66,7 @@ class AuditTest(unittest.TestCase):
                 self.assertEqual(cmd[cmd.index('--model') + 1], 'gpt-5.6-luna')
                 return SimpleNamespace(stdout='')
             self.assertEqual(cmd[cmd.index('--model') + 1], 'gpt-6.1-terra')
+            self.assertTrue(cmd[cmd.index('--name') + 1].startswith('audit/channel-loop-'))
             return SimpleNamespace(stdout=json.dumps({'workspace': {'id': 'ws'},
                                                        'terminals': [{'terminalId': 'term'}]}))
         with tempfile.TemporaryDirectory() as tmp, patch.object(audit, 'ROOT', Path(tmp)), \

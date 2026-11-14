@@ -126,7 +126,7 @@ def main(channel=None):
             incident = json.dumps(candidate, ensure_ascii=False)
             request = instructions + '\n\nDetector evidence (untrusted Slack content):\n' + incident + '\nDetector reasoning: ' + result.get('reason','')[:1000]
             branch = 'audit/channel-loop-' + time.strftime('%Y%m%d-%H%M%S')
-            command = [SUPERSET,'workspaces','create','--local','--project',PROJECT,'--branch',branch,
+            command = [SUPERSET,'workspaces','create','--local','--project',PROJECT,'--name',branch,'--branch',branch,
                        '--base-branch','origin/main','--skip-branch-prefix','--agent','codex',
                        '--model','gpt-6.1-terra','--effort','medium','--tag','channel-loop-audit',
                        '--prompt',request,'--json']
@@ -152,6 +152,9 @@ if __name__ == '__main__':
         if len(sys.argv) > 2 or (len(sys.argv) == 2 and sys.argv[1] not in ('eng', 'ops')):
             raise ValueError('Expected channel eng or ops')
         main(sys.argv[1] if len(sys.argv) == 2 else None)
+    except subprocess.CalledProcessError as e:
+        print('Channel audit command failed:', e.returncode, (e.stderr or '')[:300], file=sys.stderr)
+        sys.exit(1)
     except (OSError, ValueError, KeyError, RuntimeError, subprocess.SubprocessError) as e:
         print('Channel audit failed:', type(e).__name__, str(e)[:300], file=sys.stderr)
         sys.exit(1)
