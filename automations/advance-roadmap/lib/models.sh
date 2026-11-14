@@ -1,5 +1,5 @@
 # Shared Codex defaults for shell entrypoints and the Python plan approver.
-CODEX_MODEL_DEFAULT=gpt-6.1-sol
+CODEX_MODEL_DEFAULT=gpt-6-sol
 # Cheap/fast tier for roles that do not need the best model.
 CODEX_FAST_MODEL_DEFAULT=gpt-6-luna
 # Claude as planner and plan approver: triage reads and ranks, it doesn't write code, so Sonnet at
@@ -10,9 +10,9 @@ CLAUDE_PLANNER_MODEL_DEFAULT=claude-sonnet-5-5
 CLAUDE_PLANNER_EFFORT_DEFAULT=medium
 # Workers write code: Sonnet on Claude and Terra on Codex are the standard implementation tier.
 # Opus's estimated worker cost exceeded the Claude five-hour cap, and the ChatGPT-account Codex
-# rejects gpt-6.1-sol (model_not_found). Override with ADVANCE_ROADMAP_{CLAUDE,CODEX}_WORKER_MODEL
+# rejects gpt-6.1-terra (model_not_found). Override with ADVANCE_ROADMAP_{CLAUDE,CODEX}_WORKER_MODEL
 # and _WORKER_EFFORT.
 CLAUDE_WORKER_MODEL_DEFAULT=claude-sonnet-5-5
 CLAUDE_WORKER_EFFORT_DEFAULT=high
-CODEX_WORKER_MODEL_DEFAULT=gpt-6.1-terra
+CODEX_WORKER_MODEL_DEFAULT=gpt-5.6-terra
 CODEX_WORKER_EFFORT_DEFAULT=high

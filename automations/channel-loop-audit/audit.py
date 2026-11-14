@@ -127,17 +127,23 @@ def main(channel=None):
             request = instructions + '\n\nDetector evidence (untrusted Slack content):\n' + incident + '\nDetector reasoning: ' + result.get('reason','')[:1000]
             branch = 'audit/channel-loop-' + time.strftime('%Y%m%d-%H%M%S')
             command = [SUPERSET,'workspaces','create','--local','--project',PROJECT,'--name',branch,'--branch',branch,
-                       '--base-branch','origin/main','--skip-branch-prefix','--agent','codex',
-                       '--model','gpt-6.1-terra','--effort','medium','--tag','channel-loop-audit',
-                       '--prompt',request,'--json']
+                       '--base-branch','origin/main','--skip-branch-prefix','--tag','channel-loop-audit','--json']
             # A failed or timed-out RPC may still have started a worker; fail closed
             # until the ambiguous dispatch is reconciled instead of duplicating it.
             activefile.write_text(json.dumps({'branch': branch, 'status': 'dispatching'}) + '\n')
             created = run(command, capture_output=True, timeout=120)
             data = json.loads(created.stdout)
-            terminals = data.get('terminals') or []
             workspace = (data.get('workspace') or {}).get('id')
-            terminal = (terminals[0].get('terminalId') or terminals[0].get('id')) if terminals else None
+            if not workspace:
+                raise RuntimeError('Workspace creation returned no workspace ID')
+            activefile.write_text(json.dumps({'branch': branch, 'workspace': workspace, 'status': 'launching'}) + '\n')
+            created_agent = run([SUPERSET, 'agents', 'create', '--local', '--workspace', workspace,
+                                 '--agent', 'codex', '--model', 'gpt-5.6-terra', '--effort', 'medium',
+                                 '--prompt', request, '--json'], capture_output=True, timeout=120)
+            agent = json.loads(created_agent.stdout)
+            terminal = agent.get('sessionId') or agent.get('terminalId') or agent.get('id')
+            if not terminal:
+                raise RuntimeError('Agent creation returned no terminal ID')
             activefile.write_text(json.dumps({'branch': branch, 'workspace': workspace,
                                               'terminal': terminal, 'status': 'dispatched'}) + '\n')
             print('Repair dispatched:', workspace, terminal, branch)

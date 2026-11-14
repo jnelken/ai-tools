@@ -65,14 +65,15 @@ class AuditTest(unittest.TestCase):
                     {'action': 'investigate', 'reason': 'confirmed loop', 'signature': signature}))
                 self.assertEqual(cmd[cmd.index('--model') + 1], 'gpt-5.6-luna')
                 return SimpleNamespace(stdout='')
-            self.assertEqual(cmd[cmd.index('--model') + 1], 'gpt-6.1-terra')
-            self.assertTrue(cmd[cmd.index('--name') + 1].startswith('audit/channel-loop-'))
-            return SimpleNamespace(stdout=json.dumps({'workspace': {'id': 'ws'},
-                                                       'terminals': [{'terminalId': 'term'}]}))
+            if cmd[1:3] == ['workspaces', 'create']:
+                self.assertTrue(cmd[cmd.index('--name') + 1].startswith('audit/channel-loop-'))
+                return SimpleNamespace(stdout=json.dumps({'workspace': {'id': 'ws'}}))
+            self.assertEqual(cmd[cmd.index('--model') + 1], 'gpt-5.6-terra')
+            return SimpleNamespace(stdout=json.dumps({'sessionId': 'term'}))
         with tempfile.TemporaryDirectory() as tmp, patch.object(audit, 'ROOT', Path(tmp)), \
                 patch.object(audit, 'run', side_effect=execute) as run:
             audit.main()
-            self.assertEqual(run.call_count, 3)
+            self.assertEqual(run.call_count, 4)
             active = json.loads((Path(tmp)/'active-repair.json').read_text())
             self.assertEqual((active['workspace'], active['terminal']), ('ws', 'term'))
 
