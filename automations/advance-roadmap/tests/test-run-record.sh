@@ -79,6 +79,7 @@ res='{"outcome":"shipped","provider":"cursor","repo":"demo","item":"DEV-1 thing"
 case "$FAKE_WORKER" in
   file)  print -r -- "$res" > "$rf"; print "=== advance-roadmap exit=2 finished (decoy) ==="
          print -r -- '{"type":"result","result":"done","session_id":"cursor-session-1","usage":{"inputTokens":100,"outputTokens":50,"cacheReadTokens":900,"cacheWriteTokens":10}}' ;;
+  bookkeeping) print -r -- '{"outcome":"bookkeeping","provider":"cursor","repo":"demo","summary":"blocker recorded"}' > "$rf" ;;
   # No result file: the fence is only in the CLI's JSON final answer.
   fence) python3 -c 'import json, sys; print(json.dumps({"type": "result", "result": "```WORKER_RESULT_JSON\n" + sys.argv[1] + "\n```"}))' "$res" ;;
   # An echoed WORKER.md example on the transcript, and a final answer without a fence.
@@ -304,9 +305,9 @@ TEST_SLACKAGENT_DIR="$mock_slack" TEST_POSTS="$TMP/slack-posts" SLACK_BOT_TOKEN=
   ADVANCE_ROADMAP_CONTINUOUS=1 ADVANCE_ROADMAP_BATCH_PID=$$ ADVANCE_ROADMAP_LANE=1 \
   FAKE_NO_PLANNER=1 run good file
 check "continuous quota skip sends one run summary" "$(cat "$TMP/slack-posts")" skipped-quota
-ADVANCE_ROADMAP_CONTINUOUS=1 run noitem fail
-check "continuous no-item result launches no worker" "$(last worker)" none
+ADVANCE_ROADMAP_CONTINUOUS=1 run noitem bookkeeping
+check "continuous no-item result runs one bookkeeping worker" "$(last worker)" cursor
 check "continuous no-item remains a scheduling result" "$(last outcome)" blocked-no-item
 last_stamp="$(last stamp)"
-[ -f "$ROOT/runs/$last_stamp/bookkeeping-deferred" ] || { echo "FAIL: proposed bookkeeping not retained"; exit 1; }
+[ ! -f "$ROOT/runs/$last_stamp/bookkeeping-deferred" ] || { echo "FAIL: bookkeeping remained deferred"; exit 1; }
 echo "all passed"

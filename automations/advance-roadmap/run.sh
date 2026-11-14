@@ -1029,18 +1029,6 @@ PY
     echo "(no-op no-work result: nothing to post, bookkeeping worker skipped)"
   fi
 
-  # In continuous mode a no-item planner result is a scheduling decision, not
-  # a new model assignment. Preserve proposed bookkeeping for later review.
-  if [ "${ADVANCE_ROADMAP_CONTINUOUS:-0}" = 1 ] && [ ! -f "$RUN_DIR/bookkeeping-skipped" ] \
-     && [[ "$(jq -r '.action // empty' "$ORCH_RESULT" 2>/dev/null)" == (blocked_no_item|nothing_qualified) ]]; then
-    : > "$RUN_DIR/bookkeeping-skipped"
-    : > "$RUN_DIR/bookkeeping-deferred"
-    python3 "$MEMORY_PY" append-ledger --repo "${TARGET_REPO:-none}" --stamp "$STAMP" \
-      --outcome "$(jq -r '.outcome_token // "blocked-no-item"' "$ORCH_RESULT")" \
-      --detail "no assignment; planner bookkeeping retained for later review" >> "$LOG" 2>&1 || true
-    echo "(no assignment: bookkeeping deferred; no worker launched)"
-  fi
-
   if [ -n "$BATCH_PID" ] && [ ! -f "$RUN_DIR/bookkeeping-skipped" ]; then
     # Persist the plan before announcing readiness. No implementation/bookkeeping model runs
     # until every planner finishes and the controller releases this slot in the finite batch.
