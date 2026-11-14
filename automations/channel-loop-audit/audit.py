@@ -53,17 +53,18 @@ def run(args, **kwargs):
     return subprocess.run(args, check=True, text=True, timeout=kwargs.pop('timeout', 120), **kwargs)
 
 
-def main():
+def main(channel=None):
     ROOT.mkdir(mode=0o700, parents=True, exist_ok=True)
     os.chmod(ROOT, 0o700)
     with (ROOT / 'audit.lock').open('a') as lock:
-        try:
-            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            print('Another channel audit is active; skipping.')
-            return
-        raw = run(['/opt/homebrew/bin/node', str(HERE / 'fetch.mjs')], capture_output=True).stdout
-        candidates = groups(json.loads(raw))
+        # Queue scans rather than drop a channel's trigger while another scan runs.
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        fetch = ['/opt/homebrew/bin/node', str(HERE / 'fetch.mjs')]
+        if channel:
+            fetch.append(channel)
+        raw = run(fetch, capture_output=True).stdout
+        channels = json.loads(raw)
+        candidates = groups({channel: channels.get(channel, [])} if channel else channels)
         if not candidates:
             print('No repeated messages in #eng or #ops; no model invoked.')
             return
@@ -142,7 +143,9 @@ def main():
 
 if __name__ == '__main__':
     try:
-        main()
+        if len(sys.argv) > 2 or (len(sys.argv) == 2 and sys.argv[1] not in ('eng', 'ops')):
+            raise ValueError('Expected channel eng or ops')
+        main(sys.argv[1] if len(sys.argv) == 2 else None)
     except (OSError, ValueError, KeyError, RuntimeError, subprocess.SubprocessError) as e:
         print('Channel audit failed:', type(e).__name__, str(e)[:300], file=sys.stderr)
         sys.exit(1)

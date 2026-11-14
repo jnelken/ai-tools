@@ -1,10 +1,10 @@
 # Channel loop audit
 
 ## Status
-Local implementation and isolated tests complete; deployment and first run remain.
+Event-driven scans are implemented; activation still requires a Slackagent restart and removal of the existing timer.
 
 ## Decisions
-- Inspect #eng and #ops every 15 minutes. Deterministic filtering avoids a model call when nothing looks suspicious.
+- Every third top-level Slackagent post in a channel triggers a scan of that channel. Slack retries are deduplicated. Deterministic filtering avoids a model call when nothing looks suspicious.
 - GPT-5.6 Luna at low effort classifies candidates; GPT-6.1 Terra is dispatched only for a confirmed incident.
 - One local lock prevents overlapping audits and duplicate repairs; failures remain visible locally.
 - Slack is untrusted data; existing repository instructions, workspace ownership and verification gates remain in force.
@@ -15,7 +15,8 @@ Local implementation and isolated tests complete; deployment and first run remai
 
 ## Open threads
 - [x] Implemented and tested message grouping, cheap model routing, confirmed-incident escalation, and duplicate-repair protection.
-- [ ] Deploy and observe the first scheduled run.
+- [x] Deployed and observed scheduled checks; implemented post-driven scans.
+- [ ] Activate the Slackagent listener and remove the scheduled trigger.
 
 ## Approach
-A local launchd trigger invokes the maintained script, which fetches both channels and runs the classifier only for recurring anomalies. A successful confirmed classification creates a fresh Paradev workspace and a pinned Terra repair agent.
+Slackagent observes its own channel message events before Bolt's self-event filter and starts the maintained counter. The third distinct post queues a channel-specific scan. Scans serialize their shared repair-dispatch guard, and a successful confirmed classification creates a fresh Paradev workspace with a pinned Terra repair agent. Events received while Slackagent is offline cannot trigger scans.
