@@ -13,6 +13,20 @@ spec.loader.exec_module(audit)
 
 
 class AuditTest(unittest.TestCase):
+    def test_idle_repair_releases_guard_only_with_its_explicit_completed_outcome(self):
+        with tempfile.TemporaryDirectory() as tmp, patch.object(audit, 'ROOT', Path(tmp)):
+            active = {'branch': 'audit/example'}
+            self.assertFalse(audit.repair_settled(active, 'idle'))
+            self.assertFalse(audit.repair_settled(active, 'exited'))
+            p = audit.outcome_path(active['branch'])
+            p.parent.mkdir()
+            for outcome, expected in [({'branch': 'other', 'status': 'resolved'}, False),
+                                      ({'branch': active['branch'], 'status': 'blocked'}, False),
+                                      ({'branch': active['branch'], 'status': 'resolved'}, True)]:
+                p.write_text(json.dumps(outcome))
+                self.assertEqual(audit.repair_settled(active, 'idle'), expected)
+            self.assertFalse(audit.repair_settled(active, 'working'))
+
     def test_groups_only_repeated_messages_within_one_channel_and_window(self):
         def m(ts, text): return {'ts': str(ts), 'text': text}
         data = {'eng': [m(1, 'repo skipped at 10:01'), m(100, 'repo skipped at 10:02'),

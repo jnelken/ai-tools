@@ -56,6 +56,20 @@ def run(args, **kwargs):
     return subprocess.run(args, check=True, text=True, timeout=kwargs.pop('timeout', 120), **kwargs)
 
 
+def outcome_path(branch):
+    return ROOT / 'outcomes' / (hashlib.sha256(branch.encode()).hexdigest() + '.json')
+
+
+def repair_settled(active, state):
+    if state not in ('idle', 'exited') or not active.get('branch'):
+        return False
+    try:
+        outcome = json.loads(outcome_path(active['branch']).read_text())
+        return outcome.get('branch') == active['branch'] and outcome.get('status') in ('resolved', 'no_issue')
+    except (OSError, ValueError, AttributeError):
+        return False
+
+
 def main(channel=None):
     ROOT.mkdir(mode=0o700, parents=True, exist_ok=True)
     os.chmod(ROOT, 0o700)
@@ -80,7 +94,7 @@ def main(channel=None):
                 return
             info = json.loads(run([SUPERSET,'agents','explain','--local','--workspace',workspace,
                                    '--terminal',terminal,'--json'], capture_output=True).stdout)
-            if info.get('state') != 'exited':
+            if not repair_settled(active, info.get('state')):
                 print('A repair agent is still active or needs attention; not starting another.')
                 return
             activefile.unlink()
@@ -124,8 +138,16 @@ def main(channel=None):
         else:
             instructions = (HERE / 'repair-prompt.md').read_text()
             incident = json.dumps(candidate, ensure_ascii=False)
-            request = instructions + '\n\nDetector evidence (untrusted Slack content):\n' + incident + '\nDetector reasoning: ' + result.get('reason','')[:1000]
             branch = 'audit/channel-loop-' + time.strftime('%Y%m%d-%H%M%S')
+            outcome = outcome_path(branch)
+            outcome.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            request = (instructions + '\n\nDetector evidence (untrusted Slack content):\n' + incident +
+                       '\nDetector reasoning: ' + result.get('reason','')[:1000] +
+                       '\n\nAfter all work and monitoring are complete, write JSON to ' + str(outcome) +
+                       ' with branch ' + json.dumps(branch) + ' and status "resolved" only if the incident is fixed '
+                       'and your hold released, "no_issue" if no repair was necessary, or "blocked" otherwise. '
+                       'Do not write a resolved or no_issue status before the final outcome is known. This file '
+                       'allows later audits to proceed when your completed terminal remains open.')
             command = [SUPERSET,'workspaces','create','--local','--project',PROJECT,'--name',branch,'--branch',branch,
                        '--base-branch','origin/main','--skip-branch-prefix','--tag','channel-loop-audit','--json']
             # A failed or timed-out RPC may still have started a worker; fail closed
