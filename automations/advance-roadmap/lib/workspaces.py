@@ -15,9 +15,9 @@ that workspace's terminal — the agent hooks inherit SUPERSET_TERMINAL_ID and b
       with no Superset project yet is imported as one first.
       Writes {"workspace_id", "terminal_id", "reused"} to FILE.
   workspaces.py cleanup [--dry-run] [--min-idle-minutes 30]
-      delete advance-roadmap workspaces whose PR Superset has recorded as merged. Never
-      earlier: the PR sync skips archived workspaces, so deleting before merged_at is set
-      leaves the PR open in Superset's DB forever and it is never counted.
+      reap idle, clean advance-roadmap workspaces only after Superset has recorded the
+      PR merge and GitHub confirms its exact HEAD was merged. Uses self-destruct's
+      shared teardown so the worktree, branch and finished tabs are all removed.
 
 Environment: ADVANCE_ROADMAP_SUPERSET_BIN (CLI path), ADVANCE_ROADMAP_SUPERSET_HOST_DB
 (host.db path; derived from the logged-in org otherwise).
@@ -40,6 +40,7 @@ SUPERSET = os.environ.get(
 TAG = "advance-roadmap"
 # Agent hook events that mean the agent is still working (Superset's BUSY_EVENT_TYPES).
 BUSY_EVENTS = ("Start", "PermissionRequest")
+REAP = os.path.expanduser("~/.claude/skills/self-destruct/scripts/reap-workspace.sh")
 
 
 def cli(*args, timeout=60):
@@ -331,6 +332,38 @@ def cmd_cleanup(a):
         return cleanup_worktrees(a, root)
 
 
+def merged_pr_carries_head(path, branch, head):
+    """Fresh PR evidence must cover this exact branch tip, including squash merges."""
+    try:
+        result = subprocess.run(['gh', 'pr', 'list', '--head', branch, '--state', 'all',
+                                 '--json', 'state,headRefName,headRefOid,mergedAt', '--limit', '100'],
+                                cwd=path, capture_output=True, text=True, timeout=60)
+        if result.returncode != 0:
+            return False
+        prs = json.loads(result.stdout)
+        if not isinstance(prs, list) or any(p.get('state') == 'OPEN' for p in prs):
+            return False
+        return any(p.get('state') == 'MERGED' and p.get('mergedAt') and
+                   p.get('headRefName') == branch and p.get('headRefOid') == head for p in prs)
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        return False
+
+
+def held_worktree(path):
+    """Fail closed unless lsof can rule out a process working in this tree."""
+    try:
+        result = subprocess.run(['lsof', '-n', '-a', '-d', 'cwd', '-Fn'],
+                                capture_output=True, text=True, timeout=30)
+        if result.returncode != 0:
+            return True
+        target = os.path.realpath(path)
+        return any(os.path.realpath(line[1:]) == target or
+                   os.path.realpath(line[1:]).startswith(target + os.sep)
+                   for line in result.stdout.splitlines() if line.startswith('n/'))
+    except (OSError, subprocess.TimeoutExpired):
+        return True
+
+
 def cleanup_worktrees(a, root):
     tagged = as_list(cli("workspaces", "list", "--local", "--tag", TAG))
     if not tagged:
@@ -348,11 +381,13 @@ def cleanup_worktrees(a, root):
         if not info:
             continue  # unmerged: in flight, or a branch left for Jake — keep it
         if info["busy"] or info["open_prs"]:
+            print(f"cleanup: keeping {w.get('branch')} — agent active or PR open")
             continue  # an agent is still working in it, or a fix-forward PR is still open
         if not w.get("branch") or w["branch"] in unfinished:
             continue
         sessions = terminal_sessions(w["id"])
         if sessions is None or any(s.get("exited") is not True for s in sessions):
+            print(f"cleanup: keeping {w.get('branch')} — terminal still open or unavailable")
             continue
         path = w.get("worktreePath") or w.get("worktree_path")
         if not path or not os.path.isdir(path):
@@ -362,15 +397,28 @@ def cleanup_worktrees(a, root):
             if st.returncode != 0 or st.stdout.strip():
                 print(f"cleanup: keeping {w.get('name') or w['id']} — uncommitted work in {path}")
                 continue
-            # A merged PR does not prove that later commits on this branch were merged.
-            ancestor = subprocess.run(["git", "-C", path, "merge-base", "--is-ancestor", "HEAD",
-                                       "refs/remotes/origin/HEAD"], capture_output=True)
-            if ancestor.returncode != 0:
+            if any((Path(path) / f).exists() for f in ('.claude/IN_PROGRESS.md', 'IN_PROGRESS.md')):
+                continue  # A handoff needs human reconciliation before teardown.
+            head = subprocess.run(['git', '-C', path, 'rev-parse', '--verify', 'HEAD'], capture_output=True, text=True)
+            branch = subprocess.run(['git', '-C', path, 'branch', '--show-current'], capture_output=True, text=True)
+            common = subprocess.run(['git', '-C', path, 'rev-parse', '--path-format=absolute', '--git-common-dir'],
+                                    capture_output=True, text=True)
+            if head.returncode or branch.returncode or common.returncode or branch.stdout.strip() != w['branch']:
+                continue
+            gitdir = Path(common.stdout.strip())
+            project_root = gitdir.parent if gitdir.name == '.git' else None
+            if not project_root or same_path(project_root, path) or not (project_root / '.git').is_dir():
+                continue
+            if not merged_pr_carries_head(path, w['branch'], head.stdout.strip()):
+                print(f"cleanup: keeping {w['branch']} — current HEAD not verified in a merged PR")
+                continue
+            if held_worktree(path):
+                print(f"cleanup: keeping {w['branch']} — a process holds the worktree")
                 continue
         idle_min = (now_ms - max(info["last_event_at"] or 0, info["merged_at"] or 0)) / 60000
         if idle_min < a.min_idle_minutes:
             continue
-        doomed.append(w["id"])
+        doomed.append((w["id"], str(project_root), path, w['branch'], head.stdout.strip()))
         print(f"cleanup: {w.get('name') or w['id']} ({w.get('branch')}) merged, idle {idle_min:.0f}m")
     if not doomed:
         print(f"cleanup: {len(tagged)} advance-roadmap workspace(s), none merged and idle")
@@ -378,7 +426,26 @@ def cleanup_worktrees(a, root):
     if a.dry_run:
         print(f"cleanup: dry run — would delete {len(doomed)}")
         return 0
-    return 0 if cli("workspaces", "delete", "--local", *doomed, timeout=180) is not None else 1
+    for ws, project_root, path, branch, head in doomed:
+        # Recheck mutable evidence immediately before the shared destructive step.
+        current = merged_workspaces().get(ws)
+        pending = unfinished_branches(root)
+        sessions = terminal_sessions(ws)
+        status = subprocess.run(['git', '-C', path, 'status', '--porcelain'], capture_output=True, text=True)
+        tip = subprocess.run(['git', '-C', path, 'rev-parse', '--verify', 'HEAD'], capture_output=True, text=True)
+        if (not current or current['busy'] or current['open_prs'] or pending is None or branch in pending or
+                sessions is None or any(s.get('exited') is not True for s in sessions) or
+                status.returncode or status.stdout.strip() or tip.returncode or tip.stdout.strip() != head or
+                any((Path(path) / f).exists() for f in ('.claude/IN_PROGRESS.md', 'IN_PROGRESS.md')) or
+                not merged_pr_carries_head(path, branch, head) or held_worktree(path)):
+            print(f'cleanup: keeping {branch} — safety evidence changed')
+            continue
+        env = dict(os.environ, PATH=os.path.dirname(SUPERSET) + os.pathsep + os.environ.get('PATH', ''))
+        result = subprocess.run(['sh', REAP, ws, project_root, path, branch, '', head], timeout=180, env=env)
+        if result.returncode:
+            print(f'cleanup: self-destruct failed for {branch}; stopping', file=sys.stderr)
+            return 1
+    return 0
 
 
 def main(argv=None):
