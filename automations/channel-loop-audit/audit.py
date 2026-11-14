@@ -21,7 +21,7 @@ SUPERSET = os.environ.get('CHANNEL_AUDIT_SUPERSET', '/Users/jake/.local/opt/para
 
 
 def groups(channels):
-    """Return repeated messages within 15 minutes, grouped per channel."""
+    """Return repeated messages within a day, grouped per channel."""
     out = []
     for channel, messages in channels.items():
         buckets = defaultdict(list)
@@ -36,11 +36,14 @@ def groups(channels):
             normalized = re.sub(r'https?://\S+', '<url>', text.lower())
             normalized = re.sub(r'\b\d+(?:[.:/-]\d+)*\b', '<n>', normalized)
             normalized = re.sub(r'\s+', ' ', normalized)[:500]
+            # A scheduler can cycle through repos while producing the same no-work outcome.
+            if re.search(r'no ticket selected\s*·\s*\*?blocked no item', normalized):
+                normalized = 'roadmap: no ticket selected; blocked no item'
             buckets[normalized].append((ts, text[:2500]))
         for normalized, values in buckets.items():
             values.sort()
             for index, (start, _) in enumerate(values):
-                window = [v for v in values[index:] if v[0] - start <= 900]
+                window = [v for v in values[index:] if v[0] - start <= 86400]
                 if len(window) >= 3:
                     out.append({'channel': channel, 'count': len(window),
                                 'signature': hashlib.sha256((channel + normalized).encode()).hexdigest(),

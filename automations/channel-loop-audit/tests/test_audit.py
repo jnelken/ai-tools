@@ -17,9 +17,14 @@ class AuditTest(unittest.TestCase):
         def m(ts, text): return {'ts': str(ts), 'text': text}
         data = {'eng': [m(1, 'repo skipped at 10:01'), m(100, 'repo skipped at 10:02'),
                         m(800, 'repo skipped at 10:03')],
-                'ops': [m(1, 'other error'), m(1000, 'other error'), m(2000, 'other error')]}
+                'ops': [m(1, 'other error'), m(90000, 'other error'), m(180000, 'other error')]}
         found = audit.groups(data)
         self.assertEqual([(x['channel'], x['count']) for x in found], [('eng', 3)])
+
+    def test_no_item_outcomes_across_repositories_count_as_one_pattern(self):
+        messages = [{'ts': str(t), 'text': f':no_entry_sign: *{repo}* · No ticket selected · *Blocked no item*'}
+                    for t, repo in [(100, 'one'), (10000, 'two'), (20000, 'three')]]
+        self.assertEqual(audit.groups({'eng': messages})[0]['count'], 3)
 
     def test_clean_run_uses_no_model_or_repair(self):
         with tempfile.TemporaryDirectory() as tmp, patch.object(audit, 'ROOT', Path(tmp)), \
