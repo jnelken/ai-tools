@@ -2,7 +2,7 @@
 
 ## Status
 
-Repair in progress; new starts are held by this audit session.
+Complete. The repair is deployed and the audit-owned hold has been removed.
 
 ## Decisions
 
@@ -23,8 +23,12 @@ Repair in progress; new starts are held by this audit session.
 - [x] Verify the scheduler’s effective mode and live work state — shadow is inactive/observational; quota scheduler is the active controller; no worker or lock was present.
 - [x] Compare the three run records and verdict inputs — identical inputs and outcome, with deferred bookkeeping as the trigger.
 - [x] Determine whether deployed guards already address the repetition — they do not cover pending bookkeeping.
-- [ ] Complete regression checks, deploy the repair, remove this session’s hold, and monitor a true scheduler tick without manually sending messages.
+- [x] Complete regression checks, deploy the repair, remove this session’s hold, and monitor a true scheduler tick without manually sending messages — PR #28 merged as `97f4193`; `~/.ai-tools/install.sh` deployed it locally. The first post-release quota tick started typey.site and mailcrush continuations, not koan-master; koan-master has no new run record after `20261114-045132` while those workers occupy both slots.
 
 ## Approach
 
 Settle the first continuous no-work bookkeeping pass instead of deferring it. The existing carried-verdict gate then suppresses unchanged planners; changed inputs still reopen triage.
+
+## Outcome
+
+Channel time range: 2026-11-13 22:45 through 2026-11-14 04:52 EST (plus the post-release observation at 12:00 EST). Evidence: three identical koan-master fingerprints and `blocked-no-item` verdicts; each continuous run deferred bookkeeping because the finite batch controller was unloaded. Confirmed incident: yes — `com.jake.advance-roadmap-quota`, not shadow mode, re-planned the same unchanged deferred verdict. Fix: continuous no-work results now run their one bookkeeping pass, so later unchanged ticks skip without another planner call. Regression coverage: focused replay test, the run-record end-to-end suite, shell syntax, and diff check passed. The hold owned by `channel-loop-audit/20261114-114702` was removed after deployment. No concrete blocker remains; two unrelated current workers hold the scheduler slots, and no koan-master re-selection occurred during observation.
