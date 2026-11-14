@@ -825,6 +825,17 @@ exec(compile(open(__file__).read(), __file__, "exec"))
         self.assertEqual([c["role"] for c in self.calls()], ["orchestrator", "orchestrator", "worker"])
         self.assertNotIn("bookkeeping_pending", json.loads(self.verdict.read_text()))
 
+    def test_continuous_no_work_with_a_blocker_settles_once_then_skips_unchanged_inputs(self):
+        self.usage_state(codex={"weekly": {"used_pct": 90, "reset_epoch": FUTURE}})
+        plan = {**NO_WORK, "blockers": [{"repo": "demo", "linear_id": "DEV-7", "detail": "needs a decision"}]}
+        first = self.run_lane(ADVANCE_ROADMAP_CONTINUOUS="1", FAKE_CLAUDE="plan", FAKE_PLAN=json.dumps(plan))
+        self.assertFalse((first / "bookkeeping-deferred").exists())
+        self.assertNotIn("bookkeeping_pending", json.loads(self.verdict.read_text()))
+        self.run_lane(ADVANCE_ROADMAP_CONTINUOUS="1", FAKE_CLAUDE="plan", FAKE_PLAN=json.dumps(plan))
+        self.assertEqual(self.record()["outcome"], "skipped-unchanged")
+        self.assertEqual([call["role"] for call in self.calls()], ["orchestrator", "worker"])
+        self.assertNotIn("bookkeeping_pending", json.loads(self.verdict.read_text()))
+
     def test_a_canceled_dispatch_plan_saves_no_verdict(self):
         self.usage_state(codex={"weekly": {"used_pct": 90, "reset_epoch": FUTURE}})
         self.verdict.write_text(json.dumps({"stamp": "20261012-103001", "decided_at": "2026-10-28T10:00:00",
