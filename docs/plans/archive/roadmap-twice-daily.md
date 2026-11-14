@@ -1,5 +1,7 @@
 # Twice-daily roadmap batches
 
+> **Status:** Implemented before 2026-11-14; archived by advance-roadmap. Evidence: commit 27c16b0 (10:30 and 15:30 batch slots with carried work first) and aa4a683 (deployment verification); the plan marks every thread complete.
+
 ## Status
 
 Complete. Committed, pushed, installed and activated on 2026-11-10.

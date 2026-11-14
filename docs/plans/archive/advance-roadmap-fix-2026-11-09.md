@@ -1,5 +1,7 @@
 # Advance-roadmap batch error triage and fix
 
+> **Status:** Implemented before 2026-11-14; archived by advance-roadmap. Evidence: commit b1f8838 (Cursor removed from roadmap worker routing) and 76afd5a (closeout); every thread is checked.
+
 ## Status
 
 Complete: implementation and verification passed; merged and pushed to `main`; local deploy synced.

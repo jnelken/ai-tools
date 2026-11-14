@@ -1,5 +1,7 @@
 # Accurate roadmap recovery notices
 
+> **Status:** Implemented before 2026-11-14; archived by advance-roadmap. Evidence: commit d1c3043 (recovery notices require matching worker success); every thread is checked.
+
 ## Status
 
 Implemented and verified. The owner explicitly approved delivery; deployment uses the normal push and installer path.

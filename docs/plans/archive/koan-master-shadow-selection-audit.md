@@ -1,5 +1,7 @@
 # Koan Master shadow selection audit
 
+> **Status:** Implemented before 2026-11-14; archived by advance-roadmap. Evidence: PR #28 merged as 97f4193 (7bd9c15 continuous no-work bookkeeping fix) and outcome record 062156a; every thread is checked.
+
 ## Status
 
 Complete. The repair is deployed and the audit-owned hold has been removed.
