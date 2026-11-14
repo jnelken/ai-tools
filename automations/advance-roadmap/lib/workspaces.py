@@ -445,6 +445,15 @@ def cleanup_worktrees(a, root):
         if result.returncode:
             print(f'cleanup: self-destruct failed for {branch}; stopping', file=sys.stderr)
             return 1
+        refs = subprocess.run(['git', '-C', project_root, 'show-ref', '--verify', '--quiet',
+                               f'refs/heads/{branch}'], capture_output=True)
+        remaining = cli('workspaces', 'list', '--local', '--tag', TAG)
+        valid_listing = isinstance(remaining, list) or (isinstance(remaining, dict) and
+            any(isinstance(remaining.get(key), list) for key in ('workspaces', 'items')))
+        if (os.path.exists(path) or refs.returncode != 1 or not valid_listing or
+                any(item.get('id') == ws for item in as_list(remaining))):
+            print(f'cleanup: could not verify complete removal of {branch}; stopping', file=sys.stderr)
+            return 1
     return 0
 
 

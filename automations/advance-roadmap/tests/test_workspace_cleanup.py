@@ -71,7 +71,7 @@ class CleanupTests(unittest.TestCase):
         def cli(*args, **kwargs):
             calls.append(args)
             if args[:2] == ('workspaces', 'list'):
-                return [workspace]
+                return [] if sum(c[:2] == ('workspaces', 'list') for c in calls) > 1 else [workspace]
             if args[:2] == ('terminals', 'list'):
                 return {'sessions': []}
             return {'ok': True}
@@ -83,6 +83,8 @@ class CleanupTests(unittest.TestCase):
             if cmd[0] == 'sh':
                 calls.append(tuple(cmd))
                 return SimpleNamespace(returncode=0, stdout='')
+            if 'show-ref' in cmd:
+                return SimpleNamespace(returncode=1, stdout='')
             if 'status' in cmd:
                 return SimpleNamespace(returncode=0, stdout='')
             if '--show-current' in cmd:
@@ -93,9 +95,10 @@ class CleanupTests(unittest.TestCase):
         info = {'ws': {'busy': 0, 'open_prs': 0, 'merged_at': 1, 'last_event_at': 0}}
         with patch.object(workspaces, 'cli', side_effect=cli), patch.object(workspaces, 'merged_workspaces', return_value=info), \
                 patch.object(workspaces, 'merged_pr_carries_head', return_value=True), \
-                patch.object(workspaces, 'held_worktree', return_value=False), patch.object(workspaces.subprocess, 'run', side_effect=run):
+                patch.object(workspaces, 'held_worktree', return_value=False), \
+                patch.object(workspaces.os.path, 'exists', return_value=False), patch.object(workspaces.subprocess, 'run', side_effect=run):
             workspaces.cleanup_worktrees(SimpleNamespace(min_idle_minutes=0, dry_run=False), self.root)
-        self.assertEqual(calls[-1], ('sh', workspaces.REAP, 'ws', str(self.root), str(tree), 'feature', '', 'abc'))
+        self.assertIn(('sh', workspaces.REAP, 'ws', str(self.root), str(tree), 'feature', '', 'abc'), calls)
 
     def test_pr_must_be_merged_and_carry_current_tip_with_no_open_pr(self):
         merged = {'state': 'MERGED', 'headRefName': 'feature', 'headRefOid': 'abc', 'mergedAt': '2026-01-01'}
