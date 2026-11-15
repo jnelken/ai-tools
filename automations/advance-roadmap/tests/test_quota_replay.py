@@ -604,6 +604,16 @@ exec(compile(open(__file__).read(), __file__, "exec"))
                            "branch": "roadmap/thing", "worker_mode": "standard", "work_kind": "feature",
                            "archives": [], "blockers": [], "considered": [], "summary": "do the thing"})
 
+    def test_ticket_first_rejects_planner_substitution(self):
+        self.usage_state()
+        plan = json.loads(self.worker_plan())
+        plan['linear_id'] = 'DEV-2'
+        run = self.run_lane(FAKE_CODEX='plan', FAKE_PLAN=json.dumps(plan),
+                            ADVANCE_ROADMAP_SELECTED_TICKETS='DEV-1 DEV-3')
+        self.assertFalse(any(c['role'] == 'worker' for c in self.calls()))
+        self.assertTrue((run / 'dispatch-rejected').exists())
+        self.assertIn('eligible ticket', (run / 'dispatch-rejected').read_text())
+
     def reviewer_row(self):
         (self.root / "review.sh").symlink_to(HERE / "review.sh")
         repo = self.dir / "reviewed"

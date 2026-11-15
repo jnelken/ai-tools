@@ -63,6 +63,38 @@ def set_schedule(store, **values):
     return record
 
 
+def eligible_tickets(snapshot):
+    """Rank actionable Linear candidates before mapping them to local repositories."""
+    if not snapshot.get('ok') or snapshot.get('truncated'):
+        return []
+    issues = [issue for issue in snapshot.get('issues', []) if isinstance(issue, dict) and issue.get('id')]
+    by_id = {issue['id']: issue for issue in issues}
+    candidates = []
+    for issue in issues:
+        if issue.get('state_type') not in ('backlog', 'unstarted', 'started') or str(issue.get('state', '')).lower() in ('needs input', 'paused'):
+            continue
+        labels = issue.get('labels') or []
+        if any(str(label).lower() in ('human-only', 'human only') for label in labels):
+            continue
+        if any(blocker not in by_id or by_id[blocker].get('state_type') not in ('completed', 'canceled')
+               for blocker in issue.get('blocked_by') or []):
+            continue
+        repo_labels = [label[5:] for label in labels if isinstance(label, str) and label.startswith('repo/')]
+        if len(repo_labels) != 1:
+            continue
+        priority = issue.get('priority')
+        rank = priority if isinstance(priority, int) and 1 <= priority <= 4 else 5
+        candidates.append((rank, issue['id'], repo_labels[0]))
+    return sorted(candidates)
+
+
+def tickets_by_repo(snapshot):
+    result = {}
+    for _, ticket, repo in eligible_tickets(snapshot):
+        result.setdefault(repo, []).append(ticket)
+    return result
+
+
 def choose_repos(store, code, snapshot, repos, live, now):
     unfinished = [w for w in store.list() if w['repo'] in repos and w['repo'] not in live
                   and w['state'] not in ('done', 'human') and w['not_before'] <= now]
@@ -73,12 +105,23 @@ def choose_repos(store, code, snapshot, repos, live, now):
         if work['repo'] not in seen:
             chosen.append((work['repo'], work))
             seen.add(work['repo'])
-    decisions = scheduler.policy(store, [repo for repo in repos if repo not in live], snapshot,
-                                 now=now, daily_limit=False)
-    for decision in decisions:
-        if decision['decision'] != 'wait' and decision['repo'] not in seen:
+    # Saved plans are also resumable work, even when their ticket has since closed.
+    pending_repos = [repo for repo in repos if repo not in live and repo not in seen
+                     and batch.pending_action(repo)]
+    for decision in scheduler.policy(store, pending_repos, snapshot, now=now, daily_limit=False):
+        if decision['decision'] == 'resume':
             chosen.append((decision['repo'], None))
             seen.add(decision['repo'])
+    # The snapshot is fetched before this point. Only map eligible tickets to a
+    # local repository after ranking them; missing or incomplete snapshots fail closed.
+    ticket_repos = tickets_by_repo(workqueue.read(snapshot, {}) or {})
+    available = [repo for repo in ticket_repos if repo in repos and repo not in live and repo not in seen]
+    decisions = {d['repo']: d for d in scheduler.policy(store, available, snapshot,
+                                                        now=now, daily_limit=False)}
+    for repo in available:
+        if decisions.get(repo, {}).get('decision') != 'wait' and repo in decisions:
+            chosen.append((repo, None))
+            seen.add(repo)
     return chosen
 
 
@@ -177,6 +220,11 @@ def _tick(root):
             directory.mkdir(parents=True, exist_ok=False)
             shutil.copyfile(snapshot, directory / 'linear-snapshot.json')
             job = batch.Batch(directory, [repo for repo, _ in chosen], lanes=2, threads=1)
+            selected_tickets = tickets_by_repo(workqueue.read(snapshot, {}) or {})
+            for item in job.state['queue']:
+                if (next((work for repo, work in chosen if repo == item['repo']), None) is None
+                        and not batch.pending_action(item['repo'])):
+                    item['selected_tickets'] = selected_tickets.get(item['repo'], [])
             marker = root / 'run.lock'
             marker.mkdir(exist_ok=True)
             (marker / 'pid').write_text(str(os.getpid()))

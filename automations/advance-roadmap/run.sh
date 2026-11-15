@@ -678,6 +678,11 @@ This is lane $LANE of a parallel window (ORCHESTRATOR.md, *Parallel lanes*).
 Busy repos — other lanes are working in them right now; skip them entirely: ${BUSY_REPOS:-none}
 In-flight run stamps — still running, never interrupted: ${INFLIGHT_STAMPS:-none}"
   fi
+  if [ -n "${ADVANCE_ROADMAP_SELECTED_TICKETS:-}" ]; then
+    ORCH_PROMPT="$ORCH_PROMPT
+
+The scheduler selected these Linear tickets before selecting this repository, in priority order: ${ADVANCE_ROADMAP_SELECTED_TICKETS}. Assess them in order and select only an actionable ticket from this list; if none is actionable, return blocked_no_item."
+  fi
   if [ -n "$TARGET_REPO" ]; then
     ORCH_PROMPT="$ORCH_PROMPT
 
@@ -985,6 +990,8 @@ if r.get("action") in ("dispatch_worker", "resume_worker"):
         why = f"orchestrator asked for a {r.get('work_kind')!r} pass, which advance-roadmap no longer runs"
     elif not repo or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", repo) or not os.path.isdir(os.path.join(code, repo)):
         why = f"orchestrator named an invalid repo {repo!r}"
+    elif os.environ.get('ADVANCE_ROADMAP_SELECTED_TICKETS') and r.get('linear_id') not in os.environ['ADVANCE_ROADMAP_SELECTED_TICKETS'].split():
+        why = 'orchestrator did not select an eligible ticket from the scheduler list'
     elif repo in busy:
         why = f"orchestrator picked {repo}, which another lane holds"
     elif target and repo != target:

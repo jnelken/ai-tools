@@ -620,6 +620,8 @@ class Batch:
                "ADVANCE_ROADMAP_BATCH_SNAPSHOT": str(self.directory / "linear-snapshot.json"),
                "ADVANCE_ROADMAP_INFLIGHT_STAMPS": " ".join(i["stamp"] for i in self.state["queue"]),
                "ADVANCE_ROADMAP_LAST_VERDICT": str(self.verdict_path(item))}
+        if item.get('selected_tickets'):
+            env['ADVANCE_ROADMAP_SELECTED_TICKETS'] = ' '.join(item['selected_tickets'])
         if getattr(self.budget, 'incremental', False):
             env['ADVANCE_ROADMAP_INCREMENTAL'] = '1'
         allocation = item.get("allocation") or {}

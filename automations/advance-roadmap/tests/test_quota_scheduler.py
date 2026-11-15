@@ -25,6 +25,42 @@ class QuotaSchedulerTest(unittest.TestCase):
         self.snapshot = self.root / 'snapshot.json'
         self.snapshot.write_text('{"ok": true, "issues": []}')
 
+    def test_ticket_first_ranking_excludes_blocked_human_and_unrouted(self):
+        def issue(id, repo, priority=0, **kw):
+            return {'id': id, 'state': 'Todo', 'state_type': 'unstarted', 'priority': priority,
+                    'labels': ['repo/' + repo] if repo else [], **kw}
+        snap = {'ok': True, 'issues': [
+            issue('DEV-2', 'z', 2), issue('DEV-1', 'a', 1),
+            issue('DEV-3', 'a', 0), issue('DEV-4', None, 1),
+            issue('DEV-5', 'b', 1, blocked_by=['DEV-2']),
+            issue('DEV-6', 'c', 1, blocked_by=['DEV-404']),
+            {**issue('DEV-7', 'd', 1), 'state': 'Needs Input'},
+            {**issue('DEV-8', 'e', 1), 'labels': ['repo/e', 'human-only']},
+            {**issue('DEV-9', 'f', 1), 'state_type': 'completed'}]}
+        self.assertEqual(q.eligible_tickets(snap), [(1, 'DEV-1', 'a'), (2, 'DEV-2', 'z'), (5, 'DEV-3', 'a')])
+        self.assertEqual(q.tickets_by_repo(snap), {'a': ['DEV-1', 'DEV-3'], 'z': ['DEV-2']})
+        self.assertEqual(q.eligible_tickets({**snap, 'truncated': True}), [])
+        self.assertEqual(q.eligible_tickets({'ok': False, 'issues': snap['issues']}), [])
+
+    def test_new_candidates_start_from_tickets_and_keep_priority(self):
+        self.snapshot.write_text(json.dumps({'ok': True, 'issues': [
+            {'id': 'DEV-20', 'state': 'Todo', 'state_type': 'unstarted', 'priority': 2, 'labels': ['repo/z']},
+            {'id': 'DEV-10', 'state': 'Todo', 'state_type': 'unstarted', 'priority': 1, 'labels': ['repo/a']}]}))
+        def policy(store, repos, snapshot, **kwargs):
+            return [{'repo': r, 'decision': 'plan'} for r in repos]
+        with workqueue.Store(self.root) as store, patch.object(q.scheduler, 'policy', side_effect=policy), \
+                patch.object(q.batch, 'pending_action', return_value=None):
+            chosen = q.choose_repos(store, str(self.code), self.snapshot, ['z', 'a', 'empty'], set(), time.time())
+        self.assertEqual(chosen, [('a', None), ('z', None)])
+
+    def test_saved_plan_survives_no_eligible_tickets(self):
+        def policy(store, repos, snapshot, **kwargs):
+            return [{'repo': r, 'decision': 'resume'} for r in repos]
+        with workqueue.Store(self.root) as store, patch.object(q.scheduler, 'policy', side_effect=policy), \
+                patch.object(q.batch, 'pending_action', side_effect=lambda repo: 'resume_worker' if repo == 'a' else None):
+            chosen = q.choose_repos(store, str(self.code), self.snapshot, ['a', 'b'], set(), time.time())
+        self.assertEqual(chosen, [('a', None)])
+
     def test_next_reset_and_reservation_recheck(self):
         state = q.usage.empty_state()
         state['providers']['codex']['five_hour'] = {'used_pct': 80, 'reset_epoch': 1500}
