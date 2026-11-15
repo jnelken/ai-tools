@@ -160,7 +160,7 @@ def main(channel=None):
                 raise RuntimeError('Workspace creation returned no workspace ID')
             activefile.write_text(json.dumps({'branch': branch, 'workspace': workspace, 'status': 'launching'}) + '\n')
             created_agent = run([SUPERSET, 'agents', 'create', '--local', '--workspace', workspace,
-                                 '--agent', 'codex', '--model', 'gpt-5.6-terra', '--effort', 'medium',
+                                 '--agent', 'codex', '--model', 'gpt-6.1-terra', '--effort', 'medium',
                                  '--prompt', request, '--json'], capture_output=True, timeout=120)
             agent = json.loads(created_agent.stdout)
             terminal = agent.get('sessionId') or agent.get('terminalId') or agent.get('id')

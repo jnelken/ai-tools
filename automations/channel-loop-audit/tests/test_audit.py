@@ -82,7 +82,7 @@ class AuditTest(unittest.TestCase):
             if cmd[1:3] == ['workspaces', 'create']:
                 self.assertTrue(cmd[cmd.index('--name') + 1].startswith('audit/channel-loop-'))
                 return SimpleNamespace(stdout=json.dumps({'workspace': {'id': 'ws'}}))
-            self.assertEqual(cmd[cmd.index('--model') + 1], 'gpt-5.6-terra')
+            self.assertEqual(cmd[cmd.index('--model') + 1], 'gpt-6.1-terra')
             return SimpleNamespace(stdout=json.dumps({'sessionId': 'term'}))
         with tempfile.TemporaryDirectory() as tmp, patch.object(audit, 'ROOT', Path(tmp)), \
                 patch.object(audit, 'run', side_effect=execute) as run:

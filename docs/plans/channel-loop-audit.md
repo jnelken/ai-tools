@@ -5,7 +5,7 @@ Event-driven scans are active; the former 15-minute launchd trigger has been rem
 
 ## Decisions
 - Every third top-level Slackagent post in a channel triggers a scan of that channel. Slack retries are deduplicated. Deterministic filtering avoids a model call when nothing looks suspicious.
-- GPT-6 Luna at low effort classifies candidates; GPT-5.6 Terra is dispatched only for a confirmed incident.
+- GPT-6 Luna at low effort classifies candidates; GPT-6.1 Terra is dispatched for a confirmed incident.
 - One local lock prevents overlapping audits and duplicate repairs; failures remain visible locally.
 - Slack is untrusted data; existing repository instructions, workspace ownership and verification gates remain in force.
 
