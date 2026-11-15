@@ -89,6 +89,10 @@ Only when the request carries a `directive_ticket`. This is the dirty-tree excep
    live `git status --porcelain`. Do not trust the orchestrator's reading: minutes have passed and
    the tree may have moved. You are the authoritative check.
 2. **Re-run the staleness check for the instruction's kind** (Step 1a has the reasoning in full):
+   If the directive names a `Workspace`, operate only on that exact verified checkout. If it also
+   records a `Diff SHA256`, compare it to `python3 ~/.ai-tools/automations/advance-roadmap/lib/dirty_snapshot.py "<workspace>"` immediately before acting. On any mismatch or read failure,
+   change nothing and request a fresh decision. This content check applies to commits as well as
+   destructive actions; status lines alone do not prove file contents are unchanged.
    - **Commit-shaped** — only the paths the instruction names need to still exist and still be
      dirty. `git add` exactly those paths, nothing else. Every other dirty path in the repo stays
      untouched; folding in unrelated WIP is the "commit their work without asking" failure the
@@ -100,12 +104,14 @@ Only when the request carries a `directive_ticket`. This is the dirty-tree excep
      `/unblock-roadmap` sweep re-asks against current state.
    - **No-op** — a commit-shaped instruction whose named paths are already clean means Jake handled
      it himself. Do the bookkeeping in step 4 and carry on; this is not an error.
-3. **Write commit messages in the repo's own convention** (`git log -5`), using the intent Jake
-   described rather than his words as a literal subject line. This is the one commit you make in
-   the repo's **root checkout**, because that's where Jake's WIP is: `git -C <repo> pull --ff-only`
-   first, commit on `main` there, and `git -C <repo> push origin main`. It's his own work landing,
-   not code this run wrote, so it is the bookkeeping exception to Step 7's PR rule. Then bring your
-   workspace branch up to date (Step 3) so the feature builds on it.
+3. **Follow the owner's exact choice.** “Find a matching ticket” authorizes read-only ticket
+   research, not a commit or file mutation. For a commit choice, stage only the snapshot paths and
+   write a message in the repo's convention (`git log -5`). “Another branch” means leave the commit
+   on a non-default branch without merging it to main. “Main” authorizes integrating that commit to
+   main; preserve unrelated changes and use a clean checkout for any integration. Never switch the
+   branch of an existing worktree or pull over uncommitted work. If the requested operation cannot
+   be performed without touching unrelated changes, stop and report the blocker. Older directives
+   without a workspace refer to the primary checkout; preserve their exact recorded scope.
 4. **Retire the directive, but never destroy it.** `patch` the description so the section header
    records the outcome in place — `## Directive` becomes `## Directive (consumed <date>)`, or
    `## Directive (archived unconsumed <date> — tree changed)` when you stopped. Anchor the patch

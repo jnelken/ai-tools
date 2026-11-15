@@ -74,7 +74,8 @@ make recording depend on an audit comment. Both DM and scheduled writers share r
 locks, re-read immediately before writing, and verify the decision marker afterward. Missing
 markers trigger bounded retries; unverifiable answers remain pending with a thread notice.
 Stable decision markers recover a crash between the Linear write and local queue status update. A dirty workspace gets a labelled cleanup-only carrier only after an answer; do not attach an
-arbitrary open repo ticket to the diff. Recheck for an existing pending directive first.
+arbitrary open repo ticket to the diff. Record the exact workspace and content hash alongside the
+status snapshot. Recheck for an existing pending directive first.
 
 **V1 writes Linear only.** Do not edit any repo Markdown from Slack mode. Record the owner's
 answer in the directive so advance-roadmap can fold it into the repo later. This deliberate

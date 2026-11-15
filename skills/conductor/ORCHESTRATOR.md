@@ -455,6 +455,9 @@ and only the process about to change a tree can meaningfully check it.
    answered decisions, and a go-ahead. A ticket whose marker you matched but whose section doesn't
    parse is a blocker, not an authorization — report it and skip.
 3. **Classify the instruction, and sanity-check the snapshot against live `git status`:**
+   When a directive names a workspace, scope the decision to that exact checkout. For directives
+   with a `Diff SHA256`, verify the content hash with `python3 ~/.ai-tools/automations/advance-roadmap/lib/dirty_snapshot.py "<workspace>"`; a mismatch is stale even for a commit. “Find a matching
+   ticket” authorizes research only; do not treat it as permission to commit or implement.
    - A **commit-shaped** instruction ("commit it as one", "split into A and B") only needs the
      paths it names to still exist and still be dirty. Unrelated dirty paths that appeared since
      are *not* drift — they're out of scope, and treating their presence as staleness would block
