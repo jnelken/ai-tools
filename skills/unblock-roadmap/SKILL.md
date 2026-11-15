@@ -27,8 +27,9 @@ Slackagent runs this pass in **#agent-blockers** by default (`UNBLOCK_ROADMAP_CH
 durable SQLite question queue. Every weekday at **8:45 America/New_York**, resume and re-post
 an outstanding question before considering a fresh sweep. Independently check for dirty primary
 checkouts every five minutes, queue each distinct snapshot once, and show its status, diff summary,
-and a redacted excerpt. Before asking, search Memex for sessions mentioning the changed files and
-verify their repository metadata. Treat filename matches as leads, not proof of ownership; never
+and a redacted excerpt. Before asking, verify any session recorded in IN_PROGRESS against Memex, then search for sessions
+mentioning the changed files and verify their repository metadata. A recorded session can span repos;
+treat filename matches as leads, not proof of ownership. Never
 automatically resume an unverified or active session. Ask one question at a time, leading with the
 repo and ticket and showing
 the blocker evidence. For a dirty tree offer exactly: commit the changes to main, commit them to

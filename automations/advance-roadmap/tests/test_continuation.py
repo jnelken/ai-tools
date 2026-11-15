@@ -76,7 +76,7 @@ class ContinuationTest(unittest.TestCase):
         root, fake_lib = self.path / 'runtime', self.path / 'fake-lib'
         (root / 'lib').mkdir(parents=True)
         fake_lib.mkdir()
-        for name in ('workqueue.py', 'continuation.py', 'session_stream.py', 'session_guard.py'):
+        for name in ('workqueue.py', 'continuation.py', 'punchin.py', 'session_stream.py', 'session_guard.py'):
             shutil.copy(here / 'lib' / name, root / 'lib' / name)
         (fake_lib / 'agent_budget.py').write_text('import json,os\nfrom pathlib import Path\n'
             'def readings(*a,**kw): return json.load(open(os.environ["FAKE_READING_FILE"]))\n'
@@ -273,7 +273,7 @@ class ContinuationTest(unittest.TestCase):
         root, fake_lib = self.path / 'runtime', self.path / 'fake-lib'
         (root / 'lib').mkdir(parents=True)
         fake_lib.mkdir()
-        for name in ('workqueue.py', 'continuation.py', 'session_stream.py', 'session_guard.py'):
+        for name in ('workqueue.py', 'continuation.py', 'punchin.py', 'session_stream.py', 'session_guard.py'):
             shutil.copy(here / 'lib' / name, root / 'lib' / name)
         (fake_lib / 'agent_budget.py').write_text('import json,os\nfrom pathlib import Path\n'
             'def readings(*a,**kw): return json.load(open(os.environ["FAKE_READING_FILE"]))\n'
@@ -321,7 +321,7 @@ class ContinuationTest(unittest.TestCase):
         here = Path(__file__).resolve().parents[1]
         root = self.path / 'runtime'
         (root / 'lib').mkdir(parents=True)
-        for name in ('workqueue.py', 'continuation.py', 'session_stream.py', 'session_guard.py', 'tokens.py', 'models.sh'):
+        for name in ('workqueue.py', 'continuation.py', 'punchin.py', 'session_stream.py', 'session_guard.py', 'tokens.py', 'models.sh'):
             shutil.copy(here / 'lib' / name, root / 'lib' / name)
         (root / 'lib/usage.py').write_text('import json,os,sys\n'
             'if "gate" in sys.argv and os.environ.get("FAKE_OVER"):\n'
@@ -361,6 +361,10 @@ class ContinuationTest(unittest.TestCase):
             '--request-file', str(request_path), '--providers', 'codex', '--result-file', str(result_path),
             '--status-file', str(status)], env=env, capture_output=True, text=True, timeout=15)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        entry = (self.path / 'IN_PROGRESS.md').read_text()
+        self.assertIn(sid, entry)
+        self.assertIn('Provider: codex', entry)
+        self.assertIn('Model: gpt-5.6-terra', entry)
         args = json.loads((self.path / 'args').read_text())
         self.assertEqual(args[args.index('resume') + 1], sid)
         self.assertNotIn('--last', args)
@@ -417,7 +421,7 @@ class ContinuationTest(unittest.TestCase):
         root, ai_home = self.path / 'runtime', self.path / 'ai'
         (root / 'lib').mkdir(parents=True)
         (ai_home / 'bin').mkdir(parents=True)
-        for name in ('workqueue.py', 'continuation.py', 'session_stream.py', 'session_guard.py', 'tokens.py', 'models.sh'):
+        for name in ('workqueue.py', 'continuation.py', 'punchin.py', 'session_stream.py', 'session_guard.py', 'tokens.py', 'models.sh'):
             shutil.copy(here / 'lib' / name, root / 'lib' / name)
         (root / 'lib/usage.py').write_text('import sys\nsys.exit(1 if "live-limit" in sys.argv else 0)\n')
         wrapper = ai_home / 'bin/claude-session'

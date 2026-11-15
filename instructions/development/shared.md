@@ -1,3 +1,13 @@
+## Work ownership at the start of every coding task
+
+Before changing a repository, record the ticket (or `none`), exact provider session ID,
+provider and model in that worktree's `IN_PROGRESS.md`. Use
+`python3 ~/.ai-tools/automations/advance-roadmap/lib/punchin.py --workspace <repo-root> --ticket <ticket-or-none> --session <exact-session-id> --provider <provider> --model <model>`.
+Use session metadata supplied by the harness (`CODEX_SESSION_ID` for Codex when set); never guess an ID or model. If either is unavailable,
+record the information you can in the handoff and report the missing field. Update the entry if the
+ticket or model changes; preserve other sessions' entries and existing handoff notes. This is for
+substantive coding work, not read-only questions or assistant runtime jobs.
+
 ## Standing Git and deployment authorization
 
 Jake authorizes committing, merging, pushing and deploying task changes in every accessible repository

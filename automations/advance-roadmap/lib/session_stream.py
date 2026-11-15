@@ -12,6 +12,7 @@ import uuid
 from pathlib import Path
 
 import continuation
+import punchin
 import workqueue
 
 
@@ -265,6 +266,18 @@ def run(args):
                             continue
                         bound = continuation.binding(request, args.provider, args.workspace, sid)
                         if bound:
+                            try:
+                                plan = request.get('orchestrator') or {}
+                                punchin.punch_in(args.workspace, plan.get('linear_id') or 'none', sid,
+                                                 getattr(args, 'model', None) or 'unknown', args.provider)
+                            except (OSError, ValueError) as error:
+                                print(f'Cannot record work ownership: {error}', file=sys.stderr)
+                                reason, stop_at = 'punch-in-failed', time.monotonic()
+                                try:
+                                    os.killpg(child.pid, signal.SIGTERM)
+                                except ProcessLookupError:
+                                    pass
+                                continue
                             with workqueue.Store(args.root) as store:
                                 if store.save_session(bound):
                                     Path(args.session_out).write_text(sid + '\n')
@@ -312,6 +325,7 @@ def run(args):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--provider', required=True, choices=('claude', 'codex', 'cursor'))
+    parser.add_argument('--model', default='unknown')
     parser.add_argument('--root', required=True)
     parser.add_argument('--request', required=True)
     parser.add_argument('--workspace', required=True)

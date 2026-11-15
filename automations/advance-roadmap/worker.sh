@@ -461,7 +461,7 @@ run_incremental_cursor() {
   local cmd=("${base[@]}")
   [ -n "$sid" ] && cmd+=(--resume "$sid")
   cmd+=("$prompt")
-  python3 "$ROOT/lib/session_stream.py" --provider cursor --root "$ROOT" \
+  python3 "$ROOT/lib/session_stream.py" --provider cursor --model "$CURSOR_WORKER_MODEL" --root "$ROOT" \
     --request "$REQUEST_FILE" --workspace "$WORKDIR" --output "$out.json" \
     --session-out "$out.session" --timeout "${ADVANCE_ROADMAP_CHUNK_TIMEOUT_S:-900}" \
     --lifecycle "${RESULT_FILE:h}/chunk-lifecycle.json" --budget "${RESULT_FILE:h}/batch-budget.json" -- "${cmd[@]}"
@@ -470,7 +470,7 @@ run_incremental_cursor() {
     cp "$out.json" "${RESULT_FILE:h}/continuation-cursor-error.log"
     record_native_fallback cursor
     rc=0
-    python3 "$ROOT/lib/session_stream.py" --provider cursor --root "$ROOT" \
+    python3 "$ROOT/lib/session_stream.py" --provider cursor --model "$CURSOR_WORKER_MODEL" --root "$ROOT" \
       --request "$REQUEST_FILE" --workspace "$WORKDIR" --output "$out.json" \
       --session-out "$out.session" --timeout "${ADVANCE_ROADMAP_CHUNK_TIMEOUT_S:-900}" \
       --lifecycle "${RESULT_FILE:h}/chunk-lifecycle.json" --budget "${RESULT_FILE:h}/batch-budget.json" \
@@ -493,7 +493,7 @@ run_incremental_codex() {
   local cmd=("${base[@]}")
   [ -n "$sid" ] && cmd+=(resume "$sid")
   cmd+=("$prompt")
-  python3 "$ROOT/lib/session_stream.py" --provider codex --root "$ROOT" \
+  python3 "$ROOT/lib/session_stream.py" --provider codex --model "$CODEX_WORKER_MODEL" --root "$ROOT" \
     --request "$REQUEST_FILE" --workspace "$WORKDIR" --output "$out" \
     --session-out "$out.session" --timeout "${ADVANCE_ROADMAP_CHUNK_TIMEOUT_S:-900}" \
     --lifecycle "${RESULT_FILE:h}/chunk-lifecycle.json" --budget "${RESULT_FILE:h}/batch-budget.json" -- "${cmd[@]}"
@@ -502,7 +502,7 @@ run_incremental_codex() {
     cp "$out" "${RESULT_FILE:h}/continuation-codex-error.log"
     record_native_fallback codex
     rc=0
-    python3 "$ROOT/lib/session_stream.py" --provider codex --root "$ROOT" \
+    python3 "$ROOT/lib/session_stream.py" --provider codex --model "$CODEX_WORKER_MODEL" --root "$ROOT" \
       --request "$REQUEST_FILE" --workspace "$WORKDIR" --output "$out" \
       --session-out "$out.session" --timeout "${ADVANCE_ROADMAP_CHUNK_TIMEOUT_S:-900}" \
       --lifecycle "${RESULT_FILE:h}/chunk-lifecycle.json" --budget "${RESULT_FILE:h}/batch-budget.json" \
@@ -524,7 +524,7 @@ run_incremental_claude() {
     --verbose --output-format stream-json)
   local cmd=("${base[@]}")
   [ -n "$sid" ] && cmd+=(--resume "$sid")
-  python3 "$ROOT/lib/session_stream.py" --provider claude --root "$ROOT" \
+  python3 "$ROOT/lib/session_stream.py" --provider claude --model "$CLAUDE_WORKER_MODEL" --root "$ROOT" \
     --request "$REQUEST_FILE" --workspace "$WORKDIR" --output "$out.json" \
     --session-out "$out.session" --timeout "${ADVANCE_ROADMAP_CHUNK_TIMEOUT_S:-900}" \
     --lifecycle "${RESULT_FILE:h}/chunk-lifecycle.json" --budget "${RESULT_FILE:h}/batch-budget.json" -- "${cmd[@]}"
@@ -533,7 +533,7 @@ run_incremental_claude() {
     cp "$out.json" "${RESULT_FILE:h}/continuation-claude-error.log"
     record_native_fallback claude
     rc=0
-    python3 "$ROOT/lib/session_stream.py" --provider claude --root "$ROOT" \
+    python3 "$ROOT/lib/session_stream.py" --provider claude --model "$CLAUDE_WORKER_MODEL" --root "$ROOT" \
       --request "$REQUEST_FILE" --workspace "$WORKDIR" --output "$out.json" \
       --session-out "$out.session" --timeout "${ADVANCE_ROADMAP_CHUNK_TIMEOUT_S:-900}" \
       --lifecycle "${RESULT_FILE:h}/chunk-lifecycle.json" --budget "${RESULT_FILE:h}/batch-budget.json" \
