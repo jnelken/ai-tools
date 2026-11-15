@@ -29,7 +29,7 @@ an outstanding question before considering a fresh sweep. Independently check di
 and a redacted excerpt. Before asking, verify any session recorded in IN_PROGRESS against Memex, then search for sessions
 mentioning the changed files and verify their repository metadata. A recorded session can span repos;
 treat filename matches as leads, not proof of ownership. Automatically resume only one exact recorded
-session with a ticket, existing transcript, exact local workspace and no live terminal or open
+session with a ticket, existing transcript, exact local `advance-roadmap`-tagged workspace and no live terminal or open
 transcript; recheck the diff and provider usage gate immediately before launch and deduplicate launch
 attempts. Wait when that provider is quota-gated. Otherwise ask.
 Never automatically resume an unverified or active session. Ask one question at a time, leading with the
