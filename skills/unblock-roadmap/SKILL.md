@@ -25,12 +25,14 @@ surface while discovery and answer formatting run headlessly.
 
 Slackagent runs this pass in **#agent-blockers** by default (`UNBLOCK_ROADMAP_CHANNEL`), with a
 durable SQLite question queue. Every weekday at **8:45 America/New_York**, resume and re-post
-an outstanding question before considering a fresh sweep. Independently check for dirty primary
-checkouts every five minutes, queue each distinct snapshot once, and show its status, diff summary,
+an outstanding question before considering a fresh sweep. Independently check dirty primary checkouts and linked worktrees every five minutes, queue each distinct snapshot once, and show its status, diff summary,
 and a redacted excerpt. Before asking, verify any session recorded in IN_PROGRESS against Memex, then search for sessions
 mentioning the changed files and verify their repository metadata. A recorded session can span repos;
-treat filename matches as leads, not proof of ownership. Never
-automatically resume an unverified or active session. Ask one question at a time, leading with the
+treat filename matches as leads, not proof of ownership. Automatically resume only one exact recorded
+session with a ticket, existing transcript, exact local workspace and no live terminal or open
+transcript; recheck the diff and provider usage gate immediately before launch and deduplicate launch
+attempts. Wait when that provider is quota-gated. Otherwise ask.
+Never automatically resume an unverified or active session. Ask one question at a time, leading with the
 repo and ticket and showing
 the blocker evidence. For a dirty tree offer exactly: commit the changes to main, commit them to
 another branch, find a matching ticket, or hold/skip. Offer 2–6 numbered choices, seed
