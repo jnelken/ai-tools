@@ -25,8 +25,11 @@ surface while discovery and answer formatting run headlessly.
 
 Slackagent runs this pass in **#agent-blockers** by default (`UNBLOCK_ROADMAP_CHANNEL`), with a
 durable SQLite question queue. Every weekday at **8:45 America/New_York**, resume and re-post
-an outstanding question before considering a fresh sweep. Ask one question at a time, leading
-with the repo and ticket and showing the blocker evidence. Offer 2–6 numbered choices, seed
+an outstanding question before considering a fresh sweep. Independently check for dirty primary
+checkouts every five minutes, queue each distinct snapshot once, and show its status, diff summary,
+and a redacted excerpt. Ask one question at a time, leading with the repo and ticket and showing
+the blocker evidence. For a dirty tree offer exactly: commit the changes to main, commit them to
+another branch, find a matching ticket, or hold/skip. Offer 2–6 numbered choices, seed
 1️⃣…6️⃣ reactions, and accept only `SLACK_OWNER_USER_ID`'s answer. An owner's thread reply is
 an **Other** answer; bot seed reactions and other users never authorize a decision.
 
@@ -42,7 +45,8 @@ Before launching, gate each provider with
 short deferral and retry at a scheduler tick **at most hourly, weekdays 8:45–18:00**. Each model
 call is recorded through Slackagent's existing runners as `unblock-sweep` or `unblock-directive`.
 
-Before posting a question, cheaply recheck Linear state and the live dirty-tree snapshot. Mark
+Before posting and recording a dirty-tree answer, recheck both status and tracked/untracked content
+hashes, and supersede a changed snapshot. Recheck Linear state as well. Mark
 resolved or changed blockers **superseded** and skip them; never apply an old destructive choice
 to a changed tree. Hash the newest blocker comment (including its identity and content) at enqueue
 and re-fetch it before posting and under the recording lock. Supersede replaced/edited blocker
