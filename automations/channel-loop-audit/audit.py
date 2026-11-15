@@ -124,7 +124,7 @@ def main(channel=None):
         with tempfile.TemporaryDirectory(prefix='channel-audit-', dir=ROOT) as tmp:
             schemafile, output = Path(tmp)/'schema.json', Path(tmp)/'result.json'
             schemafile.write_text(json.dumps(schema))
-            run([CODEX,'exec','--model','gpt-5.6-luna','-c','model_reasoning_effort="low"',
+            run([CODEX,'exec','--model','gpt-6-luna','-c','model_reasoning_effort="low"',
                  '--sandbox','read-only','-C',str(CODE),'--output-schema',str(schemafile),
                  '--output-last-message',str(output),'-'], input=prompt, capture_output=True, timeout=300)
             result = json.loads(output.read_text())

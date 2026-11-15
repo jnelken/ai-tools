@@ -77,7 +77,7 @@ class AuditTest(unittest.TestCase):
             if cmd[0] == audit.CODEX:
                 Path(cmd[cmd.index('--output-last-message') + 1]).write_text(json.dumps(
                     {'action': 'investigate', 'reason': 'confirmed loop', 'signature': signature}))
-                self.assertEqual(cmd[cmd.index('--model') + 1], 'gpt-5.6-luna')
+                self.assertEqual(cmd[cmd.index('--model') + 1], 'gpt-6-luna')
                 return SimpleNamespace(stdout='')
             if cmd[1:3] == ['workspaces', 'create']:
                 self.assertTrue(cmd[cmd.index('--name') + 1].startswith('audit/channel-loop-'))
