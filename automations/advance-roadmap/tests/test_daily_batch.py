@@ -325,7 +325,7 @@ class DailyBatchTest(unittest.TestCase):
         state = self.state()
         self.assertTrue(self.trace_exists(), 'Codex work can be reviewed by Claude')
         self.assertEqual(state['review_fallback'],
-                         'review fallback: cross-provider (Cursor is disabled for roadmap routing)')
+                         'review fallback: cross-provider (Cursor is disabled for roadmap reviews)')
 
     def test_cursor_gate_does_not_admit_claude_when_it_is_its_only_reviewer(self):
         self.repo('a')
@@ -374,8 +374,7 @@ class DailyBatchTest(unittest.TestCase):
             'gates': [{'provider': 'cursor', 'state': 'ok'}, {'provider': 'codex', 'state': 'ok'},
                       {'provider': 'claude', 'state': 'ok'}]}))
         self.run_batch()
-        self.assertFalse(self.trace_exists(), 'a Cursor-only provider chain is filtered')
-        self.assertIn('no worker provider is under its quota gate', self.state()['skipped_reason'])
+        self.assertTrue(self.trace_exists(), 'Cursor work can be reviewed by Codex or Claude')
 
     def test_cross_provider_review_needs_only_one_reviewer(self):
         self.repo('a')
@@ -584,7 +583,7 @@ PYTHON
             with b.lock():
                 self.assertEqual(b.reap(), [], 'the dead lane PID must free its reservations')
 
-    def test_cursor_is_never_allocated_as_worker(self):
+    def test_cursor_is_allocated_as_worker_but_never_reviewer(self):
         with self.budget_context(), patch.object(daily_batch, 'ROOT', self.root):
             budget = daily_batch.RoadmapBudget(dry_run=True)
             budget.dry_run = False
@@ -594,7 +593,7 @@ PYTHON
                             'claude': {'provider': 'claude', 'state': 'ok'}}
             routes = list(budget.routes())
             self.assertTrue(routes)
-            self.assertTrue(all(worker != 'cursor' for worker, _ in routes))
+            self.assertEqual(routes[0][0], 'cursor')
             self.assertTrue(all('cursor' not in reviewers for _, reviewers in routes))
 
     def test_expected_cost_and_conversion_follow_the_first_fitting_worker(self):
@@ -605,14 +604,13 @@ PYTHON
             item = {'repo': 'a', 'stamp': 'one'}
             self.assertTrue(budget.admit(item))
             allocation = item['allocation']
-            self.assertEqual(allocation['worker'], 'codex')
+            self.assertEqual(allocation['worker'], 'cursor')
             self.assertEqual([r['scale'] for r in allocation['requests'] if r['role'] != 'planner'], [.6, .6])
             self.assertTrue(any(r['role'] == 'planner' for r in allocation['requests']))
             budget.planned(item)
             self.assertTrue(all(r['role'] != 'planner' for r in item['allocation']['requests']))
-            # Cursor still has quota by its raw gate, but a full worker+review
-            # no longer fits. The next worker in chain must be tried.
-            budget.readings['cursor']['windows']['auto']['live'] = 94
+            # Cursor has exhausted its Auto pool; try the next worker.
+            budget.readings['cursor']['windows']['auto']['live'] = 100
             converted = budget.choose(item=item)
             self.assertIn(converted['worker'], ('codex', 'claude'))
             self.assertEqual(converted['reviewers'], ['claude'])
@@ -689,6 +687,22 @@ PYTHON
                 budget.refresh()
             self.assertEqual(budget.workers, [])
             self.assertEqual(budget.planners, [])
+
+    def test_cursor_continuous_worker_uses_only_codex_or_claude_reviewers(self):
+        with self.budget_context(), patch.object(daily_batch, 'ROOT', self.root), patch.dict(
+                os.environ, {'ADVANCE_ROADMAP_CONTINUOUS': '1'}):
+            budget = daily_batch.RoadmapBudget(dry_run=True)
+            budget.workers = ['cursor']
+            budget.review_strategy = {'strategy': 'cross-provider', 'reason': None}
+            budget.gates = {'cursor': {'state': 'ok'}, 'codex': {'state': 'ok'}, 'claude': {'state': 'ok'}}
+            allocation = budget.choose(item={'repo': 'a', 'stamp': 'one', 'work_phase': 'reviewing'}, commit=False)
+            self.assertEqual(allocation['worker'], 'cursor')
+            self.assertEqual(allocation['reviewers'], ['codex'])
+            budget.gates['codex']['state'] = 'over'
+            allocation = budget.choose(item={'repo': 'a', 'stamp': 'one', 'work_phase': 'reviewing'}, commit=False)
+            self.assertEqual(allocation['reviewers'], ['claude'])
+            budget.gates['claude']['state'] = 'over'
+            self.assertIsNone(budget.choose(item={'repo': 'a', 'stamp': 'one', 'work_phase': 'reviewing'}, commit=False))
 
     def test_continuous_admission_does_not_reserve_forecast(self):
         with self.budget_context(), patch.object(daily_batch, 'ROOT', self.root), patch.dict(

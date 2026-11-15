@@ -38,6 +38,9 @@ def cached_quota(args, budget):
     sys.path.insert(0, str(Path(__file__).resolve().parents[3] / 'lib'))
     import agent_budget
     reading = agent_budget.readings(args.provider, root=Path(args.root), probe=False)
+    if args.provider == 'cursor':
+        pool = 'auto' if os.environ.get('ADVANCE_ROADMAP_CURSOR_WORKER_MODEL', 'auto') == 'auto' else 'api'
+        reading['windows'] = {k: v for k, v in reading.get('windows', {}).items() if k == pool}
     leases = agent_budget.read_json(agent_budget.budget_dir() / 'leases.json', [])
     own = set(budget.get('lease_ids') or [])
     now = time.time()
@@ -63,7 +66,7 @@ def session_event(line, provider):
         event = json.loads(line)
         if provider == 'codex' and event.get('type') == 'thread.started':
             value = event.get('thread_id')
-        elif provider == 'claude' and event.get('type') == 'system' and event.get('subtype') == 'init':
+        elif provider in ('claude', 'cursor') and event.get('type') == 'system' and event.get('subtype') == 'init':
             value = event.get('session_id')
         else:
             return None
@@ -77,7 +80,7 @@ def turn_finished(event, provider):
         return False
     message = event.get('message') if isinstance(event.get('message'), dict) else {}
     return ((provider == 'codex' and event.get('type') == 'turn.completed')
-            or (provider == 'claude' and event.get('type') == 'result')
+            or (provider in ('claude', 'cursor') and event.get('type') == 'result')
             or (provider == 'claude' and event.get('type') == 'assistant'
                 and message.get('stop_reason') == 'end_turn'))
 
@@ -308,7 +311,7 @@ def run(args):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--provider', required=True, choices=('claude', 'codex'))
+    parser.add_argument('--provider', required=True, choices=('claude', 'codex', 'cursor'))
     parser.add_argument('--root', required=True)
     parser.add_argument('--request', required=True)
     parser.add_argument('--workspace', required=True)

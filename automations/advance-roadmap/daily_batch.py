@@ -249,6 +249,9 @@ class RoadmapBudget:
             list(self.gates.values()))
         self.readings = {p: agent_budget.readings(p, root=ROOT, probe=not self.dry_run and p == "claude")
                          for p in agent_budget.PROVIDERS}
+        cursor_pool = 'auto' if os.environ.get('ADVANCE_ROADMAP_CURSOR_WORKER_MODEL', 'auto') == 'auto' else 'api'
+        cursor_windows = self.readings['cursor'].get('windows', {})
+        self.readings['cursor']['windows'] = {k: v for k, v in cursor_windows.items() if k == cursor_pool}
         if os.environ.get('ADVANCE_ROADMAP_CONTINUOUS') == '1':
             now = time.time()
             def fresh(provider):
@@ -275,7 +278,7 @@ class RoadmapBudget:
             if worker not in usage.ROUTED_PROVIDERS["worker"]:
                 continue
             if decision.get("strategy") == "cross-provider":
-                order = {"codex": ["claude"], "claude": ["codex"]}[worker]
+                order = {"cursor": ["codex", "claude"], "codex": ["claude"], "claude": ["codex"]}[worker]
                 reviews = [[p] for p in order if self.gates.get(p, {}).get("state") not in OUT_STATES]
             else:
                 reviews = [["cursor", "codex"]] if all(
@@ -288,12 +291,12 @@ class RoadmapBudget:
             phase = (item or {}).get('work_phase') or 'implementing'
             decision = self.review_decision()
             for worker in self.workers:
-                if worker not in ('codex', 'claude'):
+                if worker not in usage.ROUTED_PROVIDERS['worker']:
                     continue
                 reviewers = []
                 if phase in ('reviewing', 'shipping'):
                     if decision.get('strategy') == 'cross-provider':
-                        reviewers = next(([p] for p in ({'codex': ['claude'],
+                        reviewers = next(([p] for p in ({'cursor': ['codex', 'claude'], 'codex': ['claude'],
                             'claude': ['codex']}[worker])
                             if self.gates.get(p, {}).get('state') not in OUT_STATES), None)
                     else:
@@ -375,8 +378,7 @@ class RoadmapBudget:
         base_readings = getattr(self, 'override_readings', {}) if override else self.readings
         tried = False
         for worker in workers:
-            # Cursor has no bounded streaming continuation adapter yet.
-            if worker not in ('codex', 'claude'):
+            if worker not in usage.ROUTED_PROVIDERS['worker']:
                 continue
             readings = copy.deepcopy(base_readings) if override else base_readings
             if override:
@@ -412,7 +414,7 @@ class RoadmapBudget:
             reviews = [[]]
             if phase in ('reviewing', 'shipping'):
                 if decision.get('strategy') == 'cross-provider':
-                    order = {'codex': ['claude'], 'claude': ['codex']}[worker]
+                    order = {'cursor': ['codex', 'claude'], 'codex': ['claude'], 'claude': ['codex']}[worker]
                     reviews = [[p] for p in order if self.gates.get(p, {}).get('state') not in OUT_STATES]
                 else:
                     reviews = [['cursor', 'codex']] if all(

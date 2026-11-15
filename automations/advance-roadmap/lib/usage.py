@@ -103,8 +103,8 @@ ROLE_PROVIDERS = {
     "worker": ("cursor", "codex", "claude"),
     "reviewer": ("codex", "cursor", "claude"),
 }
-# Cursor is not routed to any unattended role, regardless of its reported quota.
-ROUTED_PROVIDERS = {"worker": ("codex", "claude"), "reviewer": ("codex", "claude")}
+# Cursor can implement but never reviews roadmap changes.
+ROUTED_PROVIDERS = {"worker": ("cursor", "codex", "claude"), "reviewer": ("codex", "claude")}
 # Cursor draws on a different pool per role: Auto, or the API pool for a named model.
 CURSOR_MODEL_ENV = {"worker": "ADVANCE_ROADMAP_CURSOR_WORKER_MODEL",
                     "reviewer": "ADVANCE_ROADMAP_CURSOR_REVIEW_MODEL"}
@@ -795,7 +795,7 @@ def pick_orchestrator(state: dict[str, Any]) -> str | None:
 
 
 def pick_worker_chain(state: dict[str, Any]) -> list[str]:
-    """Codex → Claude, skipping providers over their gates."""
+    """Cursor → Codex → Claude, skipping providers over their gates."""
     return [n for n in ROUTED_PROVIDERS["worker"] if state["providers"][n].get("available_for_worker")]
 
 
@@ -1167,7 +1167,7 @@ def effective_review_strategy(configured: str, reviewer_gates: list[dict[str, An
     decision = {"configured": configured, "strategy": configured, "reason": None, "reset_at": None}
     if configured == "cross-provider":
         return decision
-    decision.update(strategy="cross-provider", reason="Cursor is disabled for roadmap routing")
+    decision.update(strategy="cross-provider", reason="Cursor is disabled for roadmap reviews")
     return decision
 
 

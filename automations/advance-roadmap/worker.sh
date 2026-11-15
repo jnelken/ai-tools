@@ -164,10 +164,6 @@ fi
 
 # shellcheck disable=SC2206
 providers=(${=PROVIDERS_STR})
-# Old saved allocations may still name Cursor; continuous routing must not use it.
-if [ "${ADVANCE_ROADMAP_CONTINUOUS:-0}" = "1" ]; then
-  providers=(${providers:#cursor})
-fi
 if [ ${#providers[@]} -eq 0 ]; then
   # Bookkeeping with Claude is still possible if the chain came back empty — but only if
   # Claude is under its gate, which the loop below checks like any other provider.
@@ -194,7 +190,7 @@ if [ -z "$WORKER_REVIEW_STRATEGY" ]; then
 fi
 if [ "$WORKER_REVIEW_STRATEGY" = cursor-then-codex ]; then
   WORKER_REVIEW_STRATEGY=cross-provider
-  WORKER_REVIEW_FALLBACK_REASON="Cursor is disabled for roadmap routing"
+  WORKER_REVIEW_FALLBACK_REASON="Cursor is disabled for roadmap reviews"
 fi
 case "$WORKER_REVIEW_STRATEGY" in
   cursor-then-codex|cross-provider) ;;
@@ -455,6 +451,37 @@ os.replace(tmp, path)
 PY
 }
 
+run_incremental_cursor() {
+  local out="$1" prompt sid
+  prompt="$(prompt_for_provider cursor)" || return 2
+  [ -x "$AGENT" ] || return 127
+  sid="$(incremental_session cursor)" || return 1
+  local base=("$AGENT" -p --force --trust --model "$CURSOR_WORKER_MODEL"
+    --workspace "$WORKDIR" "${extra_dirs[@]}" --add-dir "$ROOT" --output-format stream-json)
+  local cmd=("${base[@]}")
+  [ -n "$sid" ] && cmd+=(--resume "$sid")
+  cmd+=("$prompt")
+  python3 "$ROOT/lib/session_stream.py" --provider cursor --root "$ROOT" \
+    --request "$REQUEST_FILE" --workspace "$WORKDIR" --output "$out.json" \
+    --session-out "$out.session" --timeout "${ADVANCE_ROADMAP_CHUNK_TIMEOUT_S:-900}" \
+    --lifecycle "${RESULT_FILE:h}/chunk-lifecycle.json" --budget "${RESULT_FILE:h}/batch-budget.json" -- "${cmd[@]}"
+  local rc=$?
+  if [ -n "$sid" ] && [ "$rc" -ne 0 ] && native_unavailable "$out.json"; then
+    cp "$out.json" "${RESULT_FILE:h}/continuation-cursor-error.log"
+    record_native_fallback cursor
+    rc=0
+    python3 "$ROOT/lib/session_stream.py" --provider cursor --root "$ROOT" \
+      --request "$REQUEST_FILE" --workspace "$WORKDIR" --output "$out.json" \
+      --session-out "$out.session" --timeout "${ADVANCE_ROADMAP_CHUNK_TIMEOUT_S:-900}" \
+      --lifecycle "${RESULT_FILE:h}/chunk-lifecycle.json" --budget "${RESULT_FILE:h}/batch-budget.json" \
+      -- "${base[@]}" "$prompt" || rc=$?
+  fi
+  python3 "$TOKENS_PY" cursor-json "$out.json" "$out" --final "$out.last" --role worker \
+    --model "$CURSOR_WORKER_MODEL" --log "$USAGE_LOG" --session-out "$out.session" 2>&1
+  [ -s "$out" ] || cp "$out.json" "$out" 2>/dev/null
+  return $rc
+}
+
 run_incremental_codex() {
   local out="$1" prompt sid
   prompt="$(prompt_for_provider codex)" || return 2
@@ -594,7 +621,9 @@ PY
     case "$provider" in cursor) export SUPERSET_AGENT_ID=cursor-agent ;; *) export SUPERSET_AGENT_ID="$provider" ;; esac
   fi
   case "$provider" in
-    cursor) run_cursor "$out" || rc=$? ;;
+    cursor) if [ "${ADVANCE_ROADMAP_INCREMENTAL:-0}" = 1 ]; then
+              run_incremental_cursor "$out" || rc=$?
+            else run_cursor "$out" || rc=$?; fi ;;
     codex)  if [ "${ADVANCE_ROADMAP_INCREMENTAL:-0}" = 1 ]; then
               run_incremental_codex "$out" || rc=$?
             else run_codex "$out" || rc=$?; fi ;;

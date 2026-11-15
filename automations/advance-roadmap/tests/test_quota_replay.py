@@ -778,7 +778,7 @@ exec(compile(open(__file__).read(), __file__, "exec"))
         plan = {**NO_WORK, "blockers": [{"repo": "demo", "linear_id": "DEV-7", "detail": "needs a decision"}]}
         self.run_lane(FAKE_CLAUDE="plan", FAKE_PLAN=json.dumps(plan))
         self.assertTrue(self.reached_barrier)
-        self.assertEqual([c["bin"] for c in self.calls() if c["role"] == "worker"], ["claude"])
+        self.assertEqual([c["bin"] for c in self.calls() if c["role"] == "worker"], ["agent"])
         self.assertEqual(self.record()["outcome"], "blocked-no-item")
         self.assertEqual(json.loads(self.verdict.read_text())["summary"], NO_WORK["summary"])
         self.assertFalse((self.root / "memory").exists(), "the worker owns the ledger row, not run.sh")

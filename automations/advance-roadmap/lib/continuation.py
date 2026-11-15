@@ -17,6 +17,15 @@ import workqueue
 
 def auth_fingerprint(provider, env=None):
     env = os.environ if env is None else env
+    if provider == 'cursor':
+        try:
+            status = subprocess.run([env.get('ADVANCE_ROADMAP_AGENT_BIN', 'agent'), 'whoami'],
+                                    capture_output=True, text=True, timeout=10, env=env)
+            if status.returncode != 0 or not status.stdout.strip():
+                return None
+            return hashlib.sha256(status.stdout.strip().encode()).hexdigest()
+        except (OSError, subprocess.TimeoutExpired):
+            return None
     if provider == 'claude':
         directory = Path(env.get('CLAUDE_CONFIG_DIR') or Path.home() / '.claude').expanduser()
         auth = directory / '.credentials.json'

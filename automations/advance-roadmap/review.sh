@@ -93,11 +93,11 @@ else
   REVIEW_FALLBACK_REASON="${REVIEW_FALLBACK_REASON:-}"
 fi
 
-# Cursor is disabled for roadmap routing even when an older saved allocation or
+# Cursor is disabled for roadmap reviews even when an older saved allocation or
 # explicit legacy strategy requests it.
 if [ "$REVIEW_STRATEGY" = cursor-then-codex ]; then
   REVIEW_STRATEGY=cross-provider
-  REVIEW_FALLBACK_REASON="Cursor is disabled for roadmap routing"
+  REVIEW_FALLBACK_REASON="Cursor is disabled for roadmap reviews"
 fi
 case "$WORKER" in
   cursor) cross_provider_reviewers=(codex claude) ;;

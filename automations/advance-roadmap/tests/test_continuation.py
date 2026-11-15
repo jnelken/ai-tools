@@ -54,6 +54,23 @@ class ContinuationTest(unittest.TestCase):
             'message': {'stop_reason': 'end_turn'}}, 'claude'))
         self.assertTrue(session_stream.turn_finished({'type': 'turn.completed'}, 'codex'))
 
+    def test_cursor_stream_session_and_turn_boundary(self):
+        sid = '8e2043e4-23cb-4fc8-a910-308404689ea9'
+        event = {'type': 'system', 'subtype': 'init', 'session_id': sid}
+        self.assertEqual(session_stream.session_event(json.dumps(event), 'cursor'), sid)
+        self.assertFalse(session_stream.turn_finished({'type': 'assistant'}, 'cursor'))
+        self.assertTrue(session_stream.turn_finished({'type': 'result'}, 'cursor'))
+
+    def test_cursor_session_auth_requires_logged_in_identity(self):
+        result = SimpleNamespace(returncode=0, stdout='Logged in as test@example.invalid')
+        with patch.object(continuation.subprocess, 'run', return_value=result):
+            one = continuation.auth_fingerprint('cursor', {})
+            self.assertEqual(one, continuation.auth_fingerprint('cursor', {}))
+            result.stdout = 'Logged in as another@example.invalid'
+            self.assertNotEqual(one, continuation.auth_fingerprint('cursor', {}))
+            result.returncode = 1
+            self.assertIsNone(continuation.auth_fingerprint('cursor', {}))
+
     def test_live_threshold_waits_for_completed_turn(self):
         here = Path(__file__).resolve().parents[1]
         root, fake_lib = self.path / 'runtime', self.path / 'fake-lib'

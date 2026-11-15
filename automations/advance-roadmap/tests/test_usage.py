@@ -206,10 +206,10 @@ class RoutingTests(unittest.TestCase):
             self.assertFalse(self.flags()["cursor"]["available_for_worker"])
         self.assertEqual(usage.pick_worker_chain(self.state), ["codex", "claude"])
 
-    def test_available_cursor_is_not_in_worker_route(self):
+    def test_available_cursor_is_first_in_worker_route(self):
         for provider in ("cursor", "codex", "claude"):
             self.state["providers"][provider]["available_for_worker"] = True
-        self.assertEqual(usage.pick_worker_chain(self.state), ["codex", "claude"])
+        self.assertEqual(usage.pick_worker_chain(self.state), ["cursor", "codex", "claude"])
 
     def test_cursor_pinned_model_gates_on_api_pool(self):
         usage.apply_cursor(self.state, probed(usage.parse_cursor_usage(cursor_response(auto=100, api=5)), "dashboard_api"))
@@ -336,7 +336,7 @@ class GateMatrixTests(unittest.TestCase):
         gates = [{"provider": "cursor", "state": "over", "reset_at": "2026-11-03T10:30:00-05:00"}]
         self.assertEqual(usage.effective_review_strategy("cursor-then-codex", gates), {
             "configured": "cursor-then-codex", "strategy": "cross-provider",
-            "reason": "Cursor is disabled for roadmap routing",
+            "reason": "Cursor is disabled for roadmap reviews",
             "reset_at": None})
 
     def test_explicit_cross_provider_stays_cross_provider(self):
@@ -349,7 +349,7 @@ class GateMatrixTests(unittest.TestCase):
         decision = usage.effective_review_strategy("cursor-then-codex", [
             {"provider": "cursor", "state": "ok"}])
         self.assertEqual(decision["strategy"], "cross-provider")
-        self.assertEqual(decision["reason"], "Cursor is disabled for roadmap routing")
+        self.assertEqual(decision["reason"], "Cursor is disabled for roadmap reviews")
 
     def test_thresholds_are_overridable_by_env(self):
         env = dict(os.environ, ADVANCE_ROADMAP_MAX_FIVE_HOUR_PCT="50", ADVANCE_ROADMAP_MAX_WEEKLY_PCT="60",
@@ -918,7 +918,7 @@ class CliTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         out = json.loads(result.stdout)
         self.assertEqual(out["orchestrator"], "codex")
-        self.assertEqual(out["workers"], ["codex", "claude"])
+        self.assertEqual(out["workers"], ["cursor", "codex", "claude"])
 
     def test_record_limit_still_gates_with_probe_data_absent(self):
         self.run_usage("record-limit", "--provider", "codex", "--text", "usage limit, resets in 2h 5m")
