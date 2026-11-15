@@ -1,5 +1,7 @@
 # Channel loop audit
 
+> **Status:** Implemented before 2026-11-15; archived by advance-roadmap. Evidence: `automations/channel-loop-audit/trigger.py` and tests present; commit d7affa2 removed the scheduled launchd trigger; every open thread is checked.
+
 ## Status
 Event-driven scans are active; the former 15-minute launchd trigger has been removed.
 
