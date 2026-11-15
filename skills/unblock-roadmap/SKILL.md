@@ -1,7 +1,7 @@
 ---
 name: unblock-roadmap
 description: >-
-  Interactive sweep of personal repos blocked from advance-roadmap by dirty trees, Needs Input tickets or unresolved decisions. Ask Jake one question at a time in a terminal or through Slackagent Slack mode, then record his answer as a Linear directive for advance-roadmap. Never implements work or mutates git.
+  Interactive sweep of personal repos blocked from advance-roadmap by dirty trees, Needs Input tickets or unresolved decisions. Ask Jake for decisions in a terminal or through Slackagent Slack mode, then record his answer as a Linear directive for advance-roadmap. Never implements work or mutates git.
 ---
 
 > **Personal machines only (OMEN, JXIV).** `install.sh` doesn't link this skill on the work laptop
@@ -13,7 +13,7 @@ description: >-
 to `Needs Input` rather than guess at a decision that's the user's to make, and can't decide a
 product/taste question either — so all three classes of repo sit stuck indefinitely, run
 after run, until a human clears them. This skill is that human pass: sweep every candidate
-repo, surface what's blocking each one, ask Jake one question at a time, and record his
+repo, surface what's blocking each one, ask Jake for decisions, and record each
 answer immediately — so a sweep he abandons halfway through still leaves every repo he did
 answer fully unblocked.
 
@@ -32,9 +32,9 @@ treat filename matches as leads, not proof of ownership. Automatically resume on
 session with a ticket, existing transcript, exact local `advance-roadmap`-tagged workspace and no live terminal or open
 transcript; recheck the diff and provider usage gate immediately before launch and deduplicate launch
 attempts. Wait when that provider is quota-gated. Otherwise ask.
-Never automatically resume an unverified or active session. Ask one question at a time, leading with the
-repo and ticket and showing
-the blocker evidence. For a dirty tree offer exactly: commit the changes to main, commit them to
+Never automatically resume an unverified or active session. Post dirty-workspace questions independently
+in their own threads so an unrelated unanswered question cannot block them; ask other questions one
+at a time. Lead with the repo and ticket and show the blocker evidence. For a dirty tree offer exactly: commit the changes to main, commit them to
 another branch, find a matching ticket, or hold/skip. Offer 2–6 numbered choices, seed
 1️⃣…6️⃣ reactions, and accept only `SLACK_OWNER_USER_ID`'s answer. An owner's thread reply is
 an **Other** answer; bot seed reactions and other users never authorize a decision.
