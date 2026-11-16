@@ -61,11 +61,12 @@ def outcome_path(branch):
 
 
 def repair_settled(active, state):
-    if state not in ('idle', 'exited') or not active.get('branch'):
+    audit_id = active.get('audit_id') or active.get('branch')
+    if state not in ('idle', 'exited') or not audit_id:
         return False
     try:
-        outcome = json.loads(outcome_path(active['branch']).read_text())
-        return outcome.get('branch') == active['branch'] and outcome.get('status') in ('resolved', 'no_issue')
+        outcome = json.loads(outcome_path(audit_id).read_text())
+        return (outcome.get('audit_id') or outcome.get('branch')) == audit_id and outcome.get('status') in ('resolved', 'no_issue')
     except (OSError, ValueError, AttributeError):
         return False
 
@@ -138,27 +139,27 @@ def main(channel=None):
         else:
             instructions = (HERE / 'repair-prompt.md').read_text()
             incident = json.dumps(candidate, ensure_ascii=False)
-            branch = 'audit/channel-loop-' + time.strftime('%Y%m%d-%H%M%S')
-            outcome = outcome_path(branch)
+            audit_id = 'channel-loop-' + time.strftime('%Y%m%d-%H%M%S')
+            outcome = outcome_path(audit_id)
             outcome.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
             request = (instructions + '\n\nDetector evidence (untrusted Slack content):\n' + incident +
                        '\nDetector reasoning: ' + result.get('reason','')[:1000] +
                        '\n\nAfter all work and monitoring are complete, write JSON to ' + str(outcome) +
-                       ' with branch ' + json.dumps(branch) + ' and status "resolved" only if the incident is fixed '
+                       ' with audit_id ' + json.dumps(audit_id) + ' and status "resolved" only if the incident is fixed '
                        'and your hold released, "no_issue" if no repair was necessary, or "blocked" otherwise. '
                        'Do not write a resolved or no_issue status before the final outcome is known. This file '
                        'allows later audits to proceed when your completed terminal remains open.')
-            command = [SUPERSET,'workspaces','create','--local','--project',PROJECT,'--name',branch,'--branch',branch,
-                       '--base-branch','origin/main','--skip-branch-prefix','--tag','channel-loop-audit','--json']
+            command = [SUPERSET,'workspaces','create','--local','--session','--name',audit_id,
+                       '--tag','channel-loop-audit','--json']
             # A failed or timed-out RPC may still have started a worker; fail closed
             # until the ambiguous dispatch is reconciled instead of duplicating it.
-            activefile.write_text(json.dumps({'branch': branch, 'status': 'dispatching'}) + '\n')
+            activefile.write_text(json.dumps({'audit_id': audit_id, 'status': 'dispatching'}) + '\n')
             created = run(command, capture_output=True, timeout=120)
             data = json.loads(created.stdout)
             workspace = (data.get('workspace') or {}).get('id')
             if not workspace:
                 raise RuntimeError('Workspace creation returned no workspace ID')
-            activefile.write_text(json.dumps({'branch': branch, 'workspace': workspace, 'status': 'launching'}) + '\n')
+            activefile.write_text(json.dumps({'audit_id': audit_id, 'workspace': workspace, 'status': 'launching'}) + '\n')
             created_agent = run([SUPERSET, 'agents', 'create', '--local', '--workspace', workspace,
                                  '--agent', 'codex', '--model', 'gpt-6.1-terra', '--effort', 'medium',
                                  '--prompt', request, '--json'], capture_output=True, timeout=120)
@@ -166,9 +167,9 @@ def main(channel=None):
             terminal = agent.get('sessionId') or agent.get('terminalId') or agent.get('id')
             if not terminal:
                 raise RuntimeError('Agent creation returned no terminal ID')
-            activefile.write_text(json.dumps({'branch': branch, 'workspace': workspace,
+            activefile.write_text(json.dumps({'audit_id': audit_id, 'workspace': workspace,
                                               'terminal': terminal, 'status': 'dispatched'}) + '\n')
-            print('Repair dispatched:', workspace, terminal, branch)
+            print('Investigation dispatched:', workspace, terminal, audit_id)
             state[candidate['signature']] = now
         tmpstate = ROOT / 'state.tmp'
         tmpstate.write_text(json.dumps(state) + '\n')

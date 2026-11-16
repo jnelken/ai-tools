@@ -68,7 +68,7 @@ class AuditTest(unittest.TestCase):
             self.assertEqual(run.call_count, 2)
             self.assertFalse((Path(tmp)/'active-repair.json').exists())
 
-    def test_confirmed_incident_dispatches_terra_once_in_new_workspace(self):
+    def test_suspected_incident_dispatches_terra_in_branchless_session(self):
         msgs = [{'ts': str(t), 'text': 'repeated failure'} for t in (100, 200, 300)]
         signature = audit.groups({'eng': msgs})[0]['signature']
         def execute(cmd, **kwargs):
@@ -80,9 +80,15 @@ class AuditTest(unittest.TestCase):
                 self.assertEqual(cmd[cmd.index('--model') + 1], 'gpt-6-luna')
                 return SimpleNamespace(stdout='')
             if cmd[1:3] == ['workspaces', 'create']:
-                self.assertTrue(cmd[cmd.index('--name') + 1].startswith('audit/channel-loop-'))
+                self.assertTrue(cmd[cmd.index('--name') + 1].startswith('channel-loop-'))
+                self.assertIn('--session', cmd)
+                self.assertNotIn('--branch', cmd)
+                self.assertNotIn('--project', cmd)
                 return SimpleNamespace(stdout=json.dumps({'workspace': {'id': 'ws'}}))
             self.assertEqual(cmd[cmd.index('--model') + 1], 'gpt-6.1-terra')
+            prompt = cmd[cmd.index('--prompt') + 1]
+            self.assertIn('Do not create a branch or worktree unless', prompt)
+            self.assertIn('descriptive branch name based on the actual issue', prompt)
             return SimpleNamespace(stdout=json.dumps({'sessionId': 'term'}))
         with tempfile.TemporaryDirectory() as tmp, patch.object(audit, 'ROOT', Path(tmp)), \
                 patch.object(audit, 'run', side_effect=execute) as run:
@@ -90,6 +96,10 @@ class AuditTest(unittest.TestCase):
             self.assertEqual(run.call_count, 4)
             active = json.loads((Path(tmp)/'active-repair.json').read_text())
             self.assertEqual((active['workspace'], active['terminal']), ('ws', 'term'))
+            self.assertNotIn('branch', active)
+            outcome = audit.outcome_path(active['audit_id'])
+            outcome.write_text(json.dumps({'audit_id': active['audit_id'], 'status': 'no_issue'}))
+            self.assertTrue(audit.repair_settled(active, 'idle'))
 
     def test_ignore_does_not_require_a_candidate_signature(self):
         msgs = [{'ts': str(t), 'text': 'repeated failure'} for t in (100, 200, 300)]
