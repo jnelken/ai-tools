@@ -14,6 +14,9 @@ AUDIT = Path(__file__).resolve().with_name('audit.py')
 def record(channel, event_id):
     if channel not in ('eng', 'ops') or not event_id:
         raise ValueError('Expected a monitored channel and event ID')
+    # Automatic scans are disabled; investigations are initiated by the owner.
+    if os.environ.get('CHANNEL_AUDIT_ENABLED') != 'true':
+        return
     ROOT.mkdir(mode=0o700, parents=True, exist_ok=True)
     os.chmod(ROOT, 0o700)
     with (ROOT / 'trigger.lock').open('a') as lock:

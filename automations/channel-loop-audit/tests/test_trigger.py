@@ -14,6 +14,7 @@ spec.loader.exec_module(trigger)
 class TriggerTest(unittest.TestCase):
     def test_counts_channels_independently_and_deduplicates_events(self):
         with tempfile.TemporaryDirectory() as tmp, patch.object(trigger, 'ROOT', Path(tmp)), \
+                patch.dict(trigger.os.environ, {'CHANNEL_AUDIT_ENABLED': 'true'}), \
                 patch.object(trigger.subprocess, 'Popen') as popen:
             for channel, event in [('eng', '1'), ('ops', '2'), ('eng', '1'),
                                    ('eng', '3'), ('ops', '4')]:
@@ -24,6 +25,14 @@ class TriggerTest(unittest.TestCase):
             self.assertEqual([call.args[0][-1] for call in popen.call_args_list], ['eng', 'ops'])
             state = json.loads((Path(tmp) / 'trigger-state.json').read_text())
             self.assertEqual((state['eng']['count'], state['ops']['count']), (0, 0))
+
+    def test_disabled_by_default(self):
+        with tempfile.TemporaryDirectory() as tmp, patch.object(trigger, 'ROOT', Path(tmp)), \
+                patch.dict(trigger.os.environ, {}, clear=True), patch.object(trigger.subprocess, 'Popen') as popen:
+            for event in ('1', '2', '3'):
+                trigger.record('eng', event)
+            popen.assert_not_called()
+            self.assertFalse((Path(tmp) / 'trigger-state.json').exists())
 
     def test_other_channels_are_rejected(self):
         with self.assertRaises(ValueError):
