@@ -2,14 +2,13 @@
 name: reap-adv-roadmap-sswts
 description: >-
   Safely clear leftover Superset workspaces (sswts) left by advance-roadmap worker
-  runs — by finished-banner evidence on live tabs, or by dead-pane + clean + no
-  net-new vs main (zsh diffmain/gdiffnew merge-tree check, squash-merge safe)
-  when terminals are gone. Use when the user says "reap roadmap workspaces",
-  "clear advance-roadmap sswts", "clean up finished roadmap tabs", "reap exit=0
-  finished workspaces", "reap dead panes", or after a batch of advance-roadmap
-  runs left worktrees piled up. Complements clean-sswts (general PR-state sweep
-  on non-roadmap / non-work machines) and workspaces.py cleanup (merge-recorded
-  tagged workspaces).
+  runs — by finished-banner evidence on live tabs, or by dead-pane checks (diffmain
+  net-new, and for merge-tree conflicts: merged PR or completed Linear ticket).
+  Use when the user says "reap roadmap workspaces", "clear advance-roadmap sswts",
+  "clean up finished roadmap tabs", "reap exit=0 finished workspaces", "reap dead
+  panes", or after a batch of advance-roadmap runs left worktrees piled up.
+  Complements clean-sswts (general PR-state sweep on non-roadmap / non-work
+  machines) and workspaces.py cleanup (merge-recorded tagged workspaces).
 ---
 
 # Reap advance-roadmap sswts
@@ -27,10 +26,12 @@ Those workspaces often linger even after the PR shipped — failover tabs, setup
 shells, multi-provider retries, and **dead panes** (workspace still registered,
 zero terminals). `workspaces.py cleanup` only reaps workspaces Superset has tagged
 + recorded as merged. This skill reaps by **terminal evidence**, and for dead
-panes by **empty diff vs main**.
+panes by **diffmain** plus **PR / Linear finished** evidence when merge-tree
+conflicts.
 
 Related: [[clean-sswts]] (broader PR-state sweep; fine to overlap), [[self-destruct]]
-(`reap-workspace.sh`), advance-roadmap `lib/workspaces.py cleanup` (merge-gated).
+(`reap-workspace.sh`), [[linear-cli]], advance-roadmap `lib/workspaces.py cleanup`
+(merge-gated).
 
 ## Scope
 
@@ -92,13 +93,27 @@ there is nothing to lose against main:
    `git diff --stat <main_ref> <merged-tree>` (excluding conflicted paths).
    Prefer `origin/main`, then `origin/master`, then local `main` / `master`.
    If no main ref resolves → **keep**.
-4. Reap only when that merge has **zero conflicts** and an **empty delta**.
-   Non-empty delta, merge-tree failure, conflicts, dirty/untracked → **keep**.
+4. Prefer reap when that merge has **zero conflicts** and an **empty delta**.
+5. **Path B2 — merge conflicts, but work is finished:** if merge-tree reports
+   conflicts (or you would otherwise keep solely for that), check external
+   finished evidence before keeping:
+   - Bulk `gh pr list --repo <owner/repo> --state all --limit 500` once per
+     owning clone; join on `headRefName == workspace.branch` (never parse the
+     PR number out of the workspace name).
+   - Ticket from workspace name/branch (`DEV-###` etc.) → `linear issue view
+     <id> --json` ([[linear-cli]]); read `state.name`.
+   - **Reap** when: PR state is `MERGED`, **or** there is no `OPEN` PR on the
+     branch and Linear state is `Done` / `Canceled` / `Cancelled`.
+   - **Keep** when: PR is `OPEN`, Linear is Todo/Backlog/In Progress (or
+     unknown), there is no PR and no ticket, dirty/held/missing main, or
+     merge-tree reported **net-new** (non-empty delta without relying on this
+     finished override — net-new can be real post-merge commits on the tip).
 
 Tip/blob `git diff <main_ref>` is the wrong test here: these repos squash-merge,
 so a landed branch tip is often still a huge tree diff against main even when
 its content is already reflected. `diffmain`'s merge-tree replay is what makes
-"already in main" detectable.
+"already in main" detectable; PR/Linear finished is what clears conflict noise
+after a squash land.
 
 ## Delete path
 
@@ -131,11 +146,12 @@ Surveyed N local non-root → R reaped, K kept
 Reaped:
   <project>  <branch>  path=banner     tabs=[finished0×2, setup×1]  last0=<date>
   <project>  <branch>  path=dead-pane  main=origin/main  net_new=empty
+  <project>  <branch>  path=dead-pane  conflicts + PR#12 MERGED
 
 Kept:
   <project>  <branch>  reason=nonzero-after-success …
   <project>  <branch>  reason=dead-pane-net-new
-  <project>  <branch>  reason=dead-pane-merge-conflicts
+  <project>  <branch>  reason=dead-pane-merge-conflicts (PR open / Linear Todo)
   <project>  <branch>  reason=other-tab
 ```
 

@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Survey local Superset workspaces for advance-roadmap reaps.
 
-Two paths:
-  banner    — finished-banner evidence on live tabs
-  dead-pane — zero terminals, clean tree, no net-new vs main (diffmain/gdiffnew)
+Paths:
+  banner     — finished-banner evidence on live tabs
+  dead-pane  — zero terminals + diffmain empty net-new
+  dead-pane  — merge-tree conflicts + PR MERGED or Linear Done/Canceled
 
 Prints reapable / keep buckets. Does not delete anything — the skill drives
 reap-workspace.sh after reviewing this output.
@@ -40,6 +41,9 @@ SETUP_STRONG = [
     )
 ]
 MAIN_CANDIDATES = ("origin/main", "origin/master", "main", "master")
+LINEAR_DONE = {"done", "canceled", "cancelled"}
+# Reasons that Path B2 (PR / Linear finished) may override.
+CONFLICT_OVERRIDE_REASONS = {"dead-pane-merge-conflicts"}
 
 
 def run(*args: str, cwd: str | None = None) -> subprocess.CompletedProcess[str]:
@@ -124,7 +128,106 @@ def classify_tab(raw: str) -> dict[str, Any]:
 def ticket_from_label(*parts: str) -> str | None:
     blob = " ".join(p for p in parts if p)
     m = TICKET_RE.search(blob)
+    return m.group(1).upper() if m else None
+
+
+def github_repo(root: str) -> str | None:
+    if not root or not os.path.isdir(root):
+        return None
+    p = run("git", "-C", root, "remote", "get-url", "origin")
+    if p.returncode != 0:
+        return None
+    m = re.search(r"github\.com[:/](.+?)(?:\.git)?$", (p.stdout or "").strip())
     return m.group(1) if m else None
+
+
+def bulk_prs_by_branch(repos: set[str]) -> dict[tuple[str, str], list[dict[str, Any]]]:
+    """(repo, headRefName) -> PRs from one gh call per repo."""
+    out: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    for repo in sorted(r for r in repos if r):
+        p = run(
+            "gh", "pr", "list", "--repo", repo, "--state", "all", "--limit", "500",
+            "--json", "number,state,title,headRefName,mergedAt,closedAt,url,isDraft",
+        )
+        if p.returncode != 0:
+            continue
+        try:
+            prs = json.loads(p.stdout or "[]")
+        except json.JSONDecodeError:
+            continue
+        for pr in prs:
+            key = (repo, pr.get("headRefName") or "")
+            out.setdefault(key, []).append(pr)
+    return out
+
+
+def best_pr(prs: list[dict[str, Any]]) -> dict[str, Any] | None:
+    if not prs:
+        return None
+
+    def rank(pr: dict[str, Any]) -> int:
+        return {"MERGED": 0, "OPEN": 1, "CLOSED": 2}.get((pr.get("state") or "").upper(), 9)
+
+    return sorted(prs, key=rank)[0]
+
+
+def linear_state_name(ticket: str) -> str | None:
+    """Return Linear state.name for DEV-### via `linear issue view --json`."""
+    if not ticket:
+        return None
+    p = run("linear", "issue", "view", ticket, "--json")
+    if p.returncode != 0 or not (p.stdout or "").strip():
+        return None
+    try:
+        data = json.loads(p.stdout)
+    except json.JSONDecodeError:
+        return None
+    st = data.get("state")
+    if isinstance(st, dict):
+        return st.get("name") or st.get("type")
+    if isinstance(st, str):
+        return st
+    return None
+
+
+def finished_override(
+    entry: dict[str, Any],
+    prs_index: dict[tuple[str, str], list[dict[str, Any]]],
+    linear_cache: dict[str, str | None],
+) -> tuple[bool, str]:
+    """Path B2: conflicts + (PR MERGED | Linear Done/Canceled with no OPEN PR)."""
+    repo = github_repo(entry.get("root") or "")
+    branch = entry.get("branch") or ""
+    prs = prs_index.get((repo or "", branch), []) if repo else []
+    pr = best_pr(prs)
+    pr_state = (pr.get("state") or "").upper() if pr else None
+    has_open = any((p.get("state") or "").upper() == "OPEN" for p in prs)
+
+    ticket = entry.get("label_ticket")
+    if ticket and ticket not in linear_cache:
+        linear_cache[ticket] = linear_state_name(ticket)
+    lin = linear_cache.get(ticket) if ticket else None
+    lin_l = (lin or "").strip().lower()
+    lin_done = lin_l in LINEAR_DONE
+
+    entry["pr_state"] = pr_state
+    entry["pr_number"] = pr.get("number") if pr else None
+    entry["pr_url"] = pr.get("url") if pr else None
+    entry["linear_state"] = lin
+
+    if pr_state == "MERGED":
+        return True, f"PR#{pr.get('number')} MERGED"
+    if has_open:
+        return False, f"PR#{pr.get('number')} OPEN" if pr else "OPEN PR"
+    if ticket and lin_done:
+        return True, f"{ticket}={lin}"
+    if ticket and lin:
+        return False, f"{ticket}={lin}"
+    if pr_state == "CLOSED":
+        return False, f"PR#{pr.get('number')} CLOSED (not merged)"
+    if ticket:
+        return False, f"{ticket}=unknown"
+    return False, "no-PR no-ticket"
 
 
 def same_path(a: str, b: str) -> bool:
@@ -377,11 +480,40 @@ def survey(project_filter: str | None = None) -> dict[str, Any]:
         entry["reason"] = "reapable-banner"
         reapable.append(entry)
 
+    _promote_finished_conflicts(reapable, keep)
+
     return {
         "roots_skipped": roots_skipped,
         "reapable": reapable,
         "keep": keep,
     }
+
+
+def _promote_finished_conflicts(
+    reapable: list[dict[str, Any]],
+    keep: list[dict[str, Any]],
+) -> None:
+    """Path B2: move merge-conflict keeps to reapable when PR/Linear say finished."""
+    candidates = [e for e in keep if e.get("reason") in CONFLICT_OVERRIDE_REASONS]
+    if not candidates:
+        return
+    repos = {github_repo(e.get("root") or "") for e in candidates}
+    prs_index = bulk_prs_by_branch({r for r in repos if r})
+    linear_cache: dict[str, str | None] = {}
+    still_keep: list[dict[str, Any]] = []
+    for e in keep:
+        if e.get("reason") not in CONFLICT_OVERRIDE_REASONS:
+            still_keep.append(e)
+            continue
+        ok, detail = finished_override(e, prs_index, linear_cache)
+        e["finished_evidence"] = detail
+        if ok:
+            e["reason"] = "reapable-dead-pane-finished"
+            reapable.append(e)
+        else:
+            e["reason"] = f"dead-pane-merge-conflicts ({detail})"
+            still_keep.append(e)
+    keep[:] = still_keep
 
 
 def _classify_dead_pane(
@@ -472,10 +604,14 @@ def main() -> int:
         print("\nReapable:")
         for e in r:
             if e.get("path_kind") == "dead-pane":
+                extra = (
+                    f"finished={e.get('finished_evidence')}"
+                    if e.get("finished_evidence")
+                    else f"net_new={e.get('net_new')}"
+                )
                 print(
                     f"  {e['id']}  {e['project']:20}  {e['branch']}  "
-                    f"path=dead-pane  main={e.get('main_ref')}  "
-                    f"net_new={e.get('net_new')}"
+                    f"path=dead-pane  main={e.get('main_ref')}  {extra}"
                 )
             else:
                 kinds = ",".join(e.get("kinds") or [])
