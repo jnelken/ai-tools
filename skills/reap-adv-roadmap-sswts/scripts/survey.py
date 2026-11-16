@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Survey local Superset workspaces for advance-roadmap finished-banner reaps.
+"""Survey local Superset workspaces for advance-roadmap reaps.
+
+Two paths:
+  banner    — finished-banner evidence on live tabs
+  dead-pane — zero terminals, clean tree, no diff against main
 
 Prints reapable / keep buckets. Does not delete anything — the skill drives
 reap-workspace.sh after reviewing this output.
@@ -35,10 +39,11 @@ SETUP_STRONG = [
         r"Done in \d+\.\d+s",
     )
 ]
+MAIN_CANDIDATES = ("origin/main", "origin/master", "main", "master")
 
 
-def run(*args: str) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(args, capture_output=True, text=True)
+def run(*args: str, cwd: str | None = None) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(args, capture_output=True, text=True, cwd=cwd)
 
 
 def sjson(*args: str) -> Any:
@@ -100,8 +105,20 @@ def classify_tab(raw: str) -> dict[str, Any]:
             "tickets_tail": sorted(set(TICKET_RE.findall(raw[-8000:]))),
         }
     if is_setup(raw):
-        return {"kind": "setup", "exit": None, "finished_raw": None, "finished_dt": None, "tickets_tail": []}
-    return {"kind": "other", "exit": None, "finished_raw": None, "finished_dt": None, "tickets_tail": []}
+        return {
+            "kind": "setup",
+            "exit": None,
+            "finished_raw": None,
+            "finished_dt": None,
+            "tickets_tail": [],
+        }
+    return {
+        "kind": "other",
+        "exit": None,
+        "finished_raw": None,
+        "finished_dt": None,
+        "tickets_tail": [],
+    }
 
 
 def ticket_from_label(*parts: str) -> str | None:
@@ -117,12 +134,86 @@ def same_path(a: str, b: str) -> bool:
         return a == b
 
 
+def resolve_main_ref(repo: str) -> str | None:
+    for ref in MAIN_CANDIDATES:
+        p = run("git", "-C", repo, "rev-parse", "--verify", "-q", ref)
+        if p.returncode == 0:
+            return ref
+    return None
+
+
+def fetch_once(roots: set[str]) -> dict[str, str | None]:
+    """Fetch each owning clone once; return root -> main_ref (or None)."""
+    main_refs: dict[str, str | None] = {}
+    for root in sorted(roots):
+        if not root or not os.path.isdir(root):
+            main_refs[root] = None
+            continue
+        # Only fetch when origin exists; still resolve a local main otherwise.
+        has_origin = run("git", "-C", root, "remote", "get-url", "origin").returncode == 0
+        if has_origin:
+            run("git", "-C", root, "fetch", "origin", "--prune", "-q")
+        main_refs[root] = resolve_main_ref(root)
+    return main_refs
+
+
+def held_paths() -> list[str]:
+    """Best-effort list of cwd paths held by common agent/runtime processes."""
+    p = run(
+        "bash", "-lc",
+        "lsof -a -d cwd -c node -c claude -c codex -c Cursor -Fn 2>/dev/null | "
+        "sed -n 's/^n//p' | sort -u",
+    )
+    return [ln for ln in (p.stdout or "").splitlines() if ln.startswith("/")]
+
+
+def is_held(wt: str, held: list[str]) -> bool:
+    """True when a live process cwd is the worktree or inside it.
+
+    Do not invert the test (worktree inside a broad cwd like $HOME) — that
+    marks every workspace held.
+    """
+    if not wt:
+        return False
+    try:
+        real = os.path.realpath(wt)
+    except OSError:
+        real = wt
+    for h in held:
+        try:
+            hr = os.path.realpath(h)
+        except OSError:
+            hr = h
+        if hr in ("/",) or hr == os.path.expanduser("~"):
+            continue
+        if hr == real or hr.startswith(real + os.sep):
+            return True
+    return False
+
+
+def tree_matches_main(wt: str, main_ref: str) -> tuple[bool, str]:
+    """Return (matches, detail). Uses git diff against main_ref (tracked + intent)."""
+    p = run("git", "-C", wt, "diff", "--quiet", main_ref)
+    if p.returncode == 0:
+        # Also fail if untracked would be invisible to diff against a ref — caller
+        # already requires a clean status --short, so untracked is covered there.
+        return True, "empty"
+    if p.returncode == 1:
+        stat = run("git", "-C", wt, "diff", "--shortstat", main_ref).stdout.strip()
+        return False, stat or "non-empty"
+    return False, (p.stderr or p.stdout or "diff-failed").strip()[:200]
+
+
 def survey(project_filter: str | None = None) -> dict[str, Any]:
     projects = {p["id"]: p for p in sjson("projects", "list")}
     workspaces = sjson("workspaces", "list", "--local")
-    reapable: list[dict[str, Any]] = []
-    keep: list[dict[str, Any]] = []
-    roots = 0
+    cwd = os.path.realpath(os.getcwd())
+    held = held_paths()
+
+    # Pre-collect roots we may need to fetch for dead-pane checks.
+    candidate_roots: set[str] = set()
+    filtered: list[tuple[dict[str, Any], dict[str, Any], str, str, str]] = []
+    roots_skipped = 0
 
     for w in workspaces:
         proj = projects.get(w.get("projectId") or "", {})
@@ -136,18 +227,36 @@ def survey(project_filter: str | None = None) -> dict[str, Any]:
         }:
             continue
         if root and wt and same_path(wt, root):
-            roots += 1
+            roots_skipped += 1
+            continue
+        if root:
+            candidate_roots.add(root)
+        filtered.append((w, proj, name, root, wt))
+
+    main_refs = fetch_once(candidate_roots)
+
+    reapable: list[dict[str, Any]] = []
+    keep: list[dict[str, Any]] = []
+
+    for w, _proj, name, root, wt in filtered:
+        base = _base(w, name, root, wt)
+        if wt and same_path(os.path.realpath(wt), cwd):
+            keep.append({**base, "reason": "cwd-trap", "path_kind": None})
+            continue
+        if is_held(wt, held):
+            keep.append({**base, "reason": "held", "path_kind": None})
             continue
 
         try:
             term_payload = sjson("terminals", "list", "--local", "--workspace", w["id"])
         except RuntimeError as e:
-            keep.append({**_base(w, name, root, wt), "reason": f"terminals-list-failed: {e}"})
+            keep.append({**base, "reason": f"terminals-list-failed: {e}", "path_kind": None})
             continue
         sessions = term_payload.get("sessions") if isinstance(term_payload, dict) else term_payload
         sessions = sessions or []
+
         if not sessions:
-            keep.append({**_base(w, name, root, wt), "reason": "no-terminals"})
+            _classify_dead_pane(base, w, wt, root, main_refs.get(root), reapable, keep)
             continue
 
         tabs = []
@@ -165,7 +274,8 @@ def survey(project_filter: str | None = None) -> dict[str, Any]:
 
         kinds = [t["kind"] for t in tabs]
         entry = {
-            **_base(w, name, root, wt),
+            **base,
+            "path_kind": "banner",
             "tabs": tabs,
             "kinds": kinds,
             "label_ticket": ticket_from_label(w.get("name") or "", w.get("branch") or ""),
@@ -181,7 +291,10 @@ def survey(project_filter: str | None = None) -> dict[str, Any]:
             entry["reason"] = "no-exit-0"
             keep.append(entry)
             continue
-        nonzeros = [t for t in tabs if t["kind"].startswith("finished") and t["kind"] != "finished0"]
+        nonzeros = [
+            t for t in tabs
+            if t["kind"].startswith("finished") and t["kind"] != "finished0"
+        ]
         if zeros and nonzeros:
             last0 = max(datetime.fromisoformat(t["finished_dt"]) for t in zeros)
             bad = [
@@ -196,7 +309,6 @@ def survey(project_filter: str | None = None) -> dict[str, Any]:
                 keep.append(entry)
                 continue
         elif nonzeros and not zeros:
-            # finished0 present but unparsable dates — require all zeros only
             if any(t.get("finished_dt") is None for t in zeros_any + nonzeros):
                 entry["reason"] = "unparsable-finished-date"
                 keep.append(entry)
@@ -228,14 +340,55 @@ def survey(project_filter: str | None = None) -> dict[str, Any]:
         if zeros:
             last0_raw = max(zeros, key=lambda t: t["finished_dt"])["finished_raw"]
         entry["last0"] = last0_raw
-        entry["reason"] = "reapable"
+        entry["reason"] = "reapable-banner"
         reapable.append(entry)
 
     return {
-        "roots_skipped": roots,
+        "roots_skipped": roots_skipped,
         "reapable": reapable,
         "keep": keep,
     }
+
+
+def _classify_dead_pane(
+    base: dict[str, Any],
+    w: dict[str, Any],
+    wt: str,
+    root: str,
+    main_ref: str | None,
+    reapable: list[dict[str, Any]],
+    keep: list[dict[str, Any]],
+) -> None:
+    entry = {
+        **base,
+        "path_kind": "dead-pane",
+        "tabs": [],
+        "kinds": [],
+        "label_ticket": ticket_from_label(w.get("name") or "", w.get("branch") or ""),
+        "main_ref": main_ref,
+    }
+    if not wt or not os.path.isdir(wt):
+        entry["reason"] = "dead-pane-missing-worktree"
+        keep.append(entry)
+        return
+    dirty = run("git", "-C", wt, "status", "--short").stdout.strip()
+    if dirty:
+        entry["reason"] = "dead-pane-dirty"
+        entry["dirty"] = dirty.splitlines()[:12]
+        keep.append(entry)
+        return
+    if not main_ref:
+        entry["reason"] = "dead-pane-no-main-ref"
+        keep.append(entry)
+        return
+    matches, detail = tree_matches_main(wt, main_ref)
+    entry["diff"] = detail
+    if not matches:
+        entry["reason"] = "dead-pane-diff-vs-main"
+        keep.append(entry)
+        return
+    entry["reason"] = "reapable-dead-pane"
+    reapable.append(entry)
 
 
 def _base(w: dict[str, Any], name: str, root: str, wt: str) -> dict[str, Any]:
@@ -275,11 +428,18 @@ def main() -> int:
     if r:
         print("\nReapable:")
         for e in r:
-            kinds = ",".join(e["kinds"])
-            print(
-                f"  {e['id']}  {e['project']:20}  {e['branch']}  "
-                f"tabs=[{kinds}]  last0={e.get('last0')}  ticket={e.get('label_ticket')}"
-            )
+            if e.get("path_kind") == "dead-pane":
+                print(
+                    f"  {e['id']}  {e['project']:20}  {e['branch']}  "
+                    f"path=dead-pane  main={e.get('main_ref')}  diff={e.get('diff')}"
+                )
+            else:
+                kinds = ",".join(e.get("kinds") or [])
+                print(
+                    f"  {e['id']}  {e['project']:20}  {e['branch']}  "
+                    f"path=banner  tabs=[{kinds}]  last0={e.get('last0')}  "
+                    f"ticket={e.get('label_ticket')}"
+                )
     if k and not args.quiet:
         print("\nKeep:")
         for e in k:
