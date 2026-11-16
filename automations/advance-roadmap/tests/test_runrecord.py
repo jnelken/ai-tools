@@ -53,6 +53,17 @@ class RunRecordTest(unittest.TestCase):
         self.assertEqual(rec['assigned_repo'], 'actual')
         self.assertEqual(rec['reported_repo'], 'fallback')
 
+    def test_no_worker_bookkeeping_keeps_the_planner_reason(self):
+        rec = self.append({'action': 'blocked_no_item', 'summary': 'Candidates require input'},
+                          {'used': 'none', 'exit': 0},
+                          {'outcome': 'bookkeeping', 'provider': 'none',
+                           'summary': 'No assignment; no bookkeeping worker ran'})
+        self.assertEqual(rec['summary'], 'Candidates require input')
+        rec = self.append({'action': 'blocked_no_item', 'summary': 'Planner reason'},
+                          {'used': 'codex', 'exit': 0},
+                          {'outcome': 'bookkeeping', 'provider': 'codex', 'summary': 'Worker result'})
+        self.assertEqual(rec['summary'], 'Worker result')
+
     def test_forced_stop_is_yielded_even_if_partial_result_claims_shipped(self):
         rec = self.append({'action': 'resume_worker', 'repo': 'demo'},
                           {'used': 'codex', 'exit': 124,

@@ -95,7 +95,7 @@ def tickets_by_repo(snapshot):
     return result
 
 
-def choose_repos(store, code, snapshot, repos, live, now):
+def choose_repos(store, code, snapshot, repos, live, now, *, allow_new=True):
     unfinished = [w for w in store.list() if w['repo'] in repos and w['repo'] not in live
                   and w['state'] not in ('done', 'human') and w['not_before'] <= now]
     pinned = store.get('quota_work_ids', [])
@@ -114,7 +114,7 @@ def choose_repos(store, code, snapshot, repos, live, now):
             seen.add(decision['repo'])
     # The snapshot is fetched before this point. Only map eligible tickets to a
     # local repository after ranking them; missing or incomplete snapshots fail closed.
-    ticket_repos = tickets_by_repo(workqueue.read(snapshot, {}) or {})
+    ticket_repos = tickets_by_repo(workqueue.read(snapshot, {}) or {}) if allow_new else {}
     available = [repo for repo in ticket_repos if repo in repos and repo not in live and repo not in seen]
     decisions = {d['repo']: d for d in scheduler.policy(store, available, snapshot,
                                                         now=now, daily_limit=False)}
@@ -194,13 +194,23 @@ def _tick(root):
             if not slots:
                 set_schedule(store, wake_at=now + 60, reason='existing worker active')
                 return 'worker-active'
-            snapshot = scheduler.refresh_snapshot(root)
-            workqueue.wake_humans(store, workqueue.read(snapshot, {}))
+            try:
+                snapshot = scheduler.refresh_snapshot(root, force=True)
+                fresh_snapshot = True
+            except RuntimeError:
+                # Never select new work from stale data, but a saved assignment can
+                # continue even while Linear is unavailable.
+                snapshot = root / 'continuation-only-snapshot.json'
+                snapshot.write_text(json.dumps({'ok': False, 'issues': []}))
+                fresh_snapshot = False
+            if fresh_snapshot:
+                workqueue.wake_humans(store, workqueue.read(snapshot, {}))
             repos = batch.candidates(Path(code))
-            candidates = choose_repos(store, code, snapshot, repos, live, now)
+            candidates = choose_repos(store, code, snapshot, repos, live, now, allow_new=fresh_snapshot)
             if not candidates:
-                set_schedule(store, wake_at=now + 900, reason='no eligible work')
-                return 'no-eligible-work'
+                set_schedule(store, wake_at=now + (900 if fresh_snapshot else 300),
+                             reason='no eligible work' if fresh_snapshot else 'fresh Linear snapshot unavailable')
+                return 'no-eligible-work' if fresh_snapshot else 'snapshot-unavailable'
             budget = batch.RoadmapBudget()
             chosen = forecast_candidates(budget, candidates, slots)
             store.set('quota_work_ids', [work['id'] for _, work in chosen if work])
@@ -230,7 +240,10 @@ def _tick(root):
             (marker / 'pid').write_text(str(os.getpid()))
             caffeinate = None
             previous_continuous = os.environ.get('ADVANCE_ROADMAP_CONTINUOUS')
+            previous_continuation_only = os.environ.get('ADVANCE_ROADMAP_CONTINUATION_ONLY')
             os.environ['ADVANCE_ROADMAP_CONTINUOUS'] = '1'
+            if not fresh_snapshot:
+                os.environ['ADVANCE_ROADMAP_CONTINUATION_ONLY'] = '1'
             try:
                 if shutil.which('caffeinate'):
                     caffeinate = subprocess.Popen(['caffeinate', '-i', '-w', str(os.getpid())])
@@ -240,6 +253,10 @@ def _tick(root):
                     os.environ.pop('ADVANCE_ROADMAP_CONTINUOUS', None)
                 else:
                     os.environ['ADVANCE_ROADMAP_CONTINUOUS'] = previous_continuous
+                if previous_continuation_only is None:
+                    os.environ.pop('ADVANCE_ROADMAP_CONTINUATION_ONLY', None)
+                else:
+                    os.environ['ADVANCE_ROADMAP_CONTINUATION_ONLY'] = previous_continuation_only
                 if caffeinate:
                     caffeinate.terminate()
                 (marker / 'pid').unlink(missing_ok=True)

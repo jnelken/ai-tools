@@ -614,6 +614,24 @@ exec(compile(open(__file__).read(), __file__, "exec"))
         self.assertTrue((run / 'dispatch-rejected').exists())
         self.assertIn('eligible ticket', (run / 'dispatch-rejected').read_text())
 
+    def test_selected_tickets_are_reassessed_despite_an_unchanged_verdict(self):
+        self.usage_state(codex={'weekly': {'used_pct': 90, 'reset_epoch': FUTURE}})
+        self.run_lane(FAKE_CLAUDE='plan')
+        self.assertTrue(self.verdict.exists())
+        self.run_lane(FAKE_CLAUDE='plan', ADVANCE_ROADMAP_SELECTED_TICKETS='DEV-1 DEV-3')
+        self.assertNotEqual(self.record()['outcome'], 'skipped-unchanged')
+        prompt = self.calls()[-1]['prompt']
+        self.assertIn('DEV-1 DEV-3', prompt)
+        self.assertIn('do not carry forward an earlier no-work assessment', prompt)
+        self.assertNotIn('carry unchanged verdicts forward', prompt)
+
+    def test_continuation_only_mode_never_starts_a_fresh_planner(self):
+        self.usage_state()
+        self.run_lane(FAKE_CLAUDE='plan', ADVANCE_ROADMAP_CONTINUATION_ONLY='1')
+        self.assertEqual(self.record()['outcome'], 'skipped-backoff')
+        self.assertIn('fresh Linear snapshot unavailable', self.record()['detail'])
+        self.assertFalse(self.calls())
+
     def reviewer_row(self):
         (self.root / "review.sh").symlink_to(HERE / "review.sh")
         repo = self.dir / "reviewed"

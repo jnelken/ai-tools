@@ -295,9 +295,9 @@ def archive_completed_plan(store):
         store.set('plan_archived', {'revision': revision, 'path': target})
 
 
-def refresh_snapshot(root):
+def refresh_snapshot(root, *, force=False):
     path = root / 'scheduler-snapshot.json'
-    if path.exists() and time.time() - path.stat().st_mtime < 900:
+    if not force and path.exists() and time.time() - path.stat().st_mtime < 900:
         return path
     staged = root / 'scheduler-snapshot.next.json'
     result = batch.shared.py('linearsnap.py', '--out', str(staged), timeout=180)

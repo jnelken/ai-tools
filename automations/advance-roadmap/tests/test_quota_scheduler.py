@@ -123,7 +123,7 @@ class QuotaSchedulerTest(unittest.TestCase):
                 patch.object(q.workqueue, 'active_count', return_value=0), \
                 patch.object(q.workqueue, 'wake_humans'), \
                 patch.object(q.scheduler, 'observe_completed'), \
-                patch.object(q.scheduler, 'refresh_snapshot', return_value=self.snapshot), \
+                patch.object(q.scheduler, 'refresh_snapshot', return_value=self.snapshot) as refresh, \
                 patch.object(q.scheduler, 'policy', return_value=[]), \
                 patch.object(q.batch, 'candidates', return_value=['a', 'b']), \
                 patch.object(q.batch, 'RoadmapBudget', FakeBudget), \
@@ -132,11 +132,50 @@ class QuotaSchedulerTest(unittest.TestCase):
                 patch.object(q, 'next_reset', return_value=None), \
                 patch.object(q.shutil, 'which', return_value=None):
             self.assertEqual(q.tick(self.root), 'unit-finished')
+            refresh.assert_called_once_with(self.root, force=True)
         self.assertEqual(calls, [(['a', 'b'], 2, 1), ('provisional', True, '1')])
         with workqueue.Store(self.root) as store:
             schedule = store.get('quota_schedule')
             self.assertEqual(schedule['reason'], 'unit completed; recheck headroom')
             self.assertEqual(len(store.get('quota_work_ids')), 2)
+
+    def test_linear_failure_continues_saved_work_but_never_selects_fresh_work(self):
+        with workqueue.Store(self.root) as store:
+            store.set('quota_scheduler_enabled', True)
+            store.register({'repo': 'a', 'item': 'DEV-1', 'action': 'resume_worker',
+                            'branch': 'roadmap/a'}, '20261110-100000')
+        captured = []
+        class Budget:
+            planners = ['codex']
+            def __init__(self): self.forecast = []
+            def choose(self, **kwargs): return {'leases': []}
+            def release(self, item): pass
+        class Batch:
+            def __init__(self, directory, repos, lanes, threads):
+                captured.append(repos)
+                self.state = {'queue': [{'repo': repo, 'status': 'finished', 'outcome': 'yielded',
+                                         'released_at': time.time()} for repo in repos]}
+                self.budget = Budget()
+            def run(self, **kwargs):
+                captured.append(os.environ.get('ADVANCE_ROADMAP_CONTINUATION_ONLY'))
+        with patch.object(q.batch.shared, 'code_dir', return_value=str(self.code)), \
+                patch.object(q.batch.shared, 'inflight_repos', return_value=set()), \
+                patch.object(q.batch.shared, 'py', return_value=SimpleNamespace(returncode=0)), \
+                patch.object(q.workqueue, 'sync', return_value=set()), \
+                patch.object(q.workqueue, 'active_count', return_value=0), \
+                patch.object(q.workqueue, 'wake_humans') as wake, \
+                patch.object(q.scheduler, 'observe_completed'), \
+                patch.object(q.scheduler, 'refresh_snapshot', side_effect=RuntimeError('offline')), \
+                patch.object(q.batch, 'candidates', return_value=['a', 'b']), \
+                patch.object(q.batch, 'pending_action', return_value=None), \
+                patch.object(q.batch, 'RoadmapBudget', Budget), \
+                patch.object(q.batch, 'Batch', Batch), \
+                patch.object(q.usage, 'load', return_value={}), \
+                patch.object(q, 'next_reset', return_value=None), \
+                patch.object(q.shutil, 'which', return_value=None):
+            self.assertEqual(q.tick(self.root), 'unit-finished')
+            wake.assert_not_called()
+        self.assertEqual(captured, [['a'], '1'])
 
     def test_one_surviving_worker_leaves_one_distinct_slot(self):
         with workqueue.Store(self.root) as store:

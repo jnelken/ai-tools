@@ -28,7 +28,7 @@ export const loadRunRecord = (path, stamp) => readFileSync(path, 'utf8').trim().
   .map(JSON.parse).find(row => row.stamp === stamp);
 export const formatRoadmapSummary = row => row.outcome;
 export const postRoadmapSummary = async ({record, channel}) =>
-  appendFileSync(process.env.TEST_POSTS, JSON.stringify({stamp: record.stamp, outcome: record.outcome, channel}) + '\\n');
+  appendFileSync(process.env.TEST_POSTS, JSON.stringify({stamp: record.stamp, outcome: record.outcome, item: record.item, channel}) + '\\n');
 ''')
             runs = root / 'runs.jsonl'
             runs.write_text(''.join(json.dumps({'stamp': stamp, 'outcome': outcome}) + '\n'
@@ -49,6 +49,7 @@ export const postRoadmapSummary = async ({record, channel}) =>
                              [('one', 'yielded'), ('two', 'skipped-quota'), ('three', 'needs-input'),
                               ('four', 'yielded'), ('five', 'quota-paused')])
             self.assertTrue(all(r['channel'] == '#eng' for r in rows))
+            self.assertTrue(all(r['item'] == 'Run needs attention' for r in rows))
 
 
 if __name__ == '__main__':

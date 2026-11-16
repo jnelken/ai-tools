@@ -290,7 +290,8 @@ def cmd_append(a):
         "review_sessions": [r["session_id"] for r in reviews if r.get("session_id")],
         "review_unresolved": (w.get("review") or {}).get("unresolved"),
         "review_limits": review_limits(reviews),
-        "summary": (w.get("summary") or o.get("summary") or "")[:1000],
+        "summary": ((o.get("summary") if w.get("provider") == "none" and w.get("outcome") == "bookkeeping"
+                     else w.get("summary")) or o.get("summary") or "")[:1000],
         "slack_summary": (w.get("slack_summary") or "")[:400] or None,
         "quota": (quota_info(orch, wstatus, wresult) if outcome in QUOTA_OUTCOMES
                   else recorded_quota(load_json(a.quota_gates)) if outcome == "skipped-quota" else None),

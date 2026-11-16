@@ -647,7 +647,8 @@ else
 fi
 # The last run found no work and its bookkeeping landed. If no repo, issue, allowlist or skill
 # doc has moved since, this run would re-derive the same verdict — skip planning and worker both.
-if [ ${#pending_plans} -eq 0 ] && python3 "$VERDICT_PY" check --file "$LAST_VERDICT" --max-age-hours "$verdict_max_age" \
+if [ ${#pending_plans} -eq 0 ] && [ -z "${ADVANCE_ROADMAP_SELECTED_TICKETS:-}" ] \
+     && python3 "$VERDICT_PY" check --file "$LAST_VERDICT" --max-age-hours "$verdict_max_age" \
      --fingerprint "$FINGERPRINT" --changes "$VERDICT_CHANGES" --root "$ROOT" > "$RUN_DIR/verdict-check.txt" 2>&1; then
   echo "=== advance-roadmap $STAMP: skipping — $(cat "$RUN_DIR/verdict-check.txt") ===" >> "$LOG"
   record skipped-unchanged "$(cat "$RUN_DIR/verdict-check.txt")"
@@ -681,7 +682,7 @@ In-flight run stamps — still running, never interrupted: ${INFLIGHT_STAMPS:-no
   if [ -n "${ADVANCE_ROADMAP_SELECTED_TICKETS:-}" ]; then
     ORCH_PROMPT="$ORCH_PROMPT
 
-The scheduler selected these Linear tickets before selecting this repository, in priority order: ${ADVANCE_ROADMAP_SELECTED_TICKETS}. Assess them in order and select only an actionable ticket from this list; if none is actionable, return blocked_no_item."
+The scheduler selected these Linear tickets before selecting this repository, in priority order: ${ADVANCE_ROADMAP_SELECTED_TICKETS}. Assess them in order against the current snapshot and current review availability; do not carry forward an earlier no-work assessment without checking it. Select only an actionable ticket from this list; if none is actionable, return blocked_no_item."
   fi
   if [ -n "$TARGET_REPO" ]; then
     ORCH_PROMPT="$ORCH_PROMPT
@@ -748,6 +749,10 @@ If a PushNotification probe would have been useful, set a note in summary; the w
     orch_rc=0
     ORCH=pending-plan  # the run record shows no planning pass ran
   else
+    if [ "${ADVANCE_ROADMAP_CONTINUATION_ONLY:-0}" = "1" ]; then
+      record skipped-backoff "fresh Linear snapshot unavailable; no new planning"
+      exit 0
+    fi
     orch_out="$RUN_DIR/orchestrator-stdout.txt"  # kept, so a killed planning pass leaves a trace
     # The fingerprint above keeps the full snapshot; a target-scoped planner reads its repo's slice.
     PLANNER_SNAPSHOT="$LINEAR_SNAPSHOT"
@@ -759,7 +764,7 @@ If a PushNotification probe would have been useful, set a note in summary; the w
 
 Linear snapshot (read this; never call Linear yourself): $PLANNER_SNAPSHOT
 Production deploy snapshot (read this; never call GitHub yourself): $DEPLOY_SNAPSHOT"
-    if [ -s "$VERDICT_CHANGES" ]; then
+    if [ -s "$VERDICT_CHANGES" ] && [ -z "${ADVANCE_ROADMAP_SELECTED_TICKETS:-}" ]; then
       ORCH_PROMPT="$ORCH_PROMPT
 Previous no-work verdict and what changed since (carry unchanged verdicts forward): $VERDICT_CHANGES"
     fi
@@ -1250,8 +1255,12 @@ if [ -n "$BATCH_PID" ]; then
   slackagent_posted=1
   echo "=== slack: left to the batch summary ===" >> "$LOG"
 fi
+if [ "$slackagent_posted" -eq 0 ] && python3 "$ROOT/lib/notification_policy.py" "$ROOT/runs.jsonl" "$STAMP" "$RUN_DIR"; then
+  slackagent_posted=1
+  echo "=== slack: routine checkpoint suppressed ===" >> "$LOG"
+fi
 if [ "$slackagent_posted" -eq 0 ] && [ -f "$SLACKAGENT_DIR/scripts/post-roadmap-summary.mjs" ]; then
-  if node "$SLACKAGENT_DIR/scripts/post-roadmap-summary.mjs" --stamp "$STAMP" --runs "$ROOT/runs.jsonl" >> "$LOG" 2>&1; then
+  if node "$ROOT/lib/post_run_summary.mjs" --script "$SLACKAGENT_DIR/scripts/post-roadmap-summary.mjs" --stamp "$STAMP" --runs "$ROOT/runs.jsonl" >> "$LOG" 2>&1; then
     slackagent_posted=1
   else
     echo "=== slack: slackagent post failed; falling back to webhook ===" >> "$LOG"

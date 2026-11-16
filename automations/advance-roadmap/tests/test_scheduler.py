@@ -9,6 +9,7 @@ import subprocess
 import unittest
 from datetime import datetime
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 HERE = Path(__file__).resolve().parents[1]
@@ -50,6 +51,23 @@ class SchedulerTest(unittest.TestCase):
                 s.batch, 'RoadmapBudget', side_effect=AssertionError('no quota probes')):
             for _ in range(4):
                 self.assertEqual(self.decide()['decision'], 'wait')
+
+    def test_forced_snapshot_refresh_never_uses_a_recent_cached_result(self):
+        cached = self.root / 'scheduler-snapshot.json'
+        cached.write_text(json.dumps({'ok': True, 'issues': [{'id': 'DEV-1'}]}))
+        def fetch(*args, **kwargs):
+            Path(args[args.index('--out') + 1]).write_text(json.dumps({'ok': True, 'issues': [{'id': 'DEV-2'}]}))
+            return SimpleNamespace(returncode=0)
+        with patch.object(s.batch.shared, 'py', side_effect=fetch) as request:
+            self.assertEqual(s.refresh_snapshot(self.root), cached)
+            request.assert_not_called()
+            self.assertEqual(s.refresh_snapshot(self.root, force=True), cached)
+            request.assert_called_once()
+        self.assertEqual(json.loads(cached.read_text())['issues'][0]['id'], 'DEV-2')
+        with patch.object(s.batch.shared, 'py', return_value=SimpleNamespace(returncode=1)):
+            with self.assertRaisesRegex(RuntimeError, 'fresh Linear snapshot unavailable'):
+                s.refresh_snapshot(self.root, force=True)
+        self.assertEqual(json.loads(cached.read_text())['issues'][0]['id'], 'DEV-2')
 
     def test_unrelated_and_bot_only_updates_do_not_invalidate_cached_verdict(self):
         self.write([{'id': 'DEV-1', 'labels': ['repo/a'], 'title': 'Task', 'updated_at': 'old'}])

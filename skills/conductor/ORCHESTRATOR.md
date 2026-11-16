@@ -199,6 +199,12 @@ Carry every other repo's and issue's prior verdict forward as-is into your `bloc
 `considered` — don't re-read roadmaps or tickets the fingerprint says are identical. A `skill` or
 `linear_ok` change invalidates everything; triage in full.
 
+When the scheduler supplies a ranked list of Linear tickets, reassess those tickets from the
+current snapshot and current review availability. Do not carry a previous no-work assessment
+forward for those candidates: a prior assessment may have been wrong or a quota gate may have
+cleared even if the ticket itself did not change. Continue an interrupted assignment first and
+honor explicit parked-work and attended-work restrictions.
+
 ### Did the previous run finish?
 
 **An interrupted run gets finished before a new item is started.** This job runs in scheduled

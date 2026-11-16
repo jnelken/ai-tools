@@ -16,6 +16,9 @@ require('dotenv').config({ path: resolve(dirname(script), '../.env'), quiet: tru
 const summary = await import(pathToFileURL(resolve(dirname(script), '../src/roadmap-summary.js')).href);
 const record = summary.loadRunRecord(values.runs, values.stamp);
 if (!record) throw new Error(`No run record found for ${values.stamp}`);
+// A missing assignment does not mean Linear is empty. Preserve visible errors and
+// blockers without labeling them as a global "no ticket" finding.
+if (!record.item && !record.linear_id) record.item = 'Run needs attention';
 // The stored outcome remains unchanged; label actionable yielded runs for people.
 if (record.outcome === 'yielded') {
   let result = {};
