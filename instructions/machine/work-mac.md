@@ -4,6 +4,8 @@ Concentro repositories are checked out under `~/code`; the Superset/sswt rules a
 
 ### Offload agent work to jake2
 
+**Applies only when `hostname` prints `jake1`.** On jake2 (the agent host) run the work locally and never dispatch further workspaces; skip the rest of this section.
+
 jake1 (this laptop) is for human-led work; jake2 is the agent host. **Whenever jake2 is online and available, spawn subagents there** instead of running performance-heavy agent work (implementation, reviews, typechecks, test runs, investigations) on jake1.
 
 - **Check first, every time:** `superset hosts list` shows jake2 `online: yes` and `superset projects list --host 5f5aff3dec6113da62545abf567f8d10` includes the repo. If either fails, fall back to jake1 and say so in one line.
