@@ -3,12 +3,13 @@ name: reap-adv-roadmap-sswts
 description: >-
   Safely clear leftover Superset workspaces (sswts) left by advance-roadmap worker
   runs — by finished-banner evidence on live tabs, or by dead-pane + clean + no
-  diff against main when terminals are gone. Use when the user says "reap roadmap
-  workspaces", "clear advance-roadmap sswts", "clean up finished roadmap tabs",
-  "reap exit=0 finished workspaces", "reap dead panes", or after a batch of
-  advance-roadmap runs left worktrees piled up. Complements clean-sswts (general
-  PR-state sweep on non-roadmap / non-work machines) and workspaces.py cleanup
-  (merge-recorded tagged workspaces).
+  net-new vs main (zsh diffmain/gdiffnew merge-tree check, squash-merge safe)
+  when terminals are gone. Use when the user says "reap roadmap workspaces",
+  "clear advance-roadmap sswts", "clean up finished roadmap tabs", "reap exit=0
+  finished workspaces", "reap dead panes", or after a batch of advance-roadmap
+  runs left worktrees piled up. Complements clean-sswts (general PR-state sweep
+  on non-roadmap / non-work machines) and workspaces.py cleanup (merge-recorded
+  tagged workspaces).
 ---
 
 # Reap advance-roadmap sswts
@@ -84,15 +85,20 @@ there is nothing to lose against main:
 1. Zero terminals (`superset terminals list` empty).
 2. Worktree exists, is not a root checkout, is **clean**
    (`git status --short` empty), and is not held.
-3. **No diff against main** — after one `git fetch origin --prune` per owning
-   clone, `git -C <worktree> diff --quiet <main_ref>` succeeds (exit 0). Prefer
-   `origin/main`, then `origin/master`, then local `main` / `master`. If no main
-   ref resolves → **keep** (don't guess).
-4. A non-empty diff, unpushed unique content, or any dirty/untracked file → **keep**.
+3. **No net-new work vs main** — same check as zsh `diffmain` / `gdiffnew`
+   (`dotfiles/zsh/lib/30-git.zsh`): after one `git fetch origin --prune` per
+   owning clone, simulate merging the branch into main with
+   `git merge-tree --write-tree --name-only <main_ref> <branch>`, then
+   `git diff --stat <main_ref> <merged-tree>` (excluding conflicted paths).
+   Prefer `origin/main`, then `origin/master`, then local `main` / `master`.
+   If no main ref resolves → **keep**.
+4. Reap only when that merge has **zero conflicts** and an **empty delta**.
+   Non-empty delta, merge-tree failure, conflicts, dirty/untracked → **keep**.
 
-Do **not** use PR state as a substitute for the empty-diff check on this path.
-Squash-merged branches whose tip still differs from main stay kept here (Path A
-or [[clean-sswts]] / merge-gated cleanup can still get them when evidence exists).
+Tip/blob `git diff <main_ref>` is the wrong test here: these repos squash-merge,
+so a landed branch tip is often still a huge tree diff against main even when
+its content is already reflected. `diffmain`'s merge-tree replay is what makes
+"already in main" detectable.
 
 ## Delete path
 
@@ -124,11 +130,12 @@ Surveyed N local non-root → R reaped, K kept
 
 Reaped:
   <project>  <branch>  path=banner     tabs=[finished0×2, setup×1]  last0=<date>
-  <project>  <branch>  path=dead-pane  main=origin/main  diff=empty
+  <project>  <branch>  path=dead-pane  main=origin/main  net_new=empty
 
 Kept:
   <project>  <branch>  reason=nonzero-after-success …
-  <project>  <branch>  reason=dead-pane-diff-vs-main
+  <project>  <branch>  reason=dead-pane-net-new
+  <project>  <branch>  reason=dead-pane-merge-conflicts
   <project>  <branch>  reason=other-tab
 ```
 

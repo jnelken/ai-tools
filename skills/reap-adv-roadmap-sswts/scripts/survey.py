@@ -3,7 +3,7 @@
 
 Two paths:
   banner    — finished-banner evidence on live tabs
-  dead-pane — zero terminals, clean tree, no diff against main
+  dead-pane — zero terminals, clean tree, no net-new vs main (diffmain/gdiffnew)
 
 Prints reapable / keep buckets. Does not delete anything — the skill drives
 reap-workspace.sh after reviewing this output.
@@ -191,17 +191,49 @@ def is_held(wt: str, held: list[str]) -> bool:
     return False
 
 
-def tree_matches_main(wt: str, main_ref: str) -> tuple[bool, str]:
-    """Return (matches, detail). Uses git diff against main_ref (tracked + intent)."""
-    p = run("git", "-C", wt, "diff", "--quiet", main_ref)
-    if p.returncode == 0:
-        # Also fail if untracked would be invisible to diff against a ref — caller
-        # already requires a clean status --short, so untracked is covered there.
-        return True, "empty"
-    if p.returncode == 1:
-        stat = run("git", "-C", wt, "diff", "--shortstat", main_ref).stdout.strip()
-        return False, stat or "non-empty"
-    return False, (p.stderr or p.stdout or "diff-failed").strip()[:200]
+def net_new_vs_main(wt: str, branch: str, main_ref: str) -> tuple[str, str]:
+    """Squash-merge-aware check mirroring zsh `diffmain` / `gdiffnew`.
+
+    Simulates merging <branch> into <main_ref> via `git merge-tree --write-tree`,
+    then diffs that merged tree against main (excluding conflicted paths).
+
+    Returns (status, detail) where status is one of:
+      empty      — clean merge, no net-new work (safe to delete)
+      net-new    — clean merge, but delta remains
+      conflicts  — merge-tree reported conflicted paths
+      error      — merge-tree / diff failed
+    """
+    if not branch:
+        return "error", "missing-branch"
+    p = run("git", "-C", wt, "merge-tree", "--write-tree", "--name-only", main_ref, branch)
+    lines = (p.stdout or "").splitlines()
+    tree = lines[0].strip() if lines else ""
+    if not tree:
+        err = (p.stderr or p.stdout or "merge-tree-failed").strip()[:200]
+        return "error", err or f"merge-tree-rc={p.returncode}"
+
+    conflicts: list[str] = []
+    for ln in lines[1:]:
+        if not ln.strip():
+            break
+        conflicts.append(ln.strip())
+
+    excludes: list[str] = [f":(top,exclude){f}" for f in conflicts]
+    d = run(
+        "git", "-C", wt, "diff", "--stat", main_ref, tree, "--", ":/", *excludes,
+    )
+    delta = (d.stdout or "").strip()
+
+    if conflicts:
+        preview = ", ".join(conflicts[:5])
+        more = f" (+{len(conflicts) - 5})" if len(conflicts) > 5 else ""
+        extra = f"; also net-new: {delta.splitlines()[0]}" if delta else ""
+        return "conflicts", f"{len(conflicts)} files: {preview}{more}{extra}"
+    if delta:
+        # Prefer the shortstat-ish last line when present.
+        summary = delta.splitlines()[-1] if delta.splitlines() else delta
+        return "net-new", summary[:200]
+    return "empty", "empty"
 
 
 def survey(project_filter: str | None = None) -> dict[str, Any]:
@@ -256,7 +288,9 @@ def survey(project_filter: str | None = None) -> dict[str, Any]:
         sessions = sessions or []
 
         if not sessions:
-            _classify_dead_pane(base, w, wt, root, main_refs.get(root), reapable, keep)
+            _classify_dead_pane(
+                base, w, wt, root, main_refs.get(root), reapable, keep,
+            )
             continue
 
         tabs = []
@@ -359,12 +393,13 @@ def _classify_dead_pane(
     reapable: list[dict[str, Any]],
     keep: list[dict[str, Any]],
 ) -> None:
+    branch = w.get("branch") or ""
     entry = {
         **base,
         "path_kind": "dead-pane",
         "tabs": [],
         "kinds": [],
-        "label_ticket": ticket_from_label(w.get("name") or "", w.get("branch") or ""),
+        "label_ticket": ticket_from_label(w.get("name") or "", branch),
         "main_ref": main_ref,
     }
     if not wt or not os.path.isdir(wt):
@@ -381,14 +416,22 @@ def _classify_dead_pane(
         entry["reason"] = "dead-pane-no-main-ref"
         keep.append(entry)
         return
-    matches, detail = tree_matches_main(wt, main_ref)
-    entry["diff"] = detail
-    if not matches:
-        entry["reason"] = "dead-pane-diff-vs-main"
+    status, detail = net_new_vs_main(wt, branch, main_ref)
+    entry["net_new"] = detail
+    if status == "empty":
+        entry["reason"] = "reapable-dead-pane"
+        reapable.append(entry)
+        return
+    if status == "conflicts":
+        entry["reason"] = "dead-pane-merge-conflicts"
         keep.append(entry)
         return
-    entry["reason"] = "reapable-dead-pane"
-    reapable.append(entry)
+    if status == "net-new":
+        entry["reason"] = "dead-pane-net-new"
+        keep.append(entry)
+        return
+    entry["reason"] = f"dead-pane-merge-error: {detail}"
+    keep.append(entry)
 
 
 def _base(w: dict[str, Any], name: str, root: str, wt: str) -> dict[str, Any]:
@@ -431,7 +474,8 @@ def main() -> int:
             if e.get("path_kind") == "dead-pane":
                 print(
                     f"  {e['id']}  {e['project']:20}  {e['branch']}  "
-                    f"path=dead-pane  main={e.get('main_ref')}  diff={e.get('diff')}"
+                    f"path=dead-pane  main={e.get('main_ref')}  "
+                    f"net_new={e.get('net_new')}"
                 )
             else:
                 kinds = ",".join(e.get("kinds") or [])
