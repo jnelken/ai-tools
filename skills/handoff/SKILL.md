@@ -99,7 +99,16 @@ superset agents create --workspace <workspace-id> --agent claude \
   --prompt "$(cat "$SCRATCHPAD/handoff-prompt.txt")" --json
 ```
 
-Success returns `{"kind":"terminal","sessionId":"…","label":"Claude"}` — a new tab in that workspace.
+Success returns `{"kind":"terminal","sessionId":"…","label":"Claude"}` — a new tab in that workspace. The `sessionId` is the terminal id.
+
+**Always print the Superset URL.** The tab opens in the background (`attached: false`), so the user cannot otherwise tell it exists. Right after the spawn, fetch the workspace and the terminal and show them verbatim in the reply:
+
+```bash
+superset workspaces get <workspace-id> --local --json   # .webUrl (https://app.superset.sh/workspaces/<id>) and .url (superset://v2-workspace/<id>)
+superset terminals list --local --workspace <workspace-id> --json   # the entry whose terminalId == sessionId; .title is the tab's name
+```
+
+Report the workspace `projectName`/`name`, the `webUrl`, the `superset://` deep link, the tab title and the terminal id. Skip this only when there is no Superset target (cloud sessions report their claude.ai link instead, below).
 
 **Known trap:** the MCP tool `mcp__superset__agents_create` can return `Host is not online` (503) even when the host is this very machine and perfectly healthy. The CLI path works when the MCP path 503s — go straight to the CLI; don't burn time diagnosing the MCP error.
 
@@ -144,7 +153,7 @@ Local-only items (anything needing `~/.superset`, local hooks, `.env`) are calle
 
 ### 6. Report and step back
 
-Tell the user: the new tab exists (label + workspace), what it knows, and what close-out filed on the way through.
+Tell the user: the new tab exists (label + workspace + **the Superset `webUrl` and `superset://` link from step 5**), what it knows, and what close-out filed on the way through.
 
 Then **stop working the handed-off stream in this session.** Two sessions editing one worktree race each other — reviews chase a moving target, commits interleave, and the successor's snapshot goes stale immediately. After handoff, the parent is read-only on that workstream; anything new goes to the successor (or waits).
 
