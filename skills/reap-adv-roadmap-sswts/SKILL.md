@@ -60,7 +60,7 @@ by the **last** matching finished banner:
 |---|---|
 | `finished0` | last banner has `exit=0` |
 | `finishedN` | last banner has `exit≠0` (keep the code + parsed finish time) |
-| `setup` | no worker banner near the end; package-manager install (`npm install` / `npm ci` / `pnpm` / `yarn` / `bun install`, `added N packages`, …) **or** a short idle shell after auto-open (dotfiles sync / prompt only) |
+| `setup` | no worker banner near the end; package-manager install (`npm install` / `npm ci` / `pnpm` / `yarn` / `bun install`, `added N packages`, …) **or** a short auto-open shell showing dotfiles sync |
 | `other` | anything else (live agent, empty, non-banner failure) |
 
 Multi-tab is fine. Setup tabs are allowed alongside finished workers — Superset
@@ -70,7 +70,7 @@ auto-opens install shells when a workspace boots.
 
 1. ≥1 terminal classified `finished0`.
 2. Every terminal is `finished0`, `finishedN`, or `setup` (no `other`).
-3. Every `finishedN` finish timestamp is **≤ the latest `finished0` timestamp**.
+3. Every `finishedN` finish timestamp is **≤ the latest `finished0` timestamp**. All timestamps must parse with a known timezone when nonzero exits are present.
    Non-zero exits after the last success → **keep**.
 4. Worktree clean.
 5. Optional: `DEV-###` in successful tab tails matches the ticket in the workspace
@@ -104,6 +104,7 @@ there is nothing to lose against main:
      <id> --json` ([[linear-cli]]); read `state.name`.
    - **Reap** when: PR state is `MERGED`, **or** there is no `OPEN` PR on the
      branch and Linear state is `Done` / `Canceled` / `Cancelled`.
+   - A Linear-based override requires a successful, complete PR lookup. Failed or truncated lookups cannot establish the absence of an open PR.
    - **Keep** when: PR is `OPEN`, Linear is Todo/Backlog/In Progress (or
      unknown), there is no PR and no ticket, dirty/held/missing main, or
      merge-tree reported **net-new** (non-empty delta without relying on this
@@ -135,8 +136,7 @@ python3 ~/.claude/skills/reap-adv-roadmap-sswts/scripts/survey.py --project mail
 python3 ~/.claude/skills/reap-adv-roadmap-sswts/scripts/survey.py --json
 ```
 
-Prints reapable / keep buckets (`path=banner` or `path=dead-pane`). Reap only what
-the rule marks reapable; surface the rest.
+Prints reapable / keep buckets (`path=banner` or `path=dead-pane`). Failed terminal reads, status checks, fetches, merge or diff operations, and unknown evidence must never count as a clean result. Conflicts accompanied by a non-conflicted delta remain net-new and cannot use the finished override. Reap only what the rule marks reapable; surface the rest. Recheck immediately before deletion, and verify the archive, worktree and branch state afterward; the shared script does not enforce these checks.
 
 ## Report shape
 

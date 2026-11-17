@@ -20,6 +20,7 @@ import re
 import subprocess
 import sys
 from datetime import datetime
+from email.utils import parsedate_to_datetime
 from typing import Any
 
 FINISHED_RE = re.compile(
@@ -61,14 +62,11 @@ def sjson(*args: str) -> Any:
 
 
 def parse_finished_date(s: str) -> datetime | None:
-    s = s.strip()
-    m = re.match(r"(\w{3} \w{3}\s+\d+ \d+:\d+:\d+) \w+ (\d{4})", s)
-    if m:
-        try:
-            return datetime.strptime(f"{m.group(1)} {m.group(2)}", "%a %b %d %H:%M:%S %Y")
-        except ValueError:
-            return None
-    return None
+    try:
+        dt = parsedate_to_datetime(s.strip())
+        return dt if dt and dt.tzinfo is not None else None
+    except (TypeError, ValueError, IndexError):
+        return None
 
 
 def last_finished(raw: str) -> tuple[str, int, str, datetime | None] | None:
@@ -80,6 +78,8 @@ def last_finished(raw: str) -> tuple[str, int, str, datetime | None] | None:
 
 
 def is_setup(raw: str) -> bool:
+    if not raw.strip():
+        return False
     tail = raw[-2500:]
     if FINISHED_RE.search(tail) or re.search(r"===\s*worker (used|provider)=", tail):
         return False
@@ -89,8 +89,6 @@ def is_setup(raw: str) -> bool:
     if len(lines) <= 40 and any(
         re.search(r"dotfiles: (applied|fast-forwarded)", ln) for ln in lines
     ):
-        return True
-    if len(lines) <= 15 and not re.search(r"worker used=", raw):
         return True
     return False
 
@@ -152,9 +150,12 @@ def bulk_prs_by_branch(repos: set[str]) -> dict[tuple[str, str], list[dict[str, 
         if p.returncode != 0:
             continue
         try:
-            prs = json.loads(p.stdout or "[]")
+            prs = json.loads(p.stdout)
         except json.JSONDecodeError:
             continue
+        if not isinstance(prs, list) or len(prs) >= 500:
+            continue
+        out[(repo, "")] = []  # Successful, complete lookup.
         for pr in prs:
             key = (repo, pr.get("headRefName") or "")
             out.setdefault(key, []).append(pr)
@@ -220,6 +221,8 @@ def finished_override(
     if has_open:
         return False, f"PR#{pr.get('number')} OPEN" if pr else "OPEN PR"
     if ticket and lin_done:
+        if not repo or (repo, "") not in prs_index:
+            return False, "PR lookup unavailable or incomplete"
         return True, f"{ticket}={lin}"
     if ticket and lin:
         return False, f"{ticket}={lin}"
@@ -255,19 +258,19 @@ def fetch_once(roots: set[str]) -> dict[str, str | None]:
         # Only fetch when origin exists; still resolve a local main otherwise.
         has_origin = run("git", "-C", root, "remote", "get-url", "origin").returncode == 0
         if has_origin:
-            run("git", "-C", root, "fetch", "origin", "--prune", "-q")
+            if run("git", "-C", root, "fetch", "origin", "--prune", "-q").returncode != 0:
+                main_refs[root] = None
+                continue
         main_refs[root] = resolve_main_ref(root)
     return main_refs
 
 
 def held_paths() -> list[str]:
-    """Best-effort list of cwd paths held by common agent/runtime processes."""
-    p = run(
-        "bash", "-lc",
-        "lsof -a -d cwd -c node -c claude -c codex -c Cursor -Fn 2>/dev/null | "
-        "sed -n 's/^n//p' | sort -u",
-    )
-    return [ln for ln in (p.stdout or "").splitlines() if ln.startswith("/")]
+    """List process working directories; fail closed if inspection fails."""
+    p = run("lsof", "-d", "cwd", "-Fn")
+    if p.returncode != 0 or p.stderr.strip():
+        raise RuntimeError("cannot reliably inspect process working directories")
+    return [ln[1:] for ln in p.stdout.splitlines() if ln.startswith("n/")]
 
 
 def is_held(wt: str, held: list[str]) -> bool:
@@ -311,7 +314,7 @@ def net_new_vs_main(wt: str, branch: str, main_ref: str) -> tuple[str, str]:
     p = run("git", "-C", wt, "merge-tree", "--write-tree", "--name-only", main_ref, branch)
     lines = (p.stdout or "").splitlines()
     tree = lines[0].strip() if lines else ""
-    if not tree:
+    if p.returncode not in (0, 1) or not tree:
         err = (p.stderr or p.stdout or "merge-tree-failed").strip()[:200]
         return "error", err or f"merge-tree-rc={p.returncode}"
 
@@ -325,17 +328,19 @@ def net_new_vs_main(wt: str, branch: str, main_ref: str) -> tuple[str, str]:
     d = run(
         "git", "-C", wt, "diff", "--stat", main_ref, tree, "--", ":/", *excludes,
     )
+    if d.returncode != 0:
+        return "error", "diff-failed: " + (d.stderr or "unknown error").strip()[:160]
     delta = (d.stdout or "").strip()
+    if p.returncode != 0 and not conflicts:
+        return "error", "merge-tree-failed-without-conflicts"
+    if delta:
+        summary = delta.splitlines()[-1]
+        return "net-new", summary[:200]
 
     if conflicts:
         preview = ", ".join(conflicts[:5])
         more = f" (+{len(conflicts) - 5})" if len(conflicts) > 5 else ""
-        extra = f"; also net-new: {delta.splitlines()[0]}" if delta else ""
-        return "conflicts", f"{len(conflicts)} files: {preview}{more}{extra}"
-    if delta:
-        # Prefer the shortstat-ish last line when present.
-        summary = delta.splitlines()[-1] if delta.splitlines() else delta
-        return "net-new", summary[:200]
+        return "conflicts", f"{len(conflicts)} files: {preview}{more}"
     return "empty", "empty"
 
 
@@ -375,7 +380,7 @@ def survey(project_filter: str | None = None) -> dict[str, Any]:
 
     for w, _proj, name, root, wt in filtered:
         base = _base(w, name, root, wt)
-        if wt and same_path(os.path.realpath(wt), cwd):
+        if wt and (cwd == os.path.realpath(wt) or cwd.startswith(os.path.realpath(wt) + os.sep)):
             keep.append({**base, "reason": "cwd-trap", "path_kind": None})
             continue
         if is_held(wt, held):
@@ -388,7 +393,9 @@ def survey(project_filter: str | None = None) -> dict[str, Any]:
             keep.append({**base, "reason": f"terminals-list-failed: {e}", "path_kind": None})
             continue
         sessions = term_payload.get("sessions") if isinstance(term_payload, dict) else term_payload
-        sessions = sessions or []
+        if not isinstance(sessions, list):
+            keep.append({**base, "reason": "invalid-terminals-list", "path_kind": None})
+            continue
 
         if not sessions:
             _classify_dead_pane(
@@ -403,7 +410,7 @@ def survey(project_filter: str | None = None) -> dict[str, Any]:
                 "superset", "terminals", "read", "--local",
                 "--workspace", w["id"], "--terminal", tid,
             )
-            raw = raw_p.stdout if raw_p.returncode == 0 else (raw_p.stdout or "")
+            raw = raw_p.stdout if raw_p.returncode == 0 else ""
             info = classify_tab(raw)
             info["terminal_id"] = tid
             info["title"] = (s.get("title") or s.get("customTitle") or "")[:80]
@@ -432,6 +439,10 @@ def survey(project_filter: str | None = None) -> dict[str, Any]:
             t for t in tabs
             if t["kind"].startswith("finished") and t["kind"] != "finished0"
         ]
+        if nonzeros and any(t.get("finished_dt") is None for t in zeros_any + nonzeros):
+            entry["reason"] = "unparsable-finished-date"
+            keep.append(entry)
+            continue
         if zeros and nonzeros:
             last0 = max(datetime.fromisoformat(t["finished_dt"]) for t in zeros)
             bad = [
@@ -455,7 +466,12 @@ def survey(project_filter: str | None = None) -> dict[str, Any]:
             entry["reason"] = "missing-worktree"
             keep.append(entry)
             continue
-        dirty = run("git", "-C", wt, "status", "--short").stdout.strip()
+        status_check = run("git", "-C", wt, "status", "--short")
+        if status_check.returncode != 0:
+            entry["reason"] = "status-failed"
+            keep.append(entry)
+            continue
+        dirty = status_check.stdout.strip()
         if dirty:
             entry["reason"] = "dirty"
             entry["dirty"] = dirty.splitlines()[:12]
@@ -538,7 +554,12 @@ def _classify_dead_pane(
         entry["reason"] = "dead-pane-missing-worktree"
         keep.append(entry)
         return
-    dirty = run("git", "-C", wt, "status", "--short").stdout.strip()
+    status_check = run("git", "-C", wt, "status", "--short")
+    if status_check.returncode != 0:
+        entry["reason"] = "dead-pane-status-failed"
+        keep.append(entry)
+        return
+    dirty = status_check.stdout.strip()
     if dirty:
         entry["reason"] = "dead-pane-dirty"
         entry["dirty"] = dirty.splitlines()[:12]
