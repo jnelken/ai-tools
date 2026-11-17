@@ -1,5 +1,7 @@
 # Roadmap ticket selection investigation
 
+> **Status:** Implemented before 2026-11-16; archived by advance-roadmap. Evidence: commit 46e91a6 (notification_policy, quota_scheduler, focused tests); every open thread is checked.
+
 ## Status
 Complete. Continuous selection fetches a fresh Linear snapshot and reassesses ranked candidates; routine per-repo no-work messages are suppressed.
 
