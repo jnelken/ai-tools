@@ -11,7 +11,7 @@ The last mile of a PR: review it until it's quiet, confirm CI is green, announce
 
 ```
 /loop /peer-review  →  resolve base conflicts  →  gh pr checks --watch  →  base is the default branch?
-                                                ├─ yes → Slack #pr-review → badge → gh pr ready → offer screenshot to #product-updates
+                                                ├─ yes → Slack #pr-review → badge → gh pr ready → offer screenshot to #product-updates → offer auto-merge
                                                 └─ no  → gh pr merge --merge into the trunk → reap the sub-PR's sswt
 ```
 
@@ -269,7 +269,7 @@ Only if it is currently a draft. Together with the badge this gives reviewers tw
 
 Only for a PR whose base is the default branch, after step 6 — a sub-PR merged into a trunk (step 3.6) never reaches this step. Skip it when the PR URL is already in `~/.claude/state/product-updates-posted.jsonl`, which records `posted` **and** `declined` lines so a re-run never re-asks.
 
-This is the one step that asks. Steps 4-6 are covered by the standing authorization in the global CLAUDE.md; a post to `#product-updates` (ID `C0C9DKM77HA`) is a user-facing announcement and is not, so Jake decides per PR whether the screenshot is worth announcing.
+This is one of two steps that ask (the other is 6.6). Steps 4-6 are covered by the standing authorization in the global CLAUDE.md; a post to `#product-updates` (ID `C0C9DKM77HA`) is a user-facing announcement and is not, so Jake decides per PR whether the screenshot is worth announcing.
 
 1. **Find and download the screenshots.** `scripts/fetch-pr-screenshots.sh <owner/repo> <pr> "$(mktemp -d)"` prints one local image path per line (at most 4, de-duplicated, verified as real images under 10 MB). No output means the PR has no screenshot: report `n/a (no screenshot)` and stop without asking.
 2. **Show them, then ask once.** `Read` each image so Jake sees it, then `AskUserQuestion`: *Post this to #product-updates?* with **Post**, **Skip**, and Other for a caption of their own. If no human can answer (unattended run), treat it as no answer: report `not offered (unattended)`, record nothing, so a later interactive run still asks.
@@ -282,6 +282,20 @@ This is the one step that asks. Steps 4-6 are covered by the standing authorizat
 ```
 
 Never run `slack-upload-images.sh` to "test" it against a real channel — it posts for real. Point it at Jake's own DM channel instead.
+
+### 6.6 Offer auto-merge
+
+Only for a PR whose base is the default branch, after steps 6 and 6.5 — a sub-PR merged into a trunk (step 3.6) never reaches this step. Always runs, including when 6.5 had nothing to offer.
+
+Merging is outside the standing authorization for most repos, so this step asks; it never enables auto-merge on its own.
+
+1. **Check it's worth asking.** Skip silently, with the reason in the report, when:
+   - the PR already has auto-merge on: `gh pr view <PR_NUMBER> --repo <OWNER/REPO> --json autoMergeRequest -q .autoMergeRequest` is non-null → report `already on`;
+   - the repo disallows it: `gh api repos/<OWNER/REPO> --jq .allow_auto_merge` is `false` → report `n/a (repo disallows)`. Don't change the repo setting.
+2. **Pick the method.** `--squash` unless the repo's `allow_squash_merge` is false, then `--merge`. Never `--rebase` unless it is the only method the repo allows.
+3. **Ask once.** `AskUserQuestion`: *Enable auto-merge on `<repo>#<n>`?* with **Enable (squash)** (name the actual method), **Skip**, and Other. Say what it does in the question: GitHub merges the PR by itself once required reviews and checks pass, and deletes the branch if the repo does that on merge. Read `mergeStateStatus` first: when it is `CLEAN`, nothing is left to wait for, so `--auto` would merge immediately. Say so in the question, so a yes is understood as "merge now". If no human can answer (unattended run), treat it as no answer: report `not offered (unattended)` and enable nothing.
+4. **Enable.** On a yes: `gh pr merge <PR_NUMBER> --repo <OWNER/REPO> --auto --squash` (or `--merge`), then confirm with `gh pr view <PR_NUMBER> --repo <OWNER/REPO> --json autoMergeRequest,mergeStateStatus,reviewDecision` and report the method, `enabledBy` and what it is still waiting on (usually `REVIEW_REQUIRED`). On a skip, report `declined` and do nothing; no state is recorded, so a later `/post-pr` run on the same PR asks again.
+5. **Stop watching.** With auto-merge on, GitHub finishes the PR, so stop any Monitor or loop this run armed on it and say the PR no longer needs watching. A failed `gh pr merge --auto` is reported with its error, never retried with other flags, and never fails the run.
 
 ### 7. Report
 
@@ -298,6 +312,7 @@ Concentro-Inc/api#1271
 - Badge: appended    Draft: cleared
 - Linear: CON-4112 (title suffix) (or: added to title, or: no ticket found)
 - Product update: posted (or: declined, n/a (no screenshot), not offered (unattended), failed (<why>))
+- Auto-merge: enabled, squash (or: declined, already on, n/a (repo disallows), not offered (unattended), failed (<why>))
 ```
 
 For a sub-PR (step 3.5 classified it internal-only), report the trunk merge in place of the announcement — never omit the announcement steps silently:
@@ -308,7 +323,7 @@ Concentro-Inc/woodrow#1555
 - CI: 1 check (label), pass — unit-tests/e2e-tests don't run against a non-main base
 - Base: feature/vde-airtable-parity (not the default branch) — sub-PR, not announced
 - Merged into feature/vde-airtable-parity (merge commit abc1234); trunk PR #1500 now carries it
-- Slack / Badge / Product update: skipped (step 3.5 gate)
+- Slack / Badge / Product update / Auto-merge: skipped (step 3.5 gate)
 - Reap: sswt + local branch deleted (or: skipped — <which check>)
 ```
 
@@ -348,4 +363,4 @@ Posting to Slack is outward-facing, and outward-facing actions normally warrant 
 
 The design stays safe because the gates, not the user's attention, are what hold a PR back: an unconverged review, a failing check, a missing PR, or a non-default base branch all stop the run before anything is announced. A PR reads as "not ready" until this skill has actually run, which is why [[create-pr]] and [[refresh-pr]] open PRs as drafts in the first place.
 
-The authorization covers the `#pr-review` post, the badge, the undraft and the trunk merge — nothing else. The `#product-updates` screenshot post (step 6.5) is a separate, user-facing announcement, so it is asked about once, after everything above is done.
+The authorization covers the `#pr-review` post, the badge, the undraft and the trunk merge — nothing else. The `#product-updates` screenshot post (step 6.5) is a separate, user-facing announcement, and enabling auto-merge on the PR itself (step 6.6) is a merge decision, so each is asked about once, after everything above is done.
