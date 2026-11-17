@@ -1630,6 +1630,30 @@ sys.exit(b.run('claude', 'reviewer', [sys.executable, '-c', {child_cmd!r}], toke
         self.assertEqual(b.lease_pct(legacy_dict, 'five_hour', model), 4)
         self.assertEqual(b.lease_pct(legacy_dict, 'weekly', model), 1)
 
+    def test_token_lease_pct_floor_blocks_second_one_token_reservation(self):
+        # 0.15% weekly headroom: tokens_to_pct floors each one-token job at 0.1%, so
+        # only one fits. lease_pct must apply the same floor or the first is ~0%.
+        model = b.estimates([], [])
+        reading = {'source': 'fixture', 'observed_at': time.time(), 'windows': {
+            'five_hour': {'live': 10, 'cap': 70}, 'weekly': {'live': 89.85, 'cap': 90}}}
+        with patch.object(b, 'cached_estimates', return_value=model), patch.object(b, 'readings', return_value=reading):
+            first = b.acquire('codex', 'worker', tokens=1, task='a')
+            self.assertIsNotNone(first)
+            self.assertAlmostEqual(b.lease_pct(first, 'weekly', model['codex']), .1)
+            self.assertIsNone(b.acquire('codex', 'worker', tokens=1, task='b'))
+
+    def test_ledger_samples_weekly_only_rise_calibrates_weekly(self):
+        now = time.time()
+        row = self.row(total=10000, lease_id='weekly-only', started_at=now - 60, at=now,
+                       observed_before=now - 60, observed_after=now,
+                       window_before={'five_hour': 50, 'weekly': 60},
+                       window_after={'five_hour': 50, 'weekly': 62})
+        samples = b.ledger_samples([row])
+        self.assertEqual(len(samples), 1)
+        self.assertEqual(samples[0]['windows_pct'], {'weekly': 2})
+        self.assertIsNone(samples[0]['pct'])
+        self.assertEqual(b.estimates([], samples)['codex']['factor_samples']['weekly'], 1)
+
     def test_legacy_pct_only_lease_tokens_use_primary_window_factor(self):
         models = b.cached_estimates()
         scalar = dict(provider='codex', pct=3)

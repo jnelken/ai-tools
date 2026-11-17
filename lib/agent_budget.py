@@ -514,23 +514,30 @@ def ledger_records(ledger):
 
 
 def ledger_samples(ledger):
-    """Pair a settled row's tokens with the window % before and after, when both are fresh readings."""
+    """Pair a settled row's tokens with the window % before and after, when both are fresh readings.
+
+    Emit a sample when any window rose (same rise rule quota_snapshots uses for calibration).
+    pct is the five_hour/auto delta when that short window rose; otherwise None so a weekly-
+    or api-only rise still calibrates its long window.
+    """
     result = []
     for row in ledger:
         provider = row.get('agent') or row.get('provider')
         before, after = row.get('window_before') or {}, row.get('window_after') or {}
+        # A reset drops a reading, so a strict rise is the ledger's same-reset proxy.
         windows_pct = {w: after[w] - before[w]
                        for w in set(before) | set(after)
                        if number(before.get(w)) and number(after.get(w)) and after[w] > before[w]}
-        window = next((w for w in ('five_hour', 'auto') if w in windows_pct), None)
         total = actual_total(row.get('actual')) if isinstance(row.get('actual'), dict) else 0
         if not total and number(row.get('actual_total')):
             total = row['actual_total']
         fresh = all(number(row.get(seen)) and number(row.get(edge)) and abs(row[seen] - row[edge]) <= MAX_AGE
                     for seen, edge in (('observed_before', 'started_at'), ('observed_after', 'at')))
-        if (window and fresh and total > 0 and provider in PROVIDERS and row.get('lease_id')):
+        if (windows_pct and fresh and total > 0 and provider in PROVIDERS and row.get('lease_id')):
+            short = next((w for w in ('five_hour', 'auto') if w in windows_pct), None)
             result.append(dict(id='ledger:' + row['lease_id'], provider=provider, tokens=total,
-                               pct=windows_pct[window], windows_pct=windows_pct, source='ledger'))
+                               pct=windows_pct[short] if short else None,
+                               windows_pct=windows_pct, source='ledger'))
     return result
 
 
@@ -792,10 +799,11 @@ def lease_pct(lease, window, model=None):
     factors = (model or {}).get('factor', {})
     # Capacity holds remaining need (`held_tokens`); `reserved_tokens` is the whole-job
     # estimate used at settle. Prefer the hold, then the reservation, then stored pct.
+    # Match tokens_to_pct's 0.1-point floor so admission and accounting agree on tiny jobs.
     tokens = lease.get('held_tokens') if number(lease.get('held_tokens')) else lease.get('reserved_tokens')
     if number(tokens):
         if isinstance(factors, dict) and number(factors.get(window)):
-            return tokens * factors[window]
+            return max(.1, tokens * factors[window])
         # Fall through to stored pct when the model has no factor for this window.
     pct = lease.get('pct', 0)
     if isinstance(pct, dict):
