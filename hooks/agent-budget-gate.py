@@ -31,6 +31,20 @@ def owner_pid():
     return pid
 
 
+def is_personal_target(cwd):
+    """True only when cwd positively classifies as a personal repository."""
+    if not cwd:
+        return False
+    try:
+        import agent_profiles
+        config, _ = agent_profiles.configuration()
+        return agent_profiles.classify(cwd, config)[0] == 'personal'
+    except Exception:
+        # Budget admission is personal-only. Unknown or unclassifiable targets
+        # must keep the shared cross-profile behavior and pass through.
+        return False
+
+
 def deny(reason):
     return {'hookSpecificOutput': {'hookEventName': 'PreToolUse', 'permissionDecision': 'deny',
                                   'permissionDecisionReason': reason + ' Use bin/fanout spawn to queue a Superset terminal without spending model quota while waiting.'}}
@@ -45,6 +59,9 @@ def handle(data):
     session = data.get('session_id')
     if event == 'PreToolUse':
         if data.get('tool_name') not in ('Agent', 'Workflow'):
+            return None
+        if not is_personal_target(data.get('cwd')):
+            # Only personal targets reserve from the personal shared budget.
             return None
         reading = budget.readings('claude')
         # A missing window must never turn the hook into the fanout queue's

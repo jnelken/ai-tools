@@ -1,6 +1,6 @@
 ---
 name: weekly-product-changelog-and-announcement
-description: Produce two Slack deliverables from one week of woodrow, api, and folio-platform commits — a per-engineer internal changelog and a customer/PM-facing product announcement — using a Friday cutoff window that resumes from the last run. Use for the weekly product update, weekly changelog, Friday shipping summary, or the scheduled weekly Slack post.
+description: Produce two Slack deliverables from one week of woodrow, api, and folio-platform commits — a per-engineer internal changelog and a customer/PM-facing product announcement — and add the same week to the team's demo checklist artifact, using a Friday cutoff window that resumes from the last run. Use for the weekly product update, weekly changelog, Friday shipping summary, the scheduled weekly Slack post, or adding a week to the demo checklist.
 ---
 
 # Weekly Product Changelog & Announcement
@@ -41,9 +41,10 @@ Use committer date (`%cd`) so the window reflects when code landed, not original
 Consider all product-related repos:
 
 ```bash
-WOODROW_REPO='/Users/jake/code/woodrow'
-API_REPO='/Users/jake/code/api'
-FOLIO_PLATFORM_REPO='/Users/jake/code/folio-platform'
+CODE_ROOT="${CODE_ROOT:-$HOME/code}"
+WOODROW_REPO="$CODE_ROOT/woodrow"
+API_REPO="$CODE_ROOT/api"
+FOLIO_PLATFORM_REPO="$CODE_ROOT/folio-platform"
 ```
 
 Run in all repos:
@@ -212,3 +213,50 @@ Prefer:
 
 - Data collection uses the exact cutoff from Section 1.
 - Both the changelog and announcement headers should show day-level dates only (example: `Feb 9 to Feb 13`), not cutoff time.
+
+## 6) Add the week to the demo checklist
+
+The dev team walks through a reverse-timeline checklist in the weekly product demo.
+It is a Claude artifact, `https://claude.ai/artifact/3xVUT6X32ktXpvk3Kb4UZZ`, whose page reads
+its content from the artifact database, so adding a week is a database write with
+`ArtifactData`, not a republish. (If the artifact is gone, ask Jake before creating a new one.)
+
+Data model (the page renders exactly this):
+
+- `weeks/<YYYY-MM-DD>`: one document per week, id = the Friday the window ends. Fields:
+  `week`, `label` (`Nov 6 to Nov 13`), `since`, `until` (`YYYY-MM-DD HH:MM`), optional `note`,
+  `items: [{k, text, kind: "product"|"bug"|"dev", urls: [..]}]`.
+- `checks/<week>_<k>`: check state, written only by the page. Never write or delete these;
+  keep each item's `k` stable once published so check state survives edits.
+
+Steps:
+
+1. Window: `since` = the `until` of the newest `weeks` doc (read it with `ArtifactData`
+   `list` on `weeks`, newest `week`), `until` = now. This resumes the same chain as Section 1.
+   If that newest doc has a `note` (an in-progress week), remove it with `update` and
+   `{"note": {"__delete__": true}}`.
+2. Cluster: `python3 scripts/cluster_week.py --since '...' --until '...' --out <scratch>/clusters.json`.
+   It reads `origin/main` along `--first-parent`, so one merged PR is one unit, then groups PRs by
+   `CON-`/`DEV-` ticket across the three repos.
+3. Write items from the clusters. Rules:
+   - One item per demoable capability. Group related clusters, even across tickets. Aim for
+     5 to 15 product items; never one bullet per PR.
+   - `kind`: `product` = new or improved user-visible capability; `bug` = fix of a user-visible
+     problem (this renders with a "Fix" tag); `dev` = internal tooling, CI, tests, refactors,
+     infra, with no visible change (collapsed on the page; fold into at most about 6 lines).
+   - `text`: one line, at most 170 characters, strong verb, names the visible area, no ticket IDs,
+     PR numbers, file names or jargon, nothing the PR titles do not support. Use `gh pr view`
+     only for clusters too vague to describe.
+   - `urls`: PR URLs from that item's clusters only, woodrow (UI) PR first, at most 4.
+   - `k`: the primary ticket key, else the first cluster id with characters outside
+     `A-Za-z0-9_.~:@+-` replaced by `-` (for example `woodrow-1308`); suffix `-b` on a clash.
+   - Order: product (most demo-worthy first), then bug, then dev.
+   - Every cluster lands in exactly one item (fold trivia into one dev line instead of dropping).
+4. Check in code before writing: no `CON-`/`DEV-` keys or `#123` in any `text`, every URL appears in
+   the clusters file, every cluster id is covered once, ids unique. Fix failures; do not skip the check.
+5. Write with `ArtifactData` `set` on `weeks/<Friday date>`. For a partial week (run before the
+   Friday cutoff) add `note: "In progress: includes changes merged through <day, time>. Later merges will be added."`.
+6. Mention the new week and item counts in the run report. Never put webhook values in anything written.
+
+Scale: for a multi-week backfill, run Steps 2 to 4 once per week (one agent per week works well)
+and write each week as its own document.

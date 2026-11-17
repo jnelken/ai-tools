@@ -5,3 +5,4 @@ Accepted decisions explain intent, alternatives, and consequences. Operational i
 | ADR | Status | Decision date |
 |---|---|---|
 | [0001: Compose instructions by role and target repository](0001-compose-instructions-by-role-and-repository.md) | Accepted | 2026-10-19 |
+| [0002: Machine layer for development instructions](0002-machine-layer.md) | Accepted | 2026-11-13 |

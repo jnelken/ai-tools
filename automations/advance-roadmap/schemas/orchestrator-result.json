@@ -36,7 +36,7 @@
     },
     "work_kind": {
       "type": "string",
-      "enum": ["feature", "code_health"],
+      "enum": ["feature"],
       "default": "feature"
     },
     "directive_ticket": { "type": ["string", "null"] },

@@ -10,12 +10,20 @@
 		<string>/Users/jake/.claude/automations/advance-roadmap/daily_batch.py</string>
 	</array>
 	<key>StartCalendarInterval</key>
-	<dict>
-		<key>Hour</key>
-		<integer>10</integer>
-		<key>Minute</key>
-		<integer>30</integer>
-	</dict>
+	<array>
+		<dict>
+			<key>Hour</key>
+			<integer>10</integer>
+			<key>Minute</key>
+			<integer>30</integer>
+		</dict>
+		<dict>
+			<key>Hour</key>
+			<integer>15</integer>
+			<key>Minute</key>
+			<integer>30</integer>
+		</dict>
+	</array>
 	<key>EnvironmentVariables</key>
 	<dict>
 		<key>PATH</key>

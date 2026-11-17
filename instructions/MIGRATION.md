@@ -6,7 +6,7 @@ Original source: dotfiles/claude/CLAUDE.md. Section text is preserved at migrati
 |---|---|
 | PR Descriptions | development/shared.md |
 | Post-PR Workflow | development/work.md |
-| Superset Workspaces (sswt) | development/work.md |
+| Superset Workspaces (sswt) | machine/superset.md (Mac machines) |
 | Datadog | development/work.md |
 | Linear | development/shared.md |
 | Session Retrospectives and Gotcha Docs | development/shared.md |
@@ -20,8 +20,9 @@ Original source: dotfiles/claude/CLAUDE.md. Section text is preserved at migrati
 | File Location | reference/legacy-maintenance.md |
 | Keeping CLAUDE.md Lean | reference/legacy-maintenance.md |
 | Parallelize with Subagents | providers/claude-development.md |
+| Budgeted Fan-out (budget/fanout routing split out of Parallelize with Subagents) | providers/claude-personal.md |
 | Above-Sonnet Models (Opus, Fable): Prefer Sub-Agents | providers/claude-development.md |
-| Lunch Money MCP Cache | development/personal.md |
+| Lunch Money MCP Cache | machine/personal-mac.md |
 | Cross-Session Continuity | providers/claude-development.md |
 | Who Jake Is (cross-project context) | development/personal.md |
 | Plan Files | providers/claude-development.md |

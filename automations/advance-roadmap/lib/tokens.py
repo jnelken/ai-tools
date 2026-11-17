@@ -218,7 +218,26 @@ def cmd_codex(a):
     # may quote older headers, so the first match is this run's.
     m = re.search(r"^session id: ([0-9a-f-]{36})\s*$", text, re.M)
     sid = m.group(1) if m else None
+    events = []
+    for line in text.splitlines():
+        try:
+            event = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(event, dict):
+            events.append(event)
+    if not sid:
+        sid = next((e.get('thread_id') for e in events if e.get('type') == 'thread.started'), None)
     write_session(getattr(a, "session_out", ""), sid)
+    # JSON events report this invocation's turn, unlike the cumulative rollout
+    # totals which include prior turns after a native resume.
+    turn = next((e.get('usage') for e in reversed(events)
+                 if e.get('type') == 'turn.completed' and isinstance(e.get('usage'), dict)), None)
+    if turn is not None:
+        cached = num(turn.get('cached_input_tokens'))
+        append(a.log, [record(a.role, 'codex', a.model, max(0, num(turn.get('input_tokens')) - cached),
+                              cached, 0, turn.get('output_tokens'), None, 'codex-turn', a.round, sid)])
+        return
     u = codex_rollout_usage(sid) if sid else None
     if u:
         cached = num(u.get("cached_input_tokens"))

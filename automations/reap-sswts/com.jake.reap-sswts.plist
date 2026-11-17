@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>com.jake.reap-sswts</string>
+
+	<!-- $HOME is expanded by sh, so the plist is the same on every machine. -->
+	<key>ProgramArguments</key>
+	<array>
+		<string>/bin/sh</string>
+		<string>-c</string>
+		<string>exec "$HOME/.claude/automations/reap-sswts/run.sh"</string>
+	</array>
+
+	<!-- Every 10 minutes. The 60-minute grace lives in reap.py (REAP_SSWTS_GRACE_MIN). -->
+	<key>StartInterval</key>
+	<integer>600</integer>
+
+	<key>RunAtLoad</key>
+	<false/>
+
+	<key>ProcessType</key>
+	<string>Background</string>
+</dict>
+</plist>

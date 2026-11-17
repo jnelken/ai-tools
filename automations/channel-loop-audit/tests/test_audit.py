@@ -1,0 +1,119 @@
+import importlib.util
+import json
+import tempfile
+import unittest
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
+
+HERE = Path(__file__).resolve().parents[1]
+spec = importlib.util.spec_from_file_location('audit', HERE / 'audit.py')
+audit = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(audit)
+
+
+class AuditTest(unittest.TestCase):
+    def test_idle_repair_releases_guard_only_with_its_explicit_completed_outcome(self):
+        with tempfile.TemporaryDirectory() as tmp, patch.object(audit, 'ROOT', Path(tmp)):
+            active = {'branch': 'audit/example'}
+            self.assertFalse(audit.repair_settled(active, 'idle'))
+            self.assertFalse(audit.repair_settled(active, 'exited'))
+            p = audit.outcome_path(active['branch'])
+            p.parent.mkdir()
+            for outcome, expected in [({'branch': 'other', 'status': 'resolved'}, False),
+                                      ({'branch': active['branch'], 'status': 'blocked'}, False),
+                                      ({'branch': active['branch'], 'status': 'resolved'}, True)]:
+                p.write_text(json.dumps(outcome))
+                self.assertEqual(audit.repair_settled(active, 'idle'), expected)
+            self.assertFalse(audit.repair_settled(active, 'working'))
+
+    def test_groups_only_repeated_messages_within_one_channel_and_window(self):
+        def m(ts, text): return {'ts': str(ts), 'text': text}
+        data = {'eng': [m(1, 'repo skipped at 10:01'), m(100, 'repo skipped at 10:02'),
+                        m(800, 'repo skipped at 10:03')],
+                'ops': [m(1, 'other error'), m(90000, 'other error'), m(180000, 'other error')]}
+        found = audit.groups(data)
+        self.assertEqual([(x['channel'], x['count']) for x in found], [('eng', 3)])
+
+    def test_no_item_outcomes_across_repositories_count_as_one_pattern(self):
+        messages = [{'ts': str(t), 'text': f':no_entry_sign: *{repo}* · No ticket selected · *Blocked no item*'}
+                    for t, repo in [(100, 'one'), (10000, 'two'), (20000, 'three')]]
+        self.assertEqual(audit.groups({'eng': messages})[0]['count'], 3)
+
+    def test_clean_run_uses_no_model_or_repair(self):
+        with tempfile.TemporaryDirectory() as tmp, patch.object(audit, 'ROOT', Path(tmp)), \
+                patch.object(audit, 'run', return_value=SimpleNamespace(stdout=json.dumps({'eng': [], 'ops': []}))) as run:
+            audit.main()
+            self.assertEqual(run.call_count, 1)
+            self.assertEqual(run.call_args.args[0][-1], str(HERE / 'fetch.mjs'))
+
+    def test_unresolved_dispatch_prevents_second_worker(self):
+        msgs = [{'ts': str(t), 'text':'repeated failure'} for t in (100,200,300)]
+        with tempfile.TemporaryDirectory() as tmp, patch.object(audit, 'ROOT', Path(tmp)), \
+                patch.object(audit, 'run', return_value=SimpleNamespace(stdout=json.dumps({'ops':msgs}))) as run:
+            (Path(tmp)/'active-repair.json').write_text('{"status":"dispatching"}')
+            audit.main()
+            self.assertEqual(run.call_count, 1)
+
+    def test_classifier_failure_never_dispatches_repair(self):
+        msgs = [{'ts': str(t), 'text':'repeated failure'} for t in (100,200,300)]
+        def execute(cmd, **kwargs):
+            if cmd[-1].endswith('fetch.mjs'):
+                return SimpleNamespace(stdout=json.dumps({'eng':msgs}))
+            raise audit.subprocess.CalledProcessError(1, cmd)
+        with tempfile.TemporaryDirectory() as tmp, patch.object(audit, 'ROOT', Path(tmp)), \
+                patch.object(audit, 'run', side_effect=execute) as run:
+            with self.assertRaises(audit.subprocess.CalledProcessError):
+                audit.main()
+            self.assertEqual(run.call_count, 2)
+            self.assertFalse((Path(tmp)/'active-repair.json').exists())
+
+    def test_suspected_incident_dispatches_terra_in_branchless_session(self):
+        msgs = [{'ts': str(t), 'text': 'repeated failure'} for t in (100, 200, 300)]
+        signature = audit.groups({'eng': msgs})[0]['signature']
+        def execute(cmd, **kwargs):
+            if cmd[-1].endswith('fetch.mjs'):
+                return SimpleNamespace(stdout=json.dumps({'eng': msgs}))
+            if cmd[0] == audit.CODEX:
+                Path(cmd[cmd.index('--output-last-message') + 1]).write_text(json.dumps(
+                    {'action': 'investigate', 'reason': 'confirmed loop', 'signature': signature}))
+                self.assertEqual(cmd[cmd.index('--model') + 1], 'gpt-6-luna')
+                return SimpleNamespace(stdout='')
+            if cmd[1:3] == ['workspaces', 'create']:
+                self.assertTrue(cmd[cmd.index('--name') + 1].startswith('channel-loop-'))
+                self.assertIn('--session', cmd)
+                self.assertNotIn('--branch', cmd)
+                self.assertNotIn('--project', cmd)
+                return SimpleNamespace(stdout=json.dumps({'workspace': {'id': 'ws'}}))
+            self.assertEqual(cmd[cmd.index('--model') + 1], 'gpt-6.1-terra')
+            prompt = cmd[cmd.index('--prompt') + 1]
+            self.assertIn('Do not create a branch or worktree unless', prompt)
+            self.assertIn('descriptive branch name based on the actual issue', prompt)
+            return SimpleNamespace(stdout=json.dumps({'sessionId': 'term'}))
+        with tempfile.TemporaryDirectory() as tmp, patch.object(audit, 'ROOT', Path(tmp)), \
+                patch.object(audit, 'run', side_effect=execute) as run:
+            audit.main()
+            self.assertEqual(run.call_count, 4)
+            active = json.loads((Path(tmp)/'active-repair.json').read_text())
+            self.assertEqual((active['workspace'], active['terminal']), ('ws', 'term'))
+            self.assertNotIn('branch', active)
+            outcome = audit.outcome_path(active['audit_id'])
+            outcome.write_text(json.dumps({'audit_id': active['audit_id'], 'status': 'no_issue'}))
+            self.assertTrue(audit.repair_settled(active, 'idle'))
+
+    def test_ignore_does_not_require_a_candidate_signature(self):
+        msgs = [{'ts': str(t), 'text': 'repeated failure'} for t in (100, 200, 300)]
+        def execute(cmd, **kwargs):
+            if cmd[-1].endswith('fetch.mjs'):
+                return SimpleNamespace(stdout=json.dumps({'ops': msgs}))
+            Path(cmd[cmd.index('--output-last-message') + 1]).write_text(json.dumps(
+                {'action': 'ignore', 'reason': 'already resolved', 'signature': ''}))
+            return SimpleNamespace(stdout='')
+        with tempfile.TemporaryDirectory() as tmp, patch.object(audit, 'ROOT', Path(tmp)), \
+                patch.object(audit, 'run', side_effect=execute) as run:
+            audit.main()
+            self.assertEqual(run.call_count, 2)
+            self.assertFalse((Path(tmp)/'active-repair.json').exists())
+
+
+if __name__ == '__main__': unittest.main()

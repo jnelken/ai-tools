@@ -10,7 +10,7 @@ color: blue
 Review independently without editing or fixing anything. Expect these inputs from the caller:
 - Absolute worktree path.
 - Scope: `base:<branch>` or `uncommitted`.
-- Optional effort: `high` or `medium`.
+- Optional effort: `high` or `medium`; high is the default. Policy is the latest Opus at high effort (this agent's `model: opus` alias tracks the latest).
 - Lens/focus text, which may be empty.
 - Optional "do not re-report" lines.
 - Lens label.

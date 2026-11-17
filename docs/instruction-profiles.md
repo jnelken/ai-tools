@@ -6,6 +6,8 @@ Source is maintained in ai-tools; installed entry points link to the deploy clon
 
 Use [instruction-profile-maintenance](../skills/instruction-profile-maintenance/SKILL.md) when changing recipes, bootstraps, selection, or harness loading/isolation. It directs the maintenance workflow; [ADR 0001](../adr/0001-compose-instructions-by-role-and-repository.md) owns the rationale and evaluation criteria. The normal installer exposes this skill to Claude and Codex through links to the deploy clone.
 
+Development instruction fragments (`instructions/development/*.md`, composed into development profiles for both harnesses) are maintained here under ADR 0001, including the *Invariants* convention in `shared.md`. Dotfiles owns only settings and procedure references; the convention is intentionally absent from runtime profiles.
+
 ## Starting and inspecting sessions
 
 ```sh
@@ -40,6 +42,10 @@ Configure a machine locally at `~/.config/agent-profiles/config.json` (or `AGENT
 `work_owners` entries are exact GitHub org logins matched as the whole owner segment of the origin URL (`Concentro-Inc` does not match `Concentro`); the built-in default already covers `Concentro-Inc`, so a config file is only needed for other owners or overrides.
 
 MCP files use the existing `mcpServers` JSON format and live locally; refer to credentials through existing supported mechanisms. Do not put credentials in ai-tools. Only configure existing integrations. Runtime text processing ignores all optional integrations. An explicit `--mcp-config` from the application is subject to the same server-name allowlist. Do not populate global runtime MCP files with owner-only connectors in a multi-user application: Slackagent supplies its owner mail config per call, while household/background calls use runtime/text. Mail/calendar may be unavailable for Codex until an existing connector is explicitly configured; app-supplied finance and Linear commands remain available.
+
+## Machine layer
+
+Development profiles also compose a machine fragment (`instructions/machine/`) for where the session runs: `work-mac`, `personal-mac`, `personal-pc`, `personal-cloud`. It carries facts only; grants still come from the target repository. Identity precedence: `AGENT_MACHINE`, then `"machine"` in the config file (e.g. `{"machine": "work-mac"}`), then `CLAUDE_CODE_REMOTE=true` (cloud, no setup needed), then unconfigured macOS (Mac-wide fragments only). Invalid names fail. Runtime profiles ignore it. `agent-profile resolve --explain` shows `machine` and `machine_reason`. Set the key once per physical machine; see [ADR 0002](../adr/0002-machine-layer.md).
 
 ## Runtime boundary
 

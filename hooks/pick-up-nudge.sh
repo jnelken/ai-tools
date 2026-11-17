@@ -114,7 +114,7 @@ plural=""
 [[ "$open_items" -ne 1 ]] && plural="s"
 open_item_count_text="$open_items open item$plural"
 
-msg="This repo has unresolved work recorded in \`$rel\` ($open_items open item$plural). Mention this to the user and offer to run \`/pick-up\` to resume it -- don't read the file or act on its items yourself; /pick-up owns that flow (plan-mode read, verification against current state, then user approval)."
+msg="This repo has unresolved work recorded in \`$rel\` ($open_items open item$plural). Mention this to the user and offer to run \`/pick-up\` to resume it -- don't read the file or act on its items yourself; /pick-up owns that flow (verification against current state, then each open item put to the user as a decision)."
 
 if [[ -z "$last_week" || "$last_week" != "$this_week" ]]; then
   msg="\`$rel\` has $open_item_count_text and hasn't been reconciled this week (last: ${last_updated:-never}). Run the weekly sweep without blocking the user: launch one background Agent (subagent_type \"fork\") whose prompt is to invoke the \`pick-up\` skill with args \`sweep\` for $repo_root, then carry on with the user's request. When it reports back, relay its result (each removed item with its evidence, and how many are still open) and offer \`/pick-up\` for what's left. Don't read the file or act on its items yourself."

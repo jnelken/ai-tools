@@ -17,7 +17,7 @@ Expect these inputs from the caller:
 - Optional "do not re-report" lines.
 - Lens label for the log filename (use a filename-safe label).
 
-Run from the worktree (`cd <path>`). Set `LOG="$(git rev-parse --git-dir)/peer-review-<label>.log"`; resolve its directory to an absolute path for the returned `log:`. Always `-c model_reasoning_effort=<effort>`. Do NOT pass `-m` (Codex's default model is intended).
+Run from the worktree (`cd <path>`). Set `LOG="$(git rev-parse --git-dir)/peer-review-<label>.log"`; resolve its directory to an absolute path for the returned `log:`. Always `-c model_reasoning_effort=<effort>` (high unless the caller says otherwise). Do NOT pass `-m` (`codex review` has no such flag) and do not override the model: policy is the latest sol (`gpt-6.1-sol` today), which `model` in `~/.codex/config.toml` must name. If the log header's `model:` is not a sol model, return `status: failed` with `reason: wrong model <header value>` so the caller fixes the config; never report a non-sol review as a normal pass.
 
 Choose the command:
 - Without focus or exclusion lines, use `codex review -c model_reasoning_effort=<effort> --base <branch>` for base scope, or `codex review -c model_reasoning_effort=<effort> --uncommitted` for uncommitted scope.

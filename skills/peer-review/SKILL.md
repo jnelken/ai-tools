@@ -16,6 +16,16 @@ Composes with `/loop` for iterative convergence in either mode.
 
 For addressing comments **already posted** on a GitHub PR by a bot reviewer, see [[babysit-pr]] instead — this skill runs fresh review passes. For driving Codex on GitHub itself (not a local pass), see [[cycle-review-pr]].
 
+## Reviewer models and effort (defaults)
+
+Review rounds use the **latest sol** for Codex and the **latest Opus** for Claude, both at **high** effort. Name the tier, not a version: a newer model of that tier replaces the current one when it ships.
+
+- **Codex:** the latest sol (`gpt-6.1-sol` today). `codex review` has no `-m` flag, so the model comes from `model` in `~/.codex/config.toml`, which must name it; a default that drifts to another tier (this once ran a review on `gpt-6-astra`) is a bug to fix there, not to work around per call.
+- **Claude:** the latest Opus, via `model: opus` in `agents/claude-reviewer.md` (the alias tracks the latest).
+- **Effort:** high. The one documented exception is step 2's step-down to medium on a round 3+ that follows a P1-free round; never go below medium.
+
+A round whose recorded reviewer model is not the latest sol or Opus is not a completed default round; say so in the report instead of passing it off.
+
 ## How to invoke
 
 Single pass, default (push) mode:
@@ -184,9 +194,23 @@ Run the whole block above, including its last two lines (requested effort and ro
 2. **Self-check the predictable cells yourself, first** — especially the security-shaped ones: *does the new affordance respect value masking / authorization in every state?* Fix what you find before spending a review round discovering it.
 3. **Persist the matrix as a focus prompt** so every `/loop` round reuses it:
    ```bash
-   echo "verify copy-vs-display parity for every data type; check masked/unauthorized/loading/read-only states; check all editor variants and host contexts" > "$GIT_DIR/peer-review-focus"
+   FOCUS_FILE="$GIT_DIR/peer-review-focus"
+   MATRIX='verify copy-vs-display parity for every data type; check masked/unauthorized/loading/read-only states; check all editor variants and host contexts'
+   if ! grep -Fqx "$MATRIX" "$FOCUS_FILE" 2>/dev/null; then
+     printf '%s\n' "$MATRIX" >> "$FOCUS_FILE"
+   fi
    ```
    (That's an example — write the actual axes you enumerated.) Like the rounds file, this persists across iterations and is never cleaned up per-round.
+
+**Every round: ensure the focus prompt carries the invariant checklist before dispatch.** The matrix above is prepared only on a branch's first round; this check runs on every round so existing focus files also receive the checklist. Append it idempotently:
+```bash
+GIT_DIR=$(git rev-parse --git-dir)
+FOCUS_FILE="$GIT_DIR/peer-review-focus"
+touch "$FOCUS_FILE"
+if ! grep -Fq 'Invariant check:' "$FOCUS_FILE"; then
+  echo "Invariant check: classify each finding as an instance or an invariant (a rule every path reaching a side effect must obey). For an invariant, list every code path that reaches the side effect and flag any changed path that bypasses a single owner." >> "$FOCUS_FILE"
+fi
+```
 
 For either reviewer, pass the **absolute worktree path**, scope `base:<branch>` or `uncommitted` from step 1, `$EFFORT` (`high` or `medium`), the complete contents of `$GIT_DIR/peer-review-focus` (including every `Decided … — do not re-report` line), and lens text plus label (`main` for a single call). Request "Also report anything else you find" alongside the focus. Each agent returns one fenced block with `status: ok | usage_limited | failed`, `reviewer: codex|claude <model> / <effort>`, `lens: <label>`, `log: <absolute path>`, and a normalized findings table (`sev | file:line | claim | suggested fix`), or `findings: none`.
 
@@ -273,6 +297,8 @@ Findings arrive as the agents' normalized tables (the deduped union across lense
 | Nit (style preference, ultra-minor) | **skip** by default; apply only if a cluster of nits exists in one file (batch cheap fixes) |
 | Codex is wrong (you can verify by reading the file) | **skip**, note why |
 | Finding is already fixed in the working tree (Codex reviewed a stale snapshot) | **skip**, note |
+
+**Classify instance vs invariant before applying.** For each row, decide whether it is an instance (one defect at one place; the rules above apply) or an invariant (a rule that must hold on every path reaching a side effect). For an invariant row, **before fixing, list every code path that reaches this side effect. If more than one, propose a single owner**, and apply the owner-plus-enforcement fix (convention: `${AI_TOOLS_HOME:-$HOME/.ai-tools}/instructions/development/shared.md`, *Invariants*; examples: `~/.claude/skills/peer-review/templates/invariants/`) instead of patching only the reported site. Two rounds reporting different sites of one side effect make it an invariant. Picking an owner that needs an architectural decision beyond the branch's scope is **skip** (unresolved), surfaced to the user. This changes the fix, not the finding format, reviewer routing or round limits.
 
 **Two kinds of skip, and only one blocks the push.** A skip is **dismissed** only when you have cited evidence against the finding. That means one of three things: the file on disk contradicts Codex, the finding is already fixed, or the user or spec has already decided that exact point (quote where). Every other skipped P1/P2 is **unresolved**, including one that "needs a policy call", is a judgment you're unsure of, or is marked "probably fine". Dismissed findings don't gate step 8, but each one's evidence goes in the step 6 report and in the PR comment. When in doubt, it's unresolved.
 

@@ -30,7 +30,6 @@ The contract the builder follows (Steps 2b–8: branch, implement, verify, revie
 update, merge, push, deploy watch) is
 [`../advance-roadmap/WORKER.md`](../advance-roadmap/WORKER.md); the hard rules binding everyone are
 [`../advance-roadmap/SAFETY.md`](../advance-roadmap/SAFETY.md). Read both before dispatching.
-Code-health work follows [`../advance-roadmap/CODE_HEALTH.md`](../advance-roadmap/CODE_HEALTH.md).
 
 ## 1. Choose the item
 
@@ -75,8 +74,8 @@ Write a request file (scratchpad, not the repo) — the same shape `run.sh` prod
 }
 ```
 
-Use `"mode": "resume"` + `"action": "resume_worker"` + the existing branch to finish a parked one,
-and `"work_kind": "code_health"` + a `roadmap/health-<slug>` branch for a refactor pass. Schema:
+Use `"mode": "resume"` + `"action": "resume_worker"` + the existing branch to finish a parked one.
+`work_kind` is always `"feature"`. Schema:
 `~/.claude/automations/advance-roadmap/schemas/orchestrator-result.json`.
 
 Then run (foreground; it can take a long time — use `run_in_background` and wait for completion,
@@ -95,6 +94,14 @@ pool), limited or missing, `worker.sh` exits `3` and says why in the status file
 unlike the scheduled run, you have someone to ask. The builder invokes
 `review.sh --worker cursor`, so Codex reviews (read-only) and the builder fixes findings for up to
 3 rounds; leftovers merge marked `FIXME/TODO(advance-roadmap review)`.
+
+**Classify review findings before fixes go out.** The builder's review rounds follow WORKER.md's
+*Instance versus invariant findings*. When you read review findings yourself or relay them to the builder, label each
+one an instance (one defect, local fix) or an invariant (a rule every path to a side effect must obey).
+For an invariant: before fixing, list every code path that reaches this side effect. If more than one,
+propose a single owner. Prefer one owner plus mechanical enforcement over repeated per-site patches
+(convention: `${AI_TOOLS_HOME:-$HOME/.ai-tools}/instructions/development/shared.md`, *Invariants*). Choosing an owner that exceeds the approved
+scope is a question for the user, not a silent redesign.
 
 To have the builder stop short of merging, say so in `worker_brief` ("stop after Step 5b; leave the
 branch, do not merge or push"). It reports `blocked-branch-left`; you then ask the user and send

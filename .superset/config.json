@@ -1,5 +1,7 @@
 {
-  "setup": [],
+  "setup": [
+    "/install.sh"
+  ],
   "teardown": [],
   "run": [
     "zed ."

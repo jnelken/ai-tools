@@ -1,36 +1,33 @@
 ---
 name: pick-up
-description: Resume where a previous session left off — read this repo's IN_PROGRESS.md, running plan docs, and recent harness plans in Plan mode, present their open items in a plan, and reconcile IN_PROGRESS.md with anything found already done or stale. Offer to copy recent harness plans into the repo. With the argument `sweep`, runs unattended instead: verifies items and removes only IN_PROGRESS.md items with hard evidence they're done or now tracked, while flagging plan threads only when hard evidence shows they're done or tracked; starts no work (the weekly sweep the pick-up-nudge hook requests).
+description: Resume where a previous session left off — read this repo's IN_PROGRESS.md, running plan docs, and recent harness plans, verify them, and present every still-open item as a lettered decision in the Zen reply format (no plan mode, no table), then reconcile IN_PROGRESS.md with anything found already done or stale and compact the session before starting the work. Offer to copy recent harness plans into the repo. With the argument `sweep`, runs unattended instead: verifies items and removes only IN_PROGRESS.md items with hard evidence they're done or now tracked, while flagging plan threads only when hard evidence shows they're done or tracked; starts no work (the weekly sweep the pick-up-nudge hook requests).
 ---
 
 # pick-up
 
 The other end of [[close-out]]. Close-out writes what still needs a human into
 `.claude/IN_PROGRESS.md`; pick-up reads it back in a fresh session, checks it against
-the repo's current state, and turns it into a plan the user approves before anything
-runs.
+the repo's current state, and puts every open item in front of the user as a decision
+before anything runs.
 
-The only automatic write this skill makes is reconciling the handoff file (step 5). It
-touches no other state before the plan is approved. Copy a harness plan into the repo only
-if the user accepts the offer in step 2.
+The only automatic write this skill makes is reconciling the handoff file (step 5), and
+only after the user has answered. It touches no other state before that. Copy a harness
+plan into the repo only if the user accepts the offer in step 2.
 
-**Invoked with `sweep`?** Jump to [Sweep mode](#sweep-mode-pick-up-sweep). It skips plan mode and
-approval because it only reconciles the file and never resumes work.
+**Invoked with `sweep`?** Jump to [Sweep mode](#sweep-mode-pick-up-sweep). It skips the
+decisions and the compact because it only reconciles the file and never resumes work.
 
-## 1. Enter Plan mode first
+## 1. Stay out of plan mode; answer in the Zen format
 
-Before reading anything, load and call `EnterPlanMode`:
+Do not call `EnterPlanMode` and do not build a plan or a table. This skill reuses the Zen
+reply format instead (the output style's **Notes / Verdict / Next / Decisions** layout and
+its rules for reading the user's reply: `go`, `next`, numbers, letters, `B?`, `Drop it`).
+If the Zen output style is not active in this session, follow that layout anyway.
 
-```
-ToolSearch("select:EnterPlanMode,ExitPlanMode")
-```
-
-Then call `EnterPlanMode`. Skip the call if the session is already in plan mode (e.g.
-launched with `--permission-mode plan`) — calling it again is harmless but noise.
-
-Planning starts before the read so that everything discovered in step 2 lands inside a
-mode that can't act on it by reflex. A picked-up item is often mid-flight work with a
-live blast radius; the user approves the resumption, not this skill.
+The guard that plan mode used to give still holds, by construction: steps 2–4 are read-only,
+and every open item reaches the user as a decision, not as something already underway. A
+picked-up item is often mid-flight work with a live blast radius; the user approves the
+resumption, not this skill.
 
 ## 2. Read the handoff file and running plan docs
 
@@ -54,7 +51,7 @@ Also inspect top-level `~/.claude/plans/*.md` files whose modification time is w
 7 days. Read their `## Open threads` sections and collect unchecked `- [ ]` items alongside
 the repo items, with each source path. Offer in the plan to copy a relevant harness plan into
 the target repo's `docs/plans/` so it survives outside the harness. If accepted, make that
-copy the first action after exiting plan mode, before resuming work. Do not include older
+copy the first action after the user's reply, before resuming work. Do not include older
 harness plan files.
 
 Both [[close-out]] and [[wrapup-repos]] write this file. Items under `## Ticket candidates`
@@ -81,37 +78,48 @@ Classify every item as **still open**, **already done**, or **stale/invalid**, w
 evidence for anything not still open. Don't silently drop an item — an item you
 believe is done is a claim the user gets to see and correct.
 
-Note the exact edits this implies for the file, but don't make them yet — plan mode
-permits writing only the plan file, and a verdict the user is about to correct must not
-already be on disk. Step 5 applies them once the plan is approved.
+Note the exact edits this implies for the file, but don't make them yet — a verdict the
+user is about to correct must not already be on disk. Step 5 applies them once the user
+has answered.
 
-## 4. Present the plan
+## 4. Present the items in the Zen format
 
-`ExitPlanMode` with a plan that:
+One reply, in the Zen layout and order, with no table and no plan:
 
-- Follows the file's own ordering — its "Next step" section is the previous session's
-  considered judgment about what comes first, not an arbitrary list.
-- Names the concrete first action, not a category of action.
-- Surfaces every decision the file left to the human as an explicit choice in the plan,
-  rather than quietly picking one. That's why those items were written down instead of
-  executed.
-- Lists what you found already done or stale, and why.
-- States the edits step 5 will make to the handoff file — which items get removed as
-  done, removed as stale, or dropped because a ticket/PR now tracks them. The user is
-  approving those removals too, and this is their one chance to say "no, that isn't
-  done" before a wrong verdict is applied.
-- Flags anything with real-world side effects (live account mutations, prod changes,
-  outbound messages) before the step that causes it.
+- **Notes**: context from the file and the pointers you followed that the user needs to
+  judge the items (a gotcha, a warning the previous session left). Terse bullets.
+- **Verdict**: one or two sentences: how many items are open, how many you believe are
+  done or stale.
+- **Next**: the work that needs no decision, one numbered line each:
+  - each removal step 5 will make, with its evidence ("Remove X from `IN_PROGRESS.md`:
+    landed in a1b2c3d"; "Remove Y: CON-1234 is Done"). Leaving a number out of the user's
+    reply is their one chance to say "no, that isn't done" before a wrong verdict is
+    applied;
+  - the offer to copy a recent harness plan into `docs/plans/`;
+  - `## Ticket candidates` items as "File X in Linear" (never plan their implementation).
+- **Decisions**: **every still-open item, each as its own decision**, tagged
+  `[IN_PROGRESS]` for handoff-file items and with the source path for plan threads. Use the
+  Zen option rules: letters continue across the conversation, one option `(recommended)`,
+  last option exactly `Drop it`. The first option names the concrete first action ("Yes:
+  Claude re-runs the migration check on stage"), not a category of action. Order the
+  decisions by the file's own ordering — its "Next step" section is the previous session's
+  considered judgment about what comes first. Flag anything with real-world side effects
+  (live account mutations, prod changes, outbound messages) in the option that causes it.
+  Items the file left to the human (`## Decisions needed`) are decisions here too, with the
+  options the file names; never pick one for them.
+
+`Drop it` on an `[IN_PROGRESS]` item deletes its entry in step 5, as the Zen rules say.
 
 Completion criterion: every unchecked handoff item and every collected repo or recent harness
-plan thread appears in the plan — as a step, as a decision for the user, or as an explicit
-"already done / no longer applies" with evidence. An item that exists in either source and
-nowhere in the plan is the failure mode this skill exists to prevent.
+plan thread appears in the reply — as a decision, as a Next removal with evidence, or in
+Notes as "no longer applies" with evidence. An item that exists in either source and nowhere
+in the reply is the failure mode this skill exists to prevent.
 
 ## 5. Reconcile the handoff file
 
-Once the plan is approved, copy any accepted recent harness plan into `docs/plans/` as the
-first action after exiting plan mode. Do this even if no handoff reconciliation is needed.
+When the user replies, first copy any accepted recent harness plan into `docs/plans/`. Do
+this even if no handoff reconciliation is needed. Apply only the Next numbers they
+selected (`go` selects all) and delete the entries they `Drop it`-ed.
 
 If step 3 found nothing stale, skip this — rewriting a file that was already accurate is
 churn, and it costs the `_Last updated:_` date its meaning.
@@ -149,8 +157,22 @@ is the one that goes in the file.
   The session history only exists to trace open items back to the sessions that wrote them;
   with nothing open it's noise. The `pick-up-nudge` SessionStart hook applies the same reset.
 
-Then start the work. What this skill owns is reconciling the file with reality;
-[[close-out]] still owns adding new open items and decisions at the end of a session.
+What this skill owns is reconciling the file with reality; [[close-out]] still owns
+adding new open items and decisions at the end of a session.
+
+## 6. Compact, then start the work
+
+The survey (the file, every followed pointer, the verification output) has done its job
+once the user has answered, and it is most of this session's context. Run `/compact`
+before the work instead of carrying it along, with a focus that keeps only what the work
+needs: the items the user chose to resume, their first actions, the pointers and gotchas
+that apply to them, and the decisions already made.
+
+`/compact` is a built-in command, not a tool or skill, so the model cannot call it. After
+step 5 lands, end the turn with the exact line for Jake to run — `/compact Keep: <chosen
+items, first actions, pointers/gotchas, settled decisions>` — then start the work when the
+session continues. If the user answered `Drop it` to every item, or no item was chosen to
+resume, skip this step: there is no work to protect context for.
 
 ## Sweep mode (`/pick-up sweep`)
 
@@ -158,8 +180,8 @@ The weekly, unattended version of this skill. The `pick-up-nudge` SessionStart h
 (in a background agent) when a repo's handoff file has open items and its `_Last updated:_` date
 isn't in the current ISO week. The job is to keep the file honest, not to resume work, so:
 
-- **No plan mode, no approval, no work.** Skip steps 1 and 4. Never start, edit, or run any item;
-  the only write is the handoff file.
+- **No decisions, no approval, no compact, no work.** Skip steps 1, 4 and 6. Never start, edit,
+  or run any item; the only write is the handoff file.
 - **Steps 2–3 as normal**, following pointers only as far as verification needs.
 - **Delete only on hard evidence.** An item goes when it's verifiably done, such as:
   - a commit on the default branch that does the work;
@@ -193,4 +215,4 @@ isn't in the current ISO week. The job is to keep the file honest, not to resume
   never `git add` it, and never commit a change to it as part of picking up.
 - Step 5 only ever *reconciles*: it records what is already true. It never marks an item
   done because the plan intends to do it, and never adds items — that's close-out's job.
-  If picking up reveals new work, it belongs in the plan, not appended to the file.
+  If picking up reveals new work, it belongs in the reply's decisions, not appended to the file.

@@ -21,6 +21,23 @@ _spec = importlib.util.spec_from_file_location("usage", SCRIPT)
 usage = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(usage)
 
+
+class ContinuousProbeTest(unittest.TestCase):
+    def test_refresh_reuses_readings_across_process_style_loads_for_two_minutes(self):
+        with tempfile.TemporaryDirectory() as directory, mock.patch.dict(
+                os.environ, {'ADVANCE_ROADMAP_CONTINUOUS': '1'}), mock.patch.object(
+                usage.time, 'time', return_value=1000) as clock, mock.patch.object(
+                usage, 'probe_claude') as claude, mock.patch.object(
+                usage, 'probe_codex') as codex, mock.patch.object(usage, 'probe_cursor_into') as cursor:
+            root = Path(directory)
+            usage.refresh(root)
+            clock.return_value = 1119
+            usage.refresh(root)
+            self.assertEqual((claude.call_count, codex.call_count, cursor.call_count), (1, 1, 1))
+            clock.return_value = 1120
+            usage.refresh(root)
+            self.assertEqual((claude.call_count, codex.call_count, cursor.call_count), (2, 2, 2))
+
 FUTURE = int(time.time()) + 3600
 PAST = int(time.time()) - 3600
 
@@ -130,8 +147,12 @@ class RoutingTests(unittest.TestCase):
         usage.apply_codex(self.state, probed(usage.parse_codex_rate_limits(app_server_result()), "app_server"))
         self.assertTrue(self.flags()["codex"]["available_for_orchestrator"])
 
-    def test_codex_weekly_over_threshold_is_gated(self):
-        usage.apply_codex(self.state, probed(usage.parse_codex_rate_limits(app_server_result(weekly=85)), "app_server"))
+    def test_codex_weekly_85_percent_is_available(self):
+        usage.apply_codex(self.state, probed(usage.parse_codex_rate_limits(app_server_result(five=10, weekly=85)), "app_server"))
+        self.assertTrue(self.flags()["codex"]["available_for_orchestrator"])
+
+    def test_codex_weekly_exhaustion_is_gated(self):
+        usage.apply_codex(self.state, probed(usage.parse_codex_rate_limits(app_server_result(weekly=90)), "app_server"))
         self.assertFalse(self.flags()["codex"]["available_for_orchestrator"])
         self.assertEqual(usage.pick_orchestrator(self.state), "claude")
 
@@ -185,6 +206,11 @@ class RoutingTests(unittest.TestCase):
             self.assertFalse(self.flags()["cursor"]["available_for_worker"])
         self.assertEqual(usage.pick_worker_chain(self.state), ["codex", "claude"])
 
+    def test_available_cursor_is_first_in_worker_route(self):
+        for provider in ("cursor", "codex", "claude"):
+            self.state["providers"][provider]["available_for_worker"] = True
+        self.assertEqual(usage.pick_worker_chain(self.state), ["cursor", "codex", "claude"])
+
     def test_cursor_pinned_model_gates_on_api_pool(self):
         usage.apply_cursor(self.state, probed(usage.parse_cursor_usage(cursor_response(auto=100, api=5)), "dashboard_api"))
         with mock.patch.dict(os.environ, {"ADVANCE_ROADMAP_CURSOR_WORKER_MODEL": "claude-sonnet-4-6"}):
@@ -209,15 +235,34 @@ class RoutingTests(unittest.TestCase):
         self.assertFalse(usage.apply_cursor(self.state, None))
         self.assertFalse(self.flags()["cursor"]["available_for_worker"])
 
+    def test_cursor_limit_without_reset_is_held_through_next_daily_batch(self):
+        observed = time.time() - 23 * 60 * 60
+        self.state["providers"]["cursor"]["last_limit_hit"] = {
+            "observed_at": datetime.fromtimestamp(observed).astimezone().isoformat(),
+            "reset_epoch": None}
+        gate = usage.provider_gate(self.state, "cursor", "worker", now=observed + 23 * 60 * 60)
+        self.assertFalse(gate["available"], gate)
+        self.assertEqual(gate["state"], "limited")
+        gate = usage.provider_gate(self.state, "cursor", "worker", now=observed + 25 * 60 * 60)
+        self.assertTrue(gate["available"], gate)
+
+    def test_other_provider_unknown_limit_keeps_one_hour_cooldown(self):
+        observed = time.time() - 23 * 60 * 60
+        self.state["providers"]["codex"]["last_limit_hit"] = {
+            "observed_at": datetime.fromtimestamp(observed).astimezone().isoformat(),
+            "reset_epoch": None}
+        gate = usage.provider_gate(self.state, "codex", "worker", now=observed + 23 * 60 * 60)
+        self.assertTrue(gate["available"], gate)
+
     def test_failed_probe_keeps_stored_values(self):
         usage.apply_codex(self.state, probed(usage.parse_codex_rate_limits(app_server_result(weekly=85)), "app_server"))
         self.assertFalse(usage.apply_codex(self.state, None))
         self.assertEqual(self.state["providers"]["codex"]["weekly"]["used_pct"], 85)
-        self.assertFalse(self.flags()["codex"]["available_for_worker"])
+        self.assertTrue(self.flags()["codex"]["available_for_worker"])
 
 
 class GateMatrixTests(unittest.TestCase):
-    """70% five-hour / 80% weekly for Claude and Codex, 100% of the role's Cursor pool — in every role."""
+    """70% five-hour / 90% weekly for Claude and Codex, 100% of Cursor's monthly pool."""
 
     def gate(self, provider, role, prov=None, env=None):
         state = usage.empty_state()
@@ -231,7 +276,7 @@ class GateMatrixTests(unittest.TestCase):
                 key: {"used_pct": weekly, "reset_epoch": reset}}
 
     def test_window_boundaries_for_claude_and_codex_in_every_role(self):
-        cases = [((69.9, None), True), ((70, None), False), ((None, 79.9), True), ((None, 80), False),
+        cases = [((69.9, None), True), ((70, None), False), ((10, 85), True), ((None, 90), False),
                  ((69, 79), True), ((100, 100), False)]
         for provider in ("claude", "codex"):
             for role in ("orchestrator", "worker", "reviewer"):
@@ -240,6 +285,12 @@ class GateMatrixTests(unittest.TestCase):
                         got = self.gate(provider, role, self.windows(provider, five, weekly))
                         self.assertEqual(got["available"], available, got)
                         self.assertEqual(got["state"], "ok" if available else "over")
+
+    def test_weekly_89_percent_does_not_gate_with_healthy_five_hour(self):
+        for provider in ("claude", "codex"):
+            with self.subTest(provider=provider):
+                got = self.gate(provider, "worker", self.windows(provider, five=10, weekly=89))
+                self.assertTrue(got["available"], got)
 
     def test_cursor_pool_boundary_per_role(self):
         for role, env_key in (("worker", "ADVANCE_ROADMAP_CURSOR_WORKER_MODEL"),
@@ -281,12 +332,12 @@ class GateMatrixTests(unittest.TestCase):
                 "seven_day": {"used_pct": 90, "reset_epoch": later}}
         self.assertEqual(self.gate("claude", "worker", prov)["reset_epoch"], later)
 
-    def test_review_strategy_falls_back_only_when_configured_default_has_gated_cursor(self):
+    def test_legacy_cursor_review_strategy_is_disabled(self):
         gates = [{"provider": "cursor", "state": "over", "reset_at": "2026-11-03T10:30:00-05:00"}]
         self.assertEqual(usage.effective_review_strategy("cursor-then-codex", gates), {
             "configured": "cursor-then-codex", "strategy": "cross-provider",
-            "reason": "cursor gated until 2026-11-03T10:30:00-05:00",
-            "reset_at": "2026-11-03T10:30:00-05:00"})
+            "reason": "Cursor is disabled for roadmap reviews",
+            "reset_at": None})
 
     def test_explicit_cross_provider_stays_cross_provider(self):
         decision = usage.effective_review_strategy("cross-provider", [
@@ -294,11 +345,11 @@ class GateMatrixTests(unittest.TestCase):
         self.assertEqual(decision["strategy"], "cross-provider")
         self.assertIsNone(decision["reason"])
 
-    def test_available_cursor_keeps_configured_strategy(self):
+    def test_available_cursor_still_uses_cross_provider(self):
         decision = usage.effective_review_strategy("cursor-then-codex", [
             {"provider": "cursor", "state": "ok"}])
-        self.assertEqual(decision["strategy"], "cursor-then-codex")
-        self.assertIsNone(decision["reason"])
+        self.assertEqual(decision["strategy"], "cross-provider")
+        self.assertEqual(decision["reason"], "Cursor is disabled for roadmap reviews")
 
     def test_thresholds_are_overridable_by_env(self):
         env = dict(os.environ, ADVANCE_ROADMAP_MAX_FIVE_HOUR_PCT="50", ADVANCE_ROADMAP_MAX_WEEKLY_PCT="60",
@@ -454,11 +505,11 @@ class QuotaRecordTests(unittest.TestCase):
         self.assertEqual((rec["provider"], rec["reset_epoch"], rec["cause"]), ("claude", FUTURE + 60, "usage limit"))
 
     def test_without_a_primary_the_first_reset_leads_and_every_reason_is_joined(self):
-        state = self.state(codex={"weekly": {"used_pct": 85, "reset_epoch": FUTURE + 60}},
+        state = self.state(codex={"weekly": {"used_pct": 90, "reset_epoch": FUTURE + 60}},
                            claude={"five_hour": {"used_pct": 90, "reset_epoch": FUTURE}})
         rec = usage.quota_record(state, "orchestrator")
         self.assertEqual((rec["provider"], rec["reset_epoch"]), ("claude", FUTURE))
-        self.assertEqual(rec["cause"], "codex: weekly 85% >= 80%; claude: 5h 90% >= 70%")
+        self.assertEqual(rec["cause"], "codex: weekly 90% >= 90%; claude: 5h 90% >= 70%")
 
     def test_the_live_gate_fills_a_reset_the_attempt_lacks(self):
         state = self.state(claude={"last_limit_hit": {"reset_epoch": FUTURE, "observed_at": usage.now_iso()}})
@@ -479,6 +530,11 @@ class LimitBannerTests(unittest.TestCase):
         self.assertEqual(usage.limit_banner(text), "You've hit your session limit · resets 11:50am (America/New_York)")
         self.assertIsNone(usage.limit_banner("The doc says you've hit your session limit sometimes."))
         self.assertIsNone(usage.limit_banner(""))
+
+    def test_cursor_actionrequired_usage_limit_is_a_live_banner(self):
+        banner = "ActionRequiredError: You've hit your usage limit Get Cursor Pro for more Agent usage, unlimited Tab, and more."
+        self.assertEqual(usage.limit_banner(banner), banner)
+        self.assertEqual(usage.live_limit_banner(banner, exit_code=1, final_answer=""), banner)
 
     def test_live_limit_ignores_echoed_banner_when_final_answer_succeeded(self):
         banner = "You've hit your usage limit. Resets 5pm."

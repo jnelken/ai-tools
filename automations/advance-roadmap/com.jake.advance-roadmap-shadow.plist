@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>ADVANCE_ROADMAP_LANES</key>
+		<string>5</string>
+		<key>PATH</key>
+		<string>/opt/homebrew/bin:/opt/homebrew/opt/node@22/bin:/usr/bin:/bin:/usr/sbin:/sbin:/Users/jake/.local/bin</string>
+	</dict>
+	<key>Label</key>
+	<string>com.jake.advance-roadmap-shadow</string>
+	<key>ProcessType</key>
+	<string>Background</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/opt/homebrew/bin/python3</string>
+		<string>/Users/jake/.claude/automations/advance-roadmap/scheduler.py</string>
+	</array>
+	<key>RunAtLoad</key>
+	<false/>
+	<key>StandardErrorPath</key>
+	<string>/Users/jake/.claude/automations/advance-roadmap/logs/shadow.err.log</string>
+	<key>StandardOutPath</key>
+	<string>/Users/jake/.claude/automations/advance-roadmap/logs/shadow.out.log</string>
+	<key>StartInterval</key>
+	<integer>900</integer>
+</dict>
+</plist>

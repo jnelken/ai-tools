@@ -104,6 +104,11 @@ if [ -n "${FAKE_JSON_LIMIT:-}" ] && [ "$(basename "$0")" != "codex" ]; then
   python3 -c 'import json; print(json.dumps({"type":"result","subtype":"success","is_error":True,"result":"You'\''ve hit your usage limit. Resets 5pm.","session_id":"x"}))'
   exit 0
 fi
+# Simulate Cursor rejecting the local login before the agent starts.
+if [ -n "${FAKE_AUTH:-}" ] && [ "$(basename "$0")" = "agent" ]; then
+  print -r -- "Error: Authentication required. Please run 'agent login' first, or set CURSOR_API_KEY environment variable."
+  exit 1
+fi
 print -r -- "fake provider completed"
 SH
 chmod +x "$TMP_ROOT/bin/fake-provider"
@@ -114,7 +119,8 @@ run_worker() {
   local gated="$1" status_file="$2"
   : > "$TMP_ROOT/calls"
   : > "$TMP_ROOT/limits"
-  FAKE_GATED="$gated" FAKE_CRASH="${FAKE_CRASH:-}" CALLS="$TMP_ROOT/calls" LIMITS="$TMP_ROOT/limits" \
+  FAKE_GATED="$gated" FAKE_CRASH="${FAKE_CRASH:-}" FAKE_AUTH="${FAKE_AUTH:-}" \
+  FAKE_JSON_LIMIT="${FAKE_JSON_LIMIT:-}" CALLS="$TMP_ROOT/calls" LIMITS="$TMP_ROOT/limits" \
   FAKE_RESULT="${FAKE_RESULT:-}" RESULT_PATH="$TMP_ROOT/result.json" \
   PERSONAL_CODE_DIR="$TMP_ROOT" \
   ADVANCE_ROADMAP_ROOT="$TMP_ROOT/root" \
@@ -122,8 +128,9 @@ run_worker() {
   ADVANCE_ROADMAP_AGENT_BIN="$TMP_ROOT/bin/agent" \
   ADVANCE_ROADMAP_CODEX_BIN="$TMP_ROOT/bin/codex" \
   ADVANCE_ROADMAP_CLAUDE_BIN="$TMP_ROOT/bin/claude" \
+  ADVANCE_ROADMAP_BUDGET_WORKER="${ADVANCE_ROADMAP_BUDGET_WORKER:-}" \
     "$TEST_DIR/worker.sh" --stamp test --request-file "$TMP_ROOT/request.json" \
-      --providers "cursor codex claude" --status-file "$status_file" \
+      --providers "${WORKER_PROVIDERS:-cursor codex claude}" --status-file "$status_file" \
       --result-file "$TMP_ROOT/result.json" >/dev/null
 }
 
@@ -194,6 +201,30 @@ case "$(cat "$TMP_ROOT/limits")" in
   *) fail "json is_error was not recorded: $(cat "$TMP_ROOT/limits")" ;;
 esac
 
+# Auth failure must fail over, including when the batch reserved Cursor but retained its chain.
+FAKE_AUTH=1 WORKER_PROVIDERS="cursor codex" run_worker "" "$TMP_ROOT/status-auth.json" \
+  || fail "auth failure should fail over to a healthy provider"
+[ "$(cat "$TMP_ROOT/calls")" = $'agent\ncodex' ] \
+  || fail "auth failure did not fail over cursor→codex: $(cat "$TMP_ROOT/calls")"
+python3 - "$TMP_ROOT/status-auth.json" <<'PY' || fail "auth failover status is wrong"
+import json, sys
+s = json.load(open(sys.argv[1]))
+assert s["used"] == "codex", s
+assert "cursor" in s.get("missing", []), s
+PY
+
+# A live usage limit under a batch reservation must not consume an unleased fallback.
+FAKE_JSON_LIMIT=1 ADVANCE_ROADMAP_BUDGET_WORKER=cursor WORKER_PROVIDERS="cursor codex" \
+  run_worker "" "$TMP_ROOT/status-leased-limit.json" || true
+[ "$(cat "$TMP_ROOT/calls")" = "agent" ] \
+  || fail "leased limit spilled to an unleased provider: $(cat "$TMP_ROOT/calls")"
+python3 - "$TMP_ROOT/status-leased-limit.json" <<'PY' || fail "leased limit status is wrong"
+import json, sys
+s = json.load(open(sys.argv[1]))
+assert s["used"] == "cursor", s
+assert s["limited"] and s["limited"][0]["provider"] == "cursor", s
+PY
+
 # Real usage.py live-limit CLI: echoed banner suppressed; is_error JSON counts on exit 0.
 cp "$TEST_DIR/lib/usage.py" "$TMP_ROOT/real-usage.py"
 banner=$'echoed prior log\nYou\'ve hit your usage limit. Resets 5pm.\n'
@@ -208,5 +239,9 @@ got="$(python3 "$TMP_ROOT/real-usage.py" live-limit --text ok --exit 0 --final "
   || fail "live-limit missed zero-exit is_error JSON"
 [ "$got" = "You've hit your usage limit. Resets 5pm." ] \
   || fail "live-limit is_error text wrong: $got"
+cursor_banner="ActionRequiredError: You've hit your usage limit Get Cursor Pro for more Agent usage, unlimited Tab, and more."
+got="$(python3 "$TMP_ROOT/real-usage.py" live-limit --text "$cursor_banner" --exit 1 --final "")" \
+  || fail "live-limit missed Cursor's prefixed usage-limit banner"
+[ "$got" = "$cursor_banner" ] || fail "live-limit changed Cursor's usage-limit text: $got"
 
 print -- "worker usage gate: ok"

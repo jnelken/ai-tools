@@ -60,8 +60,7 @@ Serialize only for a real dependency: two targets sharing a worktree or branch, 
 
 ### 1.5. Confirm the Linear ticket is in the PR title
 
-The ticket id as a `(CON-N)` / `(DEV-N)` suffix on the PR title is the link: Linear picks it up from the title, the same way it does from commit titles. **Do not add magic-word lines (`Fixes`, `Part of`, `Related to`) to the PR description.** Jake's ruling (api #1607, 2026-10-29): magic words belong in commit messages only; a magic word in a PR body drives the ticket's workflow state from the PR, which is not wanted.
-
+The ticket id as a `(CON-N)` / `(DEV-N)` suffix on the PR title is the link: Linear picks it up from the title, the same way it does from commit titles.
 ```bash
 gh pr view <PR_NUMBER> --repo <OWNER/REPO> --json title -q .title | grep -oiE '\((dev|con)-[0-9]+\)'
 ```
@@ -193,6 +192,7 @@ Only for a `Concentro-Inc/woodrow` PR whose base is the default branch, before s
 woodrow's PR guide (`docs/guides/pr-descriptions.md`, `## Preview`) owns the host, flag-param and omit rules. This step only makes sure each link opens the screen a reviewer has to look at, not the app's front page:
 
 - Find the route in `app/lib/routes/definitions.ts`. For a screen inside an entity (an entity's tab, such as Document Studio), use `buildEntityViewPath.ts`. Link the deepest path that shows the change, with any flag params after it.
+- A PR that changes the management portal (`apps/management/`) also links each changed portal screen on the management preview host, `https://deploy-preview-<N>.management.folio.concentro.io` + the route from `apps/management/src/routes.ts`, alongside any Folio app links. A missing management link counts as a Preview that doesn't follow these rules.
 - A screen that needs an entity uses the stage entity `/e/portfolios/legends-solar-bc65ea81da/<view>`: swap `dashboard` for the view under review. Never invent an entity id. Deploy previews talk to the stage API, so this entity exists there. Claudio's drafter uses the same entity (`WOODROW_PREVIEW_ENTITY_PATH` in internal-tools' `services/claudio-slack-bot/src/prDrafter.ts`); change both together.
 - When the change shows on several distinct screens, give one link per screen, each on its own line as `<label>: <url>`.
 - Link the bare host only when the change is genuinely app-wide (theme tokens, global layout, the app shell) and no single screen represents it.
@@ -317,6 +317,16 @@ Post this report on the PR before the reap (step 3.7), since the reap closes the
 If the merge was blocked, replace the `Merged` line with `Merge: blocked — conflicts with <trunk>` and say what is outstanding.
 
 If the run stopped at a different gate (unconverged review, failing check), say which gate and what is outstanding — don't bury it.
+
+### 8. Pick up in a new tab
+
+After a run that merged a PR (a sub-PR into its trunk, step 3.6) or otherwise finished the branch's work, if the repo's gitignored `.claude/IN_PROGRESS.md` has open items, **start `/pick-up` yourself in a new terminal tab; never offer it or leave it to Jake.** A new tab in an existing workspace, not a new sswt, and not the terminal this run is in:
+
+```bash
+superset agents create --workspace "$WS" --agent claude --prompt "/pick-up" --json
+```
+
+`$WS` is a workspace that survives the run: the current one, unless step 3.7 reaps it, in which case the trunk's workspace or the project's root checkout. The file is gitignored and lives in the root checkout, so a worktree tab sees no `IN_PROGRESS.md`; name the root checkout's path in the prompt when `$WS` is a worktree. Spawn it before step 3.7's reap, report it as `- Pick-up: tab spawned (N open items)`, and skip silently when the file is absent or empty.
 
 ## When it fires on its own
 

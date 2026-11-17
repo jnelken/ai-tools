@@ -20,8 +20,11 @@ import argparse
 import json
 import os
 import subprocess
+import time
 import sys
 from datetime import datetime, timedelta
+
+import workqueue
 
 def _personal_code_dir_module():
     """ai-tools' lib/personal_code_dir.py is the one place that decides where the
@@ -41,8 +44,8 @@ if not CODE_DIR:
     sys.exit("pendingplan: no personal code dir on this machine (set PERSONAL_CODE_DIR)")
 PREFLIGHT = os.path.expanduser("~/dotfiles/bin/git-safe-to-autocommit")
 DISPATCH_ACTIONS = {"dispatch_worker", "resume_worker"}
-# A worker that reports one of these made no durable progress; keep the plan.
-RETRY_OUTCOMES = {"failed", "limit_hit"}
+# These outcomes require continuation, including clean durable milestones.
+RETRY_OUTCOMES = {"failed", "limit_hit", "yielded"}
 
 
 def load(path):
@@ -76,6 +79,8 @@ def cmd_save(a):
         print("pending plan: none (no dispatch)")
         return 0
     prior = load(a.file) or {}
+    with workqueue.Store() as store:
+        store.register(result, a.stamp, a.file)
     same = (prior.get("orchestrator") or {}).get("item") == result.get("item") and (
         prior.get("orchestrator") or {}
     ).get("repo") == result.get("repo")
@@ -99,6 +104,28 @@ def branch_exists(repo_dir, branch):
     ).returncode == 0
 
 
+def merged_assignment(repo_dir, branch, planned_at):
+    """Recognize an already-merged exact branch revision before a recovery worker starts."""
+    if not branch:
+        return None
+    try:
+        planned = datetime.fromisoformat(planned_at).astimezone().timestamp()
+        head = subprocess.run(['git', '-C', repo_dir, 'rev-parse', '--verify', f'refs/heads/{branch}'],
+                              capture_output=True, text=True, timeout=5, check=True).stdout.strip()
+        result = subprocess.run(['gh', 'pr', 'list', '--head', branch, '--state', 'merged', '--limit', '30',
+                                 '--json', 'headRefName,headRefOid,mergedAt,mergeCommit,url'],
+                                cwd=repo_dir, capture_output=True, text=True, timeout=20, check=True)
+        candidates = []
+        for pr in json.loads(result.stdout):
+            merged_at = datetime.fromisoformat(pr.get('mergedAt', '').replace('Z', '+00:00')).timestamp()
+            if (pr.get('headRefName') == branch and pr.get('headRefOid') == head
+                    and merged_at >= planned and (pr.get('mergeCommit') or {}).get('oid') and pr.get('url')):
+                candidates.append({'url': pr['url'], 'merge_commit': pr['mergeCommit']['oid'], 'head': head})
+        return candidates[0] if len(candidates) == 1 else None
+    except (OSError, ValueError, TypeError, KeyError, subprocess.SubprocessError):
+        return None
+
+
 def cmd_reuse(a):
     plan = load(a.file)
     if not plan:
@@ -110,20 +137,60 @@ def cmd_reuse(a):
     except (KeyError, ValueError):
         age = timedelta.max
     repo_dir = os.path.join(CODE_DIR, r.get("repo") or "")
-    if age > timedelta(hours=a.max_age_hours):
-        why = f"older than {a.max_age_hours}h"
-    elif plan.get("attempts", 0) >= a.max_attempts:
-        why = f"already reused {plan.get('attempts')} time(s)"
-    elif not r.get("repo") or not os.path.isdir(repo_dir):
+    if not r.get("repo") or not os.path.isdir(repo_dir):
         why = "repo missing"
-    elif not branch_exists(repo_dir, r.get("branch")) and subprocess.run(
+    elif (os.environ.get('ADVANCE_ROADMAP_SUPERSET', '1') != '1'
+          and not branch_exists(repo_dir, r.get("branch")) and subprocess.run(
         [PREFLIGHT, repo_dir], capture_output=True
-    ).returncode != 0:
-        # No branch = the worker never started; the repo must still be safe to build in.
+    ).returncode != 0):
         why = "repo no longer passes git-safe-to-autocommit"
     if why:
-        print(f"pending plan: not reusing ({why}) — orchestrator will re-plan")
-        return 1
+        print(f"pending plan: held ({why}); saved assignment retained")
+        return 2
+    merged = merged_assignment(repo_dir, r.get('branch'), plan.get('planned_at')) if branch_exists(repo_dir, r.get('branch')) else None
+    with workqueue.Store() as store:
+        wid = store.register(r, plan.get('last_stamp') or plan.get('planned_stamp') or '00000000-000000', a.file)
+        hold = store.hold(r['repo'])
+        if hold:
+            print(f"pending plan: held ({hold['reason']}); saved assignment retained")
+            return 2
+        current = next((w for w in store.list(r['repo']) if w['id'] == wid), None)
+        if merged and current and current['state'] != 'done':
+            store.checkpoint(wid, current['latest_stamp'], 'verifying',
+                {'merged_pr': merged, 'next_action': 'Verify the existing merge and deployment; never merge again'})
+            current = next((w for w in store.list(r['repo']) if w['id'] == wid), None)
+        if current and (current['state'] == 'human' or current['not_before'] > time.time()):
+            print('pending plan: this assignment is waiting; retained for its wake condition')
+            return 2
+        if current and current['state'] == 'done':
+            clear(a.file)
+            print('pending plan: already completed; no duplicate worker')
+            return 2
+        if current and current['checkpoint']:
+            r = dict(r)
+            r['worker_brief'] = (r.get('worker_brief') or '') + (
+                "\n\nContinuation checkpoint (verify current branch/HEAD before trusting evidence):\n"
+                + json.dumps({'phase': current['phase'], **current['checkpoint']}))
+    if age > timedelta(hours=a.max_age_hours) or plan.get('attempts', 0) >= a.max_attempts:
+        r = dict(r)
+        r['worker_brief'] = (r.get('worker_brief') or '') + (
+            "\nSaved assignment needs revalidation because of age/retries. Check the ticket, branch, "
+            "existing PR/merge and current scope first. Resume unfinished work; do not restart completed phases. "
+            "If a human decision is required, report needs_input=true with a specific input_question.")
+    # Old plans can carry dirty-tree blockers from before worktree ownership was
+    # recognized. Keep their evidence for a live recheck, not as current facts
+    # for the bookkeeping worker to repost on every continuation.
+    dirty = [b for b in (r.get('blockers') or []) if isinstance(b, dict) and any(
+        word in str(b.get('detail') or '').lower() for word in ('dirty', 'uncommitted'))]
+    if dirty:
+        r = dict(r)
+        r['blockers'] = [b for b in (r.get('blockers') or []) if b not in dirty]
+        r['worker_brief'] = (r.get('worker_brief') or '') + (
+            '\nPrior dirty-workspace blockers require a live recheck under the current workspace '
+            'ownership rules; do not repost them as facts. Resume work in an advance-roadmap-tagged '
+            'workspace and preserve its changes; protect unowned work. Prior evidence: '
+            + json.dumps(dirty))
+        r['summary'] = f"Resuming {r.get('linear_id') or r.get('item') or r.get('repo')}; recheck prior dirty-workspace blockers."
     if branch_exists(repo_dir, r.get("branch")):
         r = {**r, "action": "resume_worker"}
     r["summary"] = (r.get("summary") or "") + (
@@ -148,8 +215,21 @@ def cmd_settle(a):
         if (want.get("repo"), want.get("item")) != (have.get("repo"), have.get("item")):
             print("pending plan: belongs to another item — left alone")
             return 0
-    outcome = (load(a.worker_result) or {}).get("outcome")
-    if outcome is None or outcome in RETRY_OUTCOMES:
+    result = load(a.worker_result) or {}
+    if a.worker_rc != 0:
+        # A result written before a forced stop is not proof that shipping
+        # finished; reconcile the branch and PR on the next attempt.
+        result = {}
+    outcome = result.get("outcome")
+    stamp = ((load(a.request_file) or {}).get('stamp') if a.request_file else None) or plan.get('last_stamp') or plan.get('planned_stamp') or '00000000-000000'
+    with workqueue.Store() as store:
+        assigned = plan.get('orchestrator') or {}
+        store.attempt(stamp, assigned.get('repo') or 'unknown', assigned)
+        store.finish({'stamp': stamp, 'repo': assigned.get('repo'), 'outcome': outcome,
+                      'finished_at': datetime.now().isoformat(timespec='seconds'),
+                      'worker_exit': a.worker_rc, 'worker': result.get('provider'),
+                      'detail': result.get('input_question') or result.get('summary')}, result)
+    if a.worker_rc != 0 or outcome is None or outcome in RETRY_OUTCOMES or outcome in {"blocked-branch-left", "shipped-deploy-failed"}:
         print(f"pending plan: kept for next run (worker outcome={outcome or 'none'}, rc={a.worker_rc})")
     else:
         clear(a.file)

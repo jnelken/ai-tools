@@ -9,7 +9,7 @@ End every final message of a turn with one status line — `<glyph> <label, ≤8
 | ⏳ | Watching | Idle now, but a Monitor, ScheduleWakeup, background agent or CI watch is armed and the session resumes on its own. Label names what and a rough ETA. |
 | 💡 | Follow-ups | Asked-for work done and verified; recommended follow-ups or open questions worth a look. |
 | ✅ | Done | Everything asked for is complete and verified; nothing pending. |
-| ⛏️ | Reapable | ✅ plus nothing keeps this session alive: no open questions, no in-progress work, no pending follow-up that needs this context, and any sswt it owns is merged (or already reaped). Applies with or without an sswt. Its checks and the "reap" authorization live in the ⛏️ memory note. |
+| ⛏️ | Reapable | ✅ plus nothing keeps this session alive: no open questions, no in-progress work, no pending follow-up that needs this context, and any sswt it owns is merged (or already reaped). Applies with or without an sswt. A bare "reap" reply authorizes `/self-destruct` (from a root checkout that means reaping the merged sswts the session spawned, then closing its own tab); left alone for an hour, the `reap-sswts` automation tears the sswt down (after its own merged/clean checks) or closes a root-checkout tab, so only sign off ⛏️ when that would be fine. |
 | 💬 | Answer only | Informational reply; no task was requested. |
 
 - One primary glyph, by priority: 🛑 > ⚠️ > ⏳ > 💡 > ⛏️ > ✅ > 💬. At most one secondary when both are true (`⏳💡`). Never pair ⛏️ with 💡, 🛑 or ⚠️ — ⛏️ already means nothing is open.
@@ -25,11 +25,11 @@ Once conversation context passes roughly 50% of the window, proactively recommen
 
 ## Parallelize with Subagents
 
-Whenever a task breaks into independent pieces, size the fan-out with `bin/agent-budget allow --provider P --role R --want N`, then launch each piece through `bin/fanout spawn --label L --provider claude|codex --role R --prompt-file F`. Fan-outs run in Superset terminals: headless by default, or `--interactive` for an agent TUI. Each terminal waits on the shared budget without using a model. Read completion through `bin/fanout status` / `collect`; the exit file is authoritative. The in-process Agent / Workflow gate denies over-budget calls and points here.
+Whenever a task breaks into independent pieces, run them concurrently through the in-process Agent / Workflow tools (see below for forks and preset agents).
 
 Independent means: no piece edits a file another piece touches, and no piece needs another's output as input. Research questions, isolated file/codebase lookups, per-repo or per-target checks (e.g. auditing several PRs, checking several services), and non-overlapping edits are common cases. Launch the independent remainder concurrently; sequence work with real dependencies.
 
-**Parallel is the default across repos, PRs and workspaces.** Work in different repos or worktrees (`/post-pr` runs, per-repo checks, sswt dispatches, reviews) goes out concurrently within the shared budget unless one piece needs another's output or edits the same files or state. A sequencing hint ("run the API one first") is a preference; flag any ordering risk, and serialize when explicitly required or when the dependency is real.
+**Parallel is the default across repos, PRs and workspaces.** Work in different repos or worktrees (`/post-pr` runs, per-repo checks, sswt dispatches, reviews) goes out concurrently unless one piece needs another's output or edits the same files or state. A sequencing hint ("run the API one first") is a preference; flag any ordering risk, and serialize when explicitly required or when the dependency is real.
 
 An agent given its own worktree starts with no dependencies installed. Tell it to install them first (`mise exec -- pnpm install --frozen-lockfile` in woodrow/api), and never symlink another worktree's `node_modules`: pnpm will try to purge the shared copy.
 

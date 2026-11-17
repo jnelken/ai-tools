@@ -366,7 +366,7 @@ idle_check() {
 
 # Secondary/fallback signal only: for a live tab with NO binding row (claude
 # launched manually, not via a Superset agent), the user's statusline prints
-# 🪪<session-uuid> on its first line. After a full reboot the daemon's buffer
+# 🪪 <session-uuid> on its first line. After a full reboot the daemon's buffer
 # is empty (the frozen screen is renderer-side xterm state, not persisted),
 # so this mostly helps after app-restarts / future crashes where the daemon
 # survives - not after a full machine crash.
@@ -374,9 +374,10 @@ statusline_fallback() {
   local ws_id="$1" term_id="$2" buffer marker
   [ "$HAVE_SUPERSET" -eq 0 ] && return
   buffer=$(superset terminals read --workspace "$ws_id" --terminal "$term_id" 2>/dev/null || true)
-  marker=$(printf '%s' "$buffer" | grep -Eo '🪪[0-9a-f-]{36}' | tail -1 || true)
+  marker=$(printf '%s' "$buffer" | grep -Eo '🪪 ?[0-9a-f-]{36}' | tail -1 || true)
   if [ -n "$marker" ]; then
-    printf '%s' "${marker#🪪}"
+    marker="${marker#🪪}"
+    printf '%s' "${marker# }"
   fi
 }
 

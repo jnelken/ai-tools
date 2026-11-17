@@ -39,14 +39,17 @@ TERM/INT/HUP to the command's process group, preserves exit status, and settles 
 Waiting shells back off to 30 seconds and consume no model tokens. They admit in arrival order
 (see Fair waiting).
 
-Caps come from roadmap `usage.py`: 70% over five hours, 80% weekly, and 100% for
+Caps come from roadmap `usage.py`: 70% over five hours, 90% weekly, and 100% for
 Cursor's selected pool, including that module's environment overrides. Claude
 uses the live OAuth quota helper. Other providers use fresh saved state or the
 existing probes. Fresh saved windows whose reset has passed read as zero, using
 roadmap reset semantics. Readings older than 15 minutes are unknown; an unknown window
 permits at most one active lease for fanout/batch admission, subject to any known
 window. The in-process hook allows calls when no usable reading exists.
-Reservations are conservatively charged to every window (and Cursor pool).
+Reservations are charged separately to each quota window. Legacy scalar leases
+remain readable as five-hour estimates and are scaled by the current factor ratio
+for long windows. Status JSON reports each role's estimate and each window's
+reserved amount/headroom independently.
 
 Role costs use nearest-rank p80 **newly processed** tokens (input + cache writes +
 output, excluding cache reads), matching the roadmap ledger. Multiple models in
@@ -55,8 +58,15 @@ subagent transcripts, and completed headless fanouts. Streaming transcript rows
 are deduplicated by API message id; per-field maxima retain the final usage.
 Adjacent metadata preserves agent type while all child types share the subagent role.
 
-Conversion factors remain seeded until five positive measurements exist for a
-provider, then use p80 percentage points/token (token-weighted account intervals for Codex). Paired Claude snapshots match
+Each window's conversion factor remains seeded until five positive measurements
+exist for that window, then uses p80 percentage points/token (token-weighted
+account intervals for Codex). Long-window seeds use the paired observed
+long/five-hour delta ratio once five such pairs exist. Until then Codex uses 25%
+of its five-hour factor: the 10-28 observation was about 15 weekly points per 72
+five-hour points (~21%), rounded up. Claude uses 10%, above its nominal ~3%
+weekly-to-five-hour capacity ratio. Long-window samples accumulate across
+same-reset intervals until their rounded delta reaches two points.
+Paired Claude snapshots match
 launch/session ids to per-session ledger usage, preserving review-round boundaries.
 They never pair a role's whole-job total with each session. Ambiguous multi-session
 rows are skipped. Transcript calibration counts only assistant messages within the
@@ -73,8 +83,9 @@ Sonnet, Opus and advisor work cannot be attributed from quota boundaries alone. 
 can include concurrent work, so their estimates deliberately err high. Samples
 are deduplicated in `samples.jsonl`; generated samples are rebuilt to repair old
 denominators after an upgrade. Parsed files and bounded transcript intervals are
-cached by parser version, size and mtime. Only the five-hour factor is calibrated and is conservatively applied to weekly
-windows too. Cursor remains provisional until measured samples are available.
+cached by parser version, size and mtime. Codex rollout and Claude snapshot samples
+retain both quota-window deltas; Cursor remains provisional until measured samples
+are available.
 
 Seeds: Codex 3 points per 70k-token planner (10-27); Claude 10 points per
 251k tokens, from F9's 2 points/minute across three sessions, assuming a
@@ -184,14 +195,16 @@ parent's run nor lose its usage. A nested run for a different agent (a Cursor jo
 is no child: it takes its own lease, records `parent_lease_id`, and settles its own row. A dead or
 settled lease id is ignored.
 
-**Estimates.** `estimates()` counts ledger rows (`outcome: ok`, measured) per (agent, role)
-bucket only from five rows, since the p80 of a handful is just their maximum. From five to nineteen
-it blends with the older sources (runs.jsonl, agent-usage.jsonl, transcripts, completed fanouts),
-weighting the ledger by `rows / 20`; from twenty the ledger alone sets it. With no older source,
-even a thin ledger beats the seed. A `kinds` entry per task kind needs five rows. Each settled row
-whose window readings before and after are both fresh and rising contributes a calibration sample
-(source `ledger`, rebuilt on every history scan). Account-wide deltas include concurrent work, so
-they err high, as with the quota-snapshot samples.
+**Estimates.** Role costs first apply the thin-sample blend (#19): fewer than five non-ledger
+observations blend toward same-role rows on other providers (or reviewer/planner→subagent on the
+same provider); `source` is `observed`, `proxy`, or `blended`. The reservation ledger then blends
+on top per (agent, role): from five to nineteen settled `outcome: ok` rows it weights the ledger
+by `rows / 20` against that earlier estimate (`source: blend`); from twenty the ledger alone sets
+it (`source: ledger`). With no older source, even a thin ledger beats the seed. A `kinds` entry per
+task kind needs five rows. `tokens_to_pct` and `lease_pct` turn reserved tokens into a per-window
+`pct` dict. Each settled row whose window readings before and after are both fresh and rising
+contributes a calibration sample (source `ledger`, rebuilt on every history scan). Account-wide
+deltas include concurrent work, so they err high, as with the quota-snapshot samples.
 
 **Fair waiting.** `run --wait` and `reserve --wait` queue in `waiters.json` under the same flock
 as admission. A waiter keeps its place for as long as its process lives, and admits only when it fits and no earlier waiter for the provider fits. Queued costs are recomputed

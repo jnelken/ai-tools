@@ -249,7 +249,7 @@ class ScopedVerdictTest(unittest.TestCase):
         self.assertEqual(p.returncode, 1)
         self.assertIn("repo:a", p.stdout)
 
-    def test_ticket_edits_in_other_repos_leave_it_valid_but_this_repos_and_unlabeled_ones_do_not(self):
+    def test_only_relevant_ticket_edits_reopen_triage(self):
         self.carried()
         self.issues[1] = issue("DEV-2", ["repo/b"], title="renamed")
         self.fingerprint("fp2.json")
@@ -260,8 +260,9 @@ class ScopedVerdictTest(unittest.TestCase):
                 self.issues = [edited if i["id"] == edited["id"] else i for i in self.issues]
                 self.fingerprint("fp2.json")
                 p = self.check()
-                self.assertEqual(p.returncode, 1)
-                self.assertIn(f"issue:{edited['id']}", p.stdout)
+                self.assertEqual(p.returncode, 1 if edited['id'] == 'DEV-1' else 0)
+                if edited['id'] == 'DEV-1':
+                    self.assertIn(f"issue:{edited['id']}", p.stdout)
 
     def test_a_blocker_finishing_in_another_repo_reopens_triage(self):
         self.issues[0] = issue("DEV-1", ["repo/a"], blocked_by=["DEV-2"])

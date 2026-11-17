@@ -45,6 +45,17 @@ expect BLOCK "set -- after heredoc"    "cat <<EOF${nl}x${nl}EOF${nl}set -- \$m"
 expect BLOCK "here-string not body"    'cat <<< "x"; echo ==='
 expect PASS  "empty"                   ''
 
+# Quoted spans that cross lines are still quoted (2026-11-04 false positives: a multi-line
+# `python3 -c "…"` whose `t = m.get('text')` line read as a bare `=` word, because quote
+# stripping ran line by line).
+expect PASS  "multi-line python -c"    "curl -s x | python3 -c \"${nl}import json,sys${nl}for m in d:${nl}    t = m.get('text') or ''${nl}    print('=====', m['ts'])${nl}\""
+expect PASS  "multi-line jq program"   "jq '${nl}.[] | select(.a == 1)${nl}' f.json"
+expect BLOCK "trap after multi-line"   "python3 -c \"${nl}x = 1${nl}\"; echo ==="
+# One left-to-right pass: an apostrophe inside double quotes must not pair with a later one.
+expect BLOCK "' inside \"…\" then ==="   "echo \"it's\"; echo ===; echo 'x'"
+expect PASS  "\" inside '…'"           "echo 'say \"hi\" = no'; ls"
+expect BLOCK "escaped \" is not a quote" 'echo \"; echo ===; echo "x"'
+
 # Non-zsh shells are left alone
 out=$(jq -n '{tool_input:{command:"echo ==="}}' | SHELL=/bin/bash ZSH_GUARD_FORCE= bash "$HOOK" >/dev/null 2>&1; echo $?)
 if [[ "$out" == 0 ]]; then pass=$((pass+1)); else fail=$((fail+1)); echo "FAIL: bash shell — want exit 0, got $out"; fi

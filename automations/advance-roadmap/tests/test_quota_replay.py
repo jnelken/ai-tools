@@ -51,14 +51,11 @@ class Oct27BudgetAdmissionTest(unittest.TestCase):
             budget.workers, budget.planners, budget.gates = ['codex', 'claude'], ['codex'], {}
             budget.readings = {p: {'windows': {'auto' if p == 'cursor' else 'five_hour': {'live': live, 'cap': cap}}}
                                for p, live, cap in [('codex', 41, 70), ('claude', 16, 70), ('cursor', 100, 100)]}
-            self.assertLess(budget.models['codex']['roles']['planner']['pct'], 4.4)
-            # Actual 10-27 pool: mandatory Cursor review cannot run. A4 must
-            # stop before even the now-cheap Codex planners spend anything.
-            self.assertIsNone(budget.choose(commit=False))
-            self.assertFalse(budget.admit({'repo': 'demo', 'stamp': 'blocked'}))
-            # With an eligible cross-provider reviewer, the same 41% Codex
-            # reading can admit a bounded five-lane wave (old factor admitted 0).
-            os.environ['ADVANCE_ROADMAP_REVIEW_STRATEGY'] = 'cross-provider'
+            self.assertLess(budget.models['codex']['roles']['planner']['pct']['five_hour'], 4.4)
+            # The old Cursor pool no longer gates Codex work; Claude reviews it.
+            allocation = budget.choose(commit=False)
+            self.assertEqual(allocation['reviewers'], ['claude'])
+            # The same 41% Codex reading can admit a bounded five-lane wave.
             items = [{'repo': str(n), 'stamp': str(n)} for n in range(5)]
             self.assertEqual(sum(budget.admit(item) for item in items), 5)
             for item in items:
@@ -107,6 +104,13 @@ elif name == "agent":
               open(path, "w"))
     print(json.dumps({{"type": "result", "result": "done", "usage": {{"inputTokens": 1, "outputTokens": 1}}}}))
 elif name == "codex":
+    if role == "worker" and mode == "plan":
+        path = next(l.split(": ", 1)[1] for l in prompt.splitlines()
+                    if l.startswith("(raw JSON, no fence) to: "))
+        json.dump({{"outcome": "bookkeeping", "provider": "codex", "repo": "demo",
+                   "summary": "bookkeeping done"}}, open(path, "w"))
+        print("codex done")
+        sys.exit(0)
     if session_id:
         print("session id: " + session_id, flush=True)
     out = args[args.index("-o") + 1] if "-o" in args else None
@@ -156,7 +160,14 @@ elif name == "claude":
         path = next(l.split(": ", 1)[1] for l in prompt.splitlines() if l.startswith("(raw JSON, no fence) to: "))
         json.dump({{"outcome": "limit_hit", "provider": "claude", "repo": "demo",
                     "limit_text": os.environ["FAKE_RESULT_LIMIT"]}}, open(path, "w"))
-    result = fence if mode == "plan" else "I looked around and decided nothing."
+    if role == "worker" and mode == "plan":
+        path = next(l.split(": ", 1)[1] for l in prompt.splitlines()
+                    if l.startswith("(raw JSON, no fence) to: "))
+        json.dump({{"outcome": "bookkeeping", "provider": "claude", "repo": "demo",
+                   "summary": "bookkeeping done"}}, open(path, "w"))
+        result = "done"
+    else:
+        result = fence if mode == "plan" else "I looked around and decided nothing."
     reply = {{"type": "result", "subtype": "success", "is_error": False, "result": result, "modelUsage": {{}}}}
     if session_id:
         reply["session_id"] = session_id
@@ -250,8 +261,8 @@ class QuotaReplayTest(unittest.TestCase):
         proc = subprocess.Popen(["/bin/zsh", str(self.root / "run.sh")], env=env,
                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         self.reached_barrier = False
-        deadline = time.time() + 90
-        while proc.poll() is None and time.time() < deadline:
+        deadline = time.monotonic() + 90  # monotonic: a sleeping Mac must not look like a hung run.sh
+        while proc.poll() is None and time.monotonic() < deadline:
             if (run / "batch-ready").exists() and not (run / "batch-release").exists():
                 self.reached_barrier = True
                 if budget_route:
@@ -295,7 +306,7 @@ class QuotaReplayTest(unittest.TestCase):
 
     def test_oct13_planner_limit_dispatches_nothing_and_pauses_for_quota(self):
         # Codex was over its gate that morning, so Claude planned; Claude answered only the banner.
-        self.usage_state(codex={"weekly": {"used_pct": 85, "reset_epoch": FUTURE}})
+        self.usage_state(codex={"weekly": {"used_pct": 90, "reset_epoch": FUTURE}})
         before = time.time()
         run = self.run_lane(FAKE_CLAUDE="limit")
         self.assert_nothing_dispatched(run)
@@ -348,7 +359,7 @@ class QuotaReplayTest(unittest.TestCase):
         transcript = self.dir / "claude-projects" / "demo" / "partial-session.jsonl"
         transcript.parent.mkdir(parents=True)
         shutil.copyfile(HERE / "tests/fixtures/partial-triage/claude.jsonl", transcript)
-        self.usage_state(codex={"weekly": {"used_pct": 85, "reset_epoch": FUTURE}})
+        self.usage_state(codex={"weekly": {"used_pct": 90, "reset_epoch": FUTURE}})
         self.run_lane(FAKE_CLAUDE="limit", FAKE_SESSION_ID="partial-session")
         self.assertEqual(self.record()["outcome"], "quota-paused")
         triage = self.code / ".advance-roadmap" / "partial-triage-demo.md"
@@ -418,12 +429,12 @@ class QuotaReplayTest(unittest.TestCase):
         proc = subprocess.Popen(["/bin/zsh", str(self.root / "run.sh")], env=env,
                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
         calls = self.dir / "calls.jsonl"
-        deadline = time.time() + 20
-        while not calls.exists() and time.time() < deadline:
+        deadline = time.monotonic() + 20
+        while not calls.exists() and time.monotonic() < deadline:
             time.sleep(0.02)
         self.assertTrue(calls.exists(), "fake Codex did not start")
         stdout = self.root / "runs" / self.stamp / "orchestrator-stdout.txt"
-        while (not stdout.exists() or "session id: codex-timeout-id" not in stdout.read_text()) and time.time() < deadline:
+        while (not stdout.exists() or "session id: codex-timeout-id" not in stdout.read_text()) and time.monotonic() < deadline:
             time.sleep(0.02)
         self.assertIn("session id: codex-timeout-id", stdout.read_text())
         rollout = self.dir / "codex-sessions" / "2026" / "10" / "rollout-fixture-codex-timeout-id.jsonl"
@@ -439,7 +450,7 @@ class QuotaReplayTest(unittest.TestCase):
     def test_claude_json_limit_does_not_poison_failover_codex_via_stale_json(self):
         # Codex gated → Claude plans and hits is_error JSON; FAKE_UNGATE opens Codex for failover.
         # Codex returns no fence (exit 0). Stale Claude .json must not make Codex look limited.
-        self.usage_state(codex={"weekly": {"used_pct": 85, "reset_epoch": FUTURE}})
+        self.usage_state(codex={"weekly": {"used_pct": 90, "reset_epoch": FUTURE}})
         run = self.run_lane(FAKE_CLAUDE="limit", FAKE_UNGATE="codex", FAKE_CODEX="nofence")
         self.assertEqual([c["bin"] for c in self.calls() if c["role"] == "orchestrator"],
                          ["claude", "codex"])
@@ -543,7 +554,7 @@ class QuotaReplayTest(unittest.TestCase):
     def test_every_provider_in_the_role_is_in_the_record_when_the_last_one_runs_out(self):
         # Every provider but the last is over its gate; the last one is tried and hits its limit.
         # Whatever chain the lane was handed, the record and the batch summary name them all.
-        over_codex = {"weekly": {"used_pct": 85, "reset_epoch": FUTURE}}
+        over_codex = {"weekly": {"used_pct": 90, "reset_epoch": FUTURE}}
         over_cursor = {"included": {"auto_pct": 100, "reset_epoch": LATER}}
         cases = [("orchestrator", dict(codex=over_codex), self.planner_row, {"codex": FUTURE}),
                  ("worker", dict(codex=over_codex, cursor=over_cursor), self.worker_row,
@@ -592,6 +603,34 @@ exec(compile(open(__file__).read(), __file__, "exec"))
         return json.dumps({"action": "dispatch_worker", "outcome_token": None, "repo": "demo", "item": "DEV-1 thing",
                            "branch": "roadmap/thing", "worker_mode": "standard", "work_kind": "feature",
                            "archives": [], "blockers": [], "considered": [], "summary": "do the thing"})
+
+    def test_ticket_first_rejects_planner_substitution(self):
+        self.usage_state()
+        plan = json.loads(self.worker_plan())
+        plan['linear_id'] = 'DEV-2'
+        run = self.run_lane(FAKE_CODEX='plan', FAKE_PLAN=json.dumps(plan),
+                            ADVANCE_ROADMAP_SELECTED_TICKETS='DEV-1 DEV-3')
+        self.assertFalse(any(c['role'] == 'worker' for c in self.calls()))
+        self.assertTrue((run / 'dispatch-rejected').exists())
+        self.assertIn('eligible ticket', (run / 'dispatch-rejected').read_text())
+
+    def test_selected_tickets_are_reassessed_despite_an_unchanged_verdict(self):
+        self.usage_state(codex={'weekly': {'used_pct': 90, 'reset_epoch': FUTURE}})
+        self.run_lane(FAKE_CLAUDE='plan')
+        self.assertTrue(self.verdict.exists())
+        self.run_lane(FAKE_CLAUDE='plan', ADVANCE_ROADMAP_SELECTED_TICKETS='DEV-1 DEV-3')
+        self.assertNotEqual(self.record()['outcome'], 'skipped-unchanged')
+        prompt = self.calls()[-1]['prompt']
+        self.assertIn('DEV-1 DEV-3', prompt)
+        self.assertIn('do not carry forward an earlier no-work assessment', prompt)
+        self.assertNotIn('carry unchanged verdicts forward', prompt)
+
+    def test_continuation_only_mode_never_starts_a_fresh_planner(self):
+        self.usage_state()
+        self.run_lane(FAKE_CLAUDE='plan', ADVANCE_ROADMAP_CONTINUATION_ONLY='1')
+        self.assertEqual(self.record()['outcome'], 'skipped-backoff')
+        self.assertIn('fresh Linear snapshot unavailable', self.record()['detail'])
+        self.assertFalse(self.calls())
 
     def reviewer_row(self):
         (self.root / "review.sh").symlink_to(HERE / "review.sh")
@@ -642,7 +681,7 @@ exec(compile(open(__file__).read(), __file__, "exec"))
     def test_failing_usage_helpers_never_lose_an_observed_limit(self):
         # Each path observes a limit (banner, result-only limit_hit, or a gate) and then calls a
         # usage.py helper that fails. The run record must still carry the provider, cause and reset.
-        over_codex = {"weekly": {"used_pct": 85, "reset_epoch": FUTURE}}
+        over_codex = {"weekly": {"used_pct": 90, "reset_epoch": FUTURE}}
         over_cursor = {"included": {"auto_pct": 100, "reset_epoch": LATER}}
         over_claude = {"five_hour": {"used_pct": 90, "reset_epoch": LATER}}
         def at_1150(reset):
@@ -658,7 +697,7 @@ exec(compile(open(__file__).read(), __file__, "exec"))
             ("planner banner", dict(codex=over_codex), lane(FAKE_CLAUDE="limit"),
              "claude", BANNER, at_1150, {"record-limit", "quota-record"}),
             ("planner skipped over its gate", dict(codex=over_codex, claude=over_claude), lane(),
-             "codex", "weekly 85%", lambda r: r == FUTURE, {"quota-record"}),
+             "codex", "weekly 90%", lambda r: r == FUTURE, {"quota-record"}),
             ("worker banner", dict(codex=over_codex, cursor=over_cursor),
              lane(FAKE_CLAUDE="plan", FAKE_CLAUDE_WORKER="limit", FAKE_PLAN=self.worker_plan()),
              "claude", BANNER, at_1150, {"record-limit", "quota-record"}),
@@ -696,7 +735,7 @@ exec(compile(open(__file__).read(), __file__, "exec"))
         for plan_mode, fake_plan in (("garbage", json.dumps(NO_WORK)), ("plan", '{"action": "launch_rockets"}'),
                                      ("plan", '["not", "an", "object"]')):
             with self.subTest(plan_mode=plan_mode, fake_plan=fake_plan):
-                self.usage_state(codex={"weekly": {"used_pct": 85, "reset_epoch": FUTURE}})
+                self.usage_state(codex={"weekly": {"used_pct": 90, "reset_epoch": FUTURE}})
                 run = self.run_lane(FAKE_CLAUDE=plan_mode, FAKE_PLAN=fake_plan)
                 self.assert_nothing_dispatched(run)
                 rec = self.record()
@@ -705,7 +744,7 @@ exec(compile(open(__file__).read(), __file__, "exec"))
                 self.assertIsNone(rec["quota"])
 
     def test_raw_claude_fence_outside_its_json_answer_is_not_a_plan(self):
-        self.usage_state(codex={"weekly": {"used_pct": 85, "reset_epoch": FUTURE}})
+        self.usage_state(codex={"weekly": {"used_pct": 90, "reset_epoch": FUTURE}})
         run = self.run_lane(FAKE_CLAUDE="raw")
         self.assert_nothing_dispatched(run)
         rec = self.record()
@@ -763,7 +802,7 @@ exec(compile(open(__file__).read(), __file__, "exec"))
     # ── a real no-work plan keeps its bookkeeping ────────────────────────────
 
     def test_no_work_plan_with_a_new_blocker_runs_bookkeeping_and_saves_its_verdict(self):
-        self.usage_state(codex={"weekly": {"used_pct": 85, "reset_epoch": FUTURE}})
+        self.usage_state(codex={"weekly": {"used_pct": 90, "reset_epoch": FUTURE}})
         plan = {**NO_WORK, "blockers": [{"repo": "demo", "linear_id": "DEV-7", "detail": "needs a decision"}]}
         self.run_lane(FAKE_CLAUDE="plan", FAKE_PLAN=json.dumps(plan))
         self.assertTrue(self.reached_barrier)
@@ -776,7 +815,7 @@ exec(compile(open(__file__).read(), __file__, "exec"))
         return (self.root.parent / "memory" / "advance-roadmap-runs" / "demo.md")
 
     def test_noop_no_work_plan_skips_the_worker_writes_the_ledger_row_and_saves_the_verdict(self):
-        self.usage_state(codex={"weekly": {"used_pct": 85, "reset_epoch": FUTURE}})
+        self.usage_state(codex={"weekly": {"used_pct": 90, "reset_epoch": FUTURE}})
         run = self.run_lane(FAKE_CLAUDE="plan")
         self.assertFalse(self.reached_barrier, "nothing waits on a worker, so nothing waits at the barrier")
         self.assertEqual([c["role"] for c in self.calls()], ["orchestrator"])
@@ -798,7 +837,7 @@ exec(compile(open(__file__).read(), __file__, "exec"))
         self.assertEqual([c["role"] for c in self.calls()], ["orchestrator"])
 
     def test_a_canceled_no_work_plan_keeps_its_verdict_and_tomorrow_skips_it(self):
-        self.usage_state(codex={"weekly": {"used_pct": 85, "reset_epoch": FUTURE}})
+        self.usage_state(codex={"weekly": {"used_pct": 90, "reset_epoch": FUTURE}})
         plan = {**NO_WORK, "blockers": [{"repo": "demo", "linear_id": "DEV-7", "detail": "needs a decision"}]}
         self.run_lane(cancel=True, FAKE_CLAUDE="plan", FAKE_PLAN=json.dumps(plan))
         self.assertTrue(self.reached_barrier)
@@ -814,8 +853,19 @@ exec(compile(open(__file__).read(), __file__, "exec"))
         self.assertEqual([c["role"] for c in self.calls()], ["orchestrator", "orchestrator", "worker"])
         self.assertNotIn("bookkeeping_pending", json.loads(self.verdict.read_text()))
 
+    def test_continuous_no_work_with_a_blocker_settles_once_then_skips_unchanged_inputs(self):
+        self.usage_state(codex={"weekly": {"used_pct": 90, "reset_epoch": FUTURE}})
+        plan = {**NO_WORK, "blockers": [{"repo": "demo", "linear_id": "DEV-7", "detail": "needs a decision"}]}
+        first = self.run_lane(ADVANCE_ROADMAP_CONTINUOUS="1", FAKE_CLAUDE="plan", FAKE_PLAN=json.dumps(plan))
+        self.assertFalse((first / "bookkeeping-deferred").exists())
+        self.assertNotIn("bookkeeping_pending", json.loads(self.verdict.read_text()))
+        self.run_lane(ADVANCE_ROADMAP_CONTINUOUS="1", FAKE_CLAUDE="plan", FAKE_PLAN=json.dumps(plan))
+        self.assertEqual(self.record()["outcome"], "skipped-unchanged")
+        self.assertEqual([call["role"] for call in self.calls()], ["orchestrator", "worker"])
+        self.assertNotIn("bookkeeping_pending", json.loads(self.verdict.read_text()))
+
     def test_a_canceled_dispatch_plan_saves_no_verdict(self):
-        self.usage_state(codex={"weekly": {"used_pct": 85, "reset_epoch": FUTURE}})
+        self.usage_state(codex={"weekly": {"used_pct": 90, "reset_epoch": FUTURE}})
         self.verdict.write_text(json.dumps({"stamp": "20261012-103001", "decided_at": "2026-10-28T10:00:00",
                                             "outcome_token": "blocked-no-item", "fingerprint": {}}))
         before = self.verdict.read_text()
@@ -826,7 +876,7 @@ exec(compile(open(__file__).read(), __file__, "exec"))
     # ── headless planners ────────────────────────────────────────────────────
 
     def test_headless_marker_reaches_every_model_call_and_planners_default_to_sonnet_medium(self):
-        self.usage_state(codex={"weekly": {"used_pct": 85, "reset_epoch": FUTURE}})
+        self.usage_state(codex={"weekly": {"used_pct": 90, "reset_epoch": FUTURE}})
         self.run_lane(FAKE_CLAUDE="plan")
         planner = self.calls()[0]
         self.assertEqual(planner["headless"], "1")
@@ -836,14 +886,14 @@ exec(compile(open(__file__).read(), __file__, "exec"))
         self.assertNotIn("advisor", " ".join(args), "--disallowedTools advisor does not stop the advisor server tool")
 
     def test_planner_model_and_effort_overrides_still_win(self):
-        self.usage_state(codex={"weekly": {"used_pct": 85, "reset_epoch": FUTURE}})
+        self.usage_state(codex={"weekly": {"used_pct": 90, "reset_epoch": FUTURE}})
         self.run_lane(FAKE_CLAUDE="plan", ADVANCE_ROADMAP_ORCH_CLAUDE_MODEL="claude-opus-5",
                       ADVANCE_ROADMAP_ORCH_CLAUDE_EFFORT="high")
         args = self.calls()[0]["args"]
         self.assertEqual((args[args.index("--model") + 1], args[args.index("--effort") + 1]), ("claude-opus-5", "high"))
 
     def test_planner_reads_its_repos_snapshot_while_the_fingerprint_keeps_the_whole_queue(self):
-        self.usage_state(codex={"weekly": {"used_pct": 85, "reset_epoch": FUTURE}})
+        self.usage_state(codex={"weekly": {"used_pct": 90, "reset_epoch": FUTURE}})
         def issue(id_, labels, state_type="unstarted"):
             return {"id": id_, "title": id_, "description": "", "state": "Todo", "state_type": state_type,
                     "priority": 2, "labels": labels, "blocked_by": [], "human_comments_sha": "-"}
@@ -852,16 +902,16 @@ exec(compile(open(__file__).read(), __file__, "exec"))
             issue("DEV-4", ["repo/demo"], "completed")]}))
         run = self.run_lane(FAKE_CLAUDE="plan")
         planner_snap = json.loads((run / "linear-snapshot-planner.json").read_text())
-        self.assertEqual([i["id"] for i in planner_snap["issues"]], ["DEV-1", "DEV-3"])
+        self.assertEqual([i["id"] for i in planner_snap["issues"]], ["DEV-1"])
         self.assertIn(str(run / "linear-snapshot-planner.json"), self.calls()[0]["prompt"])
         self.assertEqual(len(json.loads((run / "linear-snapshot.json").read_text())["issues"]), 4)
         self.assertEqual(sorted(json.loads((run / "fingerprint.json").read_text())["issues"]),
-                         ["DEV-1", "DEV-3", "DEV-4"])
+                         ["DEV-1", "DEV-4"])
 
     # ── a pending plan only disables its own repo's verdict check ───────────
 
     def test_pending_plans_of_other_repos_do_not_disable_this_repos_verdict(self):
-        self.usage_state(codex={"weekly": {"used_pct": 85, "reset_epoch": FUTURE}})
+        self.usage_state(codex={"weekly": {"used_pct": 90, "reset_epoch": FUTURE}})
         self.run_lane(FAKE_CLAUDE="plan")  # carries a no-op verdict for demo
         pending = self.root / "pending"
         pending.mkdir(exist_ok=True)
@@ -878,7 +928,7 @@ exec(compile(open(__file__).read(), __file__, "exec"))
         self.assertNotEqual(self.record()["outcome"], "skipped-unchanged")
 
     def test_another_repos_commit_leaves_this_repos_carried_verdict_valid(self):
-        self.usage_state(codex={"weekly": {"used_pct": 85, "reset_epoch": FUTURE}})
+        self.usage_state(codex={"weekly": {"used_pct": 90, "reset_epoch": FUTURE}})
         for name in ("demo2",):
             subprocess.run(["git", "init", "-q", str(self.code / name)], check=True)
             subprocess.run(["git", "-C", str(self.code / name), "remote", "add", "origin",
@@ -899,7 +949,7 @@ exec(compile(open(__file__).read(), __file__, "exec"))
         return sid
 
     def test_oct27_a_signoff_turn_after_the_fence_keeps_the_planners_triage(self):
-        self.usage_state(codex={"weekly": {"used_pct": 85, "reset_epoch": FUTURE}})
+        self.usage_state(codex={"weekly": {"used_pct": 90, "reset_epoch": FUTURE}})
         sid = self.write_oct27_transcript()
         self.run_lane(FAKE_CLAUDE="plan", FAKE_SESSION_ID=sid, FAKE_FINAL="💬 No item for demo",
                       FAKE_PLAN=json.dumps({**NO_WORK, "repo": "demo", "considered": ["WRONG: the live fence"]}))
@@ -934,7 +984,7 @@ exec(compile(open(__file__).read(), __file__, "exec"))
         self.assertIn('issue:DEV-8', check.stdout)
 
     def test_limit_killed_planner_cannot_recover_a_transcript_fence(self):
-        self.usage_state(codex={"weekly": {"used_pct": 85, "reset_epoch": FUTURE}})
+        self.usage_state(codex={"weekly": {"used_pct": 90, "reset_epoch": FUTURE}})
         sid = self.write_oct27_transcript()
         run = self.run_lane(FAKE_CLAUDE="limit", FAKE_SESSION_ID=sid)
         self.assert_nothing_dispatched(run)
@@ -945,7 +995,7 @@ exec(compile(open(__file__).read(), __file__, "exec"))
         self.assertEqual(self.record()['outcome'], 'skipped-quota')
 
     def test_limit_killed_planner_with_a_fence_still_fails_over(self):
-        self.usage_state(codex={"weekly": {"used_pct": 85, "reset_epoch": FUTURE}})
+        self.usage_state(codex={"weekly": {"used_pct": 90, "reset_epoch": FUTURE}})
         sid = self.write_oct27_transcript()
         run = self.run_lane(FAKE_CLAUDE="limit", FAKE_SESSION_ID=sid, FAKE_UNGATE="codex", FAKE_CODEX="plan")
         self.assertTrue(self.plan_accepted(run))
@@ -954,14 +1004,14 @@ exec(compile(open(__file__).read(), __file__, "exec"))
         self.assertEqual(self.record()['orchestrator'], 'codex')
 
     def test_oct27_without_a_transcript_the_sign_off_is_still_an_error(self):
-        self.usage_state(codex={"weekly": {"used_pct": 85, "reset_epoch": FUTURE}})
+        self.usage_state(codex={"weekly": {"used_pct": 90, "reset_epoch": FUTURE}})
         self.run_lane(FAKE_CLAUDE="plan", FAKE_SESSION_ID="no-such-session", FAKE_FINAL="💬 No item")
         rec = self.record()
         self.assertEqual(rec["outcome"], "error", rec)
         self.assertFalse(self.verdict.exists())
 
     def test_offline_deploy_snapshot_is_unknown_and_never_blocks_planning(self):
-        self.usage_state(codex={"weekly": {"used_pct": 85, "reset_epoch": FUTURE}})
+        self.usage_state(codex={"weekly": {"used_pct": 90, "reset_epoch": FUTURE}})
         run = self.run_lane(FAKE_CLAUDE="plan")
         snap = json.loads((run / "deploy-snapshot.json").read_text())
         self.assertEqual(snap["repos"]["demo"]["status"], "unknown")
@@ -971,7 +1021,7 @@ exec(compile(open(__file__).read(), __file__, "exec"))
         self.assertEqual(self.record()["outcome"], "blocked-no-item")
 
     def test_contaminated_verdict_on_disk_is_discarded_and_the_repo_replanned(self):
-        self.usage_state(codex={"weekly": {"used_pct": 85, "reset_epoch": FUTURE}})
+        self.usage_state(codex={"weekly": {"used_pct": 90, "reset_epoch": FUTURE}})
         fp, deploys = self.dir / "fp.json", self.dir / "deploys.json"
         subprocess.run([sys.executable, str(self.root / "lib/deploysnap.py"), "--code-dir", str(self.code),
                         "--out", str(deploys)], env=self.env(), check=True, capture_output=True)

@@ -106,13 +106,68 @@ def resolve_workspace(cwd):
     return max(matches, key=lambda match: match[0])[1]
 
 
+def workspace_path(workspace_id):
+    """The worktree path Superset records for a local workspace id, or None if it can't tell."""
+    try:
+        result = subprocess.run([SUPERSET, 'workspaces', 'list', '--local', '--json'],
+                                capture_output=True, text=True, check=True, timeout=20)
+        data = json.loads(result.stdout)
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return None
+    for workspace in data if isinstance(data, list) else data.get('workspaces', []):
+        if isinstance(workspace, dict) and workspace.get('id') == workspace_id and workspace.get('worktreePath'):
+            return str(Path(workspace['worktreePath']).expanduser())
+    return None
+
+
+def job_cwd(workspace, explicit):
+    """Where the terminal starts. An explicit --workspace launched from somewhere else (say the
+    root checkout) starts in that workspace's worktree, not the caller's cwd: the agent's
+    relative paths and `git` must land in the workspace it was sent to (2026-11-03, a Codex
+    worker spawned from the root checkout for a sibling worktree)."""
+    cwd = Path(os.getcwd()).resolve()
+    if not explicit:
+        return str(cwd)
+    path = workspace_path(workspace)
+    if not path:
+        return str(cwd)
+    root = Path(path).resolve()
+    return str(cwd) if cwd == root or root in cwd.parents else str(root)
+
+
+def headroom_note(provider):
+    """`five_hour live=100 cap=70` for each window at or over its cap; '' when it can't tell."""
+    try:
+        windows = budget.readings(provider, probe=False)['windows']
+    except (OSError, KeyError, TypeError, ValueError):
+        return ''
+    full = [f'{name} live={w["live"]:g} cap={w["cap"]:g}' for name, w in windows.items()
+            if budget.number(w.get('live')) and w['live'] >= w['cap']]
+    return ', '.join(full)
+
+
+def warn_if_no_headroom(meta):
+    """A spawned job with no headroom waits in the budget queue, silently, until a window resets
+    (2026-11-04: a Codex worker sat 30 minutes behind a five-hour window at 100% of its 70% cap).
+    Say so up front so the caller can pick another provider instead of waiting."""
+    try:
+        if budget.allow(meta['provider'], meta['role']) > 0:
+            return
+    except (OSError, KeyError, TypeError, ValueError):
+        return
+    note = headroom_note(meta['provider'])
+    print(f'fanout: no {meta["provider"]} headroom now' + (f' ({note})' if note else '') +
+          '; this job waits in the budget queue until a window frees up. `fanout status` shows it.',
+          file=sys.stderr)
+
+
 def spawn(args):
     workspace = args.workspace or os.environ.get('SUPERSET_WORKSPACE_ID') or resolve_workspace(os.getcwd())
     prompt = Path(args.prompt_file).read_text()
     identifier = uuid.uuid4().hex
     job = state_dir() / identifier
     meta = {key: getattr(args, key) for key in ('label', 'provider', 'role', 'model', 'effort', 'interactive')}
-    meta.update(id=identifier, workspace=workspace, cwd=os.getcwd(), created=time.time())
+    meta.update(id=identifier, workspace=workspace, cwd=job_cwd(workspace, bool(args.workspace)), created=time.time())
     command = interactive_command(meta, prompt) if args.interactive else superset_command(meta, job)
     if args.dry_run:
         print(json.dumps({'id': identifier, 'command': command, 'shell': shlex.join(command),
@@ -138,6 +193,7 @@ def spawn(args):
             write_exit(job, 127)
             update(job, state='launch_failed')
             raise
+    warn_if_no_headroom(meta)
     print(json.dumps(budget.read_json(job / 'meta.json')))
     return 0
 
@@ -270,6 +326,24 @@ def record_completion(job, meta, started):
                                              launch_id=meta['id'], duration=time.time() - started)) + '\n')
 
 
+def budget_wait(job, meta):
+    """Why a pending job is pending, when it is the budget queue: '' if it isn't (or has started).
+
+    `agent-budget run --wait` writes `queued; waiting Ns` to the job's stderr until it admits the
+    job, and the provider writes to result.json only once it runs, so a job whose last stderr line
+    is a queue line and whose result is still empty has not started at all."""
+    try:
+        if (job / 'result.json').exists() and (job / 'result.json').stat().st_size:
+            return ''
+        lines = (job / 'stderr').read_text().strip().splitlines()
+    except OSError:
+        return ''
+    if not lines or 'queued; waiting' not in lines[-1]:
+        return ''
+    note = headroom_note(meta.get('provider', ''))
+    return 'queued for budget' + (f' ({note})' if note else '')
+
+
 def inspect_jobs(identifier=None, collect=False):
     paths = [state_dir() / identifier] if identifier else sorted(state_dir().glob('*'))
     result = []
@@ -279,6 +353,8 @@ def inspect_jobs(identifier=None, collect=False):
         row = budget.read_json(path / 'meta.json')
         complete = (path / 'exit').exists()
         row.update(complete=complete, exit=int((path / 'exit').read_text()) if complete else None)
+        if not complete:
+            row['waiting'] = budget_wait(path, row)
         if collect and complete:
             row['result'] = (path / 'result.json').read_text() if (path / 'result.json').exists() else ''
         result.append(row)
@@ -320,7 +396,9 @@ def main(argv=None):
             print(json.dumps(result))
         else:
             for row in result:
-                print(f'{row["id"]} {row["label"]}: ' + (f'exit {row["exit"]}' if row['complete'] else 'pending'))
+                print(f'{row["id"]} {row["label"]}: ' + (f'exit {row["exit"]}' if row['complete']
+                                                         else f'pending, {row["waiting"]}' if row.get('waiting')
+                                                         else 'pending'))
         return 0
     except (ValueError, OSError, subprocess.SubprocessError) as error:
         print(f'fanout: {error}', file=sys.stderr)
