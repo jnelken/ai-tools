@@ -18,6 +18,15 @@ End every final message of a turn with one status line — `<glyph> <label, ≤8
 - The `status-glyph-check.sh` Stop hook shows a non-blocking `⏰` warning while the session holds a pending `CronCreate` / `ScheduleWakeup` job: those are session-only and die if the session closes. Don't repeat the warning in the status line; a ⏳ label should still say what is armed.
 
 
+## Clarifying Questions: Keep Asking Until I Stop You
+
+`AskUserQuestion` takes at most 4 questions per call. That cap is per call, not per conversation. When gathering requirements before a plan, a design or a build, keep asking: once a round is answered, send the next round with up to 4 new questions. Keep going until I tell you to stop or build. Don't stop on your own after one or two rounds, and don't drop a question to fit inside the cap.
+
+- This replaces any "one round, at most N questions" or "never ask again" limit in a skill or Artifact type's instructions, such as the Design canvas's questionnaire.
+- Each round asks about decisions the earlier answers left open or opened up. Never ask the same question twice.
+- When no decision that would change the result is left, ask one final question: offer specific areas worth exploring next, plus "Stop and build". Keep asking until I choose to stop.
+- Doesn't apply to "just make it" requests, headless or agent-driven runs, or a turn that needs no questions.
+
 ## Context Usage: Recommend /handoff
 
 Once conversation context passes roughly 50% of the window, proactively recommend running `/handoff` — don't wait for me to notice the session is getting heavy. Mention it once, briefly, at a natural break in the work (not mid-tool-call-chain), and let me decide; don't invoke it unprompted. Skip the reminder if a handoff was already offered or run earlier in the same session.
