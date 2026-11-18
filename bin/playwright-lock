@@ -1,0 +1,166 @@
+#!/usr/bin/env bash
+# Machine-wide mutex so only one Playwright-dependent task runs at a time.
+#
+#   playwright-lock acquire [--label L] [--ttl S] [--timeout S]
+#   playwright-lock release [--label L]
+#   playwright-lock status
+#   playwright-lock run [--label L] [--ttl S] [--timeout S] -- <command...>
+#
+# A lease, not a PID lock: an agent's Bash tool exits right after `acquire`, so
+# the holder's PID is dead immediately and could never prove liveness. The lock
+# is held until `release`, or until its lease expires (default 900s) and the
+# next waiter reclaims it. The same label re-acquiring renews the lease, so a
+# long MCP session re-runs `acquire` to keep its hold. `run` renews for you.
+#
+# Exit codes: 0 ok, 1 not the holder / lock held (status), 75 timed out waiting.
+# State lives outside every worktree: PLAYWRIGHT_LOCK_DIR, default
+# ~/.local/state/playwright-lock (override only for tests).
+# Bash 3.2 compatible (macOS /bin/bash): mkdir is the atomic primitive, no flock.
+# Keep all code in functions so the script can be rewritten while running.
+
+usage() {
+  echo 'Usage: playwright-lock {acquire|release|status|run -- <command...>} [--label L] [--ttl S] [--timeout S]' >&2
+}
+
+default_label() {
+  local who="${CLAUDE_CODE_SESSION_ID:-${CODEX_SESSION_ID:-pid$PPID}}"
+  printf '%s/%s' "$(basename "$PWD")" "$who"
+}
+
+mtime() {
+  stat -f %m "$1" 2>/dev/null || stat -c %Y "$1" 2>/dev/null || echo 0
+}
+
+read_field() { # read_field <name>; empty when missing
+  local value=""
+  [ -f "$lock/$1" ] && IFS= read -r value < "$lock/$1"
+  printf '%s' "$value"
+}
+
+write_lease() {
+  mkdir -p "$state"
+  printf '%s\n' "$label" > "$lock/holder"
+  printf '%s\n' "$(date +%s)" > "$lock/acquired"
+  printf '%s\n' "$(( $(date +%s) + ttl ))" > "$lock/expires"
+}
+
+lease_expired() {
+  local expires
+  expires=$(read_field expires)
+  case "$expires" in ''|*[!0-9]*) return 0 ;; esac # unreadable lease == dead
+  [ "$(date +%s)" -ge "$expires" ]
+}
+
+reclaim_if_expired() {
+  # A second short-lived mutex keeps two waiters from both deleting the stale
+  # lock and then one of them deleting the other's fresh one.
+  if ! mkdir "$state/reclaim" 2>/dev/null; then
+    if [ $(( $(date +%s) - $(mtime "$state/reclaim") )) -ge 30 ]; then
+      rmdir "$state/reclaim" 2>/dev/null
+    fi
+    return 1
+  fi
+  local rc=1
+  if [ -d "$lock" ] && lease_expired; then
+    rm -rf "$lock" && rc=0
+  fi
+  rmdir "$state/reclaim" 2>/dev/null
+  return $rc
+}
+
+describe_holder() {
+  local now held_for left
+  now=$(date +%s)
+  held_for=$(( now - $(read_field acquired) ))
+  left=$(( $(read_field expires) - now ))
+  printf 'held by %s for %ss (lease expires in %ss)' "$(read_field holder)" "$held_for" "$left"
+}
+
+cmd_acquire() {
+  local started=$SECONDS
+  mkdir -p "$state"
+  while :; do
+    if mkdir "$lock" 2>/dev/null; then
+      write_lease
+      echo "playwright-lock: acquired as $label"
+      return 0
+    fi
+    if [ "$(read_field holder)" = "$label" ]; then
+      write_lease
+      echo "playwright-lock: renewed lease for $label"
+      return 0
+    fi
+    if lease_expired && reclaim_if_expired; then continue; fi
+    if [ $((SECONDS - started)) -ge "$timeout" ]; then
+      echo "playwright-lock: timed out after ${timeout}s; $(describe_holder)" >&2
+      return 75
+    fi
+    sleep 2
+  done
+}
+
+cmd_release() {
+  if [ ! -d "$lock" ]; then
+    echo "playwright-lock: not held"
+    return 0
+  fi
+  if [ "$(read_field holder)" != "$label" ]; then
+    echo "playwright-lock: refusing to release; $(describe_holder). Wait for the holder or its lease to expire." >&2
+    return 1
+  fi
+  rm -rf "$lock"
+  echo "playwright-lock: released"
+}
+
+cmd_status() {
+  if [ -d "$lock" ] && ! lease_expired; then
+    echo "playwright-lock: $(describe_holder)"
+    return 1
+  fi
+  echo "playwright-lock: free"
+}
+
+cmd_run() {
+  [ "$#" -gt 0 ] || { usage; return 2; }
+  cmd_acquire || return $?
+  local renewer rc
+  ( while sleep $(( ttl / 3 > 5 ? ttl / 3 : 5 )); do write_lease; done ) &
+  renewer=$!
+  trap 'kill "$renewer" 2>/dev/null; cmd_release >/dev/null' EXIT
+  trap 'exit 130' INT TERM HUP
+  "$@"
+  rc=$?
+  kill "$renewer" 2>/dev/null
+  cmd_release >/dev/null
+  trap - EXIT
+  return $rc
+}
+
+main() {
+  state="${PLAYWRIGHT_LOCK_DIR:-$HOME/.local/state/playwright-lock}"
+  lock="$state/lock"
+  label="$(default_label)"
+  ttl=900
+  timeout=540 # stays under the 600s foreground cap of agent shell tools
+  local action="${1:-}"
+  [ "$#" -gt 0 ] && shift
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --label) label="${2:?--label needs a value}"; shift 2 ;;
+      --ttl) ttl="${2:?--ttl needs a value}"; shift 2 ;;
+      --timeout) timeout="${2:?--timeout needs a value}"; shift 2 ;;
+      --) shift; break ;;
+      *) break ;;
+    esac
+  done
+  case "$action" in
+    acquire) cmd_acquire ;;
+    release) cmd_release ;;
+    status) cmd_status ;;
+    run) cmd_run "$@" ;;
+    *) usage; return 2 ;;
+  esac
+}
+
+main "$@"
+exit $?
