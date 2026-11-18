@@ -316,7 +316,7 @@ is_guarded() {
 # hide the subcommand that follows it.
 git_opt_takes_value() {
   case "$1" in
-    -C | -c | --git-dir | --work-tree | --namespace | --exec-path) return 0 ;;
+    -C | -c | --git-dir | --work-tree | --namespace | --exec-path | --config-env) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -440,6 +440,17 @@ join_continuations() {
   printf '%s' "$out"
 }
 
+# expand_home <raw> <tok> -> <tok> with an unquoted leading `~` or `~/`
+# replaced by $HOME, the way the shell would expand it; anything else
+# (quoted, `~user`, no tilde) comes back unchanged.
+expand_home() {
+  case "$1" in
+    '~') printf '%s' "$HOME" ;;
+    '~/'*) printf '%s/%s' "$HOME" "${2#\~/}" ;;
+    *) printf '%s' "$2" ;;
+  esac
+}
+
 # inspect_segment judges one segment. A token that is a command-substitution
 # or backtick wrapper, or an argument handed to a shell/eval invocation, can
 # hide an entire nested command from the scan below (`"$(git push origin
@@ -508,11 +519,19 @@ inspect_segment() {
 
   # `cd <dir> && git push …` splits into two segments; carry the directory
   # forward so the second one is judged against the repo it actually enters.
-  if [[ "${tokens[0]}" == "cd" && -n "${tokens[1]:-}" ]]; then
-    case "${tokens[1]}" in
-      /*) running_dir="${tokens[1]}" ;;
+  # A bare `cd` goes home. An UNQUOTED leading `~`/`~/` is the shell's home
+  # expansion: the raw token is checked, because `cd '~/x'` enters a literal
+  # `~` directory. Before this, `cd ~/repo && git push …` kept the session's
+  # cwd and judged the push against the wrong repo, in both directions.
+  # `cd -` and `~user` still can't be resolved from text and are left alone.
+  if [[ "${tokens[0]}" == "cd" ]]; then
+    local cd_target
+    cd_target=$(expand_home "${raw_tokens[1]:-}" "${tokens[1]:-}")
+    case "$cd_target" in
+      '') [[ -z "${raw_tokens[1]:-}" ]] && running_dir="$HOME" ;;
+      /*) running_dir="$cd_target" ;;
       -|'~'*) : ;;
-      *) running_dir="$running_dir/${tokens[1]}" ;;
+      *) running_dir="$running_dir/$cd_target" ;;
     esac
   fi
 
@@ -548,9 +567,10 @@ inspect_segment() {
   while (( i < ${#tokens[@]} )); do
     case "${tokens[i]}" in
       -C)
-        case "${tokens[i+1]:-}" in
-          /*) c_dir="${tokens[i+1]}" ;;
-          *)  c_dir="${c_dir:-$running_dir}/${tokens[i+1]:-}" ;;
+        c_arg=$(expand_home "${raw_tokens[i+1]:-}" "${tokens[i+1]:-}")
+        case "$c_arg" in
+          /*) c_dir="$c_arg" ;;
+          *)  c_dir="${c_dir:-$running_dir}/$c_arg" ;;
         esac
         i=$((i + 1))
         ;;
@@ -704,11 +724,30 @@ inspect_segment() {
       fi
       push_upstream=$(git -C "$work_dir" rev-parse --abbrev-ref --symbolic-full-name '@{push}' 2>/dev/null || true)
       if [[ -n "$push_upstream" ]]; then
-        # Strip only the remote name (the segment up to the first `/`), not
-        # the last path component — `origin/release/main` is the branch
-        # `release/main`, not `main`, and comparing on the last component
-        # alone would misread it as a push to main.
-        push_branch="${push_upstream#*/}"
+        # Strip only the remote name, not the last path component —
+        # `origin/release/main` is the branch `release/main`, not `main`, and
+        # comparing on the last component alone would misread it as a push
+        # to main. The remote name itself can contain slashes (`foo/bar`),
+        # so `${push_upstream#*/}` (stop at the FIRST slash) is wrong for
+        # those — resolve it against the repo's actual configured remotes
+        # instead, preferring the longest match so a remote named `foo`
+        # can't shadow one named `foo/bar`.
+        push_branch=""
+        while IFS= read -r remote_candidate; do
+          [[ -z "$remote_candidate" ]] && continue
+          case "$push_upstream" in
+            "$remote_candidate/"*)
+              candidate_branch="${push_upstream#"$remote_candidate"/}"
+              if [[ -z "$push_branch" || ${#candidate_branch} -lt ${#push_branch} ]]; then
+                push_branch="$candidate_branch"
+              fi
+              ;;
+          esac
+        done < <(git -C "$work_dir" remote 2>/dev/null)
+        # No configured remote matched (shouldn't happen for a real
+        # `@{push}` result, but fall back to the old first-slash behavior
+        # rather than silently skipping the check).
+        [[ -z "$push_branch" ]] && push_branch="${push_upstream#*/}"
         if [[ "$push_branch" == "main" ]]; then
           deny "Refspec-less push resolves (\`@{push}\`) to \`$push_upstream\`. Pushes to main are reserved for the user to run from the terminal."
         fi

@@ -10,8 +10,6 @@
 # blocks. Write this file with the Write tool, not a shell heredoc.
 HOOK="${1:-$(cd "$(dirname "$0")/.." && pwd -P)/block-push-to-main.sh}"
 pass=0; fail=0
-# Fixture commits must not depend on the user's signing setup, hooks, or aliases.
-export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
 
 # The hook finds its denylist as a sibling of itself. To exercise denylist mode
 # without touching the real one, run the hook through a shim directory that has
@@ -170,6 +168,15 @@ check ALLOW "$W"   "git -C $F push origin feature/thing" 'guarded repo via -C, f
 check DENY  "$OUT" "git -C $P -C $W push origin main" 'last -C wins'
 check DENY  "$OUT" "cd $W && git push origin main" 'cd into a guarded repo first'
 check ALLOW "$W"   "cd $P && git push origin main" 'cd into an unguarded repo first'
+
+echo "-- ~ expands to HOME the way the shell would"
+HOME="$FIXTURE" check ALLOW "$W"   'cd ~/personal-thing && git push origin main' 'cd ~/unguarded from a guarded cwd'
+HOME="$FIXTURE" check DENY  "$P"   'cd ~/woodrow && git push origin main' 'cd ~/guarded from an unguarded cwd'
+HOME="$W"       check DENY  "$P"   'cd ~ && git push origin main' 'cd ~ into a guarded home'
+HOME="$W"       check DENY  "$P"   'cd && git push origin main' 'bare cd goes home'
+HOME="$FIXTURE" check DENY  "$P"   'git -C ~/woodrow push origin main' '-C ~/guarded'
+HOME="$FIXTURE" check ALLOW "$W"   'git -C ~/personal-thing push origin main' '-C ~/unguarded from a guarded cwd'
+HOME="$FIXTURE" check DENY  "$W"   "cd '~/personal-thing' && git push origin main" 'a quoted ~ is literal, so the cwd still decides'
 check DENY  "$OUT" "git --git-dir=$W/.git --work-tree=$W push origin main" 'git-dir and work-tree'
 check DENY  "$OUT" "GIT_DIR=$W/.git git push origin main" 'GIT_DIR env assignment'
 
@@ -230,6 +237,9 @@ echo "-- --git-dir identifies the repo by the git dir itself"
 check DENY  "$OUT" "git --git-dir=$BARE push origin main" 'bare repo via --git-dir'
 check DENY  "$OUT" "GIT_DIR=$BARE git push origin main" 'bare repo via GIT_DIR='
 check DENY  "$OUT" "git --git-dir=$W/.git --work-tree=/tmp push origin main" 'git-dir wins over a mismatched work-tree'
+
+echo "-- --config-env (separate-token form) does not hide the verb"
+check DENY  "$W" 'git --config-env foo.test=HOME push origin main' 'separate-token --config-env value is skipped, verb still found'
 
 echo "-- quoted option values containing spaces"
 check DENY  "$W" 'git push -o "ci skip" origin' 'quoted -o value, no refspec, on main'
@@ -308,6 +318,19 @@ git -C "$F" config --unset branch.feature/thing.remote
 git -C "$F" config --unset branch.feature/thing.merge
 git -C "$F" config --unset push.default
 git -C "$F" update-ref -d refs/remotes/origin/release/main
+
+echo "-- @{push} remote name resolution does not assume the remote ends at the first slash"
+git -C "$F" remote add foo/bar "git@github.com:Concentro-Inc/woodrow.git"
+git -C "$F" update-ref refs/remotes/foo/bar/main refs/heads/feature/thing
+git -C "$F" config branch.feature/thing.remote foo/bar
+git -C "$F" config branch.feature/thing.merge refs/heads/main
+git -C "$F" config push.default upstream
+check DENY "$F" 'git push' '@{push} resolves to foo/bar/main (slash-containing remote name) — still main'
+git -C "$F" config --unset branch.feature/thing.remote
+git -C "$F" config --unset branch.feature/thing.merge
+git -C "$F" config --unset push.default
+git -C "$F" update-ref -d refs/remotes/foo/bar/main
+git -C "$F" remote remove foo/bar
 
 echo "-- refspec-less push WITH an explicit remote: configured remote.push wins over the branch fallback"
 git -C "$W" config remote.origin.push 'HEAD:release'
