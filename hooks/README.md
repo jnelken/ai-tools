@@ -433,6 +433,15 @@ A **PreToolUse hook on Bash** for machines whose login shell is zsh, which is wh
 
 Append to an existing `PreToolUse` array rather than replacing it.
 
+## sswt-host-guard.sh
+
+A **PreToolUse hook on Bash** for the human-led work Mac (acts only when `hostname -s` is `jake1` and the machine profile is `work-mac`; a no-op everywhere else, so it is safe in the shared settings base). It blocks (exit 2) `superset workspaces create` / `ws create` that has no `--host`, including one that passes `--local`. The Superset CLI defaults to this machine, so the jake2-offload rule in `instructions/machine/` was being skipped by omission; requiring `--host` makes placement a deliberate choice: jake2's id by default, jake1's id when the agent decides jake1 is right. Quoted text is ignored; append `# sswt-host-ok` to bypass. Tests: `bash hooks/tests/sswt-host-guard.test.sh`.
+
+Wiring (dotfiles `claude/settings.base.json`, a `PreToolUse` entry with matcher `Bash`):
+
+```json
+{ "type": "command", "command": "bash \"$HOME/.claude/hooks/sswt-host-guard.sh\"" }
+```
 
 ## Claude quota snapshots
 
