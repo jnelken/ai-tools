@@ -93,7 +93,9 @@ Commit once per completed idea, not once per step. Hold off creating a commit un
 
 When a commit only goes through with `--no-verify` because of lint errors already in files you touched, clear them in a follow-up commit on the same PR. Details: `~/.claude/instructions/lint-no-verify.md`.
 
-**"ridealong" marks an intentional, user-requested extra change.** A commit whose message contains the word `ridealong` (or `ride-along`) on a branch/PR is deliberate: don't flag it as stray or unrelated, don't ask whether to drop it, and treat it as in scope (reviewed with the PR, mentioned in the PR description). When you write a ridealong commit — a change the user asked to bundle into a branch whose main task is something else — put the word `ridealong` in the commit message.
+**Label every ridealong commit.** A ridealong is a commit bundled into a branch whose main task is something else, such as a hook reinstall or an unrelated fix. Start its subject line with `ridealong:` (for example `ridealong: reinstall block-push-to-main hook`), so another agent working on the branch can tell it from the feature work in `git log --oneline`. This applies whether the user asked for the extra change or you added it yourself. In the body, say why it rides on this branch and who asked for it. Keep it in its own commit, never mixed into a feature commit, and list it under a ride-along heading in the PR description.
+
+When reading a branch, a commit whose message contains `ridealong` (or `ride-along`) is deliberate: don't flag it as stray or unrelated, don't ask whether to drop it, and review it with the PR. Don't treat it as part of the feature either: leave it alone unless your task is about it.
 
 
 ## Plan Files
