@@ -130,3 +130,12 @@ Reusable examples live in `~/.claude/skills/peer-review/templates/invariants/`. 
 
 When one feature's fix cycle keeps producing new edge cases faster than it converges, consider consolidating the mechanism instead of layering guards — weighed against the feature's stakes. Details: `~/.claude/instructions/refactoring-vs-patching.md`.
 
+## Playwright: one browser per machine
+
+At most one Playwright browser may be alive on a machine at a time, across every repo, session and harness, and across headed and headless. Parallel browsers and installs have maxed out a machine's RAM. Treat any Playwright-dependent work (browser MCP tools, `playwright test`, screenshot or e2e scripts, `playwright install`) as holding a single machine-wide slot.
+
+- **Use the shared MCP servers, never your own.** `playwright` (headless) and `playwright-headed` are one-per-machine servers that open the same browser profile, so the second browser is refused while one is open. Dotfiles `bin/playwright-shared` sets them up and explains the mechanism. Don't start another server, port, profile, `--isolated` instance or per-session `npx @playwright/mcp`.
+- **Queue when the slot is taken.** `Browser is already in use` means another task holds it. Wait and retry about once a minute, doing other work meanwhile. Never work around the refusal, and never kill a browser you didn't open. An abandoned browser closes itself after 5 idle minutes, so a slot held longer than that is in active use.
+- **Release the slot as soon as the browser work ends.** Call `browser_close` then, before moving on to anything else, not at the end of the session.
+- **Outside MCP nothing enforces the slot, so check first.** Before `playwright test`, a script that launches a browser, or `playwright install`, run `pgrep -fl 'ms-playwright/' | grep -v -- '--type='`. If it prints a browser, wait and re-check. Run these jobs one at a time.
+- **Don't parallelize it yourself.** Never fan out subagents or workspaces that each need a browser on the same machine; run their browser steps one after another.
