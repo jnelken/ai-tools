@@ -145,7 +145,7 @@ Strip any existing ticket decoration from the title before re-applying:
 If a ticket is found, **ask the user**:
 > "Found Linear ticket TICKET-ID in branch/title. Use it, or create a new one? (use/new)"
 
-If the user says **use**: format the final title as `PR title (CON-123)` and skip to pushing.
+If the user says **use**: keep the ticket, continue with step 4 (same-ticket stacking), and format the final title as `PR title (CON-123)` once step 7 writes it.
 
 If the user says **new**: create a new Linear issue using the steps below.
 
