@@ -15,7 +15,7 @@ Add a machine layer, `instructions/machine/*.md`, composed into `development/*` 
 - **Identity precedence:** `AGENT_MACHINE`, then the `machine` key in `~/.config/agent-profiles/config.json`, then `CLAUDE_CODE_REMOTE=true` (`personal-cloud`), then unconfigured macOS (`mac`: Mac-wide fragments only, so a Mac without a key keeps the Superset rules). An invalid name fails closed.
 - **Runtime profiles ignore the machine layer**, preserving ADR 0001 isolation.
 - **Dotfiles unchanged:** `claude/instructions/*.md` stay linked everywhere; they load on demand and cost nothing unless read.
-- Superset rules go to Work Mac and Personal Mac. Lunch Money cache guidance goes to Personal Mac.
+- Superset rules go to Work Mac and Personal Mac. Lunch Money cache and Spark CLI guidance go to Personal Mac.
 
 ## Consequences
 

@@ -22,6 +22,8 @@ metadata:
 spark <command> [options]
 ```
 
+**Machine:** personal Mac only. `spark` is not installed on the work Mac, the PC (OMEN/WSL) or cloud sessions. If `spark` is missing, say so; do not install it or work around it.
+
 **Environment:** `spark` is a thin client that talks over IPC to the user's running Spark macOS Desktop app - it does not ship its own mailbox, network stack, or credentials. Run it directly on the user's Mac against the live Spark Desktop process. Do not try to execute it inside a sandbox, container, CI runner, or any environment isolated from the user's desktop session - it will fail to connect. If Spark Desktop is not running, ask the user to launch it instead of retrying.
 
 ## Commands

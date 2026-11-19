@@ -14,6 +14,8 @@ metadata:
 
 # Scoutmail
 
+> Personal Mac only: the `spark` CLI exists nowhere else, so this skill does nothing on the work Mac, the PC or in cloud sessions.
+
 Act as a high-signal email attention filter, not an unread-mail summary. Read
 mail through the non-interactive `spark` CLI and keep durable issue-level state.
 

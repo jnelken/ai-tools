@@ -101,6 +101,10 @@ class Profiles(unittest.TestCase):
         for name,expected in (('personal-mac',True),('work-mac',False),('personal-cloud',False)):
             r=p.resolve('development/personal',self.base,'claude',{'machine':name})
             self.assertEqual('Lunch Money MCP Cache' in r['instructions'],expected,name)
+    def test_spark_only_on_personal_mac(self):
+        for name,expected in (('personal-mac',True),('work-mac',False),('personal-pc',False),('personal-cloud',False)):
+            r=p.resolve('development/personal',self.base,'claude',{'machine':name})
+            self.assertEqual('Spark CLI (personal Mac only)' in r['instructions'],expected,name)
     def test_machine_fragments_exist(self):
         for sources in p.MACHINE_SOURCES.values():
             for s in sources: self.assertTrue((p.ROOT/'instructions'/s).is_file(),s)
