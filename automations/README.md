@@ -426,8 +426,44 @@ empty queue logs nothing.
 python3 -c 'import json,os;p=os.path.expanduser("~/.claude/state/pr-review-batch.json");d=json.load(open(p)) if os.path.exists(p) else {};d["windowMin"]=0;json.dump(d,open(p,"w"))'
 ```
 
-`windowMin: 0` flushes on every tick, which turns batching off. Keep the queue even then: the
-next phase holds cross-repo siblings in it so they are announced together.
+`windowMin: 0` flushes on every tick, which turns batching off. Keep the queue even then: it
+still holds cross-repo siblings so they are announced together.
+
+**Cross-repo siblings.** When one CON ticket needs a PR in api and another in woodrow (or
+folio-platform), reviewers should see them together and know the merge order. For a queued
+entry in one of those three repos whose text carries `(CON-N)`, the flusher looks up Jake's open
+PRs into the default branch of the other two (`gh pr list --search "CON-N in:title" --author
+@me`, then an exact `(CON-N)` match on the title, so CON-44 never matches CON-441). A sibling's
+state comes from its body on GitHub, so both machines see the same thing:
+
+- **posted** — has the `📣 **Posted to Slack**` badge (wins over a stale marker)
+- **queued** — has `<!-- pr-review-queued -->`, which `/post-pr` adds at enqueue and the flusher
+  removes when it badges (or is in this machine's queue)
+- **in progress** — neither
+
+A queued PR with an in-progress sibling is **held**: it stays queued and the log says
+`<repo>#N held for sibling woodrow#M (until HH:MM)`. The hold ends when the sibling is queued or
+posted, or `siblingHoldMin` minutes (default 60, in `pr-review-batch.json` next to `windowMin`)
+after the entry's `queuedAt`; then it posts alone. A sibling queued on the other machine posts
+in the same window, since both flushers fire at the same boundary. `--only` skips the hold;
+`--force` keeps it. A failed sibling lookup requeues the entry until its hold would have run out,
+then posts it without the sibling line.
+
+Each PR still gets its own message; a paired one gets a second line, and the log a `paired …`
+line. Within one flush a ticket's PRs post together, api before woodrow:
+
+```
+<api url|[api] Let workspace admins archive record-type memory rules (CON-4458)>
+UI follow-up: <woodrow url|woodrow #1968>, merge after this one
+
+<woodrow url|[ui] Show edit and archive on record-type memory rules for admins (CON-4458)>
+Merges after <api url|api #1770>
+```
+
+Any pair involving folio-platform, a ticket in three repos, or two PRs in the sibling repo gets
+`Sibling: <url|folio-platform #N>, …` instead, with no merge-order claim. Siblings posted in an
+earlier window are still listed, for reviewers who arrive later. internal-tools and personal
+repos are never paired.
 
 **Queues are per machine.** `/post-pr` runs on jake1 and jake2, and each machine's queue is
 drained only by its own flusher, so load the plist on **every machine that runs `/post-pr`**.
@@ -438,11 +474,13 @@ Flags (`~/.claude/automations/pr-review-batch/run.sh …`):
 
 - `--dry-run` — claims and writes nothing; logs a preflight line (resolved `gh` and `security`,
   whether the Keychain token is readable, `gh auth`) and what each entry would do.
-- `--only <url>` — flush just that URL now, ignoring the window, and leave the rest queued
+- `--only <url>` — flush just that URL now, ignoring the window and any sibling hold, and leave the rest queued
   (`/post-pr --now` for hotfixes). Exits nonzero unless that URL was posted.
 - `--channel <id>` (or env `PR_REVIEW_BATCH_CHANNEL`) — post somewhere other than `#pr-review`;
   use Jake's own DM for testing, never a real channel.
-- `--force` — flush the whole queue now, ignoring the window.
+- `--force` — flush the whole queue now, ignoring the window (sibling holds still apply).
+- `--siblings <url>` — print that PR's siblings with their state and the message it would get.
+  Read-only; `/post-pr` uses it for its report.
 
 Logs: `~/.claude/automations/pr-review-batch/logs/flush.log` (output goes there whenever stdout
 isn't a terminal, including from the Bash tool). Tests: `python3 -m pytest automations/pr-review-batch/tests`.

@@ -17,17 +17,29 @@ Order, per run (all under one flock):
      base is not the default branch, whose URL is already in
      pr-review-posted.jsonl, or whose head moved past headSha. Anything that
      merely failed (gh error, timeout) is requeued.
-  3. Post each survivor with chat.postMessage, in queued order.
+  2b. Pair cross-repo siblings: for an entry in api, woodrow or folio-platform
+     whose text carries (CON-N), find Jake's open PRs into the default branch
+     of the other two repos with the exact same (CON-N) in the title. A
+     sibling's state is read from its body on GitHub, so it is the same from
+     either machine: posted (badge), queued (QUEUED_MARKER, which /post-pr
+     adds at enqueue) or in progress (neither). An entry with an in-progress
+     sibling is held in the queue until the sibling is queued or posted, or
+     siblingHoldMin minutes (default 60) after its queuedAt; then it posts
+     alone. Every paired message gets a second line naming its siblings.
+  3. Post each survivor with chat.postMessage, in queued order, except that
+     same-ticket entries post together, api before woodrow.
   4. On ok, append to pr-review-posted.jsonl immediately.
-  5. Badge, 6. undraft, 7. auto-merge. A failure here is logged and never
+  5. Badge (and remove QUEUED_MARKER), 6. undraft, 7. auto-merge. A failure here is logged and never
      undoes the post.
   8. Failed posts go back into the live queue.
 
-    flush.py [--dry-run] [--only URL] [--channel ID] [--force]
+    flush.py [--dry-run] [--only URL] [--channel ID] [--force] [--siblings URL]
 
---only and --force skip the window check; --only flushes just that URL and
-exits nonzero unless it was posted. --dry-run claims nothing and writes
-nothing, and always logs a preflight line.
+--only and --force skip the window check; --only flushes just that URL,
+skips the sibling hold, and exits nonzero unless it was posted. --force keeps
+the hold. --dry-run claims nothing and writes nothing, and always logs a
+preflight line. --siblings URL prints that PR's siblings and the line its
+message would carry, and changes nothing (/post-pr uses it to report).
 
 Env: PR_REVIEW_BATCH_CHANNEL (channel override), PR_REVIEW_BATCH_NOW (epoch
 seconds, tests), PR_REVIEW_BATCH_SLACK_API (Slack API base URL, tests).
@@ -40,6 +52,7 @@ import getpass
 import glob
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -58,7 +71,12 @@ CHANNEL = "C0APAAD3PP0"  # #pr-review
 SLACK_API = os.environ.get("PR_REVIEW_BATCH_SLACK_API", "https://slack.com/api").rstrip("/")
 TOKEN_SERVICE = "slack-pr-review-user-token"
 BADGE = "📣 **Posted to Slack**"
+QUEUED_MARKER = "<!-- pr-review-queued -->"
 DEFAULT_WINDOW_MIN = 30
+DEFAULT_SIBLING_HOLD_MIN = 60
+OWNER = "Concentro-Inc"
+SIBLING_REPOS = ("api", "woodrow", "folio-platform")  # also the posting order within a ticket
+TICKET_RE = re.compile(r"\((CON-\d+)\)")
 GH_TIMEOUT = 60
 POST_SPACING_S = 1.0
 
@@ -121,6 +139,14 @@ def window_min(cfg):
     except (TypeError, ValueError):
         w = DEFAULT_WINDOW_MIN
     return max(w, 0)
+
+
+def sibling_hold_min(cfg):
+    try:
+        h = float(cfg.get("siblingHoldMin", DEFAULT_SIBLING_HOLD_MIN))
+    except (TypeError, ValueError):
+        h = DEFAULT_SIBLING_HOLD_MIN
+    return max(h, 0)
 
 
 def boundary_crossed(now, last, window_minutes):
@@ -275,16 +301,22 @@ def badge(url):
     if res is None or res.returncode != 0:
         return f"failed ({err(res)})"
     body = res.stdout.rstrip()
-    if body.endswith(BADGE):
-        return "already"
+    # The queued marker goes in the same edit: once posted, the badge is the state.
+    stripped = "\n".join(l for l in body.split("\n") if l.strip() != QUEUED_MARKER).rstrip()
+    if stripped.endswith(BADGE):
+        if stripped == body:
+            return "already"
+        new, done = f"{stripped}\n", "already, marker removed"
+    else:
+        new, done = f"{stripped}\n\n---\n{BADGE}\n", "appended"
     fd, tmp = tempfile.mkstemp(prefix="pr-body.", suffix=".md")
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
-            f.write(f"{body}\n\n---\n{BADGE}\n")
+            f.write(new)
         res = run("gh", "pr", "edit", url, "--body-file", tmp)
     finally:
         os.unlink(tmp)
-    return "appended" if res is not None and res.returncode == 0 else f"failed ({err(res)})"
+    return done if res is not None and res.returncode == 0 else f"failed ({err(res)})"
 
 
 def undraft(url, is_draft):
@@ -301,6 +333,123 @@ def auto_merge(url, method):
         return f"failed (unknown method {method!r})"
     res = run("gh", "pr", "merge", url, "--auto", f"--{method}")
     return method if res is not None and res.returncode == 0 else f"failed ({err(res)})"
+
+
+# --- Siblings ----------------------------------------------------------------
+
+_sibling_prs = {}  # (repo, ticket) -> open same-ticket PRs into its default branch
+
+
+def sibling_scope(e):
+    """(short repo name, ticket) when the entry can have siblings, else None."""
+    owner, _, name = e["repo"].partition("/")
+    m = TICKET_RE.search(e.get("text") or "")
+    if owner != OWNER or name not in SIBLING_REPOS or not m:
+        return None
+    return name, m.group(1)
+
+
+def find_siblings(e, posted, local_queued):
+    """Open same-ticket PRs in the other Concentro repos, each with its state
+    as GitHub (or this machine) shows it. Raises RuntimeError when gh fails."""
+    scope = sibling_scope(e)
+    if not scope:
+        return []
+    name, ticket = scope
+    sibs = []
+    for other in SIBLING_REPOS:
+        if other == name:
+            continue
+        repo = f"{OWNER}/{other}"
+        if (repo, ticket) not in _sibling_prs:
+            res = run("gh", "pr", "list", "--repo", repo, "--base", default_branch(repo), "--state", "open",
+                      "--search", f"{ticket} in:title", "--author", "@me",
+                      "--json", "number,title,url,body", "--limit", "20")
+            if res is None or res.returncode != 0:
+                raise RuntimeError(f"gh pr list {repo}: {err(res)}")
+            try:
+                prs = json.loads(res.stdout)
+            except json.JSONDecodeError:
+                raise RuntimeError(f"gh pr list {repo}: bad JSON")
+            # The search is fuzzy (CON-44 finds CON-441); the title must carry exactly (CON-N).
+            _sibling_prs[(repo, ticket)] = sorted(
+                (p for p in prs if ticket in TICKET_RE.findall(p.get("title") or "")),
+                key=lambda p: p["number"])
+        for p in _sibling_prs[(repo, ticket)]:
+            body = p.get("body") or ""
+            if BADGE in body or p["url"] in posted:
+                state = "posted"  # wins over a marker an older flusher left behind
+            elif QUEUED_MARKER in body or p["url"] in local_queued:
+                state = "queued"
+            else:
+                state = "in progress"
+            sibs.append({"name": other, "number": p["number"], "url": p["url"], "state": state})
+    return sibs
+
+
+def sib_label(s):
+    return f"{s['name']}#{s['number']}"
+
+
+def sibling_line(name, sibs):
+    """The message's second line, or None. Merge order is only claimed for a
+    lone api/woodrow pair: api first, the UI follow-up after."""
+    if not sibs:
+        return None
+    links = [f"<{s['url']}|{s['name']} #{s['number']}>" for s in sibs]
+    if len(sibs) == 1 and {name, sibs[0]["name"]} == {"api", "woodrow"}:
+        return f"UI follow-up: {links[0]}, merge after this one" if name == "api" else f"Merges after {links[0]}"
+    return "Sibling: " + ", ".join(links)
+
+
+class Pairing:
+    """Per-run inputs for the sibling decision."""
+
+    def __init__(self, posted, local_queued, hold, now, hold_min):
+        self.posted, self.local_queued = posted, local_queued
+        self.hold, self.now, self.hold_min = hold, now, hold_min
+
+    def decide(self, e):
+        """('post', text) | ('hold', reason) | ('requeue', reason), logging
+        one line for any entry that has siblings."""
+        text = e.get("text") or e["url"]
+        scope = sibling_scope(e)
+        if not scope:
+            return "post", text
+        queued = parse_iso(e.get("queuedAt"))
+        expired = queued is None or self.now >= queued + self.hold_min * 60
+        holding = self.hold and not expired
+        try:
+            sibs = find_siblings(e, self.posted, self.local_queued)
+        except RuntimeError as x:
+            if holding:
+                return "requeue", f"sibling lookup failed ({x})"
+            log(f"posting {label(e)} without a sibling line: lookup failed ({x})")
+            return "post", text
+        if not sibs:
+            return "post", text
+        waiting = [s for s in sibs if s["state"] == "in progress"]
+        states = ", ".join(f"{sib_label(s)} {s['state']}" for s in sibs)
+        if waiting and holding:
+            until = dt.datetime.fromtimestamp(queued + self.hold_min * 60).strftime("%H:%M")
+            return "hold", f"held for sibling {', '.join(sib_label(s) for s in waiting)} (until {until})"
+        why = "" if not waiting else " (--only, no hold)" if not self.hold else " (hold expired)"
+        log(f"paired {label(e)} with {states}{why}")
+        return "post", f"{text}\n{sibling_line(scope[0], sibs)}"
+
+
+def post_order(ready):
+    """Queued order, except that entries for one ticket post together, at the
+    first one's place, api before woodrow before folio-platform."""
+    first, keyed = {}, []
+    for i, item in enumerate(ready):
+        scope = sibling_scope(item[0])
+        if scope:
+            g = first.setdefault(scope[1], i)
+            keyed.append(((g, SIBLING_REPOS.index(scope[0]), i), item))
+        else:
+            keyed.append(((i, 0, i), item))
+    return [item for _, item in sorted(keyed, key=lambda kv: kv[0])]
 
 
 # --- Slack -------------------------------------------------------------------
@@ -345,21 +494,57 @@ def preflight():
         f"gh-auth={'ok' if auth is not None and auth.returncode == 0 else 'FAILED'}")
 
 
+def pairing(entries, posted, hold):
+    return Pairing(posted, {e["url"] for e in entries}, hold, now_epoch(), sibling_hold_min(read_config()))
+
+
 def dry_run(only, channel):
     preflight()
     entries = []
     for p in sorted(glob.glob(QUEUE + ".flushing.*")) + [QUEUE]:
         entries.extend(read_lines(p)[0])
     entries = newest_per_url(entries)
+    posted = posted_urls()
+    pair = pairing(entries, posted, hold=not only)
     if only:
         entries = [e for e in entries if e["url"] == only]
-    posted = posted_urls()
+    ready = []
     for e in entries:
         verdict, why = revalidate(e, posted)
         if verdict == "post":
-            log(f"DRY would post {label(e)} to {channel}: {e.get('text')!r} automerge={e.get('autoMerge') or 'off'}")
+            verdict, why = pair.decide(e)
+        if verdict == "post":
+            ready.append((e, why))
         else:
             log(f"DRY would {verdict} {label(e)}: {why}")
+    for e, text in post_order(ready):
+        log(f"DRY would post {label(e)} to {channel}: {text!r} automerge={e.get('autoMerge') or 'off'}")
+    return 0
+
+
+def show_siblings(url):
+    """--siblings: what pairing would do for this PR, from GitHub and this
+    machine's queue. Writes nothing."""
+    res = run("gh", "pr", "view", url, "--json", "url,number,title")
+    if res is None or res.returncode != 0:
+        print(f"gh pr view: {err(res)}", file=sys.stderr)
+        return 1
+    pr = json.loads(res.stdout)
+    repo = "/".join(pr["url"].split("/")[3:5])
+    name = repo.split("/")[1]
+    tag = {"woodrow": "ui", "folio-platform": "platform"}.get(name, name)
+    e = {"url": pr["url"], "repo": repo, "pr": pr["number"], "text": f"<{pr['url']}|[{tag}] {pr['title']}>"}
+    queued = [x["url"] for p in sorted(glob.glob(QUEUE + ".flushing.*")) + [QUEUE] for x in read_lines(p)[0]]
+    try:
+        sibs = find_siblings(e, posted_urls(), set(queued))
+    except RuntimeError as x:
+        print(f"sibling lookup failed: {x}", file=sys.stderr)
+        return 1
+    for s in sibs:
+        print(f"sibling {sib_label(s)} {s['state']} {s['url']}")
+    line = sibling_line(name, sibs)
+    print("message:")
+    print(e["text"] + (f"\n{line}" if line else ""))
     return 0
 
 
@@ -373,7 +558,10 @@ def flush(only, channel):
             keep = [e for e in entries if e["url"] != only]
             entries = [e for e in entries if e["url"] == only]
             append_lines(QUEUE, keep)  # put the rest back before any network call
+            local = entries + keep
             keep = []
+        else:
+            local = entries
         if not entries:
             if only:
                 log(f"--only {only}: not in the queue")
@@ -383,20 +571,42 @@ def flush(only, channel):
         if channel != CHANNEL:
             log(f"channel override: posting to {channel}, not #pr-review")
         posted = posted_urls()
-        token, token_err = None, None
-        ok_urls = set()
-        first = True
+        pair = pairing(local, posted, hold=not only)
+
+        def settle(e, back):
+            if back:
+                keep.append(e)
+            pending.remove(e)
+
+        # Decide every entry before posting any, so siblings post together.
+        ready = []
         for e in entries:
             try:
                 verdict, why = revalidate(e, posted)
+                if verdict == "post":
+                    pr = why
+                    verdict, why = pair.decide(e)
                 if verdict == "drop":
                     log(f"dropped {label(e)}: {why}")
-                    continue
-                if verdict == "requeue":
+                    settle(e, back=False)
+                elif verdict == "requeue":
                     log(f"requeued {label(e)}: {why}")
-                    keep.append(e)
-                    continue
-                pr = why
+                    settle(e, back=True)
+                elif verdict == "hold":
+                    log(f"{label(e)} {why}")
+                    settle(e, back=True)
+                else:
+                    ready.append((e, pr, why))
+            except Exception as x:  # one bad entry must not cost the rest of the batch
+                log(f"requeued {label(e)}: unexpected error {type(x).__name__}: {x}")
+                if e in pending:
+                    settle(e, back=True)
+
+        token, token_err = None, None
+        ok_urls = set()
+        first = True
+        for e, pr, text in post_order(ready):
+            try:
                 if token is None and token_err is None:
                     token, token_err = slack_token()
                 if token is None:
@@ -406,7 +616,7 @@ def flush(only, channel):
                 if not first:
                     time.sleep(POST_SPACING_S)
                 first = False
-                perr = post(token, channel, e.get("text") or e["url"])
+                perr = post(token, channel, text)
                 if perr:
                     log(f"requeued {label(e)}: post failed ({perr})")
                     keep.append(e)
@@ -439,8 +649,12 @@ def main():
     ap.add_argument("--only", metavar="URL")
     ap.add_argument("--channel", default=os.environ.get("PR_REVIEW_BATCH_CHANNEL") or CHANNEL)
     ap.add_argument("--force", action="store_true", help="flush now, ignoring the window")
+    ap.add_argument("--siblings", metavar="URL", help="print a PR's siblings and its message; writes nothing")
     args = ap.parse_args()
     os.makedirs(STATE, exist_ok=True)
+
+    if args.siblings:
+        return show_siblings(args.siblings)
 
     if args.dry_run:
         return dry_run(args.only, args.channel)
