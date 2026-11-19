@@ -1,25 +1,26 @@
 ---
 name: post-pr
-description: 'Drive a PR the rest of the way to review-ready — run Codex review until clean, watch CI, post the PR to the #pr-review Slack channel, badge the description, and undraft it — or, for a sub-PR into a trunk branch, merge it into the trunk and reap its sswt instead of announcing it. Use when work on a branch is finished and its PR should be shared, e.g. "post this PR", "share it to Slack", "take this the rest of the way", "run the post-PR workflow", "it''s ready, ship the announcement". Runs automatically when a task''s work is complete (see the Post-PR Workflow section of the global CLAUDE.md); invoke by hand to re-run it for a later push, or to target a PR in a different worktree.'
+description: 'Drive a PR the rest of the way to review-ready — run Codex review until clean, watch CI, then queue the PR for the next #pr-review window (a launchd flusher posts it to Slack, badges the description, undrafts it and enables auto-merge) — or, for a sub-PR into a trunk branch, merge it into the trunk and reap its sswt instead of announcing it. Use when work on a branch is finished and its PR should be shared, e.g. "post this PR", "share it to Slack", "take this the rest of the way", "run the post-PR workflow", "it''s ready, ship the announcement". Runs automatically when a task''s work is complete (see the Post-PR Workflow section of the global CLAUDE.md); invoke by hand to re-run it for a later push, or to target a PR in a different worktree.'
 ---
 
 # Post PR
 
 ## Overview
 
-The last mile of a PR: review it until it's quiet, confirm CI is green, announce it, and flip the two signals that tell humans it's ready for eyes.
+The last mile of a PR: review it until it's quiet, confirm CI is green, and queue it for `#pr-review`. The team's review capacity is limited, so announcements go out in batches: the `pr-review-batch` flusher (a launchd job, [`automations/pr-review-batch`](../../automations/pr-review-batch/flush.py)) releases the queue on window boundaries (`:00`/`:30` by default), one Slack message per PR, and only then flips the two signals that tell humans a PR is ready for eyes.
 
 ```
 /loop /peer-review  →  resolve base conflicts  →  gh pr checks --watch  →  base is the default branch?
-                                                ├─ yes → Slack #pr-review → badge → gh pr ready → offer screenshot to #product-updates → offer auto-merge
+                                                ├─ yes → [hygiene] label → enqueue → offer screenshot to #product-updates
+                                                │          … next window: flusher → Slack #pr-review → posted.jsonl → badge → gh pr ready → auto-merge
                                                 └─ no  → gh pr merge --merge into the trunk → reap the sub-PR's sswt
 ```
 
-Every step gates the next. A PR that never comes back clean is never announced and never merged; a PR that is never announced is never badged and never leaves draft (the one exception is the undraft that `gh pr merge` requires immediately before a trunk merge, step 3.6). That chain is the whole point — the draft pill is load-bearing, not cosmetic.
+Every step gates the next. A PR that never comes back clean is never queued and never merged. A queued PR **stays draft and unbadged** until the flusher actually posts it; a PR that is never posted is never badged and never leaves draft (the one exception is the undraft that `gh pr merge` requires immediately before a trunk merge, step 3.6). That chain is the whole point — the draft pill is load-bearing, not cosmetic.
 
-This skill owns the *only* place the badge and the undraft happen. Never add `📣 **Posted to Slack**` or run `gh pr ready` anywhere else, and never speculatively.
+**The invariant:** the badge, the undraft and auto-merge happen only after a real `#pr-review` post, and only the flusher makes that post. Never add `📣 **Posted to Slack**`, run `gh pr ready` or enable auto-merge on an announceable PR anywhere else, and never speculatively. To post *now*, run the flusher on that one URL (`--now`, step 4); don't post by hand.
 
-**External announcement (steps 4-6: Slack, badge, undraft) is gated on the PR's base branch being the repo's default branch.** A PR based on anything else — a stacked PR onto another feature branch, a sub-PR into a shared `feature/*` integration branch — is internal-only: it still gets reviewed and CI-checked (steps 1-3 run exactly as normal), and once clean it is **merged into its trunk with a merge commit (step 3.6)** instead of being posted to `#pr-review` or badged. The point is to keep the number of PRs landing in front of a human reviewer proportional to the number of semantically distinct changes, not the number of branches used to build one: a stack of sub-PRs is one reviewable unit, and the *only* member of that stack a reviewer should ever see announced is the one whose base is the default branch — typically the last one, once the stack is flattened or the integration branch itself opens its PR into main. The global CLAUDE.md calls this the **trunk flow** and says when to use it (closely-knit features → one trunk; standalone fixes → straight to main). See steps 3.5 and 3.6.
+**External announcement (step 4: enqueue, then the flusher's post, badge, undraft and auto-merge) is gated on the PR's base branch being the repo's default branch.** A PR based on anything else — a stacked PR onto another feature branch, a sub-PR into a shared `feature/*` integration branch — is internal-only: it still gets reviewed and CI-checked (steps 1-3 run exactly as normal), and once clean it is **merged into its trunk with a merge commit (step 3.6)** instead of being queued for `#pr-review` or badged. The point is to keep the number of PRs landing in front of a human reviewer proportional to the number of semantically distinct changes, not the number of branches used to build one: a stack of sub-PRs is one reviewable unit, and the *only* member of that stack a reviewer should ever see announced is the one whose base is the default branch — typically the last one, once the stack is flattened or the integration branch itself opens its PR into main. The global CLAUDE.md calls this the **trunk flow** and says when to use it (closely-knit features → one trunk; standalone fixes → straight to main). See steps 3.5 and 3.6.
 
 ## Invocation
 
@@ -28,6 +29,7 @@ This skill owns the *only* place the badge and the undraft happen. Never add `�
 /post-pr 1271                 # a PR by number, in the current repo
 /post-pr <worktree-path>      # a PR whose branch lives in another worktree
 /post-pr 41 1271 1433         # several: one per worktree, run in parallel
+/post-pr --now                # hotfix: enqueue, then flush just this PR immediately
 ```
 
 Runs automatically when a task's work is complete — see [When it fires on its own](#when-it-fires-on-its-own).
@@ -54,9 +56,9 @@ gh pr view --json number,url,title,isDraft,headRefName -q '.'
 
 Stamp the run's start for the metrics ledger, from the target's worktree: `~/.ai-tools/bin/review-metrics mark started`. Also stamp `review_done` when step 2 passes its gate and `ci_done` when step 3 does, and finish every run (announced, merged, or stopped at a gate) with the ledger line in step 7. Ledger writes are best-effort: ignore a nonzero exit.
 
-If several targets were given, run them **in parallel**. Targets in different worktrees (and especially different repos) are independent: dispatch each into its own sswt with its own agent (`superset workspaces create --local --project <id> --branch <branch> --agent claude --prompt "/post-pr <n>"`, or one Agent call per target in a single message) rather than finishing one before starting the next. Each run owns its worktree, so reviews, CI watches and merges don't interact. Append to `pr-review-posted.jsonl` with a single `>>` line write so concurrent runs can't clobber each other, and have each run report its own block (step 7) rather than interleaving output.
+If several targets were given, run them **in parallel**. Targets in different worktrees (and especially different repos) are independent: dispatch each into its own sswt with its own agent (`superset workspaces create --local --project <id> --branch <branch> --agent claude --prompt "/post-pr <n>"`, or one Agent call per target in a single message) rather than finishing one before starting the next. Each run owns its worktree, so reviews, CI watches and merges don't interact. Append to `pr-review-queue.jsonl` with a single `>>` line write so concurrent runs can't clobber each other, and have each run report its own block (step 7) rather than interleaving output.
 
-Serialize only for a real dependency: two targets sharing a worktree or branch, a sub-PR whose trunk another target is still merging into, or the user stating a hard ordering requirement. A soft ordering hint ("API first so the endpoint exists") is not a hard requirement: run in parallel and flag the risk in the report (e.g. "UI PR announced before the API PR merged").
+Serialize only for a real dependency: two targets sharing a worktree or branch, a sub-PR whose trunk another target is still merging into, or the user stating a hard ordering requirement. A soft ordering hint ("API first so the endpoint exists") is not a hard requirement: run in parallel and flag the risk in the report (e.g. "UI PR queued before the API PR merged").
 
 ### 1.5. Confirm the Linear ticket is in the PR title
 
@@ -131,7 +133,7 @@ gh api <OWNER/REPO> --jq .default_branch   # or: git symbolic-ref refs/remotes/o
 
 If `baseRefName` is **not** the repo's default branch, this PR is internal-only:
 
-- **Branch here.** Skip steps 4-6 (Slack, badge, undraft) for this target and go to step 3.6 instead.
+- **Branch here.** Skip steps 4 and 6.5 (enqueue, product update) for this target and go to step 3.6 instead.
 - Report it plainly (see step 7's format) — this is not a failure, it's the normal outcome for a stacked/sub-PR, but it must be visible so nobody assumes silence means the workflow didn't run.
 
 If `baseRefName` **is** the default branch, skip step 3.6 and continue to step 4 as normal.
@@ -158,7 +160,7 @@ gh pr merge <PR_NUMBER> --repo <OWNER/REPO> --merge --delete-branch=false
 - **Keep the remote branch at merge time** (`--delete-branch=false`). Branches stacked on it still resolve, and the PR keeps its head ref. The sub-PR's local workspace and branch are reaped separately, as the run's last action (step 3.7).
 - **The undraft here is a merge prerequisite, not a signal.** No human reviews a sub-PR, so its draft pill was never load-bearing. Do it immediately before the merge and never badge the PR.
 - **Conflicts** (`CONFLICTING` / `DIRTY`): resolve them as in step 2.5, with the trunk as the base. Stop and report "merge blocked — conflicts with `<trunk>`" only for a conflict that needs a product or design decision.
-- After the merge the trunk PR's diff has grown — say so in the report, and pull the trunk in the worktree if the next piece of work starts from it. Nothing is written to `pr-review-posted.jsonl`; there was no post to dedup.
+- After the merge the trunk PR's diff has grown — say so in the report, and pull the trunk in the worktree if the next piece of work starts from it. Nothing is written to `pr-review-queue.jsonl` or `pr-review-posted.jsonl`; there is no post to queue or dedup.
 
 ### 3.7. Reap the sub-PR's sswt
 
@@ -197,11 +199,13 @@ woodrow's PR guide (`docs/guides/pr-descriptions.md`, `## Preview`) owns the hos
 - When the change shows on several distinct screens, give one link per screen, each on its own line as `<label>: <url>`.
 - Link the bare host only when the change is genuinely app-wide (theme tokens, global layout, the app shell) and no single screen represents it.
 
-If the body's `## Preview` already follows these rules, leave it. Otherwise rewrite only that section, reading and writing the body through a file the same way step 5 does. Add the section, placed after `## Summary` as the guide's template has it, when it's missing and the change is visible in a preview.
+If the body's `## Preview` already follows these rules, leave it. Otherwise rewrite only that section, reading the body into a file (`gh pr view --json body -q .body > file`) and writing it back with `gh pr edit --body-file`, never through a shell string. Add the section, placed after `## Summary` as the guide's template has it, when it's missing and the change is visible in a preview.
 
-### 4. Post to Slack
+### 4. Enqueue for #pr-review
 
-Channel `#pr-review` (ID `C0APAAD3PP0`). The message body is *only* the link:
+Don't post here. Queue the PR; the `pr-review-batch` flusher posts it at the next window boundary and then badges, undrafts and enables auto-merge on it. The PR stays draft and unbadged until then.
+
+**The Slack text.** The flusher posts each queued PR as its own message, whose body is *only* the link:
 
 ```
 <PR_URL|[REPO_LABEL] PR_TITLE>
@@ -215,61 +219,56 @@ The repo label and title together form the hyperlink text. Nothing outside the l
 | api | `api` |
 | folio-platform | `platform` |
 
-**Hygiene tag.** When the PR's net diff (`git diff <base>...HEAD`) is *only* code hygiene — codemods, behavior-preserving refactors or moves/renames, test fixes, lint or format fixes, with no user-visible or runtime behavior change — insert `[hygiene]` right after the repo label: `<PR_URL|[api][hygiene] PR_TITLE>`. It tells reviewers the PR is a skim-for-safety read, not a behavior review. One tag covers all of those; don't split it into `[lintfix]` / `[testfix]`. A PR that mixes hygiene with any feature, fix or config change gets no tag. The tag goes in the Slack link text only, never in the PR title itself. Whenever the tag applies, also add the GitHub label before posting: `gh pr edit <PR> --add-label hygiene` (idempotent). If the repo has no `hygiene` label, don't create it — skip and say so in the report.
+**Hygiene tag.** When the PR's net diff (`git diff <base>...HEAD`) is *only* code hygiene — codemods, behavior-preserving refactors or moves/renames, test fixes, lint or format fixes, with no user-visible or runtime behavior change — insert `[hygiene]` right after the repo label: `<PR_URL|[api][hygiene] PR_TITLE>`. It tells reviewers the PR is a skim-for-safety read, not a behavior review. One tag covers all of those; don't split it into `[lintfix]` / `[testfix]`. A PR that mixes hygiene with any feature, fix or config change gets no tag. The tag goes in the Slack link text only, never in the PR title itself. Whenever the tag applies, also add the GitHub label now, at enqueue time: `gh pr edit <PR> --add-label hygiene` (idempotent). If the repo has no `hygiene` label, don't create it — skip and say so in the report.
 
-Post as the real user via `chat.postMessage` with the `xoxp` token from the macOS Keychain — not the claude.ai Slack connector, which posts with an app tag:
+**Auto-merge method.** The global work instructions make auto-merge the default without asking (`instructions/development/work.md`); the flusher applies it after the undraft, since GitHub refuses auto-merge on a draft. Pick it here:
+
+- `null` when `gh api repos/<OWNER/REPO> --jq .allow_auto_merge` is `false` (report `n/a (repo disallows)`; don't change the repo setting), when `gh pr view <PR_NUMBER> --repo <OWNER/REPO> --json autoMergeRequest -q .autoMergeRequest` is already non-null (report `already on`), or when either of work.md's two conditions fails: the PR depends on another PR merging first, or there is an open question about the implementation or merge order (report which condition failed). The flusher can't judge those conditions, so this is the only place they are applied.
+- Otherwise `"squash"`, unless the repo's `allow_squash_merge` is false, then `"merge"`. Never `rebase` unless it is the only method the repo allows.
+
+**Dedup.** Skip the enqueue (report `Slack: skipped, already in dedup state`) when the PR's URL is already in `~/.claude/state/pr-review-posted.jsonl`. If it is already *queued*, enqueue again anyway: the new line supersedes the old one (the flusher keeps the newest line per URL), which is how a later push refreshes `headSha` and the title.
+
+**Enqueue.** Append one line to `~/.claude/state/pr-review-queue.jsonl`, built with `jq` or Python and written with a single `>>` (titles carry backticks, quotes and `$`; never interpolate them into a shell string):
 
 ```bash
-TOKEN=$(security find-generic-password -s slack-pr-review-user-token -a "$USER" -w)
-curl -s -X POST https://slack.com/api/chat.postMessage \
-  -H "Authorization: Bearer $TOKEN" \
-  -H 'Content-type: application/json; charset=utf-8' \
-  --data @payload.json
+jq -nc --arg url "$URL" --arg repo "$REPO" --argjson pr "$N" --arg text "$TEXT" \
+  --arg sha "$(gh pr view "$URL" --json headRefOid -q .headRefOid)" --argjson am "$AUTOMERGE_JSON" \
+  --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+  '{url:$url, repo:$repo, pr:$pr, text:$text, headSha:$sha, autoMerge:$am, queuedAt:$at}' \
+  >> ~/.claude/state/pr-review-queue.jsonl
 ```
-
-with `unfurl_links: false` and `unfurl_media: false` in the payload. Build the payload as a file rather than an inline shell string — PR titles carry backticks, quotes and `$` that command substitution will mangle.
-
-The response showing `bot_id` and "Jake (bot)" is expected and does **not** mean the token is wrong — it still renders as plain "Jake" in the Slack UI.
-
-**Dedup, before posting:** check `~/.claude/state/pr-review-posted.jsonl` for the PR's URL and skip if it's already there. After a successful post, append one line:
 
 ```json
-{"url": "...", "repo": "...", "pr": 0, "postedAt": "2026-01-01T00:00:00Z"}
+{"url": "...", "repo": "Concentro-Inc/api", "pr": 0, "text": "<URL|[api] title>", "headSha": "...", "autoMerge": "squash", "queuedAt": "2026-01-01T00:00:00Z"}
 ```
 
-This file is local dedup state, not durable memory. When a PR's sswt workspace/branch is deleted (e.g. by [[cleanup-local-branches]]), drop its entry too — a gone workspace means the work is done and there is no double-post left to guard against.
+`text` is the finished Slack link text; `autoMerge` is `"squash"`, `"merge"` or `null` (`AUTOMERGE_JSON='"squash"'` or `null`). `headSha` must be the PR's current head: the flusher drops an entry whose PR has moved on (a later push runs `/post-pr` again and re-enqueues), whose PR is no longer open or no longer targets the default branch, or whose URL is already in `pr-review-posted.jsonl`.
 
-### 5. Badge the description
-
-Only after a *real* post in step 4 — never after one the dedup check skipped, and never after a loop that failed to converge.
+**Safety net: is the flusher loaded on this machine?** Queues are per machine (`/post-pr` runs on jake1 and jake2), so check before relying on one:
 
 ```bash
-gh pr view <PR_NUMBER> --repo <OWNER/REPO> --json body -q .body > /tmp/pr-body.txt
+launchctl print "gui/$(id -u)/com.jake.pr-review-batch" >/dev/null 2>&1
 ```
 
-Read the body through a file. Do not round-trip it through a shell string; bodies contain backticks and `$` that command substitution will mangle.
+If that fails, the queue would never drain. Enqueue as above, then post immediately with `~/.claude/automations/pr-review-batch/run.sh --only <PR_URL>` and report `Slack: posted (flusher not loaded — immediate)`. Say in the report that this machine needs the plist loaded (see `automations/README.md`).
 
-If it already ends with `📣 **Posted to Slack**`, it is already badged — skip the append. (This happens when the dedup jsonl lost its entry while the PR was still open.) Otherwise append a trailing `---` and a `📣 **Posted to Slack**` line, then:
+**`/post-pr --now`** (hotfixes): enqueue, then run `~/.claude/automations/pr-review-batch/run.sh --only <PR_URL>` the same way. `--only` flushes just that URL, leaves the rest of the queue for the window, and ignores the window.
 
-```bash
-gh pr edit <PR_NUMBER> --repo <OWNER/REPO> --body-file /tmp/pr-body.txt
-```
+`run.sh` logs to `~/.claude/automations/pr-review-batch/logs/flush.log` when its output isn't a terminal, which includes the Bash tool, so judge an immediate post by its **exit code** (0 means this URL was posted, nonzero means it wasn't and the entry is still queued or was dropped) and quote the `tail` of the log for the reason.
 
-Append only. Never regenerate the rest of the body here.
+Never point the flusher at a real channel to "test" it. `--channel <id>` (or env `PR_REVIEW_BATCH_CHANNEL`) aims it at Jake's own DM instead.
 
-### 6. Undraft
+`pr-review-posted.jsonl` is local dedup state that only the flusher appends (`{"url","repo","pr","postedAt"}`, the real post time), not durable memory. When a PR's sswt workspace/branch is deleted (e.g. by [[cleanup-local-branches]]), drop its entries in the posted file and the queue too — a gone workspace means the work is done and there is no double-post left to guard against.
 
-```bash
-gh pr ready <PR_NUMBER> --repo <OWNER/REPO>
-```
+### 5–6. Badge, undraft, auto-merge (the flusher)
 
-Only if it is currently a draft. Together with the badge this gives reviewers two independent signals that the PR has been shared and wants eyes.
+Not done by this skill any more. After a real post the flusher, in order: appends to `pr-review-posted.jsonl`; appends `\n\n---\n📣 **Posted to Slack**` to the body unless it already ends with the badge (read and written through a file); runs `gh pr ready` if the PR is a draft; then `gh pr merge --auto --<method>` if the entry's `autoMerge` is set. A failed post is requeued for the next window; a failed badge, undraft or auto-merge is logged and never undoes the post. Its log (`flush.log`) has one summary line per PR.
 
 ### 6.5 Offer a product update
 
-Only for a PR whose base is the default branch, after step 6 — a sub-PR merged into a trunk (step 3.6) never reaches this step. Skip it when the PR URL is already in `~/.claude/state/product-updates-posted.jsonl`, which records `posted` **and** `declined` lines so a re-run never re-asks.
+Only for a PR whose base is the default branch, right after step 4's enqueue — a sub-PR merged into a trunk (step 3.6) never reaches this step. It runs at enqueue time, not when the flusher posts, because it asks a question and the flusher is unattended. Skip it when the PR URL is already in `~/.claude/state/product-updates-posted.jsonl`, which records `posted` **and** `declined` lines so a re-run never re-asks.
 
-This is one of two steps that ask (the other is 6.6). Steps 4-6 are covered by the standing authorization in the global CLAUDE.md; a post to `#product-updates` (ID `C0C9DKM77HA`) is a user-facing announcement and is not, so Jake decides per PR whether the screenshot is worth announcing.
+This is the one step that asks. The `#pr-review` post, badge, undraft and auto-merge are covered by the standing authorization in the global CLAUDE.md; a post to `#product-updates` (ID `C0C9DKM77HA`) is a user-facing announcement and is not, so Jake decides per PR whether the screenshot is worth announcing.
 
 1. **Find and download the screenshots.** `scripts/fetch-pr-screenshots.sh <owner/repo> <pr> "$(mktemp -d)"` prints one local image path per line (at most 4, de-duplicated, verified as real images under 10 MB). No output means the PR has no screenshot: report `n/a (no screenshot)` and stop without asking.
 2. **Show them, then ask once.** `Read` each image so Jake sees it, then `AskUserQuestion`: *Post this to #product-updates?* with **Post**, **Skip**, and Other for a caption of their own. If no human can answer (unattended run), treat it as no answer: report `not offered (unattended)`, record nothing, so a later interactive run still asks.
@@ -283,23 +282,9 @@ This is one of two steps that ask (the other is 6.6). Steps 4-6 are covered by t
 
 Never run `slack-upload-images.sh` to "test" it against a real channel — it posts for real. Point it at Jake's own DM channel instead.
 
-### 6.6 Offer auto-merge
-
-Only for a PR whose base is the default branch, after steps 6 and 6.5 — a sub-PR merged into a trunk (step 3.6) never reaches this step. Always runs, including when 6.5 had nothing to offer.
-
-Merging is outside the standing authorization for most repos, so this step asks; it never enables auto-merge on its own.
-
-1. **Check it's worth asking.** Skip silently, with the reason in the report, when:
-   - the PR already has auto-merge on: `gh pr view <PR_NUMBER> --repo <OWNER/REPO> --json autoMergeRequest -q .autoMergeRequest` is non-null → report `already on`;
-   - the repo disallows it: `gh api repos/<OWNER/REPO> --jq .allow_auto_merge` is `false` → report `n/a (repo disallows)`. Don't change the repo setting.
-2. **Pick the method.** `--squash` unless the repo's `allow_squash_merge` is false, then `--merge`. Never `--rebase` unless it is the only method the repo allows.
-3. **Ask once.** `AskUserQuestion`: *Enable auto-merge on `<repo>#<n>`?* with **Enable (squash)** (name the actual method), **Skip**, and Other. Say what it does in the question: GitHub merges the PR by itself once required reviews and checks pass, and deletes the branch if the repo does that on merge. Read `mergeStateStatus` first: when it is `CLEAN`, nothing is left to wait for, so `--auto` would merge immediately. Say so in the question, so a yes is understood as "merge now". If no human can answer (unattended run), treat it as no answer: report `not offered (unattended)` and enable nothing.
-4. **Enable.** On a yes: `gh pr merge <PR_NUMBER> --repo <OWNER/REPO> --auto --squash` (or `--merge`), then confirm with `gh pr view <PR_NUMBER> --repo <OWNER/REPO> --json autoMergeRequest,mergeStateStatus,reviewDecision` and report the method, `enabledBy` and what it is still waiting on (usually `REVIEW_REQUIRED`). On a skip, report `declined` and do nothing; no state is recorded, so a later `/post-pr` run on the same PR asks again.
-5. **Stop watching.** With auto-merge on, GitHub finishes the PR, so stop any Monitor or loop this run armed on it and say the PR no longer needs watching. A failed `gh pr merge --auto` is reported with its error, never retried with other flags, and never fails the run.
-
 ### 7. Report
 
-Record the run in the metrics ledger before reporting (and before step 3.7's reap, which kills the terminal): `~/.ai-tools/bin/review-metrics run --outcome posted|merged|stopped|skipped [--gate review|ci|conflicts|merge]`. Use `stopped` with the gate that fired when the run halted early, `skipped` when the dedup check skipped the Slack post. It reads the phase stamps and round count from the worktree, so run it from there. `~/.ai-tools/bin/review-metrics summary` aggregates rounds, durations and gate stops.
+Record the run in the metrics ledger before reporting (and before step 3.7's reap, which kills the terminal): `~/.ai-tools/bin/review-metrics run --outcome queued|posted|merged|stopped|skipped [--gate review|ci|conflicts|merge]`. Use `queued` for an announceable PR handed to the flusher, `posted` only when this run posted it immediately (`--now` or the not-loaded safety net), `stopped` with the gate that fired when the run halted early, `skipped` when the dedup check found it already posted. It reads the phase stamps and round count from the worktree, so run it from there. `~/.ai-tools/bin/review-metrics summary` aggregates rounds, durations and gate stops.
 
 Per target, one block:
 
@@ -308,11 +293,11 @@ Concentro-Inc/api#1271
 - Review: clean after 3 rounds
 - CI: 4 checks, all pass
 - Preview: woodrow only — set (or: already set, n/a (not visible in a preview))
-- Slack: posted (or: skipped, already in dedup state)
-- Badge: appended    Draft: cleared
+- Slack: queued for next :00/:30 window (or: posted (flusher not loaded — immediate), posted (--now), skipped, already in dedup state)
+- Badge / Draft: by the flusher after the post (or, when posted now: appended / cleared, from flush.log)
 - Linear: CON-4112 (title suffix) (or: added to title, or: no ticket found)
 - Product update: posted (or: declined, n/a (no screenshot), not offered (unattended), failed (<why>))
-- Auto-merge: enabled, squash (or: declined, already on, n/a (repo disallows), not offered (unattended), failed (<why>))
+- Auto-merge: squash, applied by the flusher after the post (or: already on, n/a (repo disallows), off — <which work.md condition failed>)
 ```
 
 For a sub-PR (step 3.5 classified it internal-only), report the trunk merge in place of the announcement — never omit the announcement steps silently:
@@ -323,7 +308,7 @@ Concentro-Inc/woodrow#1555
 - CI: 1 check (label), pass — unit-tests/e2e-tests don't run against a non-main base
 - Base: feature/vde-airtable-parity (not the default branch) — sub-PR, not announced
 - Merged into feature/vde-airtable-parity (merge commit abc1234); trunk PR #1500 now carries it
-- Slack / Badge / Product update / Auto-merge: skipped (step 3.5 gate)
+- Queue / Product update: skipped (step 3.5 gate)
 - Reap: sswt + local branch deleted (or: skipped — <which check>)
 ```
 
@@ -353,14 +338,14 @@ The global CLAUDE.md instructs this to run **automatically, without asking**, on
 
 Do not fire on intermediate pushes mid-task, and do not fire on a branch whose PR is deliberately parked. When several PRs finished together, run this for each of them.
 
-Firing automatically still runs the full skill, base-branch gate included: a finished task on a branch stacked onto something other than the default branch gets reviewed and CI-checked same as any other, then merged into its trunk (step 3.6) and its sswt reaped (step 3.7) rather than announced. The trunk's own PR into the default branch is announced when the user declares the trunk complete — not automatically on each sub-merge.
+Firing automatically still runs the full skill, base-branch gate included: a finished task on a branch stacked onto something other than the default branch gets reviewed and CI-checked same as any other, then merged into its trunk (step 3.6) and its sswt reaped (step 3.7) rather than queued. The trunk's own PR into the default branch is queued when the user declares the trunk complete — not automatically on each sub-merge.
 
 Because it self-starts, it must also self-report: state plainly what it did to each PR, including anything a gate stopped.
 
 ## Why it doesn't ask first
 
-Posting to Slack is outward-facing, and outward-facing actions normally warrant a confirmation. The standing instruction in the global CLAUDE.md **is** that authorization — it is durable and given in advance, which is exactly what removes the need to ask each time.
+Posting to Slack is outward-facing, and outward-facing actions normally warrant a confirmation. The standing instruction in the global CLAUDE.md **is** that authorization — it is durable and given in advance, which is exactly what removes the need to ask each time. Queueing doesn't change that: the flusher posts later, under the same authorization, with no model in the loop.
 
-The design stays safe because the gates, not the user's attention, are what hold a PR back: an unconverged review, a failing check, a missing PR, or a non-default base branch all stop the run before anything is announced. A PR reads as "not ready" until this skill has actually run, which is why [[create-pr]] and [[refresh-pr]] open PRs as drafts in the first place.
+The design stays safe because the gates, not the user's attention, are what hold a PR back: an unconverged review, a failing check, a missing PR, or a non-default base branch all stop the run before anything is queued, and the flusher re-checks at post time that the PR is still open, still targets the default branch, hasn't been posted, and still has the head that was reviewed. A PR reads as "not ready" until the flusher has actually posted it, which is why [[create-pr]] and [[refresh-pr]] open PRs as drafts in the first place, and why a queued PR stays draft.
 
-The authorization covers the `#pr-review` post, the badge, the undraft and the trunk merge — nothing else. The `#product-updates` screenshot post (step 6.5) is a separate, user-facing announcement, and enabling auto-merge on the PR itself (step 6.6) is a merge decision, so each is asked about once, after everything above is done.
+The authorization covers the `#pr-review` post, the badge, the undraft, auto-merge (work.md makes it the default, subject to its two conditions) and the trunk merge — nothing else. The `#product-updates` screenshot post (step 6.5) is a separate, user-facing announcement, so it is asked about once, at enqueue time.

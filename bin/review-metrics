@@ -446,7 +446,7 @@ def main():
     m.set_defaults(fn=cmd_mark)
 
     u = sub.add_parser("run")
-    u.add_argument("--outcome", required=True, choices=["posted", "merged", "stopped", "skipped"])
+    u.add_argument("--outcome", required=True, choices=["queued", "posted", "merged", "stopped", "skipped"])
     u.add_argument("--gate", default=None, help="gate that stopped the run (review, ci, merge, conflicts, ...)")
     u.set_defaults(fn=cmd_run)
 

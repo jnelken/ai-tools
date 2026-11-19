@@ -19,10 +19,14 @@ a periodic/ad-hoc audit and needs a confirmation step every time.
 
 ## Steps
 
-0. **Load state.** Read `~/.claude/state/pr-review-holds.jsonl` and
-   `~/.claude/state/pr-review-posted.jsonl`. Create either with `touch` if missing — an absent
-   file means zero holds / zero known-posted, not an error. Both are flat JSONL, one JSON
-   object per line.
+0. **Load state.** Read `~/.claude/state/pr-review-holds.jsonl`,
+   `~/.claude/state/pr-review-posted.jsonl` and `~/.claude/state/pr-review-queue.jsonl`.
+   Create any with `touch` if missing — an absent file means zero holds / zero known-posted /
+   nothing queued, not an error. All are flat JSONL, one JSON object per line. A URL in the
+   queue is **pending**, not a gap: `/post-pr` queued it and the `pr-review-batch` flusher
+   posts it at the next window boundary (`:00`/`:30` by default). The queue is per machine, so
+   a PR queued on the other machine still looks like a gap here; the step 6 Slack search
+   catches it once it posts.
 
 1. **List sswt workspaces.** Call the Superset `workspaces_list` tool. Drop any entry with
    `type: "main"` — that's a root checkout, not a feature worktree, and never carries a PR
@@ -53,8 +57,9 @@ a periodic/ad-hoc audit and needs a confirmation step every time.
 4. **Filter out held PRs.** Drop any candidate whose `(repo, number)` matches a line in
    `pr-review-holds.jsonl`.
 
-5. **Filter out PRs already known-posted.** Drop any candidate whose `url` matches a line in
-   `pr-review-posted.jsonl`.
+5. **Filter out PRs already known-posted or pending.** Drop any candidate whose `url` matches a
+   line in `pr-review-posted.jsonl`. Set aside any whose `url` is in `pr-review-queue.jsonl`
+   into a "pending — queued for the next window" list for step 7; don't offer those in step 8.
 
 6. **Backfill-check via Slack search.** For each remaining candidate, search rather than
    bulk-read — a plain `slack_read_channel` history pull has a lookback horizon and will miss
@@ -73,23 +78,27 @@ a periodic/ad-hoc audit and needs a confirmation step every time.
 
 7. **Report the gap list** to the user: repo, PR number, title, URL for everything that
    survives steps 4–6. List the stacked PRs set aside in step 3 underneath, marked
-   "internal — not announceable", so the user sees them without being offered them.
+   "internal — not announceable", and the queued PRs from step 5 marked "pending — queued", so
+   the user sees them without being offered them.
 
 8. **Confirm before posting anything.** Ask the user which of the reported gaps to post now.
    Support "post all," "post none," a per-item choice, and a per-item "hold instead, because:
    `<reason>`" option. Do not post without this step, regardless of how confident the gap looks.
 
-9. **Post approved items.** For each PR the user approves:
-   - `security find-generic-password -s slack-pr-review-user-token -a "$USER" -w` to get the
-     `xoxp` token.
-   - Call `chat.postMessage` on channel `C0APAAD3PP0` with text `<PR_URL|PR_TITLE>`,
-     `unfurl_links: false`, `unfurl_media: false`.
-   - On success, append `{"url","repo","pr","postedAt"}` to `pr-review-posted.jsonl`.
+9. **Enqueue approved items.** Don't post directly. For each PR the user approves, append one
+   queue line exactly as `/post-pr` step 4 does (same `text` format with the repo label and
+   `[hygiene]` rule, current `headSha`, `autoMerge` per that step's rules, `queuedAt`), built
+   with `jq -nc` and written with a single `>>` to `pr-review-queue.jsonl`. The flusher posts
+   it at the next window, appends `pr-review-posted.jsonl`, then badges, undrafts and enables
+   auto-merge. If the user wants it out now, or `launchctl print gui/$(id -u)/com.jake.pr-review-batch`
+   shows the flusher isn't loaded on this machine, follow with
+   `~/.claude/automations/pr-review-batch/run.sh --only <PR_URL>` (exit 0 means posted; the
+   reason for anything else is in `~/.claude/automations/pr-review-batch/logs/flush.log`).
 
 10. **Record new holds.** For each item the user chose to hold instead of post, append
     `{"repo","pr","reason","heldAt"}` to `pr-review-holds.jsonl`.
 
-11. **Summarize**: posted N, held M, left unresolved if the user deferred on any without
+11. **Summarize**: queued N (or posted, with `--only`), held M, left unresolved if the user deferred on any without
     posting or holding.
 
 ## Common mistakes
@@ -105,9 +114,12 @@ a periodic/ad-hoc audit and needs a confirmation step every time.
   its trunk's PR into the default branch is the announceable unit.
 - Posting without the Step 8 confirmation — this skill's whole point is a human-gated
   second look at PRs that a fully-automatic flow wouldn't have announced on its own.
-- Leaving a stale hold behind: when a workspace/branch backing a held PR is deleted (e.g. via
-  the `cleanup-local-branches` skill), remove the matching `pr-review-holds.jsonl` entry too —
-  same cleanup rule `CLAUDE.md` already specifies for `pr-review-posted.jsonl`.
+- Leaving a stale entry behind: when a workspace/branch backing a held or queued PR is deleted
+  (e.g. via the `cleanup-local-branches` skill), remove its `pr-review-holds.jsonl` and
+  `pr-review-queue.jsonl` entries too — same cleanup rule `/post-pr` specifies for
+  `pr-review-posted.jsonl`. (The flusher also drops a queued PR on its own once it is no longer
+  open.)
+- Treating a queued PR as a gap — it is already on its way; posting it again would double-post.
 
 ## Why this exists
 
