@@ -151,6 +151,13 @@ git ls-remote --heads origin <BASE_REF>    # the trunk must exist on origin
 
 Merge when `mergeable` is `MERGEABLE` and `mergeStateStatus` is `CLEAN` — or `UNSTABLE` only because main-scoped workflows (unit-tests, e2e-tests, Netlify) structurally didn't run, per the note under step 3. Any other state stops here.
 
+**Re-check the parent first.** The trunk's own PR may have been approved or merged since this sub-PR opened. [[create-pr]]'s same-ticket stacking makes this common, because it stacks onto ordinary feature PRs that reviewers are actively approving.
+```bash
+gh pr list --repo <OWNER/REPO> --head <BASE_REF> --state all --json number,state,reviewDecision -q '.[0]'
+```
+- If the parent is `OPEN` and not `APPROVED`, merge as below.
+- If the parent is `APPROVED`, `MERGED` or `CLOSED`, **don't merge into it**. Merging would put unreviewed code under an approval, or into a branch that is already done. Retarget instead with `gh pr edit <PR_NUMBER> --repo <OWNER/REPO> --base <DEFAULT_BRANCH>`, re-run step 2.5 (conflicts with main) and step 3 (main-scoped checks now run), then continue at step 4 as an announceable PR. Report it as `Base: retargeted to <default> (parent #N <approved|merged>)`.
+
 ```bash
 gh pr ready <PR_NUMBER> --repo <OWNER/REPO>        # only if isDraft — GitHub refuses to merge a draft
 gh pr merge <PR_NUMBER> --repo <OWNER/REPO> --merge --delete-branch=false
