@@ -142,6 +142,9 @@ class ContinuationTest(unittest.TestCase):
         resumed = {**self.request, 'stamp': 'two', 'orchestrator': {
             **self.request['orchestrator'], 'action': 'resume_worker'}}
         self.assertTrue(continuation.compatible(saved, resumed, 'codex', self.path, self.env))
+        answered = {**resumed, 'orchestrator': {**resumed['orchestrator'],
+            'directive_ticket': 'DEV-1', 'decision_instruction': 'Read the owner directive before continuing.'}}
+        self.assertTrue(continuation.compatible(saved, answered, 'codex', self.path, self.env))
         self.assertFalse(continuation.compatible(saved, resumed, 'claude', self.path, self.env))
         self.assertFalse(continuation.compatible(saved, resumed, 'codex', self.path,
                                                   {**self.env, 'OPENAI_API_KEY': 'account-two'}))

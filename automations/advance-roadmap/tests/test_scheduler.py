@@ -45,6 +45,14 @@ class SchedulerTest(unittest.TestCase):
         self.store.set('eligibility:a', {'fingerprint': d['fingerprint'], 'checked': 9999})
         return d
 
+    def planner_result(self, stamp, **changes):
+        run = self.root / 'runs' / stamp
+        run.mkdir(parents=True, exist_ok=True)
+        plan = {'action': 'blocked_no_item', 'summary': 'No actionable item'}
+        plan.update(changes)
+        (run / 'orchestrator-result.json').write_text(json.dumps(plan))
+        return run
+
     def test_idle_ticks_invoke_no_models_or_budget_probes(self):
         self.cached()
         with patch.object(s.batch.shared, 'py', side_effect=AssertionError('no external calls')), patch.object(
@@ -129,7 +137,9 @@ class SchedulerTest(unittest.TestCase):
         path.write_text(json.dumps({'stamp': '20261110-110000', 'outcome': 'error'}) + '\n')
         s.observe_completed(self.store, self.root)
         with path.open('a') as stream:
-            stream.write(json.dumps({'stamp': '20261110-100000', 'outcome': 'blocked-no-item'}) + '\n')
+            self.planner_result('20261110-100000')
+            stream.write(json.dumps({'stamp': '20261110-100000', 'outcome': 'blocked-no-item',
+                                     'action': 'blocked_no_item', 'worker_exit': 0}) + '\n')
         s.observe_completed(self.store, self.root)
         self.assertEqual(self.store.get('eligibility:a')['fingerprint'], 'older-inputs')
         self.assertEqual(self.decide()['decision'], 'plan')
@@ -139,6 +149,7 @@ class SchedulerTest(unittest.TestCase):
         rows = []
         for stamp in ('20261112-100001', '20261112-100002'):
             self.store.attempt(stamp, 'a')
+            self.planner_result(stamp)
             self.store.set('eligibility_at_start:' + stamp, fingerprint)
             rows.append({'stamp': stamp, 'assigned_repo': 'a', 'action': 'blocked_no_item',
                          'outcome': 'yielded', 'worker_exit': 0, 'item': None, 'linear_id': None,
@@ -151,7 +162,7 @@ class SchedulerTest(unittest.TestCase):
             s.observe_completed(self.store, self.root)
             s.observe_completed(self.store, self.root)
         state = self.store.get('no_item_yield:a')
-        self.assertEqual((state['count'], state['not_before']), (2, 17200))
+        self.assertEqual((state['count'], state['not_before']), (2, 96400))
         self.assertEqual(self.decide()['decision'], 'wait')
         self.write([{'id': 'DEV-1', 'labels': ['repo/a'], 'human_comments_sha': 'new'}])
         self.assertEqual(self.decide()['decision'], 'plan')
@@ -159,19 +170,40 @@ class SchedulerTest(unittest.TestCase):
 
     def test_no_item_backoff_ignores_git_churn_but_wakes_for_scoped_issue(self):
         self.write([{'id': 'DEV-1', 'labels': ['repo/a'], 'title': 'one'}])
-        fingerprint = q.no_item_fingerprint('a', json.loads(self.snapshot.read_text()))
+        fingerprint = q.no_item_fingerprint('a', json.loads(self.snapshot.read_text()),
+            self.root / 'code', s.batch.shared.HERE.parents[1] / 'skills/advance-roadmap')
         self.store.set('no_item_yield:a', {'input_fingerprint': fingerprint, 'not_before': 20000})
-        with patch.object(q, 'git', return_value='unrelated branch changed'):
+        with patch.object(q, 'git', side_effect=lambda repo, *args: 'stable' if args[:2] == ('rev-parse', 'HEAD') else 'unrelated branch changed'):
             self.assertEqual(self.decide()['decision'], 'wait')
             self.write([{'id': 'DEV-1', 'labels': ['repo/a'], 'title': 'changed'}])
             self.assertEqual(self.decide()['decision'], 'plan')
 
-    def test_completed_no_item_plan_waits_once_then_retries(self):
+    def test_no_item_fingerprint_tracks_both_feature_and_conductor_policy(self):
+        skill = self.root / 'skills' / 'advance-roadmap'
+        conductor = skill.parent / 'conductor'
+        skill.mkdir(parents=True)
+        conductor.mkdir()
+        (skill / 'SAFETY.md').write_text('safety')
+        (conductor / 'ORCHESTRATOR.md').write_text('first')
+        snapshot = json.loads(self.snapshot.read_text())
+        original = q.no_item_fingerprint('a', snapshot, self.root / 'code', skill)
+        (conductor / 'ORCHESTRATOR.md').write_text('changed')
+        self.assertNotEqual(original, q.no_item_fingerprint('a', snapshot, self.root / 'code', skill))
+
+    def test_changed_no_item_fingerprint_is_not_held_by_older_eligibility_cache(self):
+        fp = self.cached()['fingerprint']
+        self.store.set('no_item_yield:a', {'fingerprint': fp, 'input_fingerprint': 'old',
+                                          'not_before': 20000})
+        self.assertEqual(self.decide()['decision'], 'plan')
+
+    def test_completed_no_item_plan_waits_until_a_day_or_inputs_change(self):
         stamp = '20261112-100001'
+        self.planner_result(stamp)
         fp = self.decide()['fingerprint']
         self.store.set('eligibility_at_start:' + stamp, fp)
         self.store.set('no_item_inputs_at_start:' + stamp,
-                       q.no_item_fingerprint('a', json.loads(self.snapshot.read_text())))
+                       q.no_item_fingerprint('a', json.loads(self.snapshot.read_text()),
+                           self.root / 'code', s.batch.shared.HERE.parents[1] / 'skills/advance-roadmap'))
         row = {'stamp': stamp, 'assigned_repo': 'a', 'action': 'blocked_no_item',
                'outcome': 'blocked-no-item', 'worker_exit': 0,
                'finished_at': datetime.fromtimestamp(10000).isoformat()}
@@ -179,7 +211,10 @@ class SchedulerTest(unittest.TestCase):
         with patch.object(s.time, 'time', return_value=10000):
             s.observe_completed(self.store, self.root)
         self.assertEqual(self.decide()['decision'], 'wait')
-        self.assertEqual(s.policy(self.store, ['a'], self.snapshot, now=13601)[0]['decision'], 'plan')
+        self.assertEqual(s.policy(self.store, ['a'], self.snapshot, now=13601)[0]['decision'], 'wait')
+        self.assertEqual(s.policy(self.store, ['a'], self.snapshot, now=96401)[0]['decision'], 'plan')
+        with patch.object(q, 'git', return_value='new HEAD'):
+            self.assertEqual(self.decide()['decision'], 'plan')
 
     def test_skipped_unchanged_after_expired_no_item_backoff_stays_quiet(self):
         fp = self.decide()['fingerprint']
@@ -207,6 +242,7 @@ class SchedulerTest(unittest.TestCase):
         records = []
         for stamp, fingerprint in [('20261112-100001', 'older'), ('20261112-100002', current)]:
             self.store.attempt(stamp, 'a')
+            self.planner_result(stamp)
             self.store.set('eligibility_at_start:' + stamp, fingerprint)
             records.append({'stamp': stamp, 'assigned_repo': 'a', 'action': 'blocked_no_item',
                             'outcome': 'yielded', 'worker_exit': 0,
@@ -216,6 +252,26 @@ class SchedulerTest(unittest.TestCase):
             s.observe_completed(self.store, self.root)
         self.assertEqual(self.store.get('no_item_yield:a')['count'], 2)
         self.assertEqual(self.decide()['decision'], 'wait')
+
+    def test_error_rejected_or_second_thread_verdict_does_not_suppress_repo(self):
+        for mode in ('missing', 'parse-error', 'rejected', 'second-thread', 'thread-two'):
+            with self.subTest(mode=mode):
+                stamp = '20261112-' + str(100000 + len(mode))
+                self.store.set('eligibility_at_start:' + stamp, self.decide()['fingerprint'])
+                row = {'stamp': stamp, 'assigned_repo': 'a', 'action': 'blocked_no_item',
+                       'outcome': 'blocked-no-item', 'worker_exit': 0}
+                if mode != 'missing':
+                    run = self.planner_result(stamp,
+                        **({'parse_error': 'invalid output'} if mode == 'parse-error' else {}),
+                        **({'summary': 'no second thread'} if mode == 'second-thread' else {}))
+                    if mode == 'rejected':
+                        (run / 'dispatch-rejected').write_text('busy')
+                    if mode == 'thread-two':
+                        self.store.set('thread_at_start:' + stamp, 2)
+                (self.root / 'runs.jsonl').write_text(json.dumps(row) + '\n')
+                s.observe_completed(self.store, self.root)
+                self.assertIsNone(self.store.get('no_item_yield:a'))
+                self.assertIsNone(self.store.get('eligibility:a'))
 
     def test_daily_planning_cap_counts_unrecorded_attempts(self):
         stamp = time.strftime('%Y%m%d')

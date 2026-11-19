@@ -229,7 +229,8 @@ def cmd_settle(a):
                       'finished_at': datetime.now().isoformat(timespec='seconds'),
                       'worker_exit': a.worker_rc, 'worker': result.get('provider'),
                       'detail': result.get('input_question') or result.get('summary')}, result)
-    if a.worker_rc != 0 or outcome is None or outcome in RETRY_OUTCOMES or outcome in {"blocked-branch-left", "shipped-deploy-failed"}:
+    needs_input = result.get('needs_input') is True and str(result.get('input_question') or '').strip()
+    if a.worker_rc != 0 or needs_input or outcome is None or outcome in RETRY_OUTCOMES or outcome in {"blocked-branch-left", "shipped-deploy-failed"}:
         print(f"pending plan: kept for next run (worker outcome={outcome or 'none'}, rc={a.worker_rc})")
     else:
         clear(a.file)

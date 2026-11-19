@@ -3,7 +3,7 @@ import { createRequire } from 'node:module';
 import { dirname, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { parseArgs } from 'node:util';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 
 const { values } = parseArgs({ options: {
   script: { type: 'string' }, stamp: { type: 'string' }, runs: { type: 'string' },
@@ -16,6 +16,9 @@ require('dotenv').config({ path: resolve(dirname(script), '../.env'), quiet: tru
 const summary = await import(pathToFileURL(resolve(dirname(script), '../src/roadmap-summary.js')).href);
 const record = summary.loadRunRecord(values.runs, values.stamp);
 if (!record) throw new Error(`No run record found for ${values.stamp}`);
+const decisionsPath = resolve(dirname(script), '../src/roadmap-decisions.js');
+const decisionsModule = existsSync(decisionsPath) ? await import(pathToFileURL(decisionsPath).href) : null;
+if (decisionsModule) record.decision = await decisionsModule.loadRoadmapDecision(record, dirname(values.runs));
 // A missing assignment does not mean Linear is empty. Preserve visible errors and
 // blockers without labeling them as a global "no ticket" finding.
 if (!record.item && !record.linear_id) record.item = 'Run needs attention';
@@ -40,7 +43,10 @@ if (values['dry-run']) {
 } else {
   if (!process.env.SLACK_BOT_TOKEN) throw new Error('SLACK_BOT_TOKEN is not set');
   const { WebClient } = require('@slack/web-api');
-  const response = await summary.postRoadmapSummary({ client: new WebClient(process.env.SLACK_BOT_TOKEN), record,
-    channel: process.env.ADVANCE_ROADMAP_SLACK_CHANNEL || summary.DEFAULT_ROADMAP_CHANNEL });
+  const client = new WebClient(process.env.SLACK_BOT_TOKEN);
+  const decisions = decisionsModule && new decisionsModule.RoadmapDecisions({ ownerUserId: process.env.SLACK_OWNER_USER_ID?.trim(), client, root: dirname(values.runs) });
+  const response = await summary.postRoadmapSummary({ client, record,
+    channel: process.env.ADVANCE_ROADMAP_SLACK_CHANNEL || summary.DEFAULT_ROADMAP_CHANNEL,
+    onPosted: decisions ? (message) => decisions.register(message) : undefined });
   console.log(`Posted run ${record.stamp} (${response?.ts || 'accepted'})`);
 }

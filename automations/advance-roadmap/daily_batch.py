@@ -622,6 +622,14 @@ class Batch:
                "ADVANCE_ROADMAP_LAST_VERDICT": str(self.verdict_path(item))}
         if item.get('selected_tickets'):
             env['ADVANCE_ROADMAP_SELECTED_TICKETS'] = ' '.join(item['selected_tickets'])
+        if item.get('decision_target'):
+            env['ADVANCE_ROADMAP_TARGETED_DECISION'] = '1'
+            env['ADVANCE_ROADMAP_DECISION_TICKET'] = item['selected_tickets'][0]
+            if item.get('decision_plan_path'):
+                env['ADVANCE_ROADMAP_DECISION_PLAN_PATH'] = item['decision_plan_path']
+                env['ADVANCE_ROADMAP_DECISION_REQUIREMENTS'] = item['decision_requirements']
+            if item.get('decision_resume_only'):
+                env['ADVANCE_ROADMAP_DECISION_RESUME_ONLY'] = '1'
         if getattr(self.budget, 'incremental', False):
             env['ADVANCE_ROADMAP_INCREMENTAL'] = '1'
         allocation = item.get("allocation") or {}
@@ -634,12 +642,14 @@ class Batch:
             sorted({i["repo"] for i in self.state["queue"] if i["repo"] != item["repo"]}))
         with workqueue.Store(ROOT) as store:
             snapshot = workqueue.read(self.directory / 'linear-snapshot.json', {})
+            store.set('thread_at_start:' + item['stamp'], item['thread'])
             store.set('eligibility_at_start:' + item['stamp'], workqueue.eligibility_fingerprint(
                 item['repo'], shared.code_dir(), snapshot,
                 shared.HERE.parents[1] / 'skills/advance-roadmap'))
             if snapshot.get('ok'):
                 store.set('no_item_inputs_at_start:' + item['stamp'],
-                          workqueue.no_item_fingerprint(item['repo'], snapshot))
+                          workqueue.no_item_fingerprint(item['repo'], snapshot, shared.code_dir(),
+                              shared.HERE.parents[1] / 'skills/advance-roadmap'))
         with open(ROOT / "logs" / f'batch-lane-{item["stamp"]}.err', "w") as err:
             proc = subprocess.Popen(["/bin/zsh", str(shared.RUN_SH)], env=env,
                                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
@@ -1287,8 +1297,10 @@ def post_slack_summary(directory):
     if not url:
         return False
     state = shared.read_json(directory / 'batch.json') or {}
-    text = text or " ".join(filter(None, [f'advance-roadmap batch {state.get("date")}: {state.get("phase")}.',
-                                          quota_line(state)]))
+    if not text:
+        from slack_fallback import notice
+        text = notice(f'advance-roadmap · Batch {state.get("date")}',
+                      f'Status: {state.get("phase") or "unknown"}.', quota_line(state))
     try:
         import urllib.request
         request = urllib.request.Request(url, data=json.dumps({"text": text}).encode(),

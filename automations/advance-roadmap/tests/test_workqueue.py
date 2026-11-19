@@ -121,6 +121,28 @@ class QueueTest(unittest.TestCase):
         self.store.release_human(work['id'], 'Use the existing personal account')
         self.assertIsNone(self.store.hold('a'))
 
+    def test_yield_with_question_holds_once_and_reimport_does_not_rehold(self):
+        wid = self.register()
+        row = {'stamp': '20261110-103001', 'outcome': 'yielded', 'worker_exit': 0}
+        result = {'outcome': 'yielded', 'needs_input': True, 'input_question': 'Which account?'}
+        self.store.finish(row, result)
+        self.assertEqual(self.store.hold('a')['state'], 'human')
+        self.store.release_human(wid, 'Use the personal account')
+        self.store.finish(row, result)
+        self.assertIsNone(self.store.hold('a'))
+
+    def test_question_with_non_retry_outcome_keeps_pending_plan(self):
+        saved, result, request = (self.root / name for name in ('pending.json', 'result.json', 'request.json'))
+        saved.write_text(json.dumps({'orchestrator': plan(), 'last_stamp': '20261110-103001'}))
+        result.write_text(json.dumps({'outcome': 'bookkeeping', 'needs_input': True, 'input_question': 'Which account?'}))
+        request.write_text(json.dumps({'stamp': '20261110-103001', 'orchestrator': plan()}))
+        store_type = q.Store
+        with patch.object(pendingplan.workqueue, 'Store', side_effect=lambda: store_type(self.root)):
+            pendingplan.cmd_settle(SimpleNamespace(file=str(saved), worker_result=str(result),
+                                                   request_file=str(request), worker_rc=0))
+        self.assertTrue(saved.exists())
+        self.assertEqual(self.store.hold('a')['state'], 'human')
+
     def test_quota_wait_honors_reset_and_reimport_does_not_extend_it(self):
         self.register()
         r = {'stamp': '20261110-103001', 'outcome': 'quota-paused',

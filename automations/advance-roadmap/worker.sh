@@ -235,6 +235,12 @@ Continuation rules:
 - Only a decision or access that requires Jake is a human blocker. In that case include
   needs_input: true and one specific input_question in the worker result; otherwise needs_input: false.
 - Do not repeat a completed merge or trust test/review evidence for a different HEAD."
+decision_instruction="$(jq -r '.orchestrator.decision_instruction // empty' "$REQUEST_FILE" 2>/dev/null)"
+if [ -n "$decision_instruction" ]; then
+  BASE_PROMPT="$BASE_PROMPT
+
+$decision_instruction"
+fi
 if [ "${ADVANCE_ROADMAP_NO_MESSAGES:-0}" = 1 ]; then
   BASE_PROMPT="$BASE_PROMPT
 

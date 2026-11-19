@@ -31,16 +31,16 @@ def policy(store, repos, snapshot, now=None, daily_limit=True):
     code = Path(batch.shared.code_dir())
     snapshot_data = read(snapshot, {}) or {}
     issues = snapshot_data.get('issues', [])
+    skill_root = batch.shared.HERE.parents[1] / 'skills/advance-roadmap'
     decisions = []
     for repo in repos:
         cached = store.get('eligibility:' + repo, {})
-        fp = eligibility_fingerprint(repo, code, snapshot_data,
-                                     batch.shared.HERE.parents[1] / 'skills/advance-roadmap')
+        fp = eligibility_fingerprint(repo, code, snapshot_data, skill_root)
         hold = store.hold(repo, now)
         active = [w for w in store.list(repo) if w['state'] != 'done']
         no_item = store.get('no_item_yield:' + repo, {})
-        no_item_matches = (no_item.get('input_fingerprint') == no_item_fingerprint(repo, snapshot_data)
-                           if no_item.get('input_fingerprint') and snapshot_data.get('ok')
+        no_item_matches = (no_item.get('input_fingerprint') == no_item_fingerprint(repo, snapshot_data, code, skill_root)
+                           if no_item.get('input_fingerprint') and snapshot_data.get('ok') and not snapshot_data.get('truncated')
                            else bool(no_item) and no_item.get('fingerprint') == fp)
         changed_human = any(w['state'] == 'human' and human_changed(store, w, snapshot_data) for w in active)
         capped = daily_limit and repo not in daily_admission(store, [repo])
@@ -58,7 +58,7 @@ def policy(store, repos, snapshot, now=None, daily_limit=True):
             decision, reason = 'wait', 'newer unchanged verdict; wake on relevant change or safety audit'
         elif no_item_matches:
             decision, reason = 'plan', 'no-assignment backoff expired; recheck for work'
-        elif cached.get('fingerprint') == fp and now - cached.get('checked', 0) < 72 * 3600:
+        elif not no_item and cached.get('fingerprint') == fp and now - cached.get('checked', 0) < 72 * 3600:
             decision, reason = 'wait', 'inputs unchanged; wake on relevant change or 72-hour safety audit'
         else:
             decision, reason = 'plan', 'relevant inputs changed or safety audit is due'
@@ -78,6 +78,19 @@ def record_shadow(store, decisions, now=None):
     store.set('last_tick', {'at': now, 'decisions': decisions})
 
 
+def verified_no_work(root, row):
+    """Cache only actual first-thread planner findings, never errors or rejected dispatches."""
+    run = root / 'runs' / str(row.get('stamp') or '')
+    plan = read(run / 'orchestrator-result.json', {}) or {}
+    summary = plan.get('summary') if isinstance(plan, dict) else None
+    return (isinstance(plan, dict)
+            and plan.get('action') in {'blocked_no_item', 'nothing_qualified'}
+            and isinstance(summary, str) and bool(summary.strip())
+            and 'no second thread' not in summary.lower()
+            and not plan.get('parse_error') and not plan.get('planner_error')
+            and not (run / 'dispatch-rejected').exists())
+
+
 def observe_completed(store, root):
     """Only an actual completed planner decision can establish a cached no-work verdict."""
     assignments = {r['stamp']: r['assigned_repo'] for r in store.db.execute('SELECT * FROM attempts')}
@@ -89,7 +102,10 @@ def observe_completed(store, root):
         fingerprint = store.get('eligibility_at_start:' + stamp)
         no_item = (repo and fingerprint and row.get('outcome') in {'yielded', 'blocked-no-item', 'nothing-qualified'}
                    and row.get('action') in {'blocked_no_item', 'nothing_qualified'}
-                   and not row.get('item') and not row.get('linear_id') and row.get('worker_exit') == 0)
+                   and not row.get('item') and not row.get('linear_id') and row.get('worker_exit') == 0
+                   and store.get('thread_at_start:' + stamp, 1) == 1
+                   and not store.get('targeted_at_start:' + stamp, False)
+                   and verified_no_work(root, row))
         if no_item and store.get('observed_no_item:' + stamp) != signature:
             prior = store.get('no_item_yield:' + repo, {})
             # A late completion must not replace a newer observation.
@@ -103,7 +119,9 @@ def observe_completed(store, root):
                 # repetition count, though later input changes should wake the repo.
                 age = completed - prior.get('completed', 0)
                 count = prior.get('count', 0) + 1 if 0 <= age <= 24 * 3600 else 1
-                delay = min(24 * 3600, 3600 * 2 ** min(max(count - 1, 0), 5))
+                # A clean no-work result should not select this repo again on an
+                # hourly loop. Recheck after a bounded interval or any input change.
+                delay = 24 * 3600
                 store.set('no_item_yield:' + repo, {'fingerprint': fingerprint, 'count': count,
                                                    'input_fingerprint': store.get('no_item_inputs_at_start:' + stamp),
                                                    'stamp': stamp, 'completed': completed,
@@ -115,7 +133,7 @@ def observe_completed(store, root):
         if not fingerprint:
             continue  # historical or uncorrelated fingerprints cannot establish a new cache
         outcome = row.get('outcome')
-        if outcome in {'blocked-no-item', 'nothing-qualified', 'skipped-unchanged'}:
+        if no_item or outcome == 'skipped-unchanged':
             checked = time.time()
             store.set('eligibility:' + repo, {'fingerprint': fingerprint, 'checked': checked,
                                             'stamp': stamp, 'outcome': outcome})

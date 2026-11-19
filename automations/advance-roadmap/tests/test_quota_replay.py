@@ -28,6 +28,7 @@ sys.path.insert(0, str(HERE / "lib"))
 import daily_batch  # noqa: E402
 import planapproval  # noqa: E402
 import runrecord  # noqa: E402
+import workqueue  # noqa: E402
 from usage import ROLE_PROVIDERS  # noqa: E402
 
 
@@ -613,6 +614,46 @@ exec(compile(open(__file__).read(), __file__, "exec"))
         self.assertFalse(any(c['role'] == 'worker' for c in self.calls()))
         self.assertTrue((run / 'dispatch-rejected').exists())
         self.assertIn('eligible ticket', (run / 'dispatch-rejected').read_text())
+
+    def test_decision_resume_uses_exact_plan_and_carries_directive_without_changing_session_identity(self):
+        self.usage_state()
+        pending = self.root / 'pending'; pending.mkdir()
+        plan = json.loads(self.worker_plan())
+        plan.update(action='resume_worker', linear_id='DEV-1', worker_brief='Original requirements')
+        wrong = {**plan, 'linear_id': 'DEV-2', 'branch': 'roadmap/other'}
+        (pending / 'pending-plan-demo.json').write_text(json.dumps({'orchestrator': wrong}))
+        selected = pending / 'pending-plan-demo.t1.json'
+        selected.write_text(json.dumps({'orchestrator': plan}))
+        stub = self.root / 'lib/pendingplan.py'; stub.unlink()
+        stub.write_text('import json,sys\na=sys.argv\nif "reuse" in a:\n r=json.load(open(a[a.index("--file")+1]))["orchestrator"]\n json.dump(r,open(a[a.index("--out")+1],"w"))\n')
+        (self.root / 'lib/workqueue.py').symlink_to(HERE / 'lib/workqueue.py')
+        run = self.run_lane(ADVANCE_ROADMAP_TARGETED_DECISION='1', ADVANCE_ROADMAP_DECISION_TICKET='DEV-1',
+                            ADVANCE_ROADMAP_DECISION_RESUME_ONLY='1', ADVANCE_ROADMAP_DECISION_PLAN_PATH=str(selected),
+                            ADVANCE_ROADMAP_DECISION_REQUIREMENTS=workqueue.requirements_fingerprint(plan),
+                            ADVANCE_ROADMAP_SELECTED_TICKETS='DEV-1')
+        req = json.loads((run / 'worker-request.json').read_text())
+        self.assertEqual(req['orchestrator']['linear_id'], 'DEV-1')
+        self.assertEqual(req['orchestrator']['directive_ticket'], 'DEV-1')
+        self.assertIn('read and follow', req['orchestrator']['decision_instruction'])
+        self.assertEqual(workqueue.requirements_fingerprint(req['orchestrator']), workqueue.requirements_fingerprint(plan))
+        self.assertTrue((pending / 'pending-plan-demo.json').exists())
+
+    def test_changed_decision_resume_plan_is_not_dispatched(self):
+        self.usage_state()
+        pending = self.root / 'pending'; pending.mkdir()
+        plan = json.loads(self.worker_plan())
+        plan.update(action='resume_worker', linear_id='DEV-1', worker_brief='changed requirements')
+        selected = pending / 'pending-plan-demo.json'
+        selected.write_text(json.dumps({'orchestrator': plan}))
+        stub = self.root / 'lib/pendingplan.py'; stub.unlink()
+        stub.write_text('import json,sys\na=sys.argv\nif "reuse" in a:\n json.dump(json.load(open(a[a.index("--file")+1]))["orchestrator"],open(a[a.index("--out")+1],"w"))\n')
+        (self.root / 'lib/workqueue.py').symlink_to(HERE / 'lib/workqueue.py')
+        run = self.run_lane(ADVANCE_ROADMAP_TARGETED_DECISION='1', ADVANCE_ROADMAP_DECISION_TICKET='DEV-1',
+                            ADVANCE_ROADMAP_DECISION_PLAN_PATH=str(selected),
+                            ADVANCE_ROADMAP_DECISION_REQUIREMENTS=workqueue.requirements_fingerprint({**plan, 'worker_brief': 'original'}),
+                            ADVANCE_ROADMAP_SELECTED_TICKETS='DEV-1')
+        self.assertIn('changed since selection', (run / 'dispatch-rejected').read_text())
+        self.assertFalse(any(c['role'] == 'worker' for c in self.calls()))
 
     def test_selected_tickets_are_reassessed_despite_an_unchanged_verdict(self):
         self.usage_state(codex={'weekly': {'used_pct': 90, 'reset_epoch': FUTURE}})

@@ -162,6 +162,11 @@ find "$LOGDIR" -name 'run-*.log' -mtime +30 -delete 2>/dev/null
 # Per-run scratch the agents write into; runs.jsonl is the durable copy.
 RUN_DIR="$ROOT/runs/$STAMP"
 mkdir -p "$RUN_DIR"
+# A decision replan covers one ticket, not the whole repo. Never read or write
+# the repo-wide no-work verdict for this narrower scope.
+if [ "${ADVANCE_ROADMAP_TARGETED_DECISION:-0}" = "1" ]; then
+  LAST_VERDICT="$RUN_DIR/target-verdict.json"
+fi
 find "$ROOT/runs" -mindepth 1 -maxdepth 1 -type d -mtime +30 -exec rm -rf {} + 2>/dev/null
 ORCH_RESULT="$RUN_DIR/orchestrator-result.json"
 WORKER_RESULT="$RUN_DIR/worker-result.json"
@@ -255,21 +260,9 @@ PY
   echo "=== slack: continuous run summary failed; trying webhook ===" >> "$LOG"
   [ -n "$SLACK_WEBHOOK" ] && command -v jq >/dev/null 2>&1 || return 0
   local summary payload
-  summary="$(python3 - "$ROOT/runs.jsonl" "$STAMP" <<'PY'
-import json, sys
-for line in open(sys.argv[1]):
-    try:
-        row = json.loads(line)
-    except ValueError:
-        continue
-    if row.get('stamp') == sys.argv[2]:
-        detail = row.get('slack_summary') or row.get('summary') or row.get('detail') or ''
-        print(' '.join(f"{row.get('repo') or 'roadmap'}: {row.get('outcome') or 'unknown'} — {detail}".split())[:300])
-        break
-PY
-)"
+  summary="$(python3 "$ROOT/lib/slack_fallback.py" run "$ROOT/runs.jsonl" "$STAMP")"
   [ -n "$summary" ] || return 0
-  payload="$(jq -n --arg t "*advance-roadmap* $summary" '{text:$t}')"
+  payload="$(jq -n --arg t "$summary" '{text:$t}')"
   curl -sf -m 15 -X POST -H 'Content-Type: application/json' -d "$payload" "$SLACK_WEBHOOK" >/dev/null \
     && echo "=== slack: continuous run webhook posted ===" >> "$LOG" \
     || echo "=== slack: continuous run webhook failed ===" >> "$LOG"
@@ -729,6 +722,11 @@ If a PushNotification probe would have been useful, set a note in summary; the w
     [ "$THREAD" -gt 1 ] && break
     prepo="$(jq -r '.orchestrator.repo // empty' "$f" 2>/dev/null)"
     [ -n "$TARGET_REPO" ] && [ "$prepo" != "$TARGET_REPO" ] && continue
+    [ -n "${ADVANCE_ROADMAP_DECISION_PLAN_PATH:-}" ] && [ "$f" != "$ADVANCE_ROADMAP_DECISION_PLAN_PATH" ] && continue
+    if [ -n "${ADVANCE_ROADMAP_DECISION_TICKET:-}" ] && \
+       [ "$(jq -r '.orchestrator.linear_id // empty' "$f" 2>/dev/null)" != "$ADVANCE_ROADMAP_DECISION_TICKET" ]; then
+      continue
+    fi
     [[ " $BUSY_REPOS " == *" $prepo "* ]] && continue
     python3 "$PLAN_PY" --file "$f" reuse --out "$result"
     reuse_rc=$?
@@ -749,6 +747,10 @@ If a PushNotification probe would have been useful, set a note in summary; the w
     orch_rc=0
     ORCH=pending-plan  # the run record shows no planning pass ran
   else
+    if [ "${ADVANCE_ROADMAP_DECISION_RESUME_ONLY:-0}" = '1' ]; then
+      record skipped-backoff "saved decision assignment is unavailable; no new planning"
+      exit 0
+    fi
     if [ "${ADVANCE_ROADMAP_CONTINUATION_ONLY:-0}" = "1" ]; then
       record skipped-backoff "fresh Linear snapshot unavailable; no new planning"
       exit 0
@@ -964,7 +966,7 @@ PY
     zsystem flock -t 0 -e -f REPO_LOCK_FD "$repo_lock" 2>/dev/null \
       || BUSY_REPOS="$BUSY_REPOS $pick"
   fi
-  ORCH_RESULT="$ORCH_RESULT" python3 - "$result" "$CODE_DIR" "$BUSY_REPOS" "$TARGET_REPO" "$THREAD" <<'PY'
+  ORCH_RESULT="$ORCH_RESULT" python3 - "$result" "$CODE_DIR" "$BUSY_REPOS" "$TARGET_REPO" "$THREAD" "$ROOT" <<'PY'
 import json, os, re, sys
 path, code, busy = sys.argv[1], sys.argv[2], sys.argv[3].split()
 target, thread = sys.argv[4], int(sys.argv[5])
@@ -1001,6 +1003,28 @@ if r.get("action") in ("dispatch_worker", "resume_worker"):
         why = f"orchestrator picked {repo}, which another lane holds"
     elif target and repo != target:
         why = f"orchestrator picked {repo}, outside its assigned repo {target}"
+    decision_ticket = os.environ.get('ADVANCE_ROADMAP_DECISION_TICKET', '')
+    if not why and decision_ticket:
+        if not re.fullmatch(r'DEV-\d+', decision_ticket) or r.get('linear_id') != decision_ticket:
+            why = 'decision ticket does not match the worker assignment'
+        else:
+            expected = os.environ.get('ADVANCE_ROADMAP_DECISION_REQUIREMENTS', '')
+            if expected:
+                try:
+                    sys.path.insert(0, os.path.join(sys.argv[6], 'lib'))
+                    import workqueue
+                    if workqueue.requirements_fingerprint(r) != expected:
+                        why = 'saved decision assignment changed since selection'
+                except (ImportError, ValueError, TypeError):
+                    why = 'could not verify saved decision assignment'
+        if not why:
+            # A reused plan predates the answer. Tell the exact assigned worker to
+            # read the freshly verified directive before resuming its saved phase.
+            r['directive_ticket'] = decision_ticket
+            # Keep worker_brief unchanged: it authenticates the saved session.
+            r['decision_instruction'] = (f"Before continuing, read and follow the pending owner "
+                                         f"directive on {decision_ticket}; consume it using the "
+                                         "normal directive workflow.")
     if why:
         # Every actionable field goes too: no worker may touch another lane's repo.
         r.update(action="blocked_no_item", outcome_token="blocked-no-item", repo=None, item=None,
@@ -1267,22 +1291,13 @@ if [ "$slackagent_posted" -eq 0 ] && [ -f "$SLACKAGENT_DIR/scripts/post-roadmap-
   fi
 fi
 
-# Fallback: one short line per run. state.json was just rewritten by regen_dashboard,
-# so it describes THIS run. No webhook configured = no-op, not an error.
+# Fallback: use the run record for a compact bulleted webhook notice.
+# No webhook configured = no-op, not an error.
 if [ "$slackagent_posted" -eq 0 ] && [ -n "$SLACK_WEBHOOK" ] && [ -r "$STATE_FILE" ] && command -v jq >/dev/null 2>&1; then
-  # This run's own record: with parallel lanes, state.json may already describe another run.
-  summary="$(python3 -c 'import json,sys
-s = ""
-for l in open(sys.argv[1]):
-    r = json.loads(l)
-    if r.get("stamp") == sys.argv[2]:
-        s = r.get("slack_summary") or r.get("summary") or r.get("outcome") or ""
-print(" ".join(s.split())[:300])' "$ROOT/runs.jsonl" "$STAMP" 2>/dev/null)"
-  cadence="$(jq -r ".cadence_hours // $BASE_CADENCE" "$STATE_FILE" 2>/dev/null)"
+  # Use this run's record, since parallel lanes may have changed state.json.
+  summary="$(python3 "$ROOT/lib/slack_fallback.py" run "$ROOT/runs.jsonl" "$STAMP")"
   [ -n "$summary" ] && {
-    text="*advance-roadmap* $(date '+%a %H:%M') — ${summary}"
-    [ "$cadence" != "$BASE_CADENCE" ] && text="$text  _(backed off to every ${cadence}h)_"
-    payload="$(jq -n --arg t "$text" '{text:$t}')"
+    payload="$(jq -n --arg t "$summary" '{text:$t}')"
     if curl -sf -m 15 -X POST -H 'Content-Type: application/json' -d "$payload" "$SLACK_WEBHOOK" >/dev/null; then
       echo "=== slack: summary posted ===" >> "$LOG"
     else
@@ -1310,7 +1325,7 @@ if [ -n "$alert" ]; then
   [ "${ADVANCE_ROADMAP_NOTIFY:-1}" = "1" ] && osascript -e "display notification $(jq -rn --arg t "$alert" '$t|@json') with title \"advance-roadmap\" sound name \"Basso\"" >/dev/null 2>&1 || true
   if [ -n "$SLACK_WEBHOOK" ] && command -v jq >/dev/null 2>&1; then
     curl -sf -m 15 -X POST -H 'Content-Type: application/json' \
-      -d "$(jq -n --arg t "$alert" '{text:$t}')" "$SLACK_WEBHOOK" >/dev/null \
+      -d "$(python3 "$ROOT/lib/slack_fallback.py" alert "$alert" | jq -Rs '{text:.}')" "$SLACK_WEBHOOK" >/dev/null \
       || echo "=== slack: alert post failed (non-fatal) ===" >> "$LOG"
   fi
 fi

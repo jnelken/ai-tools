@@ -224,15 +224,28 @@ class Store:
             # Re-imports must not advance cooldowns or resurrect settled work.
             encoded = json.dumps(record, sort_keys=True)
             if attempt['record'] == encoded:
-                # Older versions applied failure backoff to interrupted yields.
-                # Reconcile those records once without reviving a human hold,
-                # a completed item, or a later attempt.
-                if record.get('outcome') == 'yielded' and attempt['work_id']:
-                    self.db.execute("UPDATE work SET state='eligible',not_before=0,updated=? "
-                                    "WHERE id=? AND latest_stamp=? AND state='retry' "
-                                    "AND coalesce(reason, '') != 'Repeated empty continuation without checkpoint progress; retry after one hour'",
-                                    (time.time(), attempt['work_id'], stamp))
-                return
+                # Migrate an old yielded result with a human question once. Keep a
+                # marker after release so re-importing the same result cannot re-hold it.
+                migrate_input = (record.get('outcome') == 'yielded' and attempt['work_id']
+                                 and record.get('worker_exit') in (0, None)
+                                 and (result or {}).get('needs_input') is True
+                                 and str((result or {}).get('input_question') or '').strip()
+                                 and not self.get('input_seen:' + stamp))
+                if migrate_input:
+                    current = self.db.execute('SELECT latest_stamp,state FROM work WHERE id=?',
+                                              (attempt['work_id'],)).fetchone()
+                    migrate_input = bool(current and current['latest_stamp'] == stamp and current['state'] != 'done')
+                if migrate_input:
+                    pass
+                else:
+                    # Older versions applied failure backoff to interrupted yields.
+                    # Never revive a human hold, completed item, or later attempt.
+                    if record.get('outcome') == 'yielded' and attempt['work_id']:
+                        self.db.execute("UPDATE work SET state='eligible',not_before=0,updated=? "
+                                        "WHERE id=? AND latest_stamp=? AND state='retry' "
+                                        "AND coalesce(reason, '') != 'Repeated empty continuation without checkpoint progress; retry after one hour'",
+                                        (time.time(), attempt['work_id'], stamp))
+                    return
             self.db.execute('UPDATE attempts SET reported_repo=?,outcome=?,record=?,updated=? WHERE stamp=?',
                             (record.get('repo'), record.get('outcome'), encoded, time.time(), stamp))
             if not attempt['work_id']:
@@ -252,6 +265,17 @@ class Store:
             state, phase, wake = 'retry', work['phase'], finished + backoff
             if outcome == 'shipped' and record.get('worker_exit') == 0 and record.get('worker'):
                 state, phase, wake = 'done', 'done', 0
+            elif (record.get('worker_exit') in (0, None) and result.get('needs_input') is True
+                  and str(result.get('input_question') or '').strip()):
+                state, reason, wake = 'human', result['input_question'], 0
+                snapshot = read(self.root / 'runs' / stamp / 'linear-snapshot-post.json') or read(
+                    self.root / 'runs' / stamp / 'linear-snapshot.json', {})
+                baseline = human_inputs(json.loads(work['plan']), snapshot)
+                if baseline is not None:
+                    self.db.execute('INSERT OR REPLACE INTO settings VALUES (?,?)',
+                                    ('human_inputs:' + work['id'], json.dumps(baseline)))
+                self.db.execute('INSERT OR REPLACE INTO settings VALUES (?,?)',
+                                ('input_seen:' + stamp, json.dumps(True)))
             elif outcome == 'yielded':
                 # A clean milestone can advance the phase; an interrupted
                 # worker's partial result is never trusted for this decision.
@@ -280,15 +304,6 @@ class Store:
                     self.db.execute('DELETE FROM settings WHERE key=?', (key,))
             elif outcome == 'shipped-deploy-failed':
                 state, phase = 'retry', 'verifying'
-            elif (record.get('worker_exit') in (0, None) and result.get('needs_input') is True
-                  and str(result.get('input_question') or '').strip()):
-                state, reason, wake = 'human', result['input_question'], 0
-                snapshot = read(self.root / 'runs' / stamp / 'linear-snapshot-post.json') or read(
-                    self.root / 'runs' / stamp / 'linear-snapshot.json', {})
-                baseline = human_inputs(json.loads(work['plan']), snapshot)
-                if baseline is not None:
-                    self.db.execute('INSERT OR REPLACE INTO settings VALUES (?,?)',
-                                    ('human_inputs:' + work['id'], json.dumps(baseline)))
             elif outcome in {'quota-paused', 'skipped-quota'}:
                 future = [p.get('reset_epoch') for p in (record.get('quota') or {}).get('providers', [])
                           if isinstance(p.get('reset_epoch'), (int, float)) and p['reset_epoch'] > finished]
@@ -327,14 +342,21 @@ def eligibility_fingerprint(repo, code, snapshot, skill_root):
     return hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()
 
 
-def no_item_fingerprint(repo, snapshot):
-    """No-item retry inputs: scoped human decisions, not unrelated Git churn."""
+def no_item_fingerprint(repo, snapshot, code=None, skill_root=None):
+    """No-item inputs: scoped tickets, deployed HEAD and policy; not branch or dirty churn."""
     from linearscope import scope_issues
     relevant = scope_issues(snapshot.get('issues', []), repo)
     inputs = [{k: i.get(k) for k in ('id', 'title', 'description', 'state', 'priority',
                                      'labels', 'blocked_by', 'human_comments_sha')}
               for i in sorted(relevant, key=lambda issue: issue['id'])]
-    return hashlib.sha256(json.dumps(inputs, sort_keys=True).encode()).hexdigest()
+    value = {'issues': inputs}
+    if code is not None:
+        value['head'] = git(Path(code) / repo, 'rev-parse', 'HEAD')
+    if skill_root is not None:
+        skill_root = Path(skill_root)
+        policy_files = sorted([*skill_root.glob('*.md'), *(skill_root.parent / 'conductor').glob('*.md')])
+        value['policy'] = [(str(p.relative_to(skill_root.parent)), p.read_text()) for p in policy_files]
+    return hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()
 
 
 def human_inputs(plan, snapshot):
