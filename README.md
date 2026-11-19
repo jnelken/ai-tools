@@ -41,7 +41,7 @@ after installing SwiftBar (`brew install --cask swiftbar`).
 | [`fix-stale-docs`](skills/fix-stale-docs) | Scan for dead doc references, fix or delete them, push to an open (preferably approved) branch |
 | [`peer-review`](skills/peer-review) | Review with Claude for Codex-authored changes, Codex otherwise |
 | [`pick-up`](skills/pick-up) | Resume open work from `IN_PROGRESS.md`, running plan docs, and recent harness plans, each open item put to the user as a Zen-format decision (no plan mode), then `/compact` before the work; offer to copy harness plans into the repo; `sweep` flags only evidence-backed done/tracked plan threads |
-| [`post-pr`](skills/post-pr) | Take a finished PR the rest of the way: review until clean, watch CI, post to `#pr-review`, badge + undraft |
+| [`post-pr`](skills/post-pr) | Take a finished PR the rest of the way: review until clean, watch CI, queue for the next `#pr-review` window (the `pr-review-batch` flusher posts, badges, undrafts, enables auto-merge) |
 | [`pr-review-gaps`](skills/pr-review-gaps) | Find sswt PRs never posted to `#pr-review`, with a hold-list for deliberately parked ones |
 | [`prod-query`](skills/prod-query) | Read-only production customer-tenant data questions via the api repo's audited `query:prod-readonly` script — CLI contract, RUM id → tenant mapping, safe query cookbook, PII rules |
 | [`rebase-after-squash`](skills/rebase-after-squash) | Resolve rebase-after-squash-merge conflicts cleanly |
@@ -126,6 +126,7 @@ Hooks need extra wiring in `~/.claude/settings.json` — see [`hooks/README.md`]
 |---|---|---|
 | [`advance-roadmap`](automations/advance-roadmap) | Daily at 10:30 (launchd) | Headlessly ship planned roadmap / Linear items in a parallel batch, one per repo, each as a merged PR from its own Superset workspace |
 | [`machine-status`](automations/machine-status) | Always on (launchd) | A read-only page of this Mac's health — the dotfiles daemons, Tailscale, Superset, disk, uptime, power, sleep and AI provider gates — at `/status` on the tailnet |
+| [`pr-review-batch`](automations/pr-review-batch) | Every 5 min (launchd), posts on :00/:30 | Release PRs queued by `/post-pr` to `#pr-review` in batches, one message per PR, then badge, undraft and enable auto-merge; no model calls |
 | [`reap-sswts`](automations/reap-sswts) | Every 10 min (launchd) | Tear down sswts whose Claude tabs signed off ⛏️ over an hour ago (PR merged, tree clean, HEAD carried by the PR), and close ⛏️ root-checkout tabs; no model calls |
 | [`wrapup-repos`](automations/wrapup-repos) | Sunday 2:45am, weekly (launchd) | Headlessly wrap up in-progress work in one repo via the `wrapup-repos` skill |
 
