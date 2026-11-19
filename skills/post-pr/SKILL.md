@@ -254,18 +254,22 @@ jq -nc --arg url "$URL" --arg repo "$REPO" --argjson pr "$N" --arg text "$TEXT" 
 **Mark it queued on GitHub.** Right after the enqueue, add an invisible `<!-- pr-review-queued -->` line to the end of the PR body, read and written through a file, and only if it isn't there yet. Queues are per machine, so this marker is how the other machine's flusher sees that this PR is queued; the flusher removes it when it adds the badge. A failed marker write is reported, not fatal: the PR still posts, though a sibling on the other machine may wait out its hold first.
 
 ```bash
-f=$(mktemp); gh pr view "$URL" --json body -q .body > "$f"
-grep -qxF '<!-- pr-review-queued -->' "$f" || { printf '\n\n<!-- pr-review-queued -->\n' >> "$f"; gh pr edit "$URL" --body-file "$f"; }
+f=$(mktemp)
+# Edit only after a successful read: an empty file would replace the whole body.
+gh pr view "$URL" --json body -q .body > "$f" && {
+  grep -qxF '<!-- pr-review-queued -->' "$f" ||
+    { printf '\n\n<!-- pr-review-queued -->\n' >> "$f" && gh pr edit "$URL" --body-file "$f"; }
+}
 rm -f "$f"
 ```
 
-**Cross-repo siblings.** When one CON ticket has a PR in more than one of api, woodrow and folio-platform, the flusher pairs them; nothing extra goes in `text`. A sibling is Jake's open PR into the default branch of another of those repos whose title carries the exact same `(CON-N)`. A queued PR with a sibling that is neither queued nor posted is **held** in the queue until the sibling is queued or posted, or until `siblingHoldMin` minutes (default 60) after `queuedAt`; then it posts alone. Each sibling's message gets a second line: api says `UI follow-up: <woodrow url|woodrow #N>, merge after this one`, woodrow says `Merges after <api url|api #N>`, and any pair involving folio-platform, or a ticket in three repos, gets `Sibling: <url|repo #N>` for each with no merge-order claim. To report it (step 7), check after the enqueue:
+**Cross-repo siblings.** When one CON ticket has a PR in more than one of api, woodrow and folio-platform, the flusher pairs them; nothing extra goes in `text`. A sibling is Jake's open PR into the default branch of another of those repos whose title carries the exact same `(CON-N)`. A queued PR with a sibling that is neither queued nor posted is **held** in the queue until the sibling is queued or posted, or until `siblingHoldMin` minutes (default 60) after `queuedAt`; then it posts alone. Each sibling's message gets a second line: api says `UI follow-up: <woodrow url|woodrow #N>, merge after this one`, woodrow says `Merges after <api url|api #N>`, and any pair involving folio-platform, or a ticket in three repos, gets `Sibling: <url|repo #N>` for each with no merge-order claim. Check for siblings **before picking the auto-merge method** (it is read-only and works before the enqueue), and use the result in step 7:
 
 ```bash
 python3 -I ~/.claude/automations/pr-review-batch/flush.py --siblings "$URL"   # read-only
 ```
 
-It prints one `sibling <repo>#<n> <posted|queued|in progress> <url>` line per sibling, then the message the flusher would post. A woodrow PR whose api sibling hasn't merged depends on it, so its `autoMerge` is `null` (work.md's first condition).
+It prints one `sibling <repo>#<n> <posted|queued|in progress> <url>` line per sibling, then the message the flusher would post. A woodrow PR whose api sibling hasn't merged depends on it, so its `autoMerge` is `null` (work.md's first condition). Report `queued (holds for sibling woodrow#N)` when any sibling is in progress, and `queued (paired with sibling api#N)` when every sibling is already queued or posted.
 
 **Safety net: is the flusher loaded on this machine?** Queues are per machine (`/post-pr` runs on jake1 and jake2), so check before relying on one:
 

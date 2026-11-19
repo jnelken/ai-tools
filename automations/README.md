@@ -480,7 +480,9 @@ Flags (`~/.claude/automations/pr-review-batch/run.sh …`):
   use Jake's own DM for testing, never a real channel.
 - `--force` — flush the whole queue now, ignoring the window (sibling holds still apply).
 - `--siblings <url>` — print that PR's siblings with their state and the message it would get.
-  Read-only; `/post-pr` uses it for its report.
+  Read-only; `/post-pr` uses it for its report. Call `flush.py` directly
+  (`python3 -I ~/.claude/automations/pr-review-batch/flush.py --siblings <url>`): through `run.sh`
+  from a non-terminal the output goes to `flush.log`.
 
 Logs: `~/.claude/automations/pr-review-batch/logs/flush.log` (output goes there whenever stdout
 isn't a terminal, including from the Bash tool). Tests: `python3 -m pytest automations/pr-review-batch/tests`.
