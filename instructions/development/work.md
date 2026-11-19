@@ -8,6 +8,8 @@ Bundle closely-knit work: land pieces as sub-PRs (merge commit, never squash) in
 
 Do **not** fire it on intermediate WIP pushes mid-task, or on a branch whose PR is deliberately parked. "Work is complete" means the task is done, not that a push happened. Invoke `/post-pr` by hand for a later push to an already-shared PR.
 
+**A finished PR that is waiting on approval always gets `/post-pr`. Never raise it as a decision.** When a PR into `main` is clean and blocked on `REVIEW_REQUIRED`, run `/post-pr` (undraft, post to `#pr-review`, badge) without asking how to get it approved, and merge it once an approving review exists. Jake chose this as the default on 2026-11-19 (api #1764, decision G): the standing instruction above is the authorization for the merge-after-approval, and enabling auto-merge to do it needs no extra question. Skip the `/post-pr` step 6.6 auto-merge question for the same reason. Still ask for the product-update post below.
+
 Because it self-starts, it must self-report: say plainly what happened to each PR, and if a gate stopped the run, name the gate and what's outstanding rather than burying it.
 
 The one place `/post-pr` asks: if a PR into `main` has a screenshot in its description, the run ends with a single question offering it to `#product-updates`. That post is user-facing and not covered by the standing authorization above.
