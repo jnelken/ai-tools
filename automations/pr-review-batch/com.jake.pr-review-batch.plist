@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>com.jake.pr-review-batch</string>
+
+	<!-- $HOME is expanded by sh, so the plist is the same on every machine. -->
+	<key>ProgramArguments</key>
+	<array>
+		<string>/bin/sh</string>
+		<string>-c</string>
+		<string>exec "$HOME/.claude/automations/pr-review-batch/run.sh"</string>
+	</array>
+
+	<!-- Every 5 minutes. The batching window (windowMin, default 30 → :00/:30)
+	     lives in ~/.claude/state/pr-review-batch.json, read by flush.py, so it can
+	     change without reloading this plist. -->
+	<key>StartInterval</key>
+	<integer>300</integer>
+
+	<key>RunAtLoad</key>
+	<false/>
+
+	<key>ProcessType</key>
+	<string>Background</string>
+</dict>
+</plist>

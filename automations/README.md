@@ -396,6 +396,62 @@ tailscale serve --bg --set-path /status http://127.0.0.1:8423
 
 Tests: `python3 -m unittest discover -s automations/machine-status/tests`.
 
+## `pr-review-batch`
+
+The team's `#pr-review` capacity is limited, so `/post-pr` no longer posts a finished PR
+the moment review and CI pass. It appends one line to `~/.claude/state/pr-review-queue.jsonl`
+(`url`, `repo`, `pr`, the finished Slack `text`, `headSha`, `autoMerge`, `queuedAt`) and the
+PR **stays draft and unbadged**. `flush.py` releases the queue on window boundaries: each PR
+still gets its own message (`<url|[api][hygiene] title>`, unfurl off), all of a window's
+messages go out together, and only after a real post does it append
+`pr-review-posted.jsonl`, badge the body, `gh pr ready` and `gh pr merge --auto`. No model calls.
+
+Before posting it re-checks each entry and drops (with the reason in the log) any PR that is no
+longer OPEN, no longer targets the default branch, is already in `pr-review-posted.jsonl`, or
+whose head moved past the queued `headSha` (that push's own `/post-pr` run re-enqueues it). A gh
+error or a failed post requeues the entry for the next window; a failed badge, undraft or
+auto-merge is logged and never undoes the post. The queue is claimed by renaming it under a
+`flock`, so concurrent `>>` appends land in a fresh file, and a leftover `.flushing.*` file
+from a crash is merged back on the next run.
+
+**The window is a runtime setting, not the plist schedule.** launchd ticks every 5 minutes;
+`flush.py` reads `windowMin` from `~/.claude/state/pr-review-batch.json` (default 30 when the
+file or key is missing), records `lastFlushAt` there, and flushes only when
+`floor(now / window) > floor(lastFlushAt / window)` — so posts land within 5 minutes after
+`:00` and `:30`. A tick that crosses no boundary exits silently without calling gh, and an
+empty queue logs nothing.
+
+```sh
+# Turn batching off (post within ~5 min of /post-pr), or change the window, without reloading launchd:
+python3 -c 'import json,os;p=os.path.expanduser("~/.claude/state/pr-review-batch.json");d=json.load(open(p)) if os.path.exists(p) else {};d["windowMin"]=0;json.dump(d,open(p,"w"))'
+```
+
+`windowMin: 0` flushes on every tick, which turns batching off. Keep the queue even then: the
+next phase holds cross-repo siblings in it so they are announced together.
+
+**Queues are per machine.** `/post-pr` runs on jake1 and jake2, and each machine's queue is
+drained only by its own flusher, so load the plist on **every machine that runs `/post-pr`**.
+`/post-pr` checks `launchctl print gui/$(id -u)/com.jake.pr-review-batch` before enqueueing and
+posts immediately (`run.sh --only`) when it isn't loaded, so an unloaded machine never strands a PR.
+
+Flags (`~/.claude/automations/pr-review-batch/run.sh …`):
+
+- `--dry-run` — claims and writes nothing; logs a preflight line (resolved `gh` and `security`,
+  whether the Keychain token is readable, `gh auth`) and what each entry would do.
+- `--only <url>` — flush just that URL now, ignoring the window, and leave the rest queued
+  (`/post-pr --now` for hotfixes). Exits nonzero unless that URL was posted.
+- `--channel <id>` (or env `PR_REVIEW_BATCH_CHANNEL`) — post somewhere other than `#pr-review`;
+  use Jake's own DM for testing, never a real channel.
+- `--force` — flush the whole queue now, ignoring the window.
+
+Logs: `~/.claude/automations/pr-review-batch/logs/flush.log` (output goes there whenever stdout
+isn't a terminal, including from the Bash tool). Tests: `python3 -m pytest automations/pr-review-batch/tests`.
+
+```sh
+ln -s ~/.ai-tools/automations/pr-review-batch/com.jake.pr-review-batch.plist ~/Library/LaunchAgents/
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.jake.pr-review-batch.plist
+```
+
 ## `reap-sswts`
 
 Every 10 minutes, `reap.py` looks at this machine's Superset tabs (local host only) and acts
