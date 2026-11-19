@@ -64,6 +64,9 @@ elif a[:2] == ["pr", "view"]:
             open(f, "a").write(hook["claimed"])
     if pr is None or pr.get("fail"):
         sys.exit("fake gh: boom")
+    if pr.get("weird"):
+        print("[]")
+        sys.exit(0)
     print(json.dumps({k: pr[k] for k in ("state", "baseRefName", "headRefOid", "isDraft")}))
 elif a[:2] == ["pr", "edit"]:
     body = open(a[a.index("--body-file") + 1]).read()
@@ -286,6 +289,25 @@ class FlushTest(unittest.TestCase):
         self.enqueue(self.entry(A))
         self.flush()
         self.assertEqual([e["url"] for e in self.lines(self.queue)], [A])
+
+    def test_malformed_line_is_dropped_rest_posts(self):
+        self.last_flush(T0 - 60)
+        bad = self.entry(A)
+        del bad["repo"]
+        self.enqueue(bad, self.entry(B, queued_min=1))
+        self.flush()
+        self.assertEqual(self.posted_texts(), [f"<{B}|[api] PR 2>"])
+        self.assertEqual(self.lines(self.queue), [])
+        self.assertIn("dropped malformed queue line (missing repo)", self.out)
+
+    def test_unexpected_error_requeues_entry_and_batch_continues(self):
+        self.last_flush(T0 - 60)
+        self.prs[A]["weird"] = True
+        self.enqueue(self.entry(A), self.entry(B, queued_min=1))
+        self.flush()
+        self.assertEqual(self.posted_texts(), [f"<{B}|[api] PR 2>"])
+        self.assertEqual([e["url"] for e in self.lines(self.queue)], [A])
+        self.assertIn(f"requeued {REPO}#1: unexpected error", self.out)
 
     # -- claim / crash safety --
 

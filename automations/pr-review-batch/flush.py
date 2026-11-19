@@ -157,8 +157,11 @@ def read_lines(path, offset=0):
         except json.JSONDecodeError:
             log(f"skip unparseable queue line: {raw[:120]!r}")
             continue
-        if isinstance(e, dict) and e.get("url"):
-            entries.append(e)
+        missing = [k for k in ("url", "repo", "text") if not (isinstance(e, dict) and isinstance(e.get(k), str) and e.get(k))]
+        if missing:
+            log(f"dropped malformed queue line (missing {', '.join(missing)}): {raw[:120]!r}")
+            continue
+        entries.append(e)
     return entries, offset + cut
 
 
@@ -263,7 +266,7 @@ def revalidate(e, posted):
     if pr.get("baseRefName") != base:
         return "drop", f"base {pr.get('baseRefName')} is not the default branch {base}"
     if e.get("headSha") and pr.get("headRefOid") != e["headSha"]:
-        return "drop", f"head moved {e['headSha'][:9]} -> {str(pr.get('headRefOid'))[:9]}"
+        return "drop", f"head moved {str(e['headSha'])[:9]} -> {str(pr.get('headRefOid'))[:9]}"
     return "post", pr
 
 
@@ -364,6 +367,7 @@ def flush(only, channel):
     claim = Claim()
     entries = claim.take()
     keep = []  # entries that go back into the live queue
+    pending = []  # claimed entries not yet posted, dropped or requeued
     try:
         if only:
             keep = [e for e in entries if e["url"] != only]
@@ -375,6 +379,7 @@ def flush(only, channel):
                 log(f"--only {only}: not in the queue")
             return False
 
+        pending = list(entries)
         if channel != CHANNEL:
             log(f"channel override: posting to {channel}, not #pr-review")
         posted = posted_urls()
@@ -382,40 +387,49 @@ def flush(only, channel):
         ok_urls = set()
         first = True
         for e in entries:
-            verdict, why = revalidate(e, posted)
-            if verdict == "drop":
-                log(f"dropped {label(e)}: {why}")
-                continue
-            if verdict == "requeue":
-                log(f"requeued {label(e)}: {why}")
-                keep.append(e)
-                continue
-            pr = why
-            if token is None and token_err is None:
-                token, token_err = slack_token()
-            if token is None:
-                log(f"requeued {label(e)}: no Slack token ({token_err})")
-                keep.append(e)
-                continue
-            if not first:
-                time.sleep(POST_SPACING_S)
-            first = False
-            perr = post(token, channel, e.get("text") or e["url"])
-            if perr:
-                log(f"requeued {label(e)}: post failed ({perr})")
-                keep.append(e)
-                continue
-            append_lines(POSTED, [{"url": e["url"], "repo": e.get("repo"), "pr": e.get("pr"),
-                                   "postedAt": iso(time.time())}])
-            posted.add(e["url"])
-            ok_urls.add(e["url"])
-            b = badge(e["url"])
-            d = undraft(e["url"], pr.get("isDraft"))
-            m = auto_merge(e["url"], e.get("autoMerge"))
-            log(f"posted {label(e)}: badge={b} draft={d} automerge={m}")
+            try:
+                verdict, why = revalidate(e, posted)
+                if verdict == "drop":
+                    log(f"dropped {label(e)}: {why}")
+                    continue
+                if verdict == "requeue":
+                    log(f"requeued {label(e)}: {why}")
+                    keep.append(e)
+                    continue
+                pr = why
+                if token is None and token_err is None:
+                    token, token_err = slack_token()
+                if token is None:
+                    log(f"requeued {label(e)}: no Slack token ({token_err})")
+                    keep.append(e)
+                    continue
+                if not first:
+                    time.sleep(POST_SPACING_S)
+                first = False
+                perr = post(token, channel, e.get("text") or e["url"])
+                if perr:
+                    log(f"requeued {label(e)}: post failed ({perr})")
+                    keep.append(e)
+                    continue
+                append_lines(POSTED, [{"url": e["url"], "repo": e.get("repo"), "pr": e.get("pr"),
+                                       "postedAt": iso(time.time())}])
+                posted.add(e["url"])
+                ok_urls.add(e["url"])
+                b = badge(e["url"])
+                d = undraft(e["url"], pr.get("isDraft"))
+                m = auto_merge(e["url"], e.get("autoMerge"))
+                log(f"posted {label(e)}: badge={b} draft={d} automerge={m}")
+            except Exception as x:  # one bad entry must not cost the rest of the batch
+                if e["url"] in ok_urls:
+                    log(f"posted {label(e)}, then unexpected error {type(x).__name__}: {x}")
+                else:
+                    log(f"requeued {label(e)}: unexpected error {type(x).__name__}: {x}")
+                    keep.append(e)
+            finally:
+                pending.remove(e)
         return only in ok_urls if only else True
     finally:
-        append_lines(QUEUE, keep)
+        append_lines(QUEUE, keep + pending)
         claim.release()
 
 
