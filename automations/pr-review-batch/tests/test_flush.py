@@ -48,6 +48,21 @@ if a[:1] == ["api"]:
     sys.exit(0)
 url = a[2] if len(a) > 2 else None
 pr = prs.get(url)
+if a[:2] == ["pr", "list"]:
+    if os.path.exists(os.path.join(d, "list_fails")):
+        sys.exit("fake gh: list boom")
+    repo = a[a.index("--repo") + 1]
+    term = a[a.index("--search") + 1].split()[0]
+    event(f"list {repo} {term}")
+    # Loose like GitHub search: a substring hit, so CON-44 also finds CON-441.
+    print(json.dumps([{"number": int(u.rsplit("/", 1)[1]), "title": p["title"], "url": u, "body": p["body"]}
+                      for u, p in prs.items()
+                      if f"github.com/{repo}/" in u and p["state"] == "OPEN"
+                      and p["baseRefName"] == "main" and term in p.get("title", "")]))
+    sys.exit(0)
+if a[:2] == ["pr", "view"] and "url,number,title" in a:
+    print(json.dumps({"url": url, "number": int(url.rsplit("/", 1)[1]), "title": pr["title"]}))
+    sys.exit(0)
 if a[:2] == ["pr", "view"] and "body" in a:
     print(pr["body"])
 elif a[:2] == ["pr", "view"]:
@@ -103,7 +118,7 @@ class Slack(http.server.BaseHTTPRequestHandler):
         pass
 
 
-class FlushTest(unittest.TestCase):
+class Harness(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         t = self.tmp.name
@@ -181,6 +196,7 @@ class FlushTest(unittest.TestCase):
     def posted_texts(self):
         return [r["text"] for r in self.srv.requests]
 
+class FlushTest(Harness):
     # -- happy path / order --
 
     def test_posts_badges_undrafts_automerges_in_order(self):
@@ -459,6 +475,248 @@ class FlushTest(unittest.TestCase):
         self.enqueue(self.entry(A))
         self.flush("--force", now=T0 + 2 * 60)
         self.assertEqual(len(self.posted_texts()), 1)
+
+
+API = "https://github.com/Concentro-Inc/api/pull/1770"
+UI = "https://github.com/Concentro-Inc/woodrow/pull/1968"
+PLAT = "https://github.com/Concentro-Inc/folio-platform/pull/50"
+MARKER = "<!-- pr-review-queued -->"
+BADGE = "📣 **Posted to Slack**"
+TAGS = {"api": "api", "woodrow": "ui", "folio-platform": "platform"}
+
+
+class SiblingTest(Harness):
+    def setUp(self):
+        super().setUp()
+        self.add(API, "Let admins archive rules (CON-4458)")
+        self.add(UI, "Show edit and archive (CON-4458)")
+        self.last_flush(T0 - 60)
+
+    def add(self, url, title, body="## Summary\nx", **kw):
+        n = int(url.rsplit("/", 1)[1])
+        self.prs[url] = {"state": "OPEN", "baseRefName": "main", "headRefOid": f"sha{n}",
+                         "isDraft": False, "title": title, "body": body, **kw}
+
+    def centry(self, url, queued_min=0, **kw):
+        repo = "/".join(url.split("/")[3:5])
+        n = int(url.rsplit("/", 1)[1])
+        e = {"url": url, "repo": repo, "pr": n, "headSha": f"sha{n}", "autoMerge": None,
+             "text": f"<{url}|[{TAGS[repo.split('/')[1]]}] {self.prs[url]['title']}>",
+             "queuedAt": iso(T0 - 600 + queued_min * 60)}
+        e.update(kw)
+        return e
+
+    def set_config(self, **kw):
+        cfg = json.load(open(self.config)) if os.path.exists(self.config) else {}
+        cfg.update(kw)
+        with open(self.config, "w") as f:
+            json.dump(cfg, f)
+
+    def text(self, url):
+        return self.centry(url)["text"]
+
+    def queued_urls(self):
+        return [e["url"] for e in self.lines(self.queue)]
+
+    # -- matching --
+
+    def test_ticket_must_match_exactly(self):
+        self.prs.pop(UI)
+        self.add(API, "Narrow fix (CON-44)")
+        self.add(UI, "Unrelated (CON-441)")
+        self.enqueue(self.centry(API))
+        self.flush()
+        self.assertIn("list Concentro-Inc/woodrow CON-44", self.events())
+        self.assertEqual(self.posted_texts(), [self.text(API)])
+        self.assertNotIn("held", self.out)
+
+    def test_closed_sibling_is_ignored(self):
+        self.prs[UI]["state"] = "MERGED"
+        self.enqueue(self.centry(API))
+        self.flush()
+        self.assertEqual(self.posted_texts(), [self.text(API)])
+
+    def test_no_siblings_posts_exactly_as_before(self):
+        self.prs.pop(UI)
+        self.enqueue(self.centry(API))
+        self.flush()
+        self.assertEqual(self.posted_texts(), [self.text(API)])
+        self.assertEqual(self.queued_urls(), [])
+        self.assertNotIn("paired", self.out)
+        self.assertIn("posted Concentro-Inc/api#1770: badge=appended", self.out)
+
+    def test_out_of_scope_repo_never_looks_up_siblings(self):
+        self.enqueue(self.entry(A, text=f"<{A}|[api] Thing (CON-4458)>"))
+        self.flush()
+        self.assertFalse(any(e.startswith("list") for e in self.events()))
+        self.assertEqual(self.posted_texts(), [f"<{A}|[api] Thing (CON-4458)>"])
+
+    # -- hold --
+
+    def test_holds_while_sibling_in_progress(self):
+        self.enqueue(self.centry(API))
+        self.flush()
+        self.assertEqual(self.posted_texts(), [])
+        self.assertEqual(self.queued_urls(), [API])
+        self.assertIn("Concentro-Inc/api#1770 held for sibling woodrow#1968", self.out)
+        self.assertNotIn(BADGE, self.prs[API]["body"])
+
+    def test_releases_when_sibling_is_queued_elsewhere(self):
+        self.prs[UI]["body"] += f"\n\n{MARKER}\n"  # queued on the other machine
+        self.enqueue(self.centry(API))
+        self.flush()
+        self.assertEqual(self.posted_texts(),
+                         [self.text(API) + f"\nUI follow-up: <{UI}|woodrow #1968>, merge after this one"])
+        self.assertIn("paired Concentro-Inc/api#1770 with woodrow#1968 queued", self.out)
+
+    def test_releases_when_sibling_already_posted(self):
+        self.prs[API]["body"] += f"\n\n---\n{BADGE}\n"
+        self.enqueue(self.centry(UI))
+        self.flush()
+        self.assertEqual(self.posted_texts(), [self.text(UI) + f"\nMerges after <{API}|api #1770>"])
+
+    def test_badge_wins_over_stale_marker(self):
+        self.prs[API]["body"] += f"\n\n{MARKER}\n\n---\n{BADGE}\n"
+        self.enqueue(self.centry(UI))
+        self.flush()
+        self.assertIn("with api#1770 posted", self.out)
+
+    def test_both_queued_here_post_together_api_first(self):
+        self.enqueue(self.centry(UI, queued_min=1), self.centry(API, queued_min=2))
+        self.flush()
+        self.assertEqual(self.posted_texts(), [
+            self.text(API) + f"\nUI follow-up: <{UI}|woodrow #1968>, merge after this one",
+            self.text(UI) + f"\nMerges after <{API}|api #1770>",
+        ])
+        self.assertEqual(self.queued_urls(), [])
+
+    def test_hold_expires_after_sibling_hold_min(self):
+        self.set_config(windowMin=0, siblingHoldMin=30)
+        self.enqueue(self.centry(API))  # queued 09:50
+        self.flush(now=T0 + 15 * 60)  # 10:15: 25 min in
+        self.assertEqual(self.posted_texts(), [])
+        self.assertIn("(until ", self.out)
+        self.flush(now=T0 + 21 * 60)  # 10:21: 31 min in
+        self.assertEqual(self.posted_texts(),
+                         [self.text(API) + f"\nUI follow-up: <{UI}|woodrow #1968>, merge after this one"])
+        self.assertIn("woodrow#1968 in progress (hold expired)", self.out)
+
+    def test_unparseable_queued_at_does_not_hold(self):
+        self.enqueue(self.centry(API, queuedAt="soon"))
+        self.flush()
+        self.assertEqual(len(self.posted_texts()), 1)
+
+    def test_window_zero_holds_on_ticks_then_releases(self):
+        self.set_config(windowMin=0)
+        self.enqueue(self.centry(API))
+        self.flush(now=T0 + 5 * 60)
+        self.assertEqual(self.posted_texts(), [])
+        self.prs[UI]["body"] += f"\n\n{MARKER}\n"
+        self.flush(now=T0 + 10 * 60)
+        self.assertEqual(len(self.posted_texts()), 1)
+        self.assertEqual(self.queued_urls(), [])
+
+    def test_force_keeps_the_hold(self):
+        self.last_flush(T0 + 30)
+        self.enqueue(self.centry(API))
+        self.flush("--force")
+        self.assertEqual(self.posted_texts(), [])
+        self.assertEqual(self.queued_urls(), [API])
+
+    def test_only_skips_the_hold(self):
+        self.last_flush(T0 + 30)
+        self.enqueue(self.centry(API))
+        self.flush("--only", API)
+        self.assertEqual(self.posted_texts(),
+                         [self.text(API) + f"\nUI follow-up: <{UI}|woodrow #1968>, merge after this one"])
+        self.assertIn("(--only, no hold)", self.out)
+
+    def test_only_sees_sibling_queued_on_this_machine(self):
+        self.last_flush(T0 + 30)
+        self.enqueue(self.centry(API), self.centry(UI))
+        self.flush("--only", UI)
+        self.assertIn("with api#1770 queued", self.out)
+        self.assertEqual(self.queued_urls(), [API])
+
+    def test_lookup_failure_requeues_then_posts_alone_after_expiry(self):
+        open(os.path.join(self.fake, "list_fails"), "w").close()
+        self.set_config(windowMin=0, siblingHoldMin=30)
+        self.enqueue(self.centry(API))
+        self.flush(now=T0 + 5 * 60)
+        self.assertIn("requeued Concentro-Inc/api#1770: sibling lookup failed", self.out)
+        self.assertEqual(self.queued_urls(), [API])
+        self.flush(now=T0 + 25 * 60)
+        self.assertEqual(self.posted_texts(), [self.text(API)])
+        self.assertIn("without a sibling line", self.out)
+
+    # -- message text --
+
+    def test_folio_platform_pair_uses_sibling_line(self):
+        self.prs.pop(UI)
+        self.add(PLAT, "Platform side (CON-4458)", body=f"x\n\n{MARKER}\n")
+        self.enqueue(self.centry(API))
+        self.flush()
+        self.assertEqual(self.posted_texts(), [self.text(API) + f"\nSibling: <{PLAT}|folio-platform #50>"])
+
+    def test_three_repos_list_every_sibling(self):
+        self.add(PLAT, "Platform side (CON-4458)")
+        self.enqueue(self.centry(API), self.centry(UI, queued_min=1), self.centry(PLAT, queued_min=2))
+        self.flush()
+        self.assertEqual(self.posted_texts(), [
+            self.text(API) + f"\nSibling: <{UI}|woodrow #1968>, <{PLAT}|folio-platform #50>",
+            self.text(UI) + f"\nSibling: <{API}|api #1770>, <{PLAT}|folio-platform #50>",
+            self.text(PLAT) + f"\nSibling: <{API}|api #1770>, <{UI}|woodrow #1968>",
+        ])
+
+    def test_two_prs_in_sibling_repo_make_no_merge_order_claim(self):
+        ui2 = "https://github.com/Concentro-Inc/woodrow/pull/1969"
+        self.add(ui2, "More UI (CON-4458)", body=MARKER)
+        self.prs[UI]["body"] = MARKER
+        self.enqueue(self.centry(API))
+        self.flush()
+        self.assertEqual(self.posted_texts(),
+                         [self.text(API) + f"\nSibling: <{UI}|woodrow #1968>, <{ui2}|woodrow #1969>"])
+
+    # -- marker --
+
+    def test_badge_removes_queued_marker(self):
+        self.prs.pop(UI)
+        self.prs[API]["body"] = f"## Summary\nx\n\n{MARKER}\n"
+        self.enqueue(self.centry(API))
+        self.flush()
+        self.assertEqual(self.prs[API]["body"], f"## Summary\nx\n\n---\n{BADGE}\n")
+
+    def test_marker_removed_even_when_already_badged(self):
+        self.prs.pop(UI)
+        self.prs[API]["body"] = f"x\n\n---\n{BADGE}\n{MARKER}\n"
+        self.enqueue(self.centry(API))
+        self.flush()
+        self.assertEqual(self.prs[API]["body"], f"x\n\n---\n{BADGE}\n")
+        self.assertIn("badge=already, marker removed", self.out)
+
+    # -- read-only modes --
+
+    def test_dry_run_shows_hold_without_writing(self):
+        self.enqueue(self.centry(API))
+        self.flush("--dry-run")
+        self.assertIn("DRY would hold Concentro-Inc/api#1770: held for sibling woodrow#1968", self.out)
+        self.assertNotIn("DRY would post", self.out)
+        self.assertEqual(self.posted_texts(), [])
+        self.assertFalse(any(e.startswith(("badge", "ready", "merge")) for e in self.events()))
+        self.assertEqual(self.queued_urls(), [API])
+
+    def test_dry_run_prints_paired_text(self):
+        self.prs[UI]["body"] = MARKER
+        self.enqueue(self.centry(API))
+        self.flush("--dry-run")
+        self.assertIn(repr(self.text(API) + f"\nUI follow-up: <{UI}|woodrow #1968>, merge after this one"), self.out)
+
+    def test_siblings_flag_reports_and_writes_nothing(self):
+        out = self.flush("--siblings", UI)
+        self.assertIn("sibling api#1770 in progress " + API, out)
+        self.assertIn(self.text(UI) + f"\nMerges after <{API}|api #1770>", out)
+        self.assertFalse(os.path.exists(self.queue))
+        self.assertFalse(any(e.startswith(("badge", "ready", "merge")) for e in self.events()))
 
 
 def iso(epoch):

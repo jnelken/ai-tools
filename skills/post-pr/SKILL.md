@@ -251,6 +251,26 @@ jq -nc --arg url "$URL" --arg repo "$REPO" --argjson pr "$N" --arg text "$TEXT" 
 
 `text` is the finished Slack link text; `autoMerge` is `"squash"`, `"merge"` or `null` (`AUTOMERGE_JSON='"squash"'` or `null`). `headSha` must be the PR's current head: the flusher drops an entry whose PR has moved on (a later push runs `/post-pr` again and re-enqueues), whose PR is no longer open or no longer targets the default branch, or whose URL is already in `pr-review-posted.jsonl`.
 
+**Mark it queued on GitHub.** Right after the enqueue, add an invisible `<!-- pr-review-queued -->` line to the end of the PR body, read and written through a file, and only if it isn't there yet. Queues are per machine, so this marker is how the other machine's flusher sees that this PR is queued; the flusher removes it when it adds the badge. A failed marker write is reported, not fatal: the PR still posts, though a sibling on the other machine may wait out its hold first.
+
+```bash
+f=$(mktemp)
+# Edit only after a successful read: an empty file would replace the whole body.
+gh pr view "$URL" --json body -q .body > "$f" && {
+  grep -qxF '<!-- pr-review-queued -->' "$f" ||
+    { printf '\n\n<!-- pr-review-queued -->\n' >> "$f" && gh pr edit "$URL" --body-file "$f"; }
+}
+rm -f "$f"
+```
+
+**Cross-repo siblings.** When one CON ticket has a PR in more than one of api, woodrow and folio-platform, the flusher pairs them; nothing extra goes in `text`. A sibling is Jake's open PR into the default branch of another of those repos whose title carries the exact same `(CON-N)`. A queued PR with a sibling that is neither queued nor posted is **held** in the queue until the sibling is queued or posted, or until `siblingHoldMin` minutes (default 60) after `queuedAt`; then it posts alone. Each sibling's message gets a second line: api says `UI follow-up: <woodrow url|woodrow #N>, merge after this one`, woodrow says `Merges after <api url|api #N>`, and any pair involving folio-platform, or a ticket in three repos, gets `Sibling: <url|repo #N>` for each with no merge-order claim. Check for siblings **before picking the auto-merge method** (it is read-only and works before the enqueue), and use the result in step 7:
+
+```bash
+python3 -I ~/.claude/automations/pr-review-batch/flush.py --siblings "$URL"   # read-only
+```
+
+It prints one `sibling <repo>#<n> <posted|queued|in progress> <url>` line per sibling, then the message the flusher would post. A woodrow PR whose api sibling hasn't merged depends on it, so its `autoMerge` is `null` (work.md's first condition). Report `queued (holds for sibling woodrow#N)` when any sibling is in progress, and `queued (paired with sibling api#N)` when every sibling is already queued or posted.
+
 **Safety net: is the flusher loaded on this machine?** Queues are per machine (`/post-pr` runs on jake1 and jake2), so check before relying on one:
 
 ```bash
@@ -259,7 +279,7 @@ launchctl print "gui/$(id -u)/com.jake.pr-review-batch" >/dev/null 2>&1
 
 If that fails, the queue would never drain. Enqueue as above, then post immediately with `~/.claude/automations/pr-review-batch/run.sh --only <PR_URL>` and report `Slack: posted (flusher not loaded — immediate)`. Say in the report that this machine needs the plist loaded (see `automations/README.md`).
 
-**`/post-pr --now`** (hotfixes): enqueue, then run `~/.claude/automations/pr-review-batch/run.sh --only <PR_URL>` the same way. `--only` flushes just that URL, leaves the rest of the queue for the window, and ignores the window.
+**`/post-pr --now`** (hotfixes): enqueue, then run `~/.claude/automations/pr-review-batch/run.sh --only <PR_URL>` the same way. `--only` flushes just that URL, leaves the rest of the queue for the window, and ignores both the window and the sibling hold (the message still gets its sibling line).
 
 `run.sh` logs to `~/.claude/automations/pr-review-batch/logs/flush.log` when its output isn't a terminal, which includes the Bash tool, so judge an immediate post by its **exit code** (0 means this URL was posted, nonzero means it wasn't and the entry is still queued or was dropped) and quote the `tail` of the log for the reason.
 
@@ -269,7 +289,7 @@ Never point the flusher at a real channel to "test" it. `--channel <id>` (or env
 
 ### 5–6. Badge, undraft, auto-merge (the flusher)
 
-Not done by this skill any more. After a real post the flusher, in order: appends to `pr-review-posted.jsonl`; appends `\n\n---\n📣 **Posted to Slack**` to the body unless it already ends with the badge (read and written through a file); runs `gh pr ready` if the PR is a draft; then `gh pr merge --auto --<method>` if the entry's `autoMerge` is set. A failed post is requeued for the next window; a failed badge, undraft or auto-merge is logged and never undoes the post. Its log (`flush.log`) has one summary line per PR.
+Not done by this skill any more. After a real post the flusher, in order: appends to `pr-review-posted.jsonl`; appends `\n\n---\n📣 **Posted to Slack**` to the body unless it already ends with the badge, removing the `<!-- pr-review-queued -->` marker in the same edit (read and written through a file); runs `gh pr ready` if the PR is a draft; then `gh pr merge --auto --<method>` if the entry's `autoMerge` is set. A failed post is requeued for the next window; a failed badge, undraft or auto-merge is logged and never undoes the post. Its log (`flush.log`) has one summary line per PR.
 
 ### 6.5 Offer a product update
 
@@ -300,7 +320,7 @@ Concentro-Inc/api#1271
 - Review: clean after 3 rounds
 - CI: 4 checks, all pass
 - Preview: woodrow only — set (or: already set, n/a (not visible in a preview))
-- Slack: queued for next :00/:30 window (or: posted (flusher not loaded — immediate), posted (--now), skipped, already in dedup state)
+- Slack: queued for next :00/:30 window (or: queued (holds for sibling woodrow#N), queued (paired with sibling api#N), posted (flusher not loaded — immediate), posted (--now), skipped, already in dedup state)
 - Badge / Draft: by the flusher after the post (or, when posted now: appended / cleared, from flush.log)
 - Linear: CON-4112 (title suffix) (or: added to title, or: no ticket found)
 - Product update: posted (or: declined, n/a (no screenshot), not offered (unattended), failed (<why>))
