@@ -107,7 +107,7 @@ git -C "$WT" log --oneline @{u}..HEAD 2>/dev/null   # unpushed commits; error = 
 ```bash
 gh pr list --repo <repo> --head "$BRANCH" --state open --json number,title,url,reviewDecision
 ```
-Cross-check `~/.claude/state/pr-review-posted.jsonl` for the URL. Missing → outstanding. Do **not** post to Slack from this skill without asking; see [[pr-review-gaps]] for the gated posting flow.
+Cross-check `~/.claude/state/pr-review-posted.jsonl` for the URL, then `~/.claude/state/pr-review-queue.jsonl`. In the posted file → done; in the queue → pending (the `pr-review-batch` flusher posts it at the next `:00`/`:30` window), not outstanding; in neither → outstanding. Do **not** post to Slack from this skill without asking; see [[pr-review-gaps]] for the gated posting flow.
 
 **e. sswt workspaces that are now empty or whose PR merged.** Verify emptiness *before* proposing anything:
 ```bash
