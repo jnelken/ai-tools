@@ -149,10 +149,22 @@ class DecideTests(unittest.TestCase):
 
 TIPS = {"id": "proj-tips", "name": "In-app Folio tips"}
 UMBRELLA = {"id": "proj-kf", "name": "Knowledge Foundation"}
+EVERGREEN = {"id": "proj-pe", "name": "Platform Engineering", "status": {"name": "Maintenance"}}
+
+
+def issue(project=None, parent=None, blocks=(), blocked_by=(), related=()):
+    """A Linear issue node as the batched query returns it."""
+    return {
+        "project": project,
+        "parent": {"identifier": parent} if parent else None,
+        "relations": {"nodes": [{"type": "blocks", "relatedIssue": {"identifier": i}} for i in blocks]
+                      + [{"type": "related", "relatedIssue": {"identifier": i}} for i in related]},
+        "inverseRelations": {"nodes": [{"type": "blocks", "issue": {"identifier": i}} for i in blocked_by]},
+    }
 
 
 class ProjectTests(unittest.TestCase):
-    """Fall back to the Linear project when no other PR carries the same ticket."""
+    """Fall back to a related ticket, then the Linear project, when no other PR carries the ticket."""
 
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -163,11 +175,12 @@ class ProjectTests(unittest.TestCase):
         self.temp.cleanup()
 
     def decide(self, prs, projects=None, denylist=None, ticket="CON-4373"):
-        """projects: ticket -> project dict (None for no project); omitted, Linear fails."""
+        """projects: ticket -> project dict, None, or a full issue(); omitted, Linear fails."""
         (self.dir / "prs.json").write_text(json.dumps(prs))
         env = {"FAKE_LINEAR_LOG": str(self.log)}
         if projects is not None:
-            nodes = [{"identifier": t, "project": p} for t, p in projects.items()]
+            nodes = [{"identifier": t, **(p if p and "relations" in p else issue(p))}
+                     for t, p in projects.items()]
             (self.dir / "linear.json").write_text(json.dumps({"data": {"issues": {"nodes": nodes}}}))
             env["FAKE_LINEAR_OUT"] = str(self.dir / "linear.json")
         args = ["decide", "--repo", "Concentro-Inc/woodrow", "--default", "main",
@@ -219,7 +232,7 @@ class ProjectTests(unittest.TestCase):
                           {"CON-4373": TIPS, "CON-4372": TIPS})
         self.assertEqual(out["decision"], "main")
         self.assertEqual(out["base_line"],
-                         'Base: main (#1964 same project "In-app Folio tips" already approved)')
+                         'Base: main (#1964 same project "In-app Folio tips", already approved)')
 
     def test_ticket_without_project_never_project_stacks(self):
         out = self.decide([pr(1964, "Other (CON-4372)", "jake/a")],
@@ -241,7 +254,8 @@ class ProjectTests(unittest.TestCase):
         out = self.decide([pr(1964, "Tips (CON-4372)", "jake/a")])
         self.assertEqual(out["decision"], "none")
         self.assertIsNone(out["base_line"])
-        self.assertTrue(out["note"].startswith("Project stacking skipped: linear api exited 4"))
+        self.assertTrue(out["note"].startswith(
+            "Related-ticket and project stacking skipped: linear api exited 4"))
 
     def run_new(self, **env):
         (self.dir / "prs.json").write_text(json.dumps([pr(1964, "Tips (CON-4372)", "jake/a")]))
@@ -252,7 +266,8 @@ class ProjectTests(unittest.TestCase):
 
     def test_note_is_one_line(self):
         out = self.run_new(FAKE_LINEAR_ERR="first\\nsecond")
-        self.assertEqual(out["note"], "Project stacking skipped: linear api exited 4: first second")
+        self.assertEqual(out["note"],
+                         "Related-ticket and project stacking skipped: linear api exited 4: first second")
 
     def test_cli_failure_falls_through_to_the_api_key(self):
         # A dead proxy makes the HTTPS attempt fail fast; the reported error must be
@@ -260,8 +275,75 @@ class ProjectTests(unittest.TestCase):
         out = self.run_new(LINEAR_API_KEY="bogus", https_proxy="http://127.0.0.1:9",
                            HTTPS_PROXY="http://127.0.0.1:9")
         self.assertEqual(out["decision"], "none")
-        self.assertTrue(out["note"].startswith("Project stacking skipped:"))
+        self.assertTrue(out["note"].startswith("Related-ticket and project stacking skipped:"))
         self.assertNotIn("linear api exited", out["note"])
+
+    def test_maintenance_project_never_stacks(self):
+        out = self.decide([pr(1950, "Infra (CON-4000)", "jake/infra")],
+                          {"CON-4373": EVERGREEN, "CON-4000": EVERGREEN})
+        self.assertEqual(out["decision"], "none")
+        self.assertIn("is in Maintenance", out["reason"])
+        started = dict(EVERGREEN, status={"name": "In Progress"})
+        self.assertEqual(self.decide([pr(1950, "Infra (CON-4000)", "jake/infra")],
+                                     {"CON-4373": started, "CON-4000": started})["decision"], "stack")
+
+    # Related tickets: same parent, parent and sub-issue, blocks / blocked by.
+
+    def test_sibling_sub_issues_stack(self):
+        out = self.decide([pr(1964, "Tip registry (CON-4372)", "jake/tips")],
+                          {"CON-4373": issue(parent="CON-4165"), "CON-4372": issue(parent="CON-4165")})
+        self.assertEqual((out["decision"], out["pr"], out["match"]), ("stack", 1964, "related"))
+        self.assertEqual(out["base_line"],
+                         "Base: stacked onto #1964 (related: parent CON-4165, not yet approved)")
+
+    def test_parent_and_its_sub_issue_stack_both_ways(self):
+        out = self.decide([pr(1900, "Framework (CON-4165)", "jake/framework")],
+                          {"CON-4373": issue(parent="CON-4165"), "CON-4165": issue()})
+        self.assertEqual(out["base_line"],
+                         "Base: stacked onto #1900 (related: parent CON-4165, not yet approved)")
+        out = self.decide([pr(1964, "Child (CON-4372)", "jake/child")],
+                          {"CON-4373": issue(), "CON-4372": issue(parent="CON-4373")})
+        self.assertEqual(out["base_line"],
+                         "Base: stacked onto #1964 (related: parent CON-4373, not yet approved)")
+
+    def test_blocks_stacks(self):
+        out = self.decide([pr(1964, "Next (CON-4372)", "jake/next")],
+                          {"CON-4373": issue(blocks=["CON-4372"]), "CON-4372": issue()})
+        self.assertEqual(out["base_line"],
+                         "Base: stacked onto #1964 (related: blocks CON-4372, not yet approved)")
+
+    def test_blocked_by_stacks(self):
+        out = self.decide([pr(1964, "Prereq (CON-4372)", "jake/prereq")],
+                          {"CON-4373": issue(blocked_by=["CON-4372"]), "CON-4372": issue()})
+        self.assertEqual(out["base_line"],
+                         "Base: stacked onto #1964 (related: blocked by CON-4372, not yet approved)")
+
+    def test_plain_related_link_does_not_stack(self):
+        out = self.decide([pr(1964, "Tips (CON-4372)", "jake/a")],
+                          {"CON-4373": issue(related=["CON-4372"]), "CON-4372": issue()})
+        self.assertEqual(out["decision"], "none")
+
+    def test_precedence_ticket_then_related_then_project(self):
+        prs = [pr(1950, "Same project (CON-4000)", "jake/p"),
+               pr(1960, "Sibling (CON-4372)", "jake/r"),
+               pr(1967, "Same ticket (CON-4373)", "jake/t")]
+        projects = {"CON-4373": issue(TIPS, parent="CON-4165"),
+                    "CON-4372": issue(parent="CON-4165"), "CON-4000": issue(TIPS)}
+        self.assertEqual(self.decide(prs, projects)["pr"], 1967)
+        out = self.decide(prs[:2], projects)
+        self.assertEqual((out["pr"], out["match"]), (1960, "related"))
+        out = self.decide(prs[:1], projects)
+        self.assertEqual((out["pr"], out["match"]), (1950, "project"))
+
+    def test_approved_related_parent_settles_on_main(self):
+        out = self.decide(
+            [pr(1950, "Same project (CON-4000)", "jake/p"),
+             pr(1964, "Sibling (CON-4372)", "jake/r", "APPROVED")],
+            {"CON-4373": issue(TIPS, parent="CON-4165"), "CON-4372": issue(parent="CON-4165"),
+             "CON-4000": issue(TIPS)},
+        )
+        self.assertEqual(out["decision"], "main")
+        self.assertEqual(out["base_line"], "Base: main (#1964 related: parent CON-4165, already approved)")
 
     def test_ticket_missing_from_linear_is_a_failure_not_no_project(self):
         out = self.decide([pr(1964, "Tips (CON-4372)", "jake/a")], {"CON-4372": TIPS})
