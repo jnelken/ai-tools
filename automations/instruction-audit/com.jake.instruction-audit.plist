@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>com.jake.instruction-audit</string>
+
+	<!-- $HOME is expanded by sh, so the plist is the same on every machine. run.sh keeps
+	     its own logs under ~/.claude/automations/instruction-audit/logs/. -->
+	<key>ProgramArguments</key>
+	<array>
+		<string>/bin/sh</string>
+		<string>-c</string>
+		<string>exec /bin/zsh "$HOME/.claude/automations/instruction-audit/run.sh"</string>
+	</array>
+
+	<!-- 3:15 am local time on days 1-7 of each month. run.sh skips once the month's
+	     report exists, so days 2-7 only matter when the Mac was off or the run failed
+	     on the 1st. A sleeping Mac runs the missed job on wake. -->
+	<key>StartCalendarInterval</key>
+	<array>
+		<dict><key>Day</key><integer>1</integer><key>Hour</key><integer>3</integer><key>Minute</key><integer>15</integer></dict>
+		<dict><key>Day</key><integer>2</integer><key>Hour</key><integer>3</integer><key>Minute</key><integer>15</integer></dict>
+		<dict><key>Day</key><integer>3</integer><key>Hour</key><integer>3</integer><key>Minute</key><integer>15</integer></dict>
+		<dict><key>Day</key><integer>4</integer><key>Hour</key><integer>3</integer><key>Minute</key><integer>15</integer></dict>
+		<dict><key>Day</key><integer>5</integer><key>Hour</key><integer>3</integer><key>Minute</key><integer>15</integer></dict>
+		<dict><key>Day</key><integer>6</integer><key>Hour</key><integer>3</integer><key>Minute</key><integer>15</integer></dict>
+		<dict><key>Day</key><integer>7</integer><key>Hour</key><integer>3</integer><key>Minute</key><integer>15</integer></dict>
+	</array>
+
+	<key>RunAtLoad</key>
+	<false/>
+
+	<key>ProcessType</key>
+	<string>Background</string>
+</dict>
+</plist>

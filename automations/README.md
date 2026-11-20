@@ -384,6 +384,27 @@ Limitations:
 - The Keychain token is the Agent CLI's; if it expires the probe gets a 401 until the next `agent`
   run refreshes it.
 
+## `instruction-audit`
+
+Monthly, report-only audit of instruction overhead. `com.jake.instruction-audit.plist` fires at
+3:15 am on days 1–7 of each month; `run.sh` skips once the month's report exists, so days 2–7 only
+cover a Mac that was off on the 1st or a failed run. Any other trigger (for example a Superset
+automation that runs `run.sh`) is equally harmless. `run.sh --force` re-runs the current month.
+
+`audit.py` does the measuring deterministically: estimated tokens (chars/4) for the global
+`CLAUDE.md`, each resolved profile fragment per target repo, the skill listing and the memory
+indexes; settings counts; and a real end-to-end `claude -p` probe from a neutral directory and from
+`~/code/ai-tools`, which captures what files cannot (connector tools, plugin skills, hook context).
+It diffs against the previous month's snapshot. A headless `claude -p` run with only
+Read/Grep/Glob then ranks duplicate, stale, situational and bloated instructions
+(`analysis-prompt.md`). Nothing is edited.
+
+Output lives in `~/.claude/automations/instruction-audit/`: `reports/YYYY-MM.md` (measurements plus
+analysis), `snapshots/YYYY-MM.json`, `logs/`. A failed analysis writes no report, so a retry re-runs.
+Env: `INSTRUCTION_AUDIT_TARGETS` (colon-separated repos to resolve), `INSTRUCTION_AUDIT_PROBE_TARGETS`
+(repos to probe from; work repos are not probed by default because a headless run fires their hooks),
+`INSTRUCTION_AUDIT_MODEL`.
+
 ## `machine-status`
 
 A read-only page of this Mac's health at `http://127.0.0.1:8423/`, mounted at `/status` on the
