@@ -40,5 +40,19 @@ URGENT=$'# In Progress\n\n_Last updated: 2026-09-24_\n\n## Urgent, tracked elsew
 expect SILENT "only urgent pointers"          "$(run "$URGENT")"
 expect "$URGENT" "urgent-only file untouched" "$(cat "$F")"$'\n'
 
+# Deferred items: "[not before YYYY-MM-DD]" later than today is open but not due.
+def_file() { printf '# In Progress\n\n_Last updated: %s (close-out)_\n\n- [ ] [not before %s] later thing\n- [ ] [not before %s] other later thing\n' "$1" "$2" "$3"; }
+expect SILENT "only deferred, reconciled this week" "$(run "$(def_file 2026-10-05 2026-10-08 2026-11-01)")"
+expect SILENT "only deferred, reconciled long ago"  "$(run "$(def_file 2026-09-24 2026-10-08 2026-11-01)")"
+expect "$(def_file 2026-09-24 2026-10-08 2026-11-01)" "deferred-only file untouched" "$(cat "$F")"
+expect OFFER  "deferred item due today counts"      "$(run "$(def_file 2026-10-05 2026-10-07 2026-11-01)")"
+expect OFFER  "deferred item past due counts"       "$(run "$(def_file 2026-10-05 2026-10-01 2026-11-01)")"
+MIXED=$'# In Progress\n\n_Last updated: 2026-10-05 (close-out)_\n\n- [ ] active thing\n- [ ] [not before 2026-11-01] later thing\n'
+expect OFFER  "active plus deferred offers"         "$(run "$MIXED")"
+ctx=$(cd "$TMP" && PICK_UP_NUDGE_TODAY=$TODAY bash "$HOOK" | jq -r '.hookSpecificOutput.additionalContext')
+[[ "$ctx" == *"(1 open item (plus 1 deferred, not due yet))"* ]] && pass=$((pass+1)) || { fail=$((fail+1)); echo "FAIL: mixed message count text — got $ctx"; }
+expect SWEEP  "active plus deferred, stale week"    "$(run "${MIXED/2026-10-05/2026-09-24}")"
+expect OFFER  "malformed date is an ordinary item"  "$(run $'# In Progress\n\n_Last updated: 2026-10-05 (close-out)_\n\n- [ ] [not before soon] thing\n')"
+
 echo "pick-up-nudge: $pass passed, $fail failed"
 (( fail == 0 ))

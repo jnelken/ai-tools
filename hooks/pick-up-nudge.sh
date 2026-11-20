@@ -8,6 +8,10 @@
 # the empty template in place -- stale [x] entries and the close-out session log
 # have no value once there's nothing left in-progress to trace back to.
 #
+# Deferred items: an open item tagged "[not before YYYY-MM-DD]" with a date after
+# today is not due yet. It still counts as open (so the file is never reset), but it
+# neither triggers the offer nor the weekly sweep; /pick-up suppresses it the same way.
+#
 # Weekly sweep: when open items exist but the file's "_Last updated:" date is
 # outside the current ISO week, it asks for `/pick-up sweep` in a background
 # agent instead of just offering /pick-up.
@@ -36,8 +40,14 @@ done
 # An "## Urgent, tracked elsewhere" pointer ("- CON-1234 — why") is real
 # content even without a checkbox, so a file holding only those is not empty.
 open_items=0 urgent_items=0 inside=0 last_updated=""
+deferred_dates=()
 while IFS= read -r line || [[ -n "$line" ]]; do
-  [[ "$line" =~ ^[[:space:]]*-\ \[\ \] ]] && open_items=$((open_items + 1))
+  if [[ "$line" =~ ^[[:space:]]*-\ \[\ \] ]]; then
+    open_items=$((open_items + 1))
+    if [[ "$line" =~ ^[[:space:]]*-\ \[\ \]\ \[not\ before\ ([0-9]{4}-[0-9]{2}-[0-9]{2})\] ]]; then
+      deferred_dates+=("${BASH_REMATCH[1]}")
+    fi
+  fi
   if [[ "$line" == '## '* ]]; then
     inside=0
     [[ "$line" == '## Urgent'* ]] && inside=1
@@ -89,6 +99,19 @@ fi
 # Only urgent pointers left: nothing to pick up, nothing to reset.
 [[ "$open_items" -eq 0 ]] && exit 0
 
+# Drop the open items that are deferred past today. ISO dates compare as strings.
+# PICK_UP_NUDGE_TODAY overrides today's date for tests; date runs only if a tag exists.
+deferred_items=0
+if [[ "${#deferred_dates[@]}" -gt 0 ]]; then
+  today=${PICK_UP_NUDGE_TODAY:-$(date +%F)}
+  for d in "${deferred_dates[@]}"; do
+    [[ "$d" > "$today" ]] && deferred_items=$((deferred_items + 1))
+  done
+  open_items=$((open_items - deferred_items))
+fi
+# Everything open is deferred: nothing to pick up yet, and the file stays as written.
+[[ "$open_items" -eq 0 ]] && exit 0
+
 # Weekly sweep. Every reconcile (close-out, pick-up, wrapup-repos, the sweep
 # itself) bumps "_Last updated: YYYY-MM-DD", so a date outside the current ISO
 # week means nobody has checked these items against reality this week.
@@ -114,7 +137,8 @@ plural=""
 [[ "$open_items" -ne 1 ]] && plural="s"
 open_item_count_text="$open_items open item$plural"
 
-msg="This repo has unresolved work recorded in \`$rel\` ($open_items open item$plural). Mention this to the user and offer to run \`/pick-up\` to resume it -- don't read the file or act on its items yourself; /pick-up owns that flow (verification against current state, then each open item put to the user as a decision)."
+[[ "$deferred_items" -gt 0 ]] && open_item_count_text+=" (plus $deferred_items deferred, not due yet)"
+msg="This repo has unresolved work recorded in \`$rel\` ($open_item_count_text). Mention this to the user and offer to run \`/pick-up\` to resume it -- don't read the file or act on its items yourself; /pick-up owns that flow (verification against current state, then each open item put to the user as a decision)."
 
 if [[ -z "$last_week" || "$last_week" != "$this_week" ]]; then
   msg="\`$rel\` has $open_item_count_text and hasn't been reconciled this week (last: ${last_updated:-never}). Run the weekly sweep without blocking the user: launch one background Agent (subagent_type \"fork\") whose prompt is to invoke the \`pick-up\` skill with args \`sweep\` for $repo_root, then carry on with the user's request. When it reports back, relay its result (each removed item with its evidence, and how many are still open) and offer \`/pick-up\` for what's left. Don't read the file or act on its items yourself."
