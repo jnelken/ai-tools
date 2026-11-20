@@ -9,13 +9,13 @@ End every final message of a turn with one status line — `<glyph> <label, ≤8
 | ⏳ | Watching | Idle now, but a Monitor, ScheduleWakeup, background agent or CI watch is armed and the session resumes on its own. Label names what and a rough ETA. |
 | 💡 | Follow-ups | Asked-for work done and verified; recommended follow-ups or open questions worth a look. |
 | ✅ | Done | Everything asked for is complete and verified; nothing pending. |
-| ⛏️ | Reapable | ✅ plus nothing keeps this session alive: no open questions, no in-progress work, no pending follow-up that needs this context, and any sswt it owns is merged (or already reaped). Applies with or without an sswt. A bare "reap" reply authorizes `/self-destruct` (from a root checkout that means reaping the merged sswts the session spawned, then closing its own tab); left alone for an hour, the `reap-sswts` automation tears the sswt down (after its own merged/clean checks) or closes a root-checkout tab, so only sign off ⛏️ when that would be fine. |
+| ⛏️ | Reapable | ✅ plus nothing keeps this session alive: no open questions, in-progress work or pending follow-up that needs this context, and any sswt it owns is merged (or already reaped). Applies with or without an sswt. A bare "reap" reply authorizes `/self-destruct`; left alone for an hour, the `reap-sswts` automation tears the session down, so sign off ⛏️ only when that would be fine. |
 | 💬 | Answer only | Informational reply; no task was requested. |
 
 - One primary glyph, by priority: 🛑 > ⚠️ > ⏳ > 💡 > ⛏️ > ✅ > 💬. At most one secondary when both are true (`⏳💡`). Never pair ⛏️ with 💡, 🛑 or ⚠️ — ⛏️ already means nothing is open.
 - Write ⚠️ and ⛏️ in emoji form (`U+26A0 U+FE0F`, `U+26CF U+FE0F`). The bare text forms render monochrome.
 - Pick honestly: a turn that armed a watch is ⏳, not ✅; unverified work is ⚠️, not ✅.
-- The `status-glyph-check.sh` Stop hook shows a non-blocking `⏰` warning while the session holds a pending `CronCreate` / `ScheduleWakeup` job: those are session-only and die if the session closes. Don't repeat the warning in the status line; a ⏳ label should still say what is armed.
+- The `status-glyph-check.sh` Stop hook shows a non-blocking `⏰` warning while a `CronCreate` / `ScheduleWakeup` job is pending (session-only, so it dies if the session closes). Don't repeat the warning; a ⏳ label should still say what is armed.
 
 
 ## Clarifying Questions: Keep Asking Until I Stop You
@@ -56,17 +56,3 @@ Delegate through the preset agents, which carry the model and rules: `researcher
 ## Cross-Session Continuity
 
 Every Claude Code session's full transcript is retained automatically and is searchable via `search_session_transcripts` / `list_events` (ccd_session_mgmt MCP). When a task references prior work, a past decision, or feels like a continuation of something already discussed, search past transcripts before assuming the context is gone or asking me to re-explain — don't wait to be told to. This is for detail too specific to belong in the curated memory system (`$(~/.ai-tools/bin/personal-code-dir --memory-dir)`); that memory system still owns durable facts, preferences, and project state — use it as normal, and don't duplicate its content into transcript-search habits.
-
-
-## Plan Files
-Every plan file you write (under `docs/plans/` in a project repo, or anywhere else when asked to create a plan) must begin with a **Suggested execution** block right after the title, recommending which Claude model and reasoning effort would best execute the plan, and why. Format:
-
-```markdown
-# Plan Title
-
-> **Suggested execution:** <model> with <reasoning effort> reasoning — <one-sentence rationale>. Step up to Opus for <when>; step down to Haiku for <when>.
-```
-
-Pick a tier: Opus, Sonnet or Haiku. Name the tier, not a version: it means the latest model of that tier, so the header doesn't go stale when a new version ships. Reasoning effort: low / medium (auto) / high. Base the recommendation on the task's code volume, design/visual judgment needs, algorithmic complexity, and how ambiguous the plan itself is (a detailed plan lets a cheaper model execute fine; a vague brief needs a smarter model to fill gaps).
-
-Outside harness plan mode, write the running plan directly to `docs/plans/<slug>.md` in the project repo (for team visibility and version control). During harness plan mode, the harness plan file **is** the running plan; do not also write `docs/plans/` while plan mode is active. As the first action after exiting plan mode, copy that plan file to `docs/plans/<slug>.md` in the target repo, then continue the work.

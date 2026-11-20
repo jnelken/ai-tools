@@ -25,6 +25,8 @@ Original source: dotfiles/claude/CLAUDE.md. Section text is preserved at migrati
 | Lunch Money MCP Cache | machine/personal-mac.md |
 | Cross-Session Continuity | providers/claude-development.md |
 | Who Jake Is (cross-project context) | development/personal.md |
-| Plan Files | providers/claude-development.md |
+| Plan Files | development/shared.md (pointer), reference/plan-files.md (2026-11-20) |
 
 The previous parent code-CLAUDE.md is preserved in development/frontend.md and loaded on demand. Global Codex installation preferences are preserved in shared.md. Legacy maintenance guidance is retained as reference; the new installer owns file locations.
+
+Later relocations (2026-11-20, from the monthly instruction-overhead audit): *Playwright: one browser per machine* detail moved to reference/playwright-slot.md, *Secrets and `.env` files` detail to reference/secrets-env.md, the *Invariants* procedure to skills/peer-review/templates/invariants/README.md, and *Plan Files* to reference/plan-files.md. Each source fragment keeps the hard rule and a one-line pointer that says when to read the file. *Post-PR Workflow* now keeps only the standing authorizations and the `#product-updates` question; mechanics live in the post-pr and create-pr skills and post-pr-trunk-flow.md.

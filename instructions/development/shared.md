@@ -78,7 +78,7 @@ provenance merely from a ticket's age, Done status, or missing PR.
 
 At the end of a session, three standing follow-ups apply. Details (triggers, tiers, destinations): `~/.claude/instructions/retrospectives.md`.
 
-- **Datadog Follow-up** — if Datadog tools were used and something slowed you down (see Datadog above).
+- **Datadog Follow-up** — if Datadog tools were used and something slowed you down.
 - **Tooling Follow-up** — if the session hit friction with the tooling around the work, or the work removed/replaced a mechanism. Report-only; name `/session-hardening` as the way to act on it.
 - **Gotcha docs** — if investigating one subsystem surfaced several related non-obvious gotchas written down nowhere, commit them to a reference doc without waiting to be asked.
 
@@ -100,14 +100,7 @@ When reading a branch, a commit whose message contains `ridealong` (or `ride-alo
 
 ## Plan Files
 
-### Running planning docs
-
-- **Open it early.** After orientation, any planning or investigation session opens a running doc: `docs/plans/<slug>.md` in the target repo, or the harness plan file in plan mode, copied to `docs/plans/` on exit.
-- **Use these sections:** Status, Decisions, Findings (with evidence), Open threads (checkbox list), Approach.
-- **Keep it current:** update it after each finding or agent result.
-- **Close threads visibly:** answer and tick with an annotation, or move the thread to a ticket or `IN_PROGRESS.md` and note where. Never delete one silently.
-- **Commit:** in personal repos, commit and push it under the existing commit rules.
-- **Scratch plans live in the root checkout.** A repo's gitignored `docs/plans/tmp/` belongs to its root checkout (the first entry of `git worktree list`, e.g. `~/code/api`), never to a worktree: deleting a worktree deletes its untracked plans, and agents in other worktrees can't see them. In a worktree, make `docs/plans/tmp` a symlink to the root's: `root=$(dirname "$(git rev-parse --path-format=absolute --git-common-dir)"); mkdir -p "$root/docs/plans/tmp"`, move any files from a real `docs/plans/tmp` there first, then `ln -s "$root/docs/plans/tmp" docs/plans/tmp`. A symlink isn't matched by the `tmp/` ignore rule, so make sure the repo's shared `.git/info/exclude` lists `docs/plans/tmp`. In briefs, handoffs and tickets, reference scratch plans by their root-checkout path.
+When starting a planning or investigation session, writing any plan file, or leaving harness plan mode, read `~/.ai-tools/instructions/reference/plan-files.md` first. It holds the running-doc rules, the scratch-plan worktree symlink and the required **Suggested execution** header. Two rules apply even before you read it: open a running doc early (`docs/plans/<slug>.md`, or the harness plan file in plan mode), and as the first action after exiting plan mode, copy the harness plan file to `docs/plans/<slug>.md` in the target repo.
 
 ## Golden Paths
 
@@ -116,17 +109,7 @@ Match process to task size: small task → one prompt; unfamiliar area → explo
 
 ## Invariants
 
-A review finding is either an **instance** (one defect at one place) or an **invariant** (a rule that must hold at every path reaching a side effect: a write, network call, payment, permission check, or secret read). Classify every finding that way before fixing it. Fixing each reported call site of an invariant one round at a time just waits for the next review to find the next site.
-
-For an invariant finding, **before fixing, list every code path that reaches this side effect. If more than one, propose a single owner.** Prefer one owner (a single module or function) that applies the policy, with mechanical enforcement over another per-site patch. Then:
-
-1. **Record** the invariant and its owner in the code or plan doc: one sentence of the rule, and the path to the owner.
-2. **Check changed paths** in the diff against it: anything new that reaches the side effect must go through the owner.
-3. **Test the owner's policy once**, with table-driven cases covering every allowed and denied input.
-4. **Test each entry point delegates** to the owner, so a new path that bypasses it fails a test.
-5. **Enforce mechanically** where cheap: keep the raw client unexported, add an ESLint restriction, or add an architecture guard test that fails on a bypassing import.
-
-Reusable examples live in `~/.claude/skills/peer-review/templates/invariants/`. Escalate only when choosing the owner is an architectural decision beyond the approved scope; otherwise make the call and note it.
+A review finding is either an **instance** (one defect at one place) or an **invariant** (a rule that must hold at every path reaching a side effect: a write, network call, payment, permission check, or secret read). Classify every finding that way before fixing it. For an invariant, **before fixing, list every code path that reaches this side effect. If more than one, propose a single owner** with mechanical enforcement instead of another per-site patch. The five-step procedure (record, check changed paths, test the owner's policy, test each entry point delegates, enforce mechanically) and reusable examples: `~/.ai-tools/skills/peer-review/templates/invariants/README.md`. Escalate only when choosing the owner is an architectural decision beyond the approved scope; otherwise make the call and note it.
 
 ## Refactoring vs Patching
 
@@ -134,10 +117,4 @@ When one feature's fix cycle keeps producing new edge cases faster than it conve
 
 ## Playwright: one browser per machine
 
-At most one Playwright browser may be alive on a machine at a time, across every repo, session and harness, and across headed and headless. Parallel browsers and installs have maxed out a machine's RAM. Treat any Playwright-dependent work (browser MCP tools, `playwright test`, screenshot or e2e scripts, `playwright install`) as holding a single machine-wide slot.
-
-- **Use the shared MCP servers, never your own.** `playwright` (headless) and `playwright-headed` are one-per-machine servers that open the same browser profile, so the second browser is refused while one is open. Dotfiles `bin/playwright-shared` sets them up and explains the mechanism. Don't start another server, port, profile, `--isolated` instance or per-session `npx @playwright/mcp`. Never call `mcp__plugin_playwright_playwright__*` tools: some repos enable the official Playwright plugin, and it starts a per-session browser outside the slot. Before the first browser tool call, run `~/.ai-tools/bin/playwright-lock status` and wait while it names a holder, because a script may hold the slot without the servers knowing.
-- **Queue when the slot is taken.** `Browser is already in use` means another task holds it. Wait and retry about once a minute, doing other work meanwhile. Never work around the refusal, and never kill a browser you didn't open. An abandoned browser closes itself after 5 idle minutes, so a slot held longer than that is in active use.
-- **Release the slot as soon as the browser work ends.** Call `browser_close` then, before moving on to anything else, not at the end of the session.
-- **Outside MCP, hold the slot with `playwright-lock`.** Run `playwright test`, any script that launches a browser, and `playwright install` as `~/.ai-tools/bin/playwright-lock run --label <task> -- <command>`. It waits for the slot, keeps it while the command runs and releases it on exit. Exit code 75 means it timed out waiting: run it again, never bypass it. The lock doesn't see browsers the shared servers opened, so inside the command's turn first run `pgrep -fl 'ms-playwright/' | grep -v -- '--type='` and wait while it prints a browser.
-- **Don't parallelize it yourself.** Never fan out subagents or workspaces that each need a browser on the same machine; run their browser steps one after another.
+At most one Playwright browser may be alive on a machine at a time, across every repo, session and harness (parallel browsers have maxed out a machine's RAM). Before any Playwright-dependent work (browser MCP tools, `playwright test`, screenshot or e2e scripts, `playwright install`), read `~/.ai-tools/instructions/reference/playwright-slot.md` and run `~/.ai-tools/bin/playwright-lock status`. Use only the shared `playwright` / `playwright-headed` MCP servers (never `mcp__plugin_playwright_playwright__*`), wrap scripts in `playwright-lock run`, and never fan out subagents that each need a browser.
