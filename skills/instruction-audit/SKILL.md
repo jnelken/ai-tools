@@ -14,7 +14,10 @@ allowed-tools: Read, ToolSearch, Bash(python3 ~/.claude/skills/instruction-audit
 
 Report-only. Your only writer is `scripts/audit.py`, which writes snapshots and reports under
 `~/.claude/automations/instruction-audit/`; the rest of your Bash is read-only searching (`grep`, `ls`,
-`wc`, the profile resolver), because this build has no Grep or Glob tool. Never edit instruction files,
+`wc`, the profile resolver), because this build has no Grep or Glob tool. Permission rules match the
+command text literally: run one simple command per call, no pipes, redirects or `$(...)`, and write the
+resolver exactly as `python3 ~/.ai-tools/bin/agent-profile resolve --harness claude --target <dir> --text`
+(keep the `~`; an absolute path is denied). Never edit instruction files,
 skills or settings: findings are recommendations for Jake. The only outward action is the unattended Slack
 post in step 4.
 
