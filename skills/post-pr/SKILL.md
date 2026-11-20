@@ -9,9 +9,11 @@ description: 'Drive a PR the rest of the way to review-ready — run Codex revie
 
 The last mile of a PR: review it until it's quiet, confirm CI is green, and queue it for `#pr-review`. The team's review capacity is limited, so announcements go out in batches: the `pr-review-batch` flusher (a launchd job, [`automations/pr-review-batch`](../../automations/pr-review-batch/flush.py)) releases the queue on window boundaries (`:00`/`:30` by default), one Slack message per PR, and only then flips the two signals that tell humans a PR is ready for eyes.
 
+**A PR that fixes no bug and ships no feature can wait** (step 3.4). Docs, tests, refactors, lint, CI, dependency and copy PRs are *deferred* to the 4 PM ET weekday release, and every such PR a repo produces that day rides in one bundle: the first one becomes the bundle, later ones merge into it as sub-PRs. Reviewers see at most one deferrable PR per repo per day.
+
 ```
-/loop /peer-review  →  resolve base conflicts  →  gh pr checks --watch  →  base is the default branch?
-                                                ├─ yes → [hygiene] label → enqueue → offer screenshot to #product-updates
+/loop /peer-review  →  resolve base conflicts  →  gh pr checks --watch  →  deferrable? (3.4: stack into today's bundle, or become it)  →  base is the default branch?
+                                                ├─ yes → [hygiene] label → enqueue (deferred: releaseAt 4 PM ET) → offer screenshot to #product-updates
                                                 │          … next window: flusher → Slack #pr-review → posted.jsonl → badge → gh pr ready → auto-merge
                                                 └─ no  → gh pr merge --merge into the trunk → reap the sub-PR's sswt
 ```
@@ -29,7 +31,7 @@ Every step gates the next. A PR that never comes back clean is never queued and 
 /post-pr 1271                 # a PR by number, in the current repo
 /post-pr <worktree-path>      # a PR whose branch lives in another worktree
 /post-pr 41 1271 1433         # several: one per worktree, run in parallel
-/post-pr --now                # hotfix: enqueue, then flush just this PR immediately
+/post-pr --now                # hotfix: skip deferral, enqueue, then flush just this PR immediately
 ```
 
 Runs automatically when a task's work is complete — see [When it fires on its own](#when-it-fires-on-its-own).
@@ -124,6 +126,40 @@ Checks reporting `NEUTRAL` or `SKIPPED` are not failures — Netlify's informati
 
 A PR whose base is not the repo's default branch typically has *fewer* checks to watch, not zero — this repo's `unit-tests.yml` and `e2e-tests.yml` are both scoped to `pull_request: branches: [main]`, so a stacked PR only gets whatever workflows aren't main-restricted (e.g. a labeler). That's expected, not a red flag: don't wait for checks that structurally cannot run, and don't treat their absence as a gate failure. Rely on local verification (tests, typecheck) for the rest.
 
+### 3.4. Defer a PR that fixes no bug and ships no feature
+
+Only for a PR whose base is the repo's default branch (a sub-PR into a trunk is merged by step 3.6 and never announced anyway). `/post-pr --now` skips this step: report `Deferral: skipped (--now)`.
+
+**Classify** the net diff (`git diff <base>...HEAD`) and the PR's labels. The PR is **deferrable** unless it fixes a bug or adds or changes user-facing behavior:
+
+- Deferrable: docs-only (woodrow #1977: three markdown files), tests, behavior-preserving refactors, lint or format fixes, CI, dependency bumps, copy tweaks. Anything step 4's `[hygiene]` tag would cover is always deferrable.
+- Not deferrable: a `bug` or `enhancement` label, any bug fix, any new or changed user-facing behavior.
+- **When unsure, it is not deferrable.** Holding a fix until 4 PM costs more than posting a refactor early.
+
+Not deferrable: report `Deferral: not deferrable` and continue at step 3.5 as before.
+
+**Deferrable: find today's bundle.** The bundle is Jake's open PR into the same repo's default branch whose body carries `<!-- pr-review-deferred -->`, with no `📣 **Posted to Slack**` badge, that isn't APPROVED. Search GitHub, never the local queue: jake1 and jake2 keep separate queues, and only GitHub state is visible to both. The flusher has a read-only helper:
+
+```bash
+python3 -I ~/.claude/automations/pr-review-batch/flush.py --defer-plan "$URL"
+# {"self": false, "bundle": {"number": 1971, "url": "...", "title": "...", "head": "jake/docs-x"} | null,
+#  "releaseAt": "2026-11-20T21:00:00Z", "releaseLocal": "Fri 2026-11-20 16:00 EST"}
+```
+
+`releaseAt` is the next weekday `deferReleaseAt` in `deferTz` (`pr-review-batch.json`, default 16:00 America/New_York), as UTC: after 4 PM it is the next day, and Friday after 4 PM is Monday. Then one of three paths:
+
+- **`self: true`** — this PR already carries the marker: it *is* a bundle (a re-run after a push). Continue to step 4 as a deferred entry with the printed `releaseAt` (it reuses the queued one). Report `Deferral: deferrable (<reason>), today's <repo> bundle, releases <releaseLocal>`.
+- **`bundle` found** — retarget this PR onto it: `gh pr edit <PR_NUMBER> --repo <OWNER/REPO> --base <bundle.head>`. Step 3.5 now classifies it as a sub-PR, and step 3.6 merges it into the bundle (re-checking that the bundle is still open and unapproved) and step 3.7 reaps its sswt. CI already passed against the default branch in step 3; don't wait for main-scoped checks that won't run against the bundle branch. **After the merge succeeds**, record it in the bundle's body with create-pr's `note` helper (read and write through a file; skip the edit when it prints `unchanged`):
+  ```bash
+  f=$(mktemp)
+  gh pr view "$BUNDLE_URL" --json body -q .body > "$f" &&
+    [ "$(python3 ~/.claude/skills/create-pr/scripts/same_ticket.py note --body-file "$f" --pr "$N" --title "$TITLE")" = changed ] &&
+    gh pr edit "$BUNDLE_URL" --body-file "$f"
+  rm -f "$f"
+  ```
+  Report `Deferral: stacked into #N (today's <repo> bundle)`. If step 3.6 finds the bundle approved, merged or closed, it retargets this PR back to the default branch; run this step again (the plan no longer returns that bundle). If the merge hits a conflict that needs a decision, retarget back to the default branch (`gh pr edit --base <DEFAULT_BRANCH>`) and queue this PR as **its own deferred entry** in step 4 (`defer`, `releaseAt`, but no `<!-- pr-review-deferred -->` marker, so it doesn't become a second bundle). Report `Deferral: own deferred entry (conflicts with bundle #N: <what>)`.
+- **No bundle** — this PR becomes today's bundle. Add `<!-- pr-review-deferred -->` to the end of its body, read and written through a file and only if it isn't there yet (the same snippet as step 4's queued marker), then continue to step 4 and queue it with `"defer": true` and the printed `releaseAt`. Report `Deferral: deferrable (<reason>), new <repo> bundle, releases <releaseLocal>`. If the flusher isn't loaded on this machine (step 4's safety net), don't defer: nothing would release it. Report `Deferral: skipped (flusher not loaded)` and post as usual.
+
 ### 3.5. Check whether this PR is externally announceable
 
 ```bash
@@ -167,6 +203,7 @@ gh pr merge <PR_NUMBER> --repo <OWNER/REPO> --merge --delete-branch=false
 - **Keep the remote branch at merge time** (`--delete-branch=false`). Branches stacked on it still resolve, and the PR keeps its head ref. The sub-PR's local workspace and branch are reaped separately, as the run's last action (step 3.7).
 - **The undraft here is a merge prerequisite, not a signal.** No human reviews a sub-PR, so its draft pill was never load-bearing. Do it immediately before the merge and never badge the PR.
 - **Conflicts** (`CONFLICTING` / `DIRTY`): resolve them as in step 2.5, with the trunk as the base. Stop and report "merge blocked — conflicts with `<trunk>`" only for a conflict that needs a product or design decision.
+- When step 3.4 retargeted this PR into a deferred bundle, write the bundle's `## Stacked follow-ups` line (3.4's `note` snippet) now, after the merge and before step 3.7's reap ends the session.
 - After the merge the trunk PR's diff has grown — say so in the report, and pull the trunk in the worktree if the next piece of work starts from it. Nothing is written to `pr-review-queue.jsonl` or `pr-review-posted.jsonl`; there is no post to queue or dedup.
 
 ### 3.7. Reap the sub-PR's sswt
@@ -240,16 +277,20 @@ The repo label and title together form the hyperlink text. Nothing outside the l
 ```bash
 jq -nc --arg url "$URL" --arg repo "$REPO" --argjson pr "$N" --arg text "$TEXT" \
   --arg sha "$(gh pr view "$URL" --json headRefOid -q .headRefOid)" --argjson am "$AUTOMERGE_JSON" \
-  --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-  '{url:$url, repo:$repo, pr:$pr, text:$text, headSha:$sha, autoMerge:$am, queuedAt:$at}' \
+  --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --argjson defer "$DEFER_JSON" --arg rel "$RELEASE_AT" \
+  '{url:$url, repo:$repo, pr:$pr, text:$text, headSha:$sha, autoMerge:$am, queuedAt:$at}
+   + (if $defer then {defer:true, releaseAt:$rel} else {} end)' \
   >> ~/.claude/state/pr-review-queue.jsonl
 ```
 
 ```json
 {"url": "...", "repo": "Concentro-Inc/api", "pr": 0, "text": "<URL|[api] title>", "headSha": "...", "autoMerge": "squash", "queuedAt": "2026-01-01T00:00:00Z"}
+{"url": "...", "repo": "Concentro-Inc/woodrow", "pr": 0, "text": "<URL|[ui][hygiene] title>", "headSha": "...", "autoMerge": "squash", "queuedAt": "2026-01-01T15:00:00Z", "defer": true, "releaseAt": "2026-01-01T21:00:00Z"}
 ```
 
 `text` is the finished Slack link text; `autoMerge` is `"squash"`, `"merge"` or `null` (`AUTOMERGE_JSON='"squash"'` or `null`). `headSha` must be the PR's current head: the flusher drops an entry whose PR has moved on (a later push runs `/post-pr` again and re-enqueues), whose PR is no longer open or no longer targets the default branch, or whose URL is already in `pr-review-posted.jsonl`.
+
+`defer` and `releaseAt` are set only for a PR step 3.4 deferred (`DEFER_JSON=true` and `RELEASE_AT` from `--defer-plan`; otherwise `DEFER_JSON=false`). The flusher holds such an entry until `releaseAt`, then posts it on the next window. Sub-PRs merge into a bundle while it waits, so the flusher **never drops a deferred entry for a moved head**; at release it requires `gh pr checks` to be all passing on the current head instead (pending holds it to the next window, failing holds it and logs `!!!` in `flush.log`). Its message keeps the usual first line and, when sub-PRs were merged into it, gets `Also includes: <url|#N>, <url|#M>`.
 
 **Mark it queued on GitHub.** Right after the enqueue, add an invisible `<!-- pr-review-queued -->` line to the end of the PR body, read and written through a file, and only if it isn't there yet. Queues are per machine, so this marker is how the other machine's flusher sees that this PR is queued; the flusher removes it when it adds the badge. A failed marker write is reported, not fatal: the PR still posts, though a sibling on the other machine may wait out its hold first.
 
@@ -279,7 +320,7 @@ launchctl print "gui/$(id -u)/com.jake.pr-review-batch" >/dev/null 2>&1
 
 If that fails, the queue would never drain. Enqueue as above, then post immediately with `~/.claude/automations/pr-review-batch/run.sh --only <PR_URL>` and report `Slack: posted (flusher not loaded — immediate)`. Say in the report that this machine needs the plist loaded (see `automations/README.md`).
 
-**`/post-pr --now`** (hotfixes): enqueue, then run `~/.claude/automations/pr-review-batch/run.sh --only <PR_URL>` the same way. `--only` flushes just that URL, leaves the rest of the queue for the window, and ignores both the window and the sibling hold (the message still gets its sibling line).
+**`/post-pr --now`** (hotfixes): skip step 3.4's deferral, enqueue, then run `~/.claude/automations/pr-review-batch/run.sh --only <PR_URL>` the same way. `--only` flushes just that URL, leaves the rest of the queue for the window, and ignores the window, the sibling hold and a deferred entry's `releaseAt` (the message still gets its sibling line, and a deferred entry still needs green checks).
 
 `run.sh` logs to `~/.claude/automations/pr-review-batch/logs/flush.log` when its output isn't a terminal, which includes the Bash tool, so judge an immediate post by its **exit code** (0 means this URL was posted, nonzero means it wasn't and the entry is still queued or was dropped) and quote the `tail` of the log for the reason.
 
@@ -289,7 +330,7 @@ Never point the flusher at a real channel to "test" it. `--channel <id>` (or env
 
 ### 5–6. Badge, undraft, auto-merge (the flusher)
 
-Not done by this skill any more. After a real post the flusher, in order: appends to `pr-review-posted.jsonl`; appends `\n\n---\n📣 **Posted to Slack**` to the body unless it already ends with the badge, removing the `<!-- pr-review-queued -->` marker in the same edit (read and written through a file); runs `gh pr ready` if the PR is a draft; then `gh pr merge --auto --<method>` if the entry's `autoMerge` is set. A failed post is requeued for the next window; a failed badge, undraft or auto-merge is logged and never undoes the post. Its log (`flush.log`) has one summary line per PR.
+Not done by this skill any more. After a real post the flusher, in order: appends to `pr-review-posted.jsonl`; appends `\n\n---\n📣 **Posted to Slack**` to the body unless it already ends with the badge, removing the `<!-- pr-review-queued -->` and `<!-- pr-review-deferred -->` markers in the same edit (read and written through a file); runs `gh pr ready` if the PR is a draft; then `gh pr merge --auto --<method>` if the entry's `autoMerge` is set. A failed post is requeued for the next window; a failed badge, undraft or auto-merge is logged and never undoes the post. Its log (`flush.log`) has one summary line per PR.
 
 ### 6.5 Offer a product update
 
@@ -311,7 +352,7 @@ Never run `slack-upload-images.sh` to "test" it against a real channel — it po
 
 ### 7. Report
 
-Record the run in the metrics ledger before reporting (and before step 3.7's reap, which kills the terminal): `~/.ai-tools/bin/review-metrics run --outcome queued|posted|merged|stopped|skipped [--gate review|ci|conflicts|merge]`. Use `queued` for an announceable PR handed to the flusher, `posted` only when this run posted it immediately (`--now` or the not-loaded safety net), `stopped` with the gate that fired when the run halted early, `skipped` when the dedup check found it already posted. It reads the phase stamps and round count from the worktree, so run it from there. `~/.ai-tools/bin/review-metrics summary` aggregates rounds, durations and gate stops.
+Record the run in the metrics ledger before reporting (and before step 3.7's reap, which kills the terminal): `~/.ai-tools/bin/review-metrics run --outcome queued|posted|merged|stopped|skipped [--gate review|ci|conflicts|merge]`. Use `queued` for an announceable PR handed to the flusher (deferred or not), `merged` for one step 3.4 stacked into a bundle, `posted` only when this run posted it immediately (`--now` or the not-loaded safety net), `stopped` with the gate that fired when the run halted early, `skipped` when the dedup check found it already posted. It reads the phase stamps and round count from the worktree, so run it from there. `~/.ai-tools/bin/review-metrics summary` aggregates rounds, durations and gate stops.
 
 Per target, one block:
 
@@ -320,7 +361,8 @@ Concentro-Inc/api#1271
 - Review: clean after 3 rounds
 - CI: 4 checks, all pass
 - Preview: woodrow only — set (or: already set, n/a (not visible in a preview))
-- Slack: queued for next :00/:30 window (or: queued (holds for sibling woodrow#N), queued (paired with sibling api#N), posted (flusher not loaded — immediate), posted (--now), skipped, already in dedup state)
+- Deferral: not deferrable (or: deferrable (docs only), new woodrow bundle, releases Fri 2026-11-20 16:00 EST; deferrable (tests only), today's woodrow bundle, releases …; own deferred entry (conflicts with bundle #N: …); skipped (--now); skipped (flusher not loaded))
+- Slack: queued for next :00/:30 window (or: deferred to the Fri 16:00 EST release, queued (holds for sibling woodrow#N), queued (paired with sibling api#N), posted (flusher not loaded — immediate), posted (--now), skipped, already in dedup state)
 - Badge / Draft: by the flusher after the post (or, when posted now: appended / cleared, from flush.log)
 - Linear: CON-4112 (title suffix) (or: added to title, or: no ticket found)
 - Product update: posted (or: declined, n/a (no screenshot), not offered (unattended), failed (<why>))
@@ -334,6 +376,7 @@ Concentro-Inc/woodrow#1555
 - Review: clean after 2 rounds
 - CI: 1 check (label), pass — unit-tests/e2e-tests don't run against a non-main base
 - Base: feature/vde-airtable-parity (not the default branch) — sub-PR, not announced
+- Deferral: stacked into #1971 (today's woodrow bundle) — only when step 3.4 retargeted it; the bundle's body gained a Stacked follow-ups line
 - Merged into feature/vde-airtable-parity (merge commit abc1234); trunk PR #1500 now carries it
 - Queue / Product update: skipped (step 3.5 gate)
 - Reap: sswt + local branch deleted (or: skipped — <which check>)
@@ -373,6 +416,6 @@ Because it self-starts, it must also self-report: state plainly what it did to e
 
 Posting to Slack is outward-facing, and outward-facing actions normally warrant a confirmation. The standing instruction in the global CLAUDE.md **is** that authorization — it is durable and given in advance, which is exactly what removes the need to ask each time. Queueing doesn't change that: the flusher posts later, under the same authorization, with no model in the loop.
 
-The design stays safe because the gates, not the user's attention, are what hold a PR back: an unconverged review, a failing check, a missing PR, or a non-default base branch all stop the run before anything is queued, and the flusher re-checks at post time that the PR is still open, still targets the default branch, hasn't been posted, and still has the head that was reviewed. A PR reads as "not ready" until the flusher has actually posted it, which is why [[create-pr]] and [[refresh-pr]] open PRs as drafts in the first place, and why a queued PR stays draft.
+The design stays safe because the gates, not the user's attention, are what hold a PR back: an unconverged review, a failing check, a missing PR, or a non-default base branch all stop the run before anything is queued, and the flusher re-checks at post time that the PR is still open, still targets the default branch, hasn't been posted, and still has the head that was reviewed (for a deferred bundle, whose head grows as sub-PRs merge in, that every check on its current head is green). A PR reads as "not ready" until the flusher has actually posted it, which is why [[create-pr]] and [[refresh-pr]] open PRs as drafts in the first place, and why a queued PR stays draft.
 
 The authorization covers the `#pr-review` post, the badge, the undraft, auto-merge (work.md makes it the default, subject to its two conditions) and the trunk merge — nothing else. The `#product-updates` screenshot post (step 6.5) is a separate, user-facing announcement, so it is asked about once, at enqueue time.
