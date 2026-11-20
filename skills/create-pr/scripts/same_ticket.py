@@ -63,26 +63,42 @@ def title_tickets(title):
 
 
 def linear_query(query):
-    """Run a GraphQL query: the `linear` CLI when installed, else the API key over HTTPS."""
+    """Run a GraphQL query: the `linear` CLI when installed, else the API key over HTTPS.
+
+    A failing CLI falls through to the API key when one is set, so a CLI whose flags
+    or output differ from what this expects doesn't turn project stacking off.
+    """
+    cli_error = None
     if shutil.which("linear"):
-        cmd = ["linear", "api", "--workspace", LINEAR_WORKSPACE, query]
-        r = subprocess.run(cmd, text=True, capture_output=True, timeout=LINEAR_TIMEOUT)
-        if r.returncode == 2:  # an older CLI without --workspace: use its default workspace
-            r = subprocess.run(["linear", "api", query], text=True, capture_output=True,
-                               timeout=LINEAR_TIMEOUT)
-        if r.returncode:
-            raise LookupError(f"linear api exited {r.returncode}: {r.stderr.strip()[:160]}")
-        out = json.loads(r.stdout)
-    else:
-        key = os.environ.get("LINEAR_API_TOKEN") or os.environ.get("LINEAR_API_KEY")
-        if not key:
-            raise LookupError("no linear CLI and no LINEAR_API_KEY")
-        req = urllib.request.Request(
-            "https://api.linear.app/graphql", data=json.dumps({"query": query}).encode(),
-            headers={"Authorization": key, "Content-Type": "application/json"},
-        )
-        with urllib.request.urlopen(req, timeout=LINEAR_TIMEOUT) as resp:
-            out = json.loads(resp.read())
+        try:
+            return linear_cli(query)
+        except (LookupError, ValueError, KeyError, subprocess.SubprocessError) as e:
+            cli_error = e
+    key = os.environ.get("LINEAR_API_TOKEN") or os.environ.get("LINEAR_API_KEY")
+    if not key:
+        raise cli_error or LookupError("no linear CLI and no LINEAR_API_KEY")
+    req = urllib.request.Request(
+        "https://api.linear.app/graphql", data=json.dumps({"query": query}).encode(),
+        headers={"Authorization": key, "Content-Type": "application/json"},
+    )
+    with urllib.request.urlopen(req, timeout=LINEAR_TIMEOUT) as resp:
+        return graphql_data(json.loads(resp.read()))
+
+
+def linear_cli(query):
+    cmd = ["linear", "api", "--workspace", LINEAR_WORKSPACE, query]
+    r = subprocess.run(cmd, text=True, capture_output=True, timeout=LINEAR_TIMEOUT)
+    if r.returncode == 2:  # an older CLI without --workspace: use its default workspace
+        r = subprocess.run(["linear", "api", query], text=True, capture_output=True,
+                           timeout=LINEAR_TIMEOUT)
+    if r.returncode:
+        raise LookupError(f"linear api exited {r.returncode}: {r.stderr.strip()[:160]}")
+    data = graphql_data(json.loads(r.stdout))
+    data["issues"]["nodes"]  # a shape this doesn't understand counts as a failure
+    return data
+
+
+def graphql_data(out):
     if out.get("errors"):
         raise LookupError(f"GraphQL error: {out['errors'][0].get('message', '?')}")
     return out.get("data", out)
@@ -181,7 +197,7 @@ def decide(args):
         denied = project_denylist(args.config)
         projects = ticket_projects({ticket} | set().union(*(title_tickets(p["title"]) for p in others)))
     except Exception as e:  # never block PR creation on Linear
-        note = f"Project stacking skipped: {e}"
+        note = " ".join(f"Project stacking skipped: {e}".split())
         return result("none", reason=f"no other open PR carries ({ticket})")
 
     project = projects.get(ticket)

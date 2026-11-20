@@ -20,7 +20,7 @@ FAKE_BIN.mkdir()
     '#!/bin/sh\n'
     'echo "$@" >> "${FAKE_LINEAR_LOG:-/dev/null}"\n'
     '[ -n "$FAKE_LINEAR_OUT" ] && exec cat "$FAKE_LINEAR_OUT"\n'
-    'echo "not authenticated" >&2; exit 4\n'
+    'printf "%b\\n" "${FAKE_LINEAR_ERR:-not authenticated}" >&2; exit 4\n'
 )
 (FAKE_BIN / "linear").chmod(0o755)
 
@@ -242,6 +242,26 @@ class ProjectTests(unittest.TestCase):
         self.assertEqual(out["decision"], "none")
         self.assertIsNone(out["base_line"])
         self.assertTrue(out["note"].startswith("Project stacking skipped: linear api exited 4"))
+
+    def run_new(self, **env):
+        (self.dir / "prs.json").write_text(json.dumps([pr(1964, "Tips (CON-4372)", "jake/a")]))
+        return json.loads(run("decide", "--repo", "Concentro-Inc/woodrow", "--default", "main",
+                              "--ticket", "CON-4373", "--branch", "jake/new", "--skip-ancestry",
+                              "--prs-json", str(self.dir / "prs.json"), cwd=self.dir,
+                              env=sandbox_env(**env)))
+
+    def test_note_is_one_line(self):
+        out = self.run_new(FAKE_LINEAR_ERR="first\\nsecond")
+        self.assertEqual(out["note"], "Project stacking skipped: linear api exited 4: first second")
+
+    def test_cli_failure_falls_through_to_the_api_key(self):
+        # A dead proxy makes the HTTPS attempt fail fast; the reported error must be
+        # that attempt's, not the CLI's.
+        out = self.run_new(LINEAR_API_KEY="bogus", https_proxy="http://127.0.0.1:9",
+                           HTTPS_PROXY="http://127.0.0.1:9")
+        self.assertEqual(out["decision"], "none")
+        self.assertTrue(out["note"].startswith("Project stacking skipped:"))
+        self.assertNotIn("linear api exited", out["note"])
 
     def test_ticket_missing_from_linear_is_a_failure_not_no_project(self):
         out = self.decide([pr(1964, "Tips (CON-4372)", "jake/a")], {"CON-4372": TIPS})
