@@ -219,6 +219,8 @@ A **SessionStart hook** that surfaces unresolved `IN_PROGRESS.md` content at the
 
 "Unresolved" means at least one open checklist item (`- [ ]`), not just file presence. Once a file holds no open item and no `## Urgent, tracked elsewhere` pointer, the hook resets it to the empty template (`# In Progress` / `_Nothing outstanding._`), wiping the `## Close-out sessions` history; close-out, pick-up and wrapup-repos write that same template themselves when they leave nothing open.
 
+**Deferred items.** An open item written as `- [ ] [not before YYYY-MM-DD] …` with a date after today still counts as open (the file is never reset), but it is invisible to the hook: when every open item is deferred the hook stays silent, and otherwise the offer counts only the due items and mentions how many are deferred. The `pick-up` skill applies the same rule, listing deferred items in one Notes line and never verifying, presenting or sweeping them until their date. Today's date comes from `date +%F`, or `PICK_UP_NUDGE_TODAY` in tests.
+
 It also runs the **weekly sweep**: when open items exist but the file's `_Last updated:` date falls outside the current ISO week, it asks the session to run `/pick-up sweep` in a background agent. That re-verifies every item and deletes only the ones with hard evidence they're done or now tracked, without starting any work. Every reconcile bumps `_Last updated:`, so the sweep runs at most once per repo per week, and only in repos you actually open.
 
 ### Requirements

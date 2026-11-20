@@ -58,6 +58,16 @@ Both [[close-out]] and [[wrapup-repos]] write this file. Items under `## Ticket 
 are work to *file* in Linear, not to execute — offer to file them rather than planning
 their implementation. `## Code state notes` are context about the tree, not tasks.
 
+**Deferred items.** An unchecked item may carry a `[not before YYYY-MM-DD]` tag right after
+its `- [ ]` (close-out writes it for work whose action is scheduled for later: a soak week
+before retiring old keys, a ticket due date). Get today from `date +%F`. A tag dated **after**
+today makes the item *deferred*: set it aside before step 3. Do not verify it, follow its
+pointers, or present it as a decision, because its action was designated for later and the
+survey is the wrong time to reopen it. An item whose date is today or earlier, an untagged item
+and an item with a malformed date are all ordinary open items. Indented sub-bullets belong to
+their parent item. Deferred items stay in the file untouched and count as open, so they block
+the empty-template reset.
+
 Read the whole file, including its context section — not just the checkboxes. Then
 **follow every pointer it makes**: a named commit, a source file's header comment, a
 `CLAUDE.md` gotcha list. Those pointers exist because the previous session paid for
@@ -68,7 +78,7 @@ hard-won DOM/API quirks it re-walks a dead end the file explicitly warns about.
 
 The handoff file is a snapshot from a previous session and items go stale — someone may
 have finished, abandoned, or invalidated one since it was written. For each unchecked
-handoff item and collected plan thread, confirm cheaply that it's still real: does the
+handoff item (deferred ones excepted) and collected plan thread, confirm cheaply that it's still real: does the
 file it names still exist, does `git log` since the handoff's `_Last updated:_` date
 already contain the work, is the stated blocker still a blocker. Plan threads remain in
 their source docs; step 5 reconciles only the handoff file. When approved work answers or
@@ -87,7 +97,9 @@ has answered.
 One reply, in the Zen layout and order, with no table and no plan:
 
 - **Notes**: context from the file and the pointers you followed that the user needs to
-  judge the items (a gotcha, a warning the previous session left). Terse bullets.
+  judge the items (a gotcha, a warning the previous session left). Terse bullets. Add one
+  bullet for deferred items, as a single line naming each with its date ("Deferred, not
+  shown: Anthropic key retire pass until 2026-11-23"). That line is the only place they appear.
 - **Verdict**: one or two sentences: how many items are open, how many you believe are
   done or stale.
 - **Next**: the work that needs no decision, one numbered line each:
@@ -110,7 +122,8 @@ One reply, in the Zen layout and order, with no table and no plan:
 
 `Drop it` on an `[IN_PROGRESS]` item deletes its entry in step 5, as the Zen rules say.
 
-Completion criterion: every unchecked handoff item and every collected repo or recent harness
+Completion criterion: every unchecked handoff item (deferred ones appear only in the Notes
+line) and every collected repo or recent harness
 plan thread appears in the reply — as a decision, as a Next removal with evidence, or in
 Notes as "no longer applies" with evidence. An item that exists in either source and nowhere
 in the reply is the failure mode this skill exists to prevent.
@@ -142,10 +155,12 @@ is the one that goes in the file.
   if the file says "we decided not to build X" and X shipped, that sentence has to go.
   Keep the context to a few orienting sentences; investigation detail belongs in tickets.
 - Leave still-open, untracked items, and the reasoning behind them, exactly as they are.
+  That includes deferred items: keep their `[not before …]` tag and text byte for byte, even
+  when a reconcile happens for other reasons.
 - Update `_Last updated:_`, and append a `_Picked up:_` line with the date and session id
   so the provenance of the edit is visible next to close-out's own record.
-- **If nothing open remains, reset instead.** When no `- [ ]` item and no urgent tracked
-  pointer survives the reconcile, replace the whole file with exactly the empty template —
+- **If nothing open remains, reset instead.** When no `- [ ]` item (deferred ones included)
+  and no urgent tracked pointer survives the reconcile, replace the whole file with exactly the empty template —
   no context line, no `_Last updated:_`, no `## Close-out sessions` history:
 
   ```markdown
@@ -172,7 +187,7 @@ that apply to them, and the decisions already made.
 step 5 lands, end the turn with the exact line for Jake to run — `/compact Keep: <chosen
 items, first actions, pointers/gotchas, settled decisions>` — then start the work when the
 session continues. If the user answered `Drop it` to every item, or no item was chosen to
-resume, skip this step: there is no work to protect context for.
+resume (including a file whose only open items are deferred), skip this step: there is no work to protect context for.
 
 ## Sweep mode (`/pick-up sweep`)
 
@@ -182,7 +197,9 @@ isn't in the current ISO week. The job is to keep the file honest, not to resume
 
 - **No decisions, no approval, no compact, no work.** Skip steps 1, 4 and 6. Never start, edit,
   or run any item; the only write is the handoff file.
-- **Steps 2–3 as normal**, following pointers only as far as verification needs.
+- **Steps 2–3 as normal**, following pointers only as far as verification needs. Deferred
+  items (step 2) are skipped: never verify, edit or delete one, whatever the evidence, until its
+  date arrives.
 - **Delete only on hard evidence.** An item goes when it's verifiably done, such as:
   - a commit on the default branch that does the work;
   - a Linear ticket in a completed or canceled state;

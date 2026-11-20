@@ -101,6 +101,13 @@ refuses any dispatch that asks for it.
 `action` / `outcome_token`: `blocked_no_item` / `blocked-no-item`, or
 `nothing_qualified` / `nothing-qualified`.
 
+For a no-work result, make `summary` say that no candidate qualified under this run's
+selection rules; do not claim the backlog is empty merely because nothing qualified.
+List each relevant unfinished candidate in `considered` with its ticket ID and concrete
+exclusion or dependency, including code-health tickets excluded without `do-next`.
+Identify unshipped prerequisites even when Linear does not mark a formal blocker. These
+reasons appear in the run's Slack summary alongside the scoped snapshot count.
+
 `run.sh` still invokes a bookkeeping worker so Step 2b comments, archives, Step 2e close-outs and
 Step 8 ledger writes happen with write tools — put everything they need in this JSON.
 

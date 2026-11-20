@@ -212,6 +212,14 @@ Skill sources of truth: [`SKILL.md`](../skills/advance-roadmap/SKILL.md) (router
 Skip the tick only when **no orchestrator** remains (both Codex and Claude hot). Worker
 exhaustion alone still lets the orchestrator report `blocked-no-item` / `nothing-qualified`.
 
+These tokens describe selection, not an empty backlog. No-work run records include a
+`backlog` assessment for the targeted repo, based on the run's complete Linear snapshot:
+`unfinished`, `empty`, or `unknown`. Counts cover unfinished `repo/<name>`-labeled DEV
+tickets only; missing, failed, truncated, malformed, or unscoped snapshots are unknown.
+The no-work record's Slack summary includes that assessment and the planner's considered items
+and blockers. The webhook fallback stays static for redaction. A second thread's no-item result
+only means no independent second item qualified.
+
 Guardrails (personal `jnelken` repos only, clean tree, no force, all-or-nothing verification)
 live in `SAFETY.md`. `daily_batch.py` and `run.sh` share the single-instance lock.
 

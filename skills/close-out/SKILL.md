@@ -159,6 +159,8 @@ Collect what this skill **cannot** close out itself **and** that has no other du
 - **Destructive cleanups you proposed but did not perform** — workspace deletions, temp-file removals, state-file edits.
 - **Blocked work and deferred promises from step 1's table** — only the ones without a ticket.
 
+**Date items whose action belongs to later.** When an item can't be acted on until a known date (a soak week before retiring old keys, a deadline, a scheduled cutover), write it as `- [ ] [not before YYYY-MM-DD] <text>`. [[pick-up]] and the `pick-up-nudge` hook then leave it out of the survey and the open-item count until that date, so a future session isn't asked about work that was deliberately parked. Use the date the action becomes possible, not a guess at when someone will get to it. Don't tag an item that has any step doable today: split it, so the doable part stays untagged and the waiting part carries the date. Keep the tag and text exactly as written when you reconcile a file that has them.
+
 **`## Ticket candidates` are a to-file queue, not a resting place.** [[wrapup-repos]] writes them there because it runs headless and never contacts Linear. When you reconcile a file that has any, file each through step 3 (duplicate check first, `repo/*` label from the candidate) and then delete it from the file — once filed it's tracked, so the filter below drops it. If you can't file one (no Linear access), leave it in place and say so in the chat pointer.
 
 **Filter before writing:**
@@ -212,6 +214,7 @@ sense cold. Tracked work lives in Linear/GitHub, not here.
 
 ## Deferred (untracked)
 - [ ] Revisit the shared write-path guard once TICKET-1200 lands — not worth a ticket until then
+- [ ] [not before 2026-08-24] Retire the old API key — the new one needs a week of clean usage first
 
 ## Ticket candidates
 - [ ] Offline mode for the editor — service worker + IndexedDB queue; `repo/typey.site`; see `src/sync.ts`
