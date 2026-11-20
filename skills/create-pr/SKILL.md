@@ -1,6 +1,6 @@
 ---
 name: create-pr
-description: Generate a dead-simple PR title/body from the net diff vs base, backfill a required CON ticket in the work environment, and open the PR as a draft by default; `draft=false` opens it ready (or update an existing one). In Concentro repos, a new PR whose CON ticket already has an open, unapproved PR stacks onto that PR instead of opening into main. Use when the user wants to open a PR from the current branch, e.g. "create a PR", "open a PR for this", "push this and make a PR". Preserves an existing non-empty PR body — only normalizes the title. For force-rewriting an existing description instead, see [[refresh-pr]].
+description: Generate a dead-simple PR title/body from the net diff vs base, backfill a required CON ticket in the work environment, and open the PR as a draft by default; `draft=false` opens it ready (or update an existing one). In Concentro repos, a new PR stacks onto Jake's open, unapproved PR for the same CON ticket, or failing that for another ticket in the same Linear project, instead of opening into main. Use when the user wants to open a PR from the current branch, e.g. "create a PR", "open a PR for this", "push this and make a PR". Preserves an existing non-empty PR body — only normalizes the title. For force-rewriting an existing description instead, see [[refresh-pr]].
 ---
 
 # Create PR
@@ -23,7 +23,7 @@ Push the current branch, generate (or preserve) a minimal PR description, backfi
 
 `draft=<true|false>` (default `true`) sets the state the PR is created in. Honor `draft=false` only when explicitly passed; otherwise always draft. Options combine (`base=… draft=false`).
 
-`base=<branch>` sets the PR's base for both the net diff and `gh pr create --base`. Without it, the base is the default branch unless step 2's auto-detection finds a trunk the branch was cut from, or, in a Concentro repo, step 4 stacks the PR onto the open PR of the same ticket.
+`base=<branch>` sets the PR's base for both the net diff and `gh pr create --base`. Without it, the base is the default branch unless step 2's auto-detection finds a trunk the branch was cut from, or, in a Concentro repo, step 4 stacks the PR onto the open PR of the same ticket or Linear project.
 
 **Trunks.** When cutting a new `feature/<slug>` trunk for closely-knit work (see the Post-PR Workflow section of the global CLAUDE.md), open the trunk's own PR into the default branch right away as a draft — run this skill from the trunk branch with no `base=`. That PR is what eventually gets announced, and it is the only way the sub-work gets a Netlify deploy preview, since previews only build for PRs based on main.
 
@@ -53,7 +53,7 @@ Before anything else, collect:
 
      A candidate means the branch forked from that trunk after the trunk left the default branch. Propose it as the base and confirm once with the user — this is the only base-related question; don't ask when nothing matches.
 3. Resolve the ticket now, before the base is final: run **Detect existing ticket** and its use/new question from [Linear ticket routing](#linear-ticket-routing) below. If no ticket is found, the routing stays as it is (a trunk's ticket for a sub-PR, otherwise a new issue), and a new issue is still created after step 7 because it reuses the PR title. A brand-new ticket has no other PRs, so step 4 never needs it.
-4. **Same-ticket stacking** (Concentro `#pr-review` repos only): when the PR is new, the base is still the default branch, and step 3 kept an existing `CON-N` (not one the user chose to replace with a new ticket), run [Same-ticket stacking](#same-ticket-stacking-concentro) below. It may change the base to another open PR's head branch, and it sets the `Base:` line for step 12.
+4. **Same-work stacking** (Concentro `#pr-review` repos only): when the PR is new, the base is still the default branch, and step 3 kept an existing `CON-N` (not one the user chose to replace with a new ticket), run [Same-work stacking](#same-work-stacking-concentro) below. It may change the base to another open PR's head branch, and it sets the `Base:` line and any skip note for step 12.
 5. Get the **net diff vs base** using `git diff <base-branch>...HEAD` — the description must reflect this final state, not per-commit history.
 6. Get the commit log using `git log <base-branch>..HEAD --oneline` (only as a hint; never describe intermediate or reverted work).
 7. **If a PR already exists with a non-empty body**: skip description generation entirely — only update the title (for Linear ticket normalization). Jump to step 8. Otherwise generate the PR title and body:
@@ -61,7 +61,7 @@ Before anything else, collect:
    - **Body**: follow the **PR Descriptions** format in the user's global CLAUDE.md (`~/.claude/CLAUDE.md`) exactly — that doc is the single source of truth for section shape, skimmability rules, and what to omit. Don't duplicate that guidance here; read it fresh each time in case it's changed.
    - No `🤖 Generated with` footer.
    - **Preview** (repos with deploy previews, today woodrow): its URL carries the PR number, so prefer the repo's `pnpm run pr:create -- … --preview "<label>: <path>"`, which adds the section after opening the PR. Management portal screens (`apps/management/` changes) go in `--management-preview "<label>: <path>"`; a PR that changes both apps passes both. Opening with `gh pr create` instead, add `## Preview` with `gh pr edit` once the number exists. A PR whose base is not the default branch (a trunk sub-PR or a stacked PR) gets no deploy preview: pass `--base <base-branch>` to `pr:create` and no preview flags.
-   - **Stacked PR** (step 4 chose to stack): start the body with `Stacked on #N (same CON-N); merges into it after review.`
+   - **Stacked PR** (step 4 chose to stack): start the body with `Stacked on #N (same CON-N); merges into it after review.`, or for a project stack `Stacked on #N (same project "<name>"); merges into it after review.`
 8. Push the branch to origin if not already pushed (`git push -u origin <branch>`). **Before pushing**, if the current branch equals the base branch (e.g. you're on `main`/`master` itself), STOP and confirm with the user — running a PR workflow from the base branch is almost certainly a mistake, and pushing could ship unintended work to production.
 9. If a PR exists with a non-empty body, only update the title: `gh pr edit --title "..."`. If a PR exists with an empty body, edit title and body. Otherwise create a new PR — **as a draft** unless `draft=false` was passed (then omit `--draft`) — passing `--base <base-branch>` whenever the base resolved in steps 2-4 is not the default branch. `gh` rejects `--draft` combined with `--web` (`the --draft flag is not supported with --web`), so create it headless and open the browser as a separate step: `gh pr create --draft [--base <base-branch>] --title "..." --body "..."` then `gh pr view --web`. Use a HEREDOC for the body to preserve formatting:
 
@@ -74,12 +74,12 @@ Before anything else, collect:
    ```
 
 10. **Verify the draft state matches the request** — `gh pr view --json isDraft -q .isDraft` should be `true` unless `draft=false` was passed. A repo wrapper (e.g. a `pr:create` script) that opens PRs itself may ignore `--draft`; if the state is wrong, fix it (`gh pr ready --undo` to draft, `gh pr ready` to undraft) and say so. This applies to an existing PR too: don't silently leave a PR in a state the caller didn't ask for.
-11. **Stacked PR only:** record it in the parent PR's body (step 4 of [Same-ticket stacking](#same-ticket-stacking-concentro)).
-12. Output the PR URL (printed by `gh pr create`, or `gh pr view --json url -q .url`), followed by the `Base:` line when step 4 set one.
+11. **Stacked PR only:** record it in the parent PR's body (step 4 of [Same-work stacking](#same-work-stacking-concentro)).
+12. Output the PR URL (printed by `gh pr create`, or `gh pr view --json url -q .url`), followed by the `Base:` line when step 4 set one, and the `note` line (`Project stacking skipped: …`) when `decide` returned one.
 
-## Same-ticket stacking (Concentro)
+## Same-work stacking (Concentro)
 
-Follow-ups on one ticket stack into the ticket's open PR instead of reaching `#pr-review` as PRs of their own. A reviewer sees one PR that grows. This applies only to `Concentro-Inc/woodrow`, `Concentro-Inc/api` and `Concentro-Inc/folio-platform`. Personal `jnelken/*` repos and `internal-tools` don't go through `#pr-review`, so they skip it. Stacking happens without asking: it is Jake's standing choice.
+Follow-ups on one ticket, or on one Linear project, stack into an open PR instead of reaching `#pr-review` as PRs of their own. A reviewer sees one PR that grows. This applies only to `Concentro-Inc/woodrow`, `Concentro-Inc/api` and `Concentro-Inc/folio-platform`. Personal `jnelken/*` repos and `internal-tools` don't go through `#pr-review`, so they skip it. Stacking happens without asking: it is Jake's standing choice.
 
 1. **Decide.** From the branch's worktree:
 
@@ -89,10 +89,15 @@ Follow-ups on one ticket stack into the ticket's open PR instead of reaching `#p
      --default "$DEFAULT" --ticket CON-N --branch "$(git branch --show-current)"
    ```
 
-   It lists Jake's open PRs into the default branch with `gh pr list --search "CON-N in:title" --author @me` and keeps only titles carrying the exact `(CON-N)`, so `CON-44` never matches `CON-441`. It skips the current branch's own PR, and it never stacks onto a teammate's PR. It prints JSON with `decision`, `base`, `pr` and `base_line`:
-   - `none`: no other open PR carries the ticket. Keep the default branch and print no `Base:` line.
-   - `main`: every match is `APPROVED` (`Base: main (#N already approved)`), or the branch can't stack cleanly (`Base: main (could not stack onto #N: <reason>)`). Keep the default branch. An approval must never silently cover code nobody reviewed.
-   - `stack`: the lowest-numbered match that isn't approved, and the branch forked from a commit that PR's head already contains. So merging it adds no default-branch commits the parent lacks. Continue with step 2.
+   It lists Jake's open PRs into the default branch (`gh pr list --author @me`), skips the current branch's own PR, and never stacks onto a teammate's PR. It looks for a parent in this order:
+   - **Same ticket.** Titles carrying the exact `(CON-N)`, so `CON-44` never matches `CON-441`. Any match settles the decision, even an approved one: a same-ticket parent always wins.
+   - **Same Linear project**, only when no other PR carries the ticket. One batched Linear query (the `linear` CLI's `linear api --workspace concentro`, or `LINEAR_API_KEY` over HTTPS when the CLI isn't installed) maps the new ticket and every other PR's `(CON-M)` to its project. A ticket with no project never project-stacks. Projects listed in `projectDenylist` in `~/.claude/state/create-pr-stack.json` (names, case-insensitive, or ids; a missing file means none) never project-stack either: that's for umbrella projects like Knowledge Foundation.
+
+   Both use the same rules. It prints JSON with `decision`, `base`, `pr`, `match` (`ticket` or `project`), `base_line` and `note`:
+   - `none`: no parent. Keep the default branch and print no `Base:` line.
+   - `main`: every match is `APPROVED` (`Base: main (#N already approved)`, or `Base: main (#N same project "<name>" already approved)`), or the branch can't stack cleanly (`Base: main (could not stack onto #N: <reason>)`). Keep the default branch. An approval must never silently cover code nobody reviewed.
+   - `stack`: the lowest-numbered match that isn't approved, and the branch forked from a commit that PR's head already contains. So merging it adds no default-branch commits the parent lacks. `base_line` is `Base: stacked onto #N (same CON-N, not yet approved)` or `Base: stacked onto #N (same project "<name>", not yet approved)`. Continue with step 2.
+   - `note` is set when the Linear lookup failed (not authenticated, network, a ticket Linear didn't return): the decision falls back to same-ticket only, and step 12 prints the note. Never block PR creation on it.
 2. **Merge the parent's head into the branch,** so the sub-PR's diff holds only the new work. Commit or set aside pending changes first: the merge needs a clean tree. Trial the merge before committing it:
 
    ```bash
@@ -102,7 +107,7 @@ Follow-ups on one ticket stack into the ticket's open PR instead of reaching `#p
    ```
 
    On a conflict, fall back to the default branch: `Base: main (could not stack onto #N: conflicts with <base>)`. If nothing new is left, the work is already in #N: stop and say so rather than opening an empty PR.
-3. **Open the sub-PR** with `--base <base>` (steps 5-10). Its title keeps the same `(CON-N)`. `/post-pr` reviews it, runs CI and merges it into the parent's branch with a merge commit without announcing it (its steps 3.5-3.6), exactly as for a trunk sub-PR.
+3. **Open the sub-PR** with `--base <base>` (steps 5-10). Its title keeps its own `(CON-N)`, which is the parent's ticket for a same-ticket stack. `/post-pr` reviews it, runs CI and merges it into the parent's branch with a merge commit without announcing it (its steps 3.5-3.6), exactly as for a trunk sub-PR.
 4. **Tell the parent's reviewers it grew.** Read and write the parent's body through a file, never a shell string:
 
    ```bash
@@ -145,7 +150,7 @@ Strip any existing ticket decoration from the title before re-applying:
 If a ticket is found, **ask the user**:
 > "Found Linear ticket TICKET-ID in branch/title. Use it, or create a new one? (use/new)"
 
-If the user says **use**: keep the ticket, continue with step 4 (same-ticket stacking), and format the final title as `PR title (CON-123)` once step 7 writes it.
+If the user says **use**: keep the ticket, continue with step 4 (same-work stacking), and format the final title as `PR title (CON-123)` once step 7 writes it.
 
 If the user says **new**: create a new Linear issue using the steps below.
 

@@ -1,17 +1,42 @@
 #!/usr/bin/env python3
 
 import json
+import os
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "same_ticket.py"
 
+# Every run is offline: HOME has no denylist, no Linear key is set, and the only
+# `linear` on PATH is this fake. It prints $FAKE_LINEAR_OUT when set and fails
+# (exit 4, "not authenticated") otherwise.
+SANDBOX = tempfile.TemporaryDirectory()
+FAKE_BIN = Path(SANDBOX.name) / "bin"
+FAKE_BIN.mkdir()
+(FAKE_BIN / "linear").write_text(
+    '#!/bin/sh\n'
+    'echo "$@" >> "${FAKE_LINEAR_LOG:-/dev/null}"\n'
+    '[ -n "$FAKE_LINEAR_OUT" ] && exec cat "$FAKE_LINEAR_OUT"\n'
+    'printf "%b\\n" "${FAKE_LINEAR_ERR:-not authenticated}" >&2; exit 4\n'
+)
+(FAKE_BIN / "linear").chmod(0o755)
 
-def run(*args, cwd=None):
+
+def sandbox_env(**extra):
+    env = {k: v for k, v in os.environ.items() if not k.startswith(("LINEAR_", "FAKE_LINEAR_"))}
+    env["HOME"] = SANDBOX.name
+    env["PATH"] = f"{FAKE_BIN}:/usr/bin:/bin"
+    env.update(extra)
+    return env
+
+
+def run(*args, cwd=None, env=None):
     result = subprocess.run(
-        ["python3", str(SCRIPT), *args], text=True, capture_output=True, cwd=cwd
+        [sys.executable, str(SCRIPT), *args], text=True, capture_output=True, cwd=cwd,
+        env=env or sandbox_env(),
     )
     if result.returncode:
         raise AssertionError(result.stderr)
@@ -120,6 +145,134 @@ class DecideTests(unittest.TestCase):
             out["base_line"],
             "Base: main (could not stack onto #5: branch is cut from a newer main than #5)",
         )
+
+
+TIPS = {"id": "proj-tips", "name": "In-app Folio tips"}
+UMBRELLA = {"id": "proj-kf", "name": "Knowledge Foundation"}
+
+
+class ProjectTests(unittest.TestCase):
+    """Fall back to the Linear project when no other PR carries the same ticket."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.dir = Path(self.temp.name)
+        self.log = self.dir / "linear.log"
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def decide(self, prs, projects=None, denylist=None, ticket="CON-4373"):
+        """projects: ticket -> project dict (None for no project); omitted, Linear fails."""
+        (self.dir / "prs.json").write_text(json.dumps(prs))
+        env = {"FAKE_LINEAR_LOG": str(self.log)}
+        if projects is not None:
+            nodes = [{"identifier": t, "project": p} for t, p in projects.items()]
+            (self.dir / "linear.json").write_text(json.dumps({"data": {"issues": {"nodes": nodes}}}))
+            env["FAKE_LINEAR_OUT"] = str(self.dir / "linear.json")
+        args = ["decide", "--repo", "Concentro-Inc/woodrow", "--default", "main",
+                "--ticket", ticket, "--branch", "jake/new", "--prs-json", str(self.dir / "prs.json"),
+                "--skip-ancestry"]
+        if denylist is not None:
+            (self.dir / "stack.json").write_text(json.dumps({"projectDenylist": denylist}))
+            args += ["--config", str(self.dir / "stack.json")]
+        return json.loads(run(*args, cwd=self.dir, env=sandbox_env(**env)))
+
+    def linear_calls(self):
+        return self.log.read_text().splitlines() if self.log.exists() else []
+
+    def test_stacks_onto_same_project_pr(self):
+        out = self.decide(
+            [pr(1964, "Tip registry (CON-4372)", "jake/tips-registry"),
+             pr(1950, "Unrelated (CON-4000)", "jake/other")],
+            {"CON-4373": TIPS, "CON-4372": TIPS, "CON-4000": None},
+        )
+        self.assertEqual((out["decision"], out["pr"], out["base"]), ("stack", 1964, "jake/tips-registry"))
+        self.assertEqual(out["match"], "project")
+        self.assertEqual(out["base_line"],
+                         'Base: stacked onto #1964 (same project "In-app Folio tips", not yet approved)')
+        self.assertIsNone(out["note"])
+        calls = self.linear_calls()
+        self.assertEqual(len(calls), 1, "one batched lookup")
+        self.assertIn("--workspace concentro", calls[0])
+        self.assertIn("[4000, 4372, 4373]", calls[0])
+
+    def test_same_ticket_wins_over_same_project(self):
+        out = self.decide(
+            [pr(1960, "Same project (CON-4372)", "jake/a"),
+             pr(1967, "Same ticket (CON-4373)", "jake/b")],
+            {"CON-4373": TIPS, "CON-4372": TIPS},
+        )
+        self.assertEqual((out["decision"], out["pr"], out["match"]), ("stack", 1967, "ticket"))
+        self.assertEqual(self.linear_calls(), [], "no Linear call when the ticket matches")
+
+    def test_approved_same_project_parent_is_skipped(self):
+        out = self.decide(
+            [pr(1964, "Approved (CON-4372)", "jake/a", "APPROVED"),
+             pr(1966, "Open (CON-4374)", "jake/b")],
+            {"CON-4373": TIPS, "CON-4372": TIPS, "CON-4374": TIPS},
+        )
+        self.assertEqual((out["decision"], out["pr"]), ("stack", 1966))
+
+    def test_all_same_project_approved_stays_on_main(self):
+        out = self.decide([pr(1964, "Approved (CON-4372)", "jake/a", "APPROVED")],
+                          {"CON-4373": TIPS, "CON-4372": TIPS})
+        self.assertEqual(out["decision"], "main")
+        self.assertEqual(out["base_line"],
+                         'Base: main (#1964 same project "In-app Folio tips" already approved)')
+
+    def test_ticket_without_project_never_project_stacks(self):
+        out = self.decide([pr(1964, "Other (CON-4372)", "jake/a")],
+                          {"CON-4373": None, "CON-4372": None})
+        self.assertEqual(out["decision"], "none")
+        self.assertIn("has no project", out["reason"])
+        self.assertIsNone(out["base_line"])
+
+    def test_denylisted_project_by_name_or_id(self):
+        prs = [pr(1636, "Task views (CON-4223)", "jake/tasks")]
+        projects = {"CON-4373": UMBRELLA, "CON-4223": UMBRELLA}
+        for entry in ("knowledge foundation", "proj-kf"):
+            out = self.decide(prs, projects, denylist=[entry])
+            self.assertEqual(out["decision"], "none", entry)
+            self.assertIn("denylisted", out["reason"])
+        self.assertEqual(self.decide(prs, projects, denylist=["Other"])["decision"], "stack")
+
+    def test_linear_failure_falls_back_with_a_note(self):
+        out = self.decide([pr(1964, "Tips (CON-4372)", "jake/a")])
+        self.assertEqual(out["decision"], "none")
+        self.assertIsNone(out["base_line"])
+        self.assertTrue(out["note"].startswith("Project stacking skipped: linear api exited 4"))
+
+    def run_new(self, **env):
+        (self.dir / "prs.json").write_text(json.dumps([pr(1964, "Tips (CON-4372)", "jake/a")]))
+        return json.loads(run("decide", "--repo", "Concentro-Inc/woodrow", "--default", "main",
+                              "--ticket", "CON-4373", "--branch", "jake/new", "--skip-ancestry",
+                              "--prs-json", str(self.dir / "prs.json"), cwd=self.dir,
+                              env=sandbox_env(**env)))
+
+    def test_note_is_one_line(self):
+        out = self.run_new(FAKE_LINEAR_ERR="first\\nsecond")
+        self.assertEqual(out["note"], "Project stacking skipped: linear api exited 4: first second")
+
+    def test_cli_failure_falls_through_to_the_api_key(self):
+        # A dead proxy makes the HTTPS attempt fail fast; the reported error must be
+        # that attempt's, not the CLI's.
+        out = self.run_new(LINEAR_API_KEY="bogus", https_proxy="http://127.0.0.1:9",
+                           HTTPS_PROXY="http://127.0.0.1:9")
+        self.assertEqual(out["decision"], "none")
+        self.assertTrue(out["note"].startswith("Project stacking skipped:"))
+        self.assertNotIn("linear api exited", out["note"])
+
+    def test_ticket_missing_from_linear_is_a_failure_not_no_project(self):
+        out = self.decide([pr(1964, "Tips (CON-4372)", "jake/a")], {"CON-4372": TIPS})
+        self.assertEqual(out["decision"], "none")
+        self.assertIn("did not return CON-4373", out["note"])
+
+    def test_no_ticketed_prs_skips_linear(self):
+        out = self.decide([pr(1283, "[HOLD] Family tree", "jake/tree")])
+        self.assertEqual(out["decision"], "none")
+        self.assertIsNone(out["note"])
+        self.assertEqual(self.linear_calls(), [])
 
 
 BODY = """## Summary
