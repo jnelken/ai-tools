@@ -1,6 +1,12 @@
 ---
 name: revive
-description: Revive a dead Claude Code session (a Remote Control thread whose host went offline, a terminal session that crashed, a Superset tab whose claude process died), but first find out why it died and propose a guardrail so it doesn't happen again. Takes a claude.ai/code/cshk_ link, a session_ id, a local session UUID, a local_<uuid> desktop id or a title fragment; with no argument it looks for unarchived dead sessions and asks which one. Works across machines (this Mac and the OMEN via `ssh omen-wsl`). Trigger phrases include "/revive", "/undead", "revive this session", "resume this dead thread", "this remote session died", "bring this claude.ai session back", "why did this session die", "find my dead sessions".
+description: >-
+  Revive a dead Claude Code session (an offline Remote Control thread, a crashed terminal session, a
+  Superset tab whose claude process died) after first finding why it died and proposing a guardrail.
+  Takes a claude.ai/code/cshk_ link, session id, local UUID or title fragment; with none it lists
+  unarchived dead sessions. Works across this Mac and the OMEN. Trigger phrases: "/revive", "/undead",
+  "revive this session", "this remote session died", "why did this session die", "find my dead
+  sessions".
 ---
 
 # revive

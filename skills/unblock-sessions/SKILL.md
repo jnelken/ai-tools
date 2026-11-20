@@ -1,6 +1,11 @@
 ---
 name: unblock-sessions
-description: Walk every Claude session running in a Superset terminal tab on any of Jake's online hosts (this Mac, jake2, …), one at a time, and ask Jake here (AskUserQuestion) about each one that is waiting on him — open questions, Decisions blocks, live AskUserQuestion/permission dialogs, and finished (✅/⛏️) tabs that could be reaped — with enough transcript context that he never has to open the tab. Relays each answer into the session, then rescans for follow-ups until nothing is left. Every prompt offers Skip for now and Skip forever, and typing `exit` sends the answers so far and stops. Pass `--host <name|id|local>` to scope the run to one host and `--repo <name>[,<name>]` to scope it to those repos; with no flags it covers every repo on every host. Use when Jake says "unblock my sessions", "what's waiting on me", "check my tabs for questions", "answer my sessions", "survey open sessions", or "/unblock-sessions".
+description: >-
+  Walk every Claude session running in a Superset terminal tab on Jake's online hosts, one at a time,
+  and ask Jake here about each one waiting on him (open questions, Decisions blocks, permission
+  dialogs, finished tabs to reap), relaying each answer into the session and rescanning until nothing
+  is left. Flags: `--host <name|id|local>`, `--repo <name>[,<name>]`. Use for "unblock my sessions",
+  "what's waiting on me", "check my tabs for questions", "survey open sessions".
 ---
 
 # unblock-sessions

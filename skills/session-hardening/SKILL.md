@@ -1,6 +1,12 @@
 ---
 name: session-hardening
-description: Session retrospective (not monthly-retro). Turn friction and gaps hit while working in a session into concrete fixes that make the next session faster — a wrong or missing doc, skill or instruction, a hook or permission that misfired, flaky or slow tooling, a manual step done twice, an assumption traced to stale memory, or a mechanism the work just made dead. General counterpart to the Datadog Debugging Follow-ups (which owns observability gaps). Report-only when self-started by the CLAUDE.md trigger; when invoked by name it also applies provably safe, trivially reversible fixes, with everything else a numbered offer. Trigger phrases include "session hardening", "harden this", "what slowed us down", "what would have made this easier", "session follow-ups", "what can we delete now", "retro this session".
+description: >-
+  Session retrospective (not monthly-retro): turn friction hit during a session into concrete fixes
+  for the next one: a wrong or missing doc, skill or instruction, a misfiring hook or permission,
+  flaky tooling, a manual step done twice, stale memory, or a mechanism the work just made dead.
+  Observability gaps belong to the Datadog Debugging Follow-ups. Report-only when self-started;
+  applies provably safe fixes when invoked by name. Trigger phrases: "session hardening", "harden
+  this", "what slowed us down", "what can we delete now", "retro this session".
 ---
 
 # Session Hardening

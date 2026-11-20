@@ -1,6 +1,11 @@
 ---
 name: create-pr
-description: Generate a dead-simple PR title/body from the net diff vs base, backfill a required CON ticket in the work environment, and open the PR as a draft by default; `draft=false` opens it ready (or update an existing one). In Concentro repos, a new PR stacks onto Jake's open, unapproved PR for the same CON ticket, or failing that for a related ticket (same parent issue, parent and sub-issue, or blocks/blocked by), or failing that for another ticket in the same Linear project, instead of opening into main. Use when the user wants to open a PR from the current branch, e.g. "create a PR", "open a PR for this", "push this and make a PR". Preserves an existing non-empty PR body — only normalizes the title. For force-rewriting an existing description instead, see [[refresh-pr]].
+description: >-
+  Generate a simple PR title and body from the net diff vs base, backfill a required CON ticket, and
+  open the PR as a draft (`draft=false` opens it ready) or update an existing one. In Concentro repos
+  a new PR stacks onto Jake's open unapproved PR for the same or a related ticket before opening into
+  main. Use for "create a PR", "open a PR for this", "push this and make a PR". Preserves a non-empty
+  PR body; to force-rewrite one see [[refresh-pr]].
 ---
 
 # Create PR

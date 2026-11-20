@@ -1,6 +1,11 @@
 ---
 name: screenshot-pr
-description: Capture one signature screenshot of the current branch's most visually-significant UI change and embed it in the corresponding GitHub PR description, captured in Playwright against the Netlify deploy preview (or localhost for a sub-PR into a trunk, which never gets one) and uploaded through Claude-in-Chrome, the browser actually signed into GitHub. Use this skill whenever the user asks to "add screenshots", "screenshot the PR", "snap the PR", "drop a visual into the PR", "capture the change", or otherwise asks to attach a visual to a pull request — even if they don't mention Playwright. The skill handles diff analysis, deploy-preview login, capture, and the GitHub web-UI upload that `gh` CLI cannot do directly. Uses localhost when explicitly requested or when the PR's base isn't the default branch.
+description: >-
+  Capture one signature screenshot of the branch's most visually significant UI change and embed it in
+  the GitHub PR description: Playwright against the Netlify deploy preview (localhost for a sub-PR
+  into a trunk or when asked), uploaded through Claude-in-Chrome because `gh` cannot upload images.
+  Use for "add screenshots", "screenshot the PR", "snap the PR", "drop a visual into the PR", "capture
+  the change", even without mentioning Playwright.
 ---
 
 # screenshot-pr

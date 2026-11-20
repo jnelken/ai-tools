@@ -1,6 +1,11 @@
 ---
 name: resume-sswts
-description: Use after a machine crash, power loss, or forced restart to bring Claude Code sessions that were running inside Superset workspace terminal tabs back to life. Superset restores the tabs themselves (same terminal, a fresh idle shell) but the claude process inside each one is gone; this skill relaunches `claude --resume <session-id>` in the exact same tab it died in, and separately sweeps for crashed sessions that were running in plain (non-Superset) terminals. Trigger phrases include "resume my crashed sessions", "the machine died, bring my claude sessions back", "restore interrupted claude tabs", "my computer restarted, resume everything", "power went out, get my sessions back". Distinguishes a session that crashed mid-flight from one the user exited on purpose - only the former gets auto-resumed.
+description: >-
+  Use after a crash, power loss or forced restart to relaunch `claude --resume <session-id>` in the
+  same Superset workspace tab each Claude session died in, and to sweep crashed sessions from plain
+  terminals. Only sessions that crashed mid-flight resume, not ones the user exited on purpose.
+  Trigger phrases: "resume my crashed sessions", "the machine died, bring my claude sessions back",
+  "my computer restarted, resume everything", "power went out".
 ---
 
 # Resume sswts

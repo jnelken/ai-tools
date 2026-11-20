@@ -1,14 +1,12 @@
 ---
 name: conductor
 description: >-
-  Human-driven "ship one item" without implementing in-process: the current Claude session conducts
-  sub-agent CLI processes — Cursor (`agent`) builds on a branch, Codex (`codex exec`, read-only)
-  reviews up to 3 rounds — then reports the result, merge commit and deploy status. Input is an item
-  you name (Linear DEV-N, a ROADMAP.md entry, a docs/plans/ doc, or a plain brief) or "pick the next
-  one" (runs the shared triage in ORCHESTRATOR.md). Personal `jnelken` repos only. Use on-demand
-  ("/conductor", "conductor DEV-42", "have cursor build X and codex review it", "ship this with the
-  worker pipeline"). The unattended scheduler is [[advance-roadmap]]; this is the same engine
-  (worker.sh + review.sh) driven by a human.
+  Human-driven "ship one item" that never implements in-process: this session conducts Cursor
+  (`agent`) as builder and Codex (`codex exec`, read-only) as reviewer for up to 3 rounds, then
+  reports the result, merge commit and deploy status. Input: a named item (Linear DEV-N, ROADMAP.md
+  entry, docs/plans doc, plain brief) or "pick the next one" (shared triage in ORCHESTRATOR.md).
+  Personal `jnelken` repos only. Use for "/conductor", "conductor DEV-42", "have cursor build X and
+  codex review it". The unattended scheduler is [[advance-roadmap]].
 ---
 
 > **Personal machines only (OMEN, JXIV).** Same gate as `advance-roadmap`.

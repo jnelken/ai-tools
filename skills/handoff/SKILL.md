@@ -1,6 +1,11 @@
 ---
 name: handoff
-description: "Summarize the current session's true state and spawn a continuation Claude agent in a new Superset terminal tab in the right workspace, so work continues on a small accurate context instead of a bloated one. Runs the close-out sweep first — filing follow-ups and writing durable memories — then hands the successor tracked work (ticket IDs, PRs, decisions) rather than a to-do list. Use whenever the user wants to hand a session off, continue in a fresh session/tab, spin up a new session with a summary, says the context is getting long/heavy, wants to save on context, or asks for a successor/handoff session. Bare invocation summarizes and tells the successor to continue; arguments become the successor's mission on top of the summary. `--cloud` targets a claude.ai cloud session instead of a Superset tab (also: \"hand this off to the cloud\", \"continue this in a cloud session\", \"teleport this to the cloud\"). When run *from inside* a cloud session (CLAUDE_CODE_REMOTE=true) there is no Superset and no durable local disk, so it skips the spawn and any IN_PROGRESS.md write and sends the user the full handoff prompt instead, to paste into a new session."
+description: >-
+  Summarize the session's true state and spawn a continuation Claude agent in a new Superset terminal
+  tab (or a claude.ai cloud session with `--cloud`), after running the close-out sweep, so work
+  continues on a small accurate context. Use when the user wants to hand off, continue in a fresh
+  session or tab, spin up a successor, or says the context is getting long or heavy. Arguments become
+  the successor's mission.
 ---
 
 # Handoff

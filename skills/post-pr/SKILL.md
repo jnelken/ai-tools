@@ -1,6 +1,12 @@
 ---
 name: post-pr
-description: 'Drive a PR the rest of the way to review-ready — run Codex review until clean, watch CI, then queue the PR for the next #pr-review window (a launchd flusher posts it to Slack, badges the description, undrafts it and enables auto-merge) — or, for a sub-PR into a trunk branch, merge it into the trunk and reap its sswt instead of announcing it. Use when work on a branch is finished and its PR should be shared, e.g. "post this PR", "share it to Slack", "take this the rest of the way", "run the post-PR workflow", "it''s ready, ship the announcement". Runs automatically when a task''s work is complete (see the Post-PR Workflow section of the global CLAUDE.md); invoke by hand to re-run it for a later push, or to target a PR in a different worktree.'
+description: >-
+  Drive a PR to review-ready: run Codex review until clean, watch CI, then queue it for the next #pr-
+  review window (a launchd flusher posts to Slack, badges, undrafts and enables auto-merge); a sub-PR
+  into a trunk is merged into the trunk and its sswt reaped instead. Use when branch work is finished
+  and its PR should be shared: "post this PR", "share it to Slack", "take this the rest of the way".
+  Runs automatically when a task completes (see Post-PR Workflow in work.md); invoke by hand to re-run
+  for a later push or another worktree.
 ---
 
 # Post PR

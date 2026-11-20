@@ -1,6 +1,12 @@
 ---
 name: close-out
-description: Use at the end of a long working session to confirm nothing was left orphaned before closing the thread — sweeps the conversation for unanswered questions, unfiled findings, retracted claims and "I'll do that later" promises, checks this session's open threads in running plan docs and recent harness plans, offers to copy harness plans into the repo, sweeps the machine for stray background processes, temp scripts, uncommitted/unpushed worktrees, un-announced PRs and stale sswt workspaces, files every real follow-up into Linear assigned to the user, writes anything only a human can decide into a running IN_PROGRESS.md so a future session can pick it up, then prints a large ASCII confirmation banner once the machine is genuinely clean (open decisions no longer block the close — they just have to be durably captured first). Trigger phrases include "wrap up this session", "can I close this thread", "close out", "close this out", "file the follow-ups", "am I safe to close this", "session wrap-up", "anything left hanging", "did we leave anything unfinished", "safe to end the session".
+description: >-
+  Use at the end of a long session to confirm nothing is orphaned before closing the thread: sweeps
+  the conversation and machine for unanswered questions, unfiled findings, open plan threads, stray
+  processes, uncommitted or unpushed worktrees and stale sswt workspaces, files follow-ups into
+  Linear, records human-only decisions in IN_PROGRESS.md, then prints a confirmation banner. Trigger
+  phrases: "wrap up this session", "close out", "can I close this thread", "file the follow-ups",
+  "anything left hanging", "safe to end the session".
 ---
 
 # Close Out

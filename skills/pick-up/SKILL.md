@@ -1,6 +1,11 @@
 ---
 name: pick-up
-description: Resume where a previous session left off — read this repo's IN_PROGRESS.md, running plan docs, and recent harness plans, verify them, and present every still-open item as a lettered decision in the Zen reply format (no plan mode, no table), then reconcile IN_PROGRESS.md with anything found already done or stale and compact the session before starting the work. Offer to copy recent harness plans into the repo. With the argument `sweep`, runs unattended instead: verifies items and removes only IN_PROGRESS.md items with hard evidence they're done or now tracked, while flagging plan threads only when hard evidence shows they're done or tracked; starts no work (the weekly sweep the pick-up-nudge hook requests).
+description: >-
+  Resume where a previous session left off: read this repo's IN_PROGRESS.md, running plan docs and
+  recent harness plans, verify them, present each still-open item as a lettered decision in the Zen
+  reply format, reconcile IN_PROGRESS.md, and compact the session before starting work. Offers to copy
+  recent harness plans into the repo. `sweep` runs unattended: removes only items with hard evidence
+  they are done or tracked and starts no work (the weekly pick-up-nudge sweep).
 ---
 
 # pick-up

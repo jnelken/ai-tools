@@ -1,6 +1,10 @@
 ---
 name: move-session
-description: Find a lost Claude Code session by remembered keywords and resume or re-home it in the right project directory. Use when a past session is missing from the `claude --resume` picker — typically because the repo was moved/renamed on disk so old sessions are stranded under a stale encoded project path, or because the session ran from an unexpected cwd — or when the user asks "find the session where I was discussing X", "I can't find the session I did X in", "move this session to this project", "relocate a claude session", "why isn't my old session in the resume picker". Covers keyword search across transcripts and prompt history, global resume by session ID, and re-homing with /cd.
+description: >-
+  Find a lost Claude Code session by remembered keywords and resume or re-home it in the right project
+  directory. Use when a past session is missing from the `claude --resume` picker (repo moved or
+  renamed, or the session ran from an unexpected cwd) or for "find the session where I discussed X",
+  "move this session to this project", "relocate a claude session".
 ---
 
 # Move Session
