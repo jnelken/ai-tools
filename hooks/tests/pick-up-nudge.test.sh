@@ -50,7 +50,7 @@ expect OFFER  "deferred item past due counts"       "$(run "$(def_file 2026-10-0
 MIXED=$'# In Progress\n\n_Last updated: 2026-10-05 (close-out)_\n\n- [ ] active thing\n- [ ] [not before 2026-11-01] later thing\n'
 expect OFFER  "active plus deferred offers"         "$(run "$MIXED")"
 ctx=$(cd "$TMP" && PICK_UP_NUDGE_TODAY=$TODAY bash "$HOOK" | jq -r '.hookSpecificOutput.additionalContext')
-[[ "$ctx" == *"(1 open item (plus 1 deferred, not due yet))"* ]] && pass=$((pass+1)) || { fail=$((fail+1)); echo "FAIL: mixed message count text — got $ctx"; }
+[[ "$ctx" == *"(1 open item, plus 1 deferred (not due yet))"* ]] && pass=$((pass+1)) || { fail=$((fail+1)); echo "FAIL: mixed message count text — got $ctx"; }
 expect SWEEP  "active plus deferred, stale week"    "$(run "${MIXED/2026-10-05/2026-09-24}")"
 expect OFFER  "malformed date is an ordinary item"  "$(run $'# In Progress\n\n_Last updated: 2026-10-05 (close-out)_\n\n- [ ] [not before soon] thing\n')"
 

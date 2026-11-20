@@ -137,7 +137,7 @@ plural=""
 [[ "$open_items" -ne 1 ]] && plural="s"
 open_item_count_text="$open_items open item$plural"
 
-[[ "$deferred_items" -gt 0 ]] && open_item_count_text+=" (plus $deferred_items deferred, not due yet)"
+[[ "$deferred_items" -gt 0 ]] && open_item_count_text+=", plus $deferred_items deferred (not due yet)"
 msg="This repo has unresolved work recorded in \`$rel\` ($open_item_count_text). Mention this to the user and offer to run \`/pick-up\` to resume it -- don't read the file or act on its items yourself; /pick-up owns that flow (verification against current state, then each open item put to the user as a decision)."
 
 if [[ -z "$last_week" || "$last_week" != "$this_week" ]]; then
