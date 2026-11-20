@@ -160,17 +160,7 @@ def render(snap, prev):
     return '\n'.join(L)
 
 
-def main():
-    ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument('--root', required=True, help='runtime dir (snapshots/ and reports/ are created in it)')
-    ap.add_argument('--month', required=True, help='YYYY-MM')
-    ap.add_argument('--model', default='claude-sonnet-5-5')
-    ap.add_argument('--no-probe', action='store_true')
-    args = ap.parse_args()
-    root = Path(args.root)
-    (root / 'snapshots').mkdir(parents=True, exist_ok=True)
-    (root / 'reports').mkdir(parents=True, exist_ok=True)
-
+def measure(args, root):
     targets = [Path(t).expanduser() for t in
                (os.environ.get('INSTRUCTION_AUDIT_TARGETS', ':'.join(DEFAULT_TARGETS))).split(':')]
     targets = [t for t in targets if t.is_dir()]
@@ -193,7 +183,41 @@ def main():
     (root / 'snapshots' / f'{args.month}.json').write_text(json.dumps(snap, indent=2) + '\n')
     out = root / 'reports' / f'{args.month}.measurements.md'
     out.write_text(render(snap, prev))
-    print(out)
+    print(f'measurements: {out}')
+    print(f"snapshot: {root / 'snapshots' / f'{args.month}.json'}")
+    print(f"previous snapshot: {earlier[-1] if earlier else 'none (this is the baseline)'}")
+
+
+def save(args, root):
+    analysis = sys.stdin.read().strip()
+    meas = root / 'reports' / f'{args.month}.measurements.md'
+    if not analysis:
+        sys.exit('save: empty analysis on stdin; no report written')
+    if not meas.exists():
+        sys.exit(f'save: {meas} missing; run `measure` first')
+    out = root / 'reports' / f'{args.month}.md'
+    out.write_text(meas.read_text().rstrip() + '\n\n# Analysis\n\n' + analysis + '\n')
+    print(f'report: {out}')
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__)
+    sub = ap.add_subparsers(dest='cmd', required=True)
+    for name, fn, help_ in (('measure', measure, 'snapshot the layers and write the measurement table'),
+                            ('save', save, 'write the month report: measurements + analysis read from stdin')):
+        p = sub.add_parser(name, help=help_)
+        p.add_argument('--root', default=str(CLAUDE_DIR / 'automations/instruction-audit'),
+                       help='runtime dir (snapshots/ and reports/ are created in it)')
+        p.add_argument('--month', default=time.strftime('%Y-%m'), help='YYYY-MM (default: this month)')
+        if name == 'measure':
+            p.add_argument('--model', default='claude-sonnet-5-5')
+            p.add_argument('--no-probe', action='store_true')
+        p.set_defaults(fn=fn)
+    args = ap.parse_args()
+    root = Path(args.root)
+    (root / 'snapshots').mkdir(parents=True, exist_ok=True)
+    (root / 'reports').mkdir(parents=True, exist_ok=True)
+    args.fn(args, root)
 
 
 if __name__ == '__main__':

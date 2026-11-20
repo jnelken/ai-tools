@@ -5,18 +5,19 @@
 	<key>Label</key>
 	<string>com.jake.instruction-audit</string>
 
-	<!-- $HOME is expanded by sh, so the plist is the same on every machine. run.sh keeps
-	     its own logs under ~/.claude/automations/instruction-audit/logs/. -->
+	<!-- An automation is a schedule plus a skill name: the work lives in skills/instruction-audit.
+	     $HOME is expanded by sh, so the plist is the same on every machine. Logs go to
+	     ~/.claude/automations/instruction-audit/logs/. -->
 	<key>ProgramArguments</key>
 	<array>
 		<string>/bin/sh</string>
 		<string>-c</string>
-		<string>exec /bin/zsh "$HOME/.claude/automations/instruction-audit/run.sh"</string>
+		<string>exec "$HOME/.ai-tools/bin/skill-automation" instruction-audit --once-per month</string>
 	</array>
 
-	<!-- 3:15 am local time on days 1-7 of each month. run.sh skips once the month's
-	     report exists, so days 2-7 only matter when the Mac was off or the run failed
-	     on the 1st. A sleeping Mac runs the missed job on wake. -->
+	<!-- 3:15 am local time on days 1-7 of each month. skill-automation skips once the month has
+	     succeeded, so days 2-7 only matter when the Mac was off on the 1st or the run failed.
+	     A sleeping Mac runs the missed job on wake. -->
 	<key>StartCalendarInterval</key>
 	<array>
 		<dict><key>Day</key><integer>1</integer><key>Hour</key><integer>3</integer><key>Minute</key><integer>15</integer></dict>

@@ -36,6 +36,13 @@ When authoring a skill elsewhere first (spike, cloud agent, another repo):
 3. Commit and push to `main`.
 4. On each machine: run `~/.ai-tools/install.sh` (or wait for the next session's `ai-tools-sync` hook) to pull the push into the deploy clone.
 
+## Automations are a skill plus a schedule (standing)
+
+New automations are skills first: the procedure lives in `skills/<name>/` (with its own `scripts/`), runs
+on demand as `/<name>`, and declares its tool allowlist in `allowed-tools`. The automation stores only the
+schedule and the skill name, run through `bin/skill-automation`. See "Skill-backed automations" in
+`automations/README.md`. Do not add a bespoke `run.sh` that embeds a prompt.
+
 ## Agent permissions
 
 Agents may **commit and push** in this repo without asking first. This is a deliberate standing exception to the default "commit or push only when the user asks" rule. Keep commits small and descriptive; push to `main` is fine.

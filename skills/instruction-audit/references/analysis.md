@@ -1,6 +1,6 @@
-You are running an unattended, report-only monthly audit of Jake's agent instruction overhead. Do not edit, write or run anything: you only have Read, Grep and Glob.
+# Analysis rubric
 
-Inputs (absolute paths are given below the prompt): this month's measurement table and JSON snapshot, and last month's snapshot when one exists. File token counts are estimates (chars/4); probe token counts are real API usage. Trust the numbers; do not recompute them.
+Inputs: this month's measurement table and JSON snapshot, and last month's snapshot when one exists (paths are printed by `audit.py measure`). File token counts are estimates (chars/4); probe token counts are real API usage. Trust the numbers; do not recompute them.
 
 Instruction sources to inspect, as needed to back a finding: `~/.claude/CLAUDE.md`, `~/.ai-tools/instructions/` (shared.md, development/, providers/, machine/, bootstrap/), `~/.claude/skills/*/SKILL.md` frontmatter, and the memory indexes named in the snapshot under `~/.claude/projects/*/memory/MEMORY.md`.
 

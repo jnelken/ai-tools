@@ -18,6 +18,23 @@ Each automation keeps its own `logs/` locally under `~/.claude/automations/<name
 — a real directory outside the deploy clone, which is why it's runtime output and never
 makes the deploy clone dirty.
 
+## Skill-backed automations
+
+An automation is a schedule plus a skill name; nothing else. The procedure lives in
+`skills/<name>/` so the same work runs on demand (`/<name>`) and unattended, and a scheduler is
+interchangeable. `bin/skill-automation <skill> [--once-per day|week|month] [--force]` is the shared
+runner: it runs `claude -p "/<skill> unattended" --permission-mode dontAsk` from a neutral directory.
+
+- **Permissions** come from the skill's `allowed-tools` frontmatter. `dontAsk` denies everything that
+  list does not cover, so a report-only skill lists only reads and its one script. (Frontmatter alone
+  only adds approvals: without `dontAsk` the default `auto` mode lets other tools through.)
+- **Success** is a line `AUTOMATION_RESULT: ok ...` in the skill's output, written under its
+  "Unattended contract" section. Anything else leaves no marker, so the next trigger retries.
+- **Runtime files** live in `~/.claude/automations/<skill>/{logs,state,cwd}`, outside the deploy clone.
+- **Not yet migrated:** `pr-review-batch` (no-LLM flusher), `machine-status` (a server), `reap-sswts`,
+  `advance-roadmap` (a scheduler with its own queue) and `wrapup-repos` (hard-codes its prompt and runs
+  with permissions skipped). Deterministic ones would become a skill that documents and runs their script.
+
 ## `advance-roadmap`
 
 Two finite batches every day at **10:30 and 15:30 local time** (Eastern on Jake's Mac), starting
@@ -386,24 +403,26 @@ Limitations:
 
 ## `instruction-audit`
 
-Monthly, report-only audit of instruction overhead. `com.jake.instruction-audit.plist` fires at
-3:15 am on days 1–7 of each month; `run.sh` skips once the month's report exists, so days 2–7 only
-cover a Mac that was off on the 1st or a failed run. Any other trigger (for example a Superset
-automation that runs `run.sh`) is equally harmless. `run.sh --force` re-runs the current month.
+Skill-backed (see "Skill-backed automations" above): the plist runs
+`skill-automation instruction-audit --once-per month` and the work lives in
+[`skills/instruction-audit`](../skills/instruction-audit). Monthly, report-only audit of instruction
+overhead. The plist fires at 3:15 am on days 1–7 of each month; `skill-automation` skips once the
+month has succeeded, so days 2–7 only cover a Mac that was off on the 1st or a failed run. On demand:
+`/instruction-audit` (shows this month's report) or `/instruction-audit refresh`.
 
-`audit.py` does the measuring deterministically: estimated tokens (chars/4) for the global
-`CLAUDE.md`, each resolved profile fragment per target repo, the skill listing and the memory
-indexes; settings counts; and a real end-to-end `claude -p` probe from a neutral directory and from
-`~/code/ai-tools`, which captures what files cannot (connector tools, plugin skills, hook context).
-It diffs against the previous month's snapshot. A headless `claude -p` run with only
-Read/Grep/Glob then ranks duplicate, stale, situational and bloated instructions
-(`analysis-prompt.md`). Nothing is edited.
+The skill's `scripts/audit.py measure` does the measuring deterministically: estimated tokens
+(chars/4) for the global `CLAUDE.md`, each resolved profile fragment per target repo, the skill
+listing and the memory indexes; settings counts; and a real end-to-end `claude -p` probe from a
+neutral directory and from `~/code/ai-tools`, which captures what files cannot (connector tools,
+plugin skills, hook context). It diffs against the previous month's snapshot. The model then ranks
+duplicate, stale, situational and bloated instructions (`references/analysis.md`) and `audit.py save`
+writes the report. Its tool allowlist is `Read, Grep, Glob` plus that one script, so nothing else is
+edited or run.
 
 Output lives in `~/.claude/automations/instruction-audit/`: `reports/YYYY-MM.md` (measurements plus
-analysis), `snapshots/YYYY-MM.json`, `logs/`. A failed analysis writes no report, so a retry re-runs.
-Env: `INSTRUCTION_AUDIT_TARGETS` (colon-separated repos to resolve), `INSTRUCTION_AUDIT_PROBE_TARGETS`
-(repos to probe from; work repos are not probed by default because a headless run fires their hooks),
-`INSTRUCTION_AUDIT_MODEL`.
+analysis), `snapshots/YYYY-MM.json`, `logs/`. Env: `INSTRUCTION_AUDIT_TARGETS` (colon-separated repos
+to resolve), `INSTRUCTION_AUDIT_PROBE_TARGETS` (repos to probe from; work repos are not probed by
+default because a headless run fires their hooks), `SKILL_AUTOMATION_MODEL`.
 
 ## `machine-status`
 
