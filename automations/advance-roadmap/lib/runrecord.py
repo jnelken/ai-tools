@@ -71,6 +71,38 @@ def stamp_epoch(stamp):
         return None
 
 
+def no_work_report(orch, snapshot, target):
+    """Describe the scoped snapshot and planner's reasons without inferring missing data."""
+    repo = target or orch.get("repo")
+    complete = (isinstance(snapshot, dict) and snapshot.get("ok") is True
+                and snapshot.get("truncated") is False and isinstance(snapshot.get("issues"), list))
+    assessment = {"status": "unknown", "repo": repo, "unfinished_count": None}
+    if repo and complete:
+        issues = snapshot["issues"]
+        # Malformed rows cannot prove an empty backlog.
+        if all(isinstance(i, dict) and isinstance(i.get("labels"), list)
+               and isinstance(i.get("state_type"), str) for i in issues):
+            count = sum(1 for i in issues if f"repo/{repo}" in i["labels"]
+                        and i["state_type"] not in ("completed", "canceled"))
+            assessment.update(status="unfinished" if count else "empty", unfinished_count=count)
+    if assessment["status"] == "unfinished":
+        headline = f"{repo}: {assessment['unfinished_count']} unfinished repo-labeled Linear ticket(s) remain."
+    elif assessment["status"] == "empty":
+        headline = f"{repo}: no unfinished repo-labeled Linear tickets in the snapshot."
+    else:
+        headline = "Unfinished Linear backlog could not be verified for this run."
+    reasons = [s.strip() for s in (orch.get("considered") or []) if isinstance(s, str) and s.strip()]
+    for blocker in (orch.get("blockers") or []):
+        if isinstance(blocker, dict) and blocker.get("detail"):
+            reasons.append(": ".join(filter(None, [blocker.get("linear_id"), blocker["detail"]])))
+    summary = (orch.get("summary") or "").strip()
+    lines = [headline]
+    if summary:
+        lines.append(summary)
+    lines.extend(f"• {reason}" for reason in dict.fromkeys(reasons))
+    return assessment, "\n".join(lines)
+
+
 def derive(a, orch, wstatus, wresult):
     """(outcome, detail) from what run.sh observed plus what the agents wrote."""
     if a.status in SKIP_OUTCOMES:
@@ -298,6 +330,8 @@ def cmd_append(a):
         # Tokens this run spent, per (role, review round, model): see lib/tokens.py.
         "tokens": tokens.summarize(a.usage_log),
     }
+    if outcome in ("blocked-no-item", "nothing-qualified"):
+        rec["backlog"], rec["slack_summary"] = no_work_report(o, load_json(a.linear_snapshot), a.target_repo)
     path = os.path.join(a.root, "runs.jsonl")
     # Parallel lanes append concurrently; one writer at a time keeps every record whole.
     with open(path + ".lock", "w") as lk:
@@ -416,6 +450,8 @@ def main(argv=None):
                     help="usage.py quota-record output saved when the run skipped for quota")
     ap.add_argument("--repo", default="", help="target repo, including skips before planning")
     ap.add_argument("--lane", type=int, default=None)
+    ap.add_argument("--linear-snapshot", default="")
+    ap.add_argument("--target-repo", default="")
     ap.add_argument("--expect-pr", action="store_true",
                     help="the worker ran in a Superset workspace, so a ship must name its PR")
     sub.add_parser("alert")

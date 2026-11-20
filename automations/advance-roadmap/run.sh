@@ -195,7 +195,8 @@ record() {
     --orch-provider "$ORCH" \
     --orch-result "$ORCH_RESULT" \
     --worker-status "$WORKER_STATUS" --worker-result "$WORKER_RESULT" \
-    --usage-log "$USAGE_LOG" >> "$LOG" 2>&1 || true
+    --usage-log "$USAGE_LOG" --linear-snapshot "$RUN_DIR/linear-snapshot.json" \
+    --target-repo "$TARGET_REPO" >> "$LOG" 2>&1 || true
 }
 planner_quota_record() {
   # planner_quota_record OUT [--primary P] [--hit P=FILE]... — every planner who is out and until
