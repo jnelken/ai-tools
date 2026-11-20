@@ -32,7 +32,7 @@ Order, per run (all under one flock):
      America/New_York). Sub-PRs merge into a deferred bundle while it waits,
      so its head moving is expected and never drops it; instead it releases
      only when `gh pr checks` is all green on the current head (pending: held
-     to the next tick; failing: held and logged loudly). Its message gets an
+     to the next window; failing: held and logged loudly). Its message gets an
      "Also includes:" line listing the sub-PRs merged into it.
   3. Post each survivor with chat.postMessage, in queued order, except that
      same-ticket entries post together, api before woodrow.

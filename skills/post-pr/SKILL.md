@@ -133,7 +133,7 @@ Only for a PR whose base is the repo's default branch (a sub-PR into a trunk is 
 **Classify** the net diff (`git diff <base>...HEAD`) and the PR's labels. The PR is **deferrable** unless it fixes a bug or adds or changes user-facing behavior:
 
 - Deferrable: docs-only (woodrow #1977: three markdown files), tests, behavior-preserving refactors, lint or format fixes, CI, dependency bumps, copy tweaks. Anything step 4's `[hygiene]` tag would cover is always deferrable.
-- Not deferrable: a `bug` or `enhancement` label, any bug fix, any new or changed behavior a user, API client or operator would notice (including config that changes runtime behavior).
+- Not deferrable: a `bug` or `enhancement` label, any bug fix, any new or changed user-facing behavior.
 - **When unsure, it is not deferrable.** Holding a fix until 4 PM costs more than posting a refactor early.
 
 Not deferrable: report `Deferral: not deferrable` and continue at step 3.5 as before.
@@ -203,6 +203,7 @@ gh pr merge <PR_NUMBER> --repo <OWNER/REPO> --merge --delete-branch=false
 - **Keep the remote branch at merge time** (`--delete-branch=false`). Branches stacked on it still resolve, and the PR keeps its head ref. The sub-PR's local workspace and branch are reaped separately, as the run's last action (step 3.7).
 - **The undraft here is a merge prerequisite, not a signal.** No human reviews a sub-PR, so its draft pill was never load-bearing. Do it immediately before the merge and never badge the PR.
 - **Conflicts** (`CONFLICTING` / `DIRTY`): resolve them as in step 2.5, with the trunk as the base. Stop and report "merge blocked — conflicts with `<trunk>`" only for a conflict that needs a product or design decision.
+- When step 3.4 retargeted this PR into a deferred bundle, write the bundle's `## Stacked follow-ups` line (3.4's `note` snippet) now, after the merge and before step 3.7's reap ends the session.
 - After the merge the trunk PR's diff has grown — say so in the report, and pull the trunk in the worktree if the next piece of work starts from it. Nothing is written to `pr-review-queue.jsonl` or `pr-review-posted.jsonl`; there is no post to queue or dedup.
 
 ### 3.7. Reap the sub-PR's sswt
@@ -289,7 +290,7 @@ jq -nc --arg url "$URL" --arg repo "$REPO" --argjson pr "$N" --arg text "$TEXT" 
 
 `text` is the finished Slack link text; `autoMerge` is `"squash"`, `"merge"` or `null` (`AUTOMERGE_JSON='"squash"'` or `null`). `headSha` must be the PR's current head: the flusher drops an entry whose PR has moved on (a later push runs `/post-pr` again and re-enqueues), whose PR is no longer open or no longer targets the default branch, or whose URL is already in `pr-review-posted.jsonl`.
 
-`defer` and `releaseAt` are set only for a PR step 3.4 deferred (`DEFER_JSON=true` and `RELEASE_AT` from `--defer-plan`; otherwise `DEFER_JSON=false`). The flusher holds such an entry until `releaseAt`, then posts it on the next window. Sub-PRs merge into a bundle while it waits, so the flusher **never drops a deferred entry for a moved head**; at release it requires `gh pr checks` to be all passing on the current head instead (pending holds it to the next tick, failing holds it and logs `!!!` in `flush.log`). Its message keeps the usual first line and, when sub-PRs were merged into it, gets `Also includes: <url|#N>, <url|#M>`.
+`defer` and `releaseAt` are set only for a PR step 3.4 deferred (`DEFER_JSON=true` and `RELEASE_AT` from `--defer-plan`; otherwise `DEFER_JSON=false`). The flusher holds such an entry until `releaseAt`, then posts it on the next window. Sub-PRs merge into a bundle while it waits, so the flusher **never drops a deferred entry for a moved head**; at release it requires `gh pr checks` to be all passing on the current head instead (pending holds it to the next window, failing holds it and logs `!!!` in `flush.log`). Its message keeps the usual first line and, when sub-PRs were merged into it, gets `Also includes: <url|#N>, <url|#M>`.
 
 **Mark it queued on GitHub.** Right after the enqueue, add an invisible `<!-- pr-review-queued -->` line to the end of the PR body, read and written through a file, and only if it isn't there yet. Queues are per machine, so this marker is how the other machine's flusher sees that this PR is queued; the flusher removes it when it adds the badge. A failed marker write is reported, not fatal: the PR still posts, though a sibling on the other machine may wait out its hold first.
 

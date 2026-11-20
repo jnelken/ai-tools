@@ -490,7 +490,7 @@ it goes out on the next window like any other entry, with these differences:
 
 - Its head moves each time a sub-PR merges in, so a moved head **never drops** it. Instead
   `gh pr checks` must be all green (pass or skipped, or no checks at all) on the current head:
-  pending holds it to the next tick; failing holds it and logs
+  pending holds it to the next window; failing holds it and logs
   `!!! <repo>#N deferred bundle held at release: CHECKS FAILING (…)`.
 - The sibling hold still applies, counted from `releaseAt` rather than `queuedAt`.
 - Its message keeps the usual first line, plus `Also includes: <url|#N>, <url|#M>` listing the
