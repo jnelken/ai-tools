@@ -26,20 +26,33 @@ Order, per run (all under one flock):
      sibling is held in the queue until the sibling is queued or posted, or
      siblingHoldMin minutes (default 60) after its queuedAt; then it posts
      alone. Every paired message gets a second line naming its siblings.
+  2c. Deferred entries ("defer": true, set by /post-pr for a PR that fixes no
+     bug and ships no feature) are held, with no gh call, until "releaseAt"
+     (the next weekday deferReleaseAt in deferTz, default 16:00
+     America/New_York). Sub-PRs merge into a deferred bundle while it waits,
+     so its head moving is expected and never drops it; instead it releases
+     only when `gh pr checks` is all green on the current head (pending: held
+     to the next tick; failing: held and logged loudly). Its message gets an
+     "Also includes:" line listing the sub-PRs merged into it.
   3. Post each survivor with chat.postMessage, in queued order, except that
      same-ticket entries post together, api before woodrow.
   4. On ok, append to pr-review-posted.jsonl immediately.
-  5. Badge (and remove QUEUED_MARKER), 6. undraft, 7. auto-merge. A failure here is logged and never
+  5. Badge (and remove QUEUED_MARKER and DEFER_MARKER), 6. undraft, 7. auto-merge. A failure here is logged and never
      undoes the post.
   8. Failed posts go back into the live queue.
 
     flush.py [--dry-run] [--only URL] [--channel ID] [--force] [--siblings URL]
+             [--release-at [ISO]] [--defer-plan URL]
 
 --only and --force skip the window check; --only flushes just that URL,
-skips the sibling hold, and exits nonzero unless it was posted. --force keeps
-the hold. --dry-run claims nothing and writes nothing, and always logs a
+skips the sibling and release holds (never the checks gate), and exits
+nonzero unless it was posted. --force keeps both holds. --dry-run claims nothing and writes nothing, and always logs a
 preflight line. --siblings URL prints that PR's siblings and the line its
 message would carry, and changes nothing (/post-pr uses it to report).
+--release-at prints the next deferred release (after ISO, default now) as UTC.
+--defer-plan URL prints, as JSON, the release time and today's bundle for that
+PR's repo (Jake's open, unposted, unapproved PR into the default branch with
+DEFER_MARKER in its body). Both are read-only.
 
 Env: PR_REVIEW_BATCH_CHANNEL (channel override), PR_REVIEW_BATCH_NOW (epoch
 seconds, tests), PR_REVIEW_BATCH_SLACK_API (Slack API base URL, tests).
@@ -60,6 +73,7 @@ import tempfile
 import time
 import urllib.error
 import urllib.request
+import zoneinfo
 
 HOME = os.path.expanduser("~")
 STATE = os.path.join(HOME, ".claude", "state")
@@ -72,11 +86,15 @@ SLACK_API = os.environ.get("PR_REVIEW_BATCH_SLACK_API", "https://slack.com/api")
 TOKEN_SERVICE = "slack-pr-review-user-token"
 BADGE = "📣 **Posted to Slack**"
 QUEUED_MARKER = "<!-- pr-review-queued -->"
+DEFER_MARKER = "<!-- pr-review-deferred -->"
+DEFAULT_DEFER_RELEASE_AT = "16:00"
+DEFAULT_DEFER_TZ = "America/New_York"
 DEFAULT_WINDOW_MIN = 30
 DEFAULT_SIBLING_HOLD_MIN = 60
 OWNER = "Concentro-Inc"
 SIBLING_REPOS = ("api", "woodrow", "folio-platform")  # also the posting order within a ticket
 TICKET_RE = re.compile(r"\((CON-\d+)\)")
+SUBPR_RE = re.compile(r"^- #(\d+)\b", re.MULTILINE)
 GH_TIMEOUT = 60
 POST_SPACING_S = 1.0
 
@@ -160,6 +178,46 @@ def boundary_crossed(now, last, window_minutes):
         return False
     w = window_minutes * 60
     return int(now // w) > int(last // w)
+
+
+# --- Deferral ----------------------------------------------------------------
+
+def defer_settings(cfg):
+    """(hour, minute, tzinfo) from deferReleaseAt / deferTz, falling back to
+    16:00 America/New_York for a missing or bad value."""
+    try:
+        h, m = (int(x) for x in str(cfg.get("deferReleaseAt", DEFAULT_DEFER_RELEASE_AT)).split(":"))
+        if not (0 <= h < 24 and 0 <= m < 60):
+            raise ValueError
+    except (TypeError, ValueError):
+        h, m = (int(x) for x in DEFAULT_DEFER_RELEASE_AT.split(":"))
+    try:
+        tz = zoneinfo.ZoneInfo(str(cfg.get("deferTz", DEFAULT_DEFER_TZ)))
+    except (zoneinfo.ZoneInfoNotFoundError, ValueError):
+        tz = zoneinfo.ZoneInfo(DEFAULT_DEFER_TZ)
+    return h, m, tz
+
+
+def next_release(after, cfg):
+    """Epoch of the first weekday release strictly after `after`. Built as a
+    local wall-clock time and converted, so it stays 16:00 across DST."""
+    h, m, tz = defer_settings(cfg)
+    day = dt.datetime.fromtimestamp(after, tz).date()
+    while True:
+        at = dt.datetime(day.year, day.month, day.day, h, m, tzinfo=tz)
+        if at.weekday() < 5 and at.timestamp() > after:
+            return at.timestamp()
+        day += dt.timedelta(days=1)
+
+
+def release_epoch(e, cfg):
+    """When a deferred entry may go out: its releaseAt, or (missing or bad)
+    the release after its queuedAt, or now when that is bad too."""
+    at = parse_iso(e.get("releaseAt")) if e.get("releaseAt") else None
+    if at is not None:
+        return at
+    queued = parse_iso(e.get("queuedAt")) if e.get("queuedAt") else None
+    return next_release(queued, cfg) if queued is not None else now_epoch()
 
 
 # --- Queue -------------------------------------------------------------------
@@ -276,7 +334,7 @@ def revalidate(e, posted):
     """('post', pr_info) | ('drop', reason) | ('requeue', reason)."""
     if e["url"] in posted:
         return "drop", "already in pr-review-posted.jsonl"
-    res = run("gh", "pr", "view", e["url"], "--json", "state,baseRefName,headRefOid,isDraft")
+    res = run("gh", "pr", "view", e["url"], "--json", "state,baseRefName,headRefOid,headRefName,isDraft")
     if res is None or res.returncode != 0:
         return "requeue", f"gh pr view: {err(res)}"
     try:
@@ -291,9 +349,56 @@ def revalidate(e, posted):
         return "requeue", str(x)
     if pr.get("baseRefName") != base:
         return "drop", f"base {pr.get('baseRefName')} is not the default branch {base}"
-    if e.get("headSha") and pr.get("headRefOid") != e["headSha"]:
+    # A deferred bundle's head moves every time a sub-PR merges in; the checks
+    # gate on the current head replaces this drop for it.
+    if e.get("headSha") and not e.get("defer") and pr.get("headRefOid") != e["headSha"]:
         return "drop", f"head moved {str(e['headSha'])[:9]} -> {str(pr.get('headRefOid'))[:9]}"
     return "post", pr
+
+
+def checks_gate(e):
+    """For a deferred entry at release: ('post', None) when every check on the
+    current head passed or was skipped (or there are none), ('hold', reason)
+    while any is pending or failing, ('requeue', reason) when gh fails."""
+    res = run("gh", "pr", "checks", e["url"], "--json", "bucket,name")
+    if res is None:
+        return "requeue", f"gh pr checks: {err(res)}"
+    # gh exits 8 for pending and 1 for failing, still printing the JSON.
+    try:
+        checks = json.loads(res.stdout) if res.stdout.strip() else None
+    except json.JSONDecodeError:
+        checks = None
+    if checks is None:
+        if "no checks reported" in (res.stderr or ""):
+            return "post", None
+        return "requeue", f"gh pr checks: {err(res)}"
+    failing = sorted(c.get("name", "?") for c in checks if c.get("bucket") in ("fail", "cancel"))
+    pending = sorted(c.get("name", "?") for c in checks if c.get("bucket") == "pending")
+    if failing:
+        return "hold", f"CHECKS FAILING ({', '.join(failing)})"
+    if pending:
+        return "hold", f"checks pending ({', '.join(pending)})"
+    return "post", None
+
+
+def also_includes(e, pr):
+    """The "Also includes:" line for a deferred bundle: the sub-PRs merged into
+    its head branch, oldest first. None when there are none; raises
+    RuntimeError when gh fails."""
+    head = pr.get("headRefName")
+    if not head:
+        return None
+    res = run("gh", "pr", "list", "--repo", e["repo"], "--base", head, "--state", "merged",
+              "--json", "number,url", "--limit", "100")
+    if res is None or res.returncode != 0:
+        raise RuntimeError(f"gh pr list --base {head}: {err(res)}")
+    try:
+        subs = sorted(json.loads(res.stdout), key=lambda p: p["number"])
+    except (json.JSONDecodeError, KeyError, TypeError):
+        raise RuntimeError(f"gh pr list --base {head}: bad JSON")
+    if not subs:
+        return None
+    return "Also includes: " + ", ".join(f"<{p['url']}|#{p['number']}>" for p in subs)
 
 
 def badge(url):
@@ -302,7 +407,7 @@ def badge(url):
         return f"failed ({err(res)})"
     body = res.stdout.rstrip()
     # The queued marker goes in the same edit: once posted, the badge is the state.
-    stripped = "\n".join(l for l in body.split("\n") if l.strip() != QUEUED_MARKER).rstrip()
+    stripped = "\n".join(l for l in body.split("\n") if l.strip() not in (QUEUED_MARKER, DEFER_MARKER)).rstrip()
     if stripped.endswith(BADGE):
         if stripped == body:
             return "already"
@@ -405,9 +510,18 @@ def sibling_line(name, sibs):
 class Pairing:
     """Per-run inputs for the sibling decision."""
 
-    def __init__(self, posted, local_queued, hold, now, hold_min):
+    def __init__(self, posted, local_queued, hold, now, hold_min, cfg=None):
         self.posted, self.local_queued = posted, local_queued
         self.hold, self.now, self.hold_min = hold, now, hold_min
+        self.cfg = cfg or {}
+
+    def hold_start(self, e):
+        """queuedAt, or for a deferred entry its release, so the sibling hold
+        is not already spent by the time the entry is allowed out."""
+        queued = parse_iso(e.get("queuedAt")) if e.get("queuedAt") else None
+        if e.get("defer") and queued is not None:
+            return max(queued, release_epoch(e, self.cfg))
+        return queued
 
     def decide(self, e):
         """('post', text) | ('hold', reason) | ('requeue', reason), logging
@@ -416,7 +530,7 @@ class Pairing:
         scope = sibling_scope(e)
         if not scope:
             return "post", text
-        queued = parse_iso(e.get("queuedAt"))
+        queued = self.hold_start(e)
         expired = queued is None or self.now >= queued + self.hold_min * 60
         holding = self.hold and not expired
         try:
@@ -495,7 +609,47 @@ def preflight():
 
 
 def pairing(entries, posted, hold):
-    return Pairing(posted, {e["url"] for e in entries}, hold, now_epoch(), sibling_hold_min(read_config()))
+    cfg = read_config()
+    return Pairing(posted, {e["url"] for e in entries}, hold, now_epoch(), sibling_hold_min(cfg), cfg)
+
+
+def release_label(at, cfg):
+    return dt.datetime.fromtimestamp(at, defer_settings(cfg)[2]).strftime("%a %Y-%m-%d %H:%M %Z")
+
+
+def decide(e, posted, pair):
+    """(verdict, pr, text_or_reason): verdict is post, drop, requeue or hold.
+    A deferred entry is held until its release (unless --only), then must
+    pass revalidation, green checks on its current head and the sibling
+    hold, and gets its "Also includes:" line. Everything else is unchanged."""
+    deferred = bool(e.get("defer"))
+    if deferred and pair.hold:
+        at = release_epoch(e, pair.cfg)
+        if pair.now < at:
+            return "hold", None, f"deferred until {release_label(at, pair.cfg)}"
+    verdict, why = revalidate(e, posted)
+    if verdict != "post":
+        return verdict, None, why
+    pr = why
+    if deferred:
+        verdict, why = checks_gate(e)
+        if verdict == "hold":
+            sha = str(pr.get("headRefOid"))[:9]
+            loud = why.startswith("CHECKS FAILING")
+            return "hold", None, f"deferred bundle held at release: {why} on {sha}"
+        if verdict != "post":
+            return verdict, None, why
+    verdict, text = pair.decide(e)
+    if verdict != "post":
+        return verdict, None, text
+    if deferred:
+        try:
+            line = also_includes(e, pr)
+        except RuntimeError as x:
+            return "requeue", None, f"sub-PR lookup failed ({x})"
+        if line:
+            text = f"{text}\n{line}"
+    return "post", pr, text
 
 
 def dry_run(only, channel):
@@ -510,9 +664,7 @@ def dry_run(only, channel):
         entries = [e for e in entries if e["url"] == only]
     ready = []
     for e in entries:
-        verdict, why = revalidate(e, posted)
-        if verdict == "post":
-            verdict, why = pair.decide(e)
+        verdict, _, why = decide(e, posted, pair)
         if verdict == "post":
             ready.append((e, why))
         else:
@@ -545,6 +697,74 @@ def show_siblings(url):
     line = sibling_line(name, sibs)
     print("message:")
     print(e["text"] + (f"\n{line}" if line else ""))
+    return 0
+
+
+def show_release_at(after):
+    """--release-at: the next deferred release after `after` (ISO, default
+    now), as UTC ISO."""
+    when = parse_iso(after) if after else now_epoch()
+    if when is None:
+        print(f"bad time {after!r}", file=sys.stderr)
+        return 1
+    print(iso(next_release(when, read_config())))
+    return 0
+
+
+def queued_release(url):
+    """releaseAt of this machine's newest queue line for url, or None."""
+    entries = []
+    for p in sorted(glob.glob(QUEUE + ".flushing.*")) + [QUEUE]:
+        entries.extend(read_lines(p)[0])
+    for e in newest_per_url(entries):
+        if e["url"] == url and e.get("defer") and parse_iso(e.get("releaseAt") or "") is not None:
+            return e["releaseAt"]
+    return None
+
+
+def has_line(body, marker):
+    return any(l.strip() == marker for l in (body or "").split("\n"))
+
+
+def show_defer_plan(url):
+    """--defer-plan: JSON {releaseAt, releaseLocal, self, bundle} for a
+    deferrable PR. self is true when the PR already carries DEFER_MARKER (it is
+    a bundle; a re-run keeps its queued releaseAt). Otherwise bundle is the
+    oldest of Jake's open PRs into the same repo's default branch that carry
+    DEFER_MARKER, have no badge and aren't approved, or null. Read from GitHub,
+    not the local queue, so jake1 and jake2 see the same bundle. Writes nothing."""
+    res = run("gh", "pr", "view", url, "--json", "url,number,body")
+    if res is None or res.returncode != 0:
+        print(f"gh pr view: {err(res)}", file=sys.stderr)
+        return 1
+    me = json.loads(res.stdout)
+    repo = "/".join(me["url"].split("/")[3:5])
+    cfg = read_config()
+    out = {"self": has_line(me.get("body"), DEFER_MARKER), "bundle": None}
+    release = queued_release(me["url"]) if out["self"] else None
+    if not out["self"]:
+        try:
+            base = default_branch(repo)
+        except RuntimeError as x:
+            print(str(x), file=sys.stderr)
+            return 1
+        res = run("gh", "pr", "list", "--repo", repo, "--base", base, "--state", "open", "--author", "@me",
+                  "--json", "number,url,title,headRefName,body,reviewDecision", "--limit", "200")
+        if res is None or res.returncode != 0:
+            print(f"gh pr list {repo}: {err(res)}", file=sys.stderr)
+            return 1
+        bundles = sorted(
+            (p for p in json.loads(res.stdout)
+             if p["number"] != me["number"] and has_line(p.get("body"), DEFER_MARKER)
+             and BADGE not in (p.get("body") or "") and p.get("reviewDecision") != "APPROVED"),
+            key=lambda p: p["number"])
+        if bundles:
+            b = bundles[0]
+            out["bundle"] = {"number": b["number"], "url": b["url"], "title": b["title"], "head": b["headRefName"]}
+    at = parse_iso(release) if release else next_release(now_epoch(), cfg)
+    out["releaseAt"] = iso(at)
+    out["releaseLocal"] = release_label(at, cfg)
+    print(json.dumps(out))
     return 0
 
 
@@ -582,10 +802,7 @@ def flush(only, channel):
         ready = []
         for e in entries:
             try:
-                verdict, why = revalidate(e, posted)
-                if verdict == "post":
-                    pr = why
-                    verdict, why = pair.decide(e)
+                verdict, pr, why = decide(e, posted, pair)
                 if verdict == "drop":
                     log(f"dropped {label(e)}: {why}")
                     settle(e, back=False)
@@ -593,7 +810,8 @@ def flush(only, channel):
                     log(f"requeued {label(e)}: {why}")
                     settle(e, back=True)
                 elif verdict == "hold":
-                    log(f"{label(e)} {why}")
+                    # A red bundle never releases on its own: make it stand out in the log.
+                    log(f"{'!!! ' if 'CHECKS FAILING' in why else ''}{label(e)} {why}")
                     settle(e, back=True)
                 else:
                     ready.append((e, pr, why))
@@ -650,11 +868,19 @@ def main():
     ap.add_argument("--channel", default=os.environ.get("PR_REVIEW_BATCH_CHANNEL") or CHANNEL)
     ap.add_argument("--force", action="store_true", help="flush now, ignoring the window")
     ap.add_argument("--siblings", metavar="URL", help="print a PR's siblings and its message; writes nothing")
+    ap.add_argument("--release-at", nargs="?", const="", metavar="ISO",
+                    help="print the next deferred release after ISO (default now), as UTC; writes nothing")
+    ap.add_argument("--defer-plan", metavar="URL",
+                    help="print the release time and today's deferred bundle for URL's repo, as JSON; writes nothing")
     args = ap.parse_args()
     os.makedirs(STATE, exist_ok=True)
 
     if args.siblings:
         return show_siblings(args.siblings)
+    if args.release_at is not None:
+        return show_release_at(args.release_at)
+    if args.defer_plan:
+        return show_defer_plan(args.defer_plan)
 
     if args.dry_run:
         return dry_run(args.only, args.channel)

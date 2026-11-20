@@ -473,6 +473,33 @@ Any pair involving folio-platform, a ticket in three repos, or two PRs in the si
 earlier window are still listed, for reviewers who arrive later. internal-tools and personal
 repos are never paired.
 
+**Deferred PRs.** `#pr-review` is over capacity, so a PR that fixes no bug and ships no feature
+(docs, tests, refactors, lint, CI, dependencies, copy) waits for the 4 PM ET weekday release,
+and a repo's deferrable PRs for the day ride in one bundle. `/post-pr` classifies the PR (step
+3.4). The first deferrable PR of the day in a repo becomes the bundle: its body gets
+`<!-- pr-review-deferred -->` and its queue line gets `"defer": true` and `"releaseAt"` (UTC).
+Later deferrable PRs in that repo are retargeted onto the bundle's branch and merged into it as
+sub-PRs, each adding a `## Stacked follow-ups` line to its body. `/post-pr` finds the bundle on
+GitHub, not in a queue, so jake1 and jake2 share it (`flush.py --defer-plan <url>`, read-only).
+
+The flusher holds a deferred entry, without calling gh, until `releaseAt`: the next weekday
+`deferReleaseAt` (default `"16:00"`) in `deferTz` (default `"America/New_York"`), both in
+`pr-review-batch.json`. After 4 PM it is the next day; Friday after 4 PM is Monday; the time is
+wall-clock, so it stays 4 PM across DST (`flush.py --release-at [ISO]` prints it). From then on
+it goes out on the next window like any other entry, with these differences:
+
+- Its head moves each time a sub-PR merges in, so a moved head **never drops** it. Instead
+  `gh pr checks` must be all green (pass or skipped, or no checks at all) on the current head:
+  pending holds it to the next tick; failing holds it and logs
+  `!!! <repo>#N deferred bundle held at release: CHECKS FAILING (…)`.
+- The sibling hold still applies, counted from `releaseAt` rather than `queuedAt`.
+- Its message keeps the usual first line, plus `Also includes: <url|#N>, <url|#M>` listing the
+  sub-PRs merged into its branch.
+- The badge edit removes `<!-- pr-review-deferred -->` along with `<!-- pr-review-queued -->`.
+
+`--force` keeps the release hold; `--only` skips it (the checks gate still applies).
+`/post-pr --now` never defers. Entries without `defer` behave exactly as before.
+
 **Queues are per machine.** `/post-pr` runs on jake1 and jake2, and each machine's queue is
 drained only by its own flusher, so load the plist on **every machine that runs `/post-pr`**.
 `/post-pr` checks `launchctl print gui/$(id -u)/com.jake.pr-review-batch` before enqueueing and
@@ -491,6 +518,9 @@ Flags (`~/.claude/automations/pr-review-batch/run.sh …`):
   Read-only; `/post-pr` uses it for its report. Call `flush.py` directly
   (`python3 -I ~/.claude/automations/pr-review-batch/flush.py --siblings <url>`): through `run.sh`
   from a non-terminal the output goes to `flush.log`.
+- `--release-at [ISO]` — print the next deferred release after ISO (default now), as UTC. Read-only.
+- `--defer-plan <url>` — print, as JSON, the release time and today's bundle for that PR's repo
+  (`self` is true when the PR already is a bundle). Read-only; `/post-pr` step 3.4 uses it.
 
 Logs: `~/.claude/automations/pr-review-batch/logs/flush.log` (output goes there whenever stdout
 isn't a terminal, including from the Bash tool). Tests: `python3 -m pytest automations/pr-review-batch/tests`.

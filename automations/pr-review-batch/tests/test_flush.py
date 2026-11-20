@@ -48,6 +48,28 @@ if a[:1] == ["api"]:
     sys.exit(0)
 url = a[2] if len(a) > 2 else None
 pr = prs.get(url)
+if a[:2] == ["pr", "checks"]:
+    event("checks " + url)
+    checks = pr.get("checks", [{"name": "ci", "bucket": "pass"}])
+    if checks == "none":
+        sys.exit("no checks reported on the 'x' branch")
+    if checks == "error":
+        sys.exit("fake gh: checks boom")
+    print(json.dumps(checks))
+    buckets = {c["bucket"] for c in checks}
+    sys.exit(1 if buckets & {"fail", "cancel"} else 8 if "pending" in buckets else 0)
+if a[:2] == ["pr", "list"] and "--search" not in a:
+    if os.path.exists(os.path.join(d, "list_fails")):
+        sys.exit("fake gh: list boom")
+    repo, base = a[a.index("--repo") + 1], a[a.index("--base") + 1]
+    state = a[a.index("--state") + 1].upper()
+    event(f"list {repo} base={base} {state}")
+    print(json.dumps([{"number": int(u.rsplit("/", 1)[1]), "url": u, "title": p.get("title", ""),
+                       "headRefName": p.get("headRefName", ""), "body": p.get("body", ""),
+                       "reviewDecision": p.get("reviewDecision", "")}
+                      for u, p in prs.items()
+                      if f"github.com/{repo}/" in u and p["state"] == state and p["baseRefName"] == base]))
+    sys.exit(0)
 if a[:2] == ["pr", "list"]:
     if os.path.exists(os.path.join(d, "list_fails")):
         sys.exit("fake gh: list boom")
@@ -62,6 +84,9 @@ if a[:2] == ["pr", "list"]:
     sys.exit(0)
 if a[:2] == ["pr", "view"] and "url,number,title" in a:
     print(json.dumps({"url": url, "number": int(url.rsplit("/", 1)[1]), "title": pr["title"]}))
+    sys.exit(0)
+if a[:2] == ["pr", "view"] and "url,number,body" in a:
+    print(json.dumps({"url": url, "number": int(url.rsplit("/", 1)[1]), "body": pr["body"]}))
     sys.exit(0)
 if a[:2] == ["pr", "view"] and "body" in a:
     print(pr["body"])
@@ -82,7 +107,9 @@ elif a[:2] == ["pr", "view"]:
     if pr.get("weird"):
         print("[]")
         sys.exit(0)
-    print(json.dumps({k: pr[k] for k in ("state", "baseRefName", "headRefOid", "isDraft")}))
+    out = {k: pr[k] for k in ("state", "baseRefName", "headRefOid", "isDraft")}
+    out["headRefName"] = pr.get("headRefName", "branch-" + url.rsplit("/", 1)[1])
+    print(json.dumps(out))
 elif a[:2] == ["pr", "edit"]:
     body = open(a[a.index("--body-file") + 1]).read()
     pr["body"] = body
@@ -711,12 +738,277 @@ class SiblingTest(Harness):
         self.flush("--dry-run")
         self.assertIn(repr(self.text(API) + f"\nUI follow-up: <{UI}|woodrow #1968>, merge after this one"), self.out)
 
+    def test_sibling_hold_starts_at_release(self):
+        # Queued 10h before release; the 60-minute sibling hold runs from the release, not queuedAt.
+        self.enqueue(self.centry(API, defer=True, releaseAt=iso(T0 - 60),
+                                 queuedAt=iso(T0 - 36000)))
+        self.flush()
+        self.assertEqual(self.posted_texts(), [])
+        self.assertIn("held for sibling woodrow#1968", self.out)
+
     def test_siblings_flag_reports_and_writes_nothing(self):
         out = self.flush("--siblings", UI)
         self.assertIn("sibling api#1770 in progress " + API, out)
         self.assertIn(self.text(UI) + f"\nMerges after <{API}|api #1770>", out)
         self.assertFalse(os.path.exists(self.queue))
         self.assertFalse(any(e.startswith(("badge", "ready", "merge")) for e in self.events()))
+
+
+DEFER = "<!-- pr-review-deferred -->"
+SUB = lambda n: f"https://github.com/{REPO}/pull/{n}"
+
+
+def utc(y, mo, d, h, mi=0):
+    return iso(dt.datetime(y, mo, d, h, mi, tzinfo=dt.timezone.utc).timestamp())
+
+
+class ReleaseAtTest(Harness):
+    """--release-at: the next weekday 16:00 America/New_York, as UTC."""
+
+    def release(self, when):
+        return self.flush("--release-at", when).strip()
+
+    def test_before_four_pm_is_today(self):
+        # Thu 2026-01-01 10:00 EST
+        self.assertEqual(self.release(utc(2026, 1, 1, 15)), "2026-01-01T21:00:00Z")
+
+    def test_after_four_pm_is_tomorrow(self):
+        # Thu 17:00 EST, and exactly 16:00, both wait for Friday.
+        self.assertEqual(self.release(utc(2026, 1, 1, 22)), "2026-01-02T21:00:00Z")
+        self.assertEqual(self.release(utc(2026, 1, 1, 21)), "2026-01-02T21:00:00Z")
+
+    def test_local_evening_after_utc_midnight(self):
+        # Thu 23:30 EST is already Friday in UTC; the release is still Friday 16:00 EST.
+        self.assertEqual(self.release(utc(2026, 1, 2, 4, 30)), "2026-01-02T21:00:00Z")
+
+    def test_friday_evening_and_weekend_go_to_monday(self):
+        self.assertEqual(self.release(utc(2026, 1, 2, 23)), "2026-01-05T21:00:00Z")  # Fri 18:00 EST
+        self.assertEqual(self.release(utc(2026, 1, 3, 17)), "2026-01-05T21:00:00Z")  # Sat noon
+        self.assertEqual(self.release(utc(2026, 1, 4, 17)), "2026-01-05T21:00:00Z")  # Sun noon
+
+    def test_dst_ends_over_the_weekend(self):
+        # Fri 2026-10-30 18:00 EDT -> Mon 2026-11-02 16:00 EST (UTC-5).
+        self.assertEqual(self.release(utc(2026, 10, 30, 22)), "2026-11-02T21:00:00Z")
+        # Fri 2026-10-30 10:00 EDT -> same day 16:00 EDT (UTC-4).
+        self.assertEqual(self.release(utc(2026, 10, 30, 14)), "2026-10-30T20:00:00Z")
+
+    def test_dst_starts_over_the_weekend(self):
+        # Fri 2026-03-06 18:00 EST -> Mon 2026-03-09 16:00 EDT (UTC-4).
+        self.assertEqual(self.release(utc(2026, 3, 6, 23)), "2026-03-09T20:00:00Z")
+
+    def test_settings_and_bad_settings(self):
+        with open(self.config, "w") as f:
+            json.dump({"deferReleaseAt": "09:30", "deferTz": "Europe/London"}, f)
+        self.assertEqual(self.release(utc(2026, 1, 1, 10)), "2026-01-02T09:30:00Z")
+        with open(self.config, "w") as f:
+            json.dump({"deferReleaseAt": "25:99", "deferTz": "Nowhere/Land"}, f)
+        self.assertEqual(self.release(utc(2026, 1, 1, 15)), "2026-01-01T21:00:00Z")
+
+    def test_defaults_to_now(self):
+        # T0 + 60 is Thu 2026-01-01 05:01 EST.
+        self.assertEqual(self.flush("--release-at").strip(), "2026-01-01T21:00:00Z")
+
+
+class DeferTest(Harness):
+    def setUp(self):
+        super().setUp()
+        self.last_flush(T0 - 60)
+        self.prs[A].update(headRefName="docs-bundle", body=f"## Summary\nPR 1\n\n{MARKER}\n{DEFER}\n")
+
+    def deferred(self, url=A, release_min=-1, **kw):
+        """A deferred entry whose release is release_min minutes from T0."""
+        return self.entry(url, defer=True, releaseAt=iso(T0 + release_min * 60), **kw)
+
+    def sub(self, n, state="MERGED"):
+        self.prs[SUB(n)] = {"state": state, "baseRefName": "docs-bundle", "headRefOid": f"sha{n}",
+                            "isDraft": False, "body": "x", "title": f"sub {n}"}
+
+    # -- holding --
+
+    def test_holds_before_release_without_calling_gh(self):
+        e = self.deferred(release_min=60)
+        self.enqueue(e)
+        self.flush()
+        self.assertEqual(self.posted_texts(), [])
+        self.assertEqual(self.lines(self.queue), [e])
+        self.assertEqual([x for x in self.events() if not x.startswith("api")], [])
+        self.assertIn(f"{REPO}#1 deferred until Thu 2026-01-01 06:00 EST", self.out)
+
+    def test_missing_release_at_derives_from_queued_at(self):
+        e = self.entry(A, defer=True)  # queued Thu 04:50 EST -> releases Thu 16:00 EST
+        self.enqueue(e)
+        self.flush()
+        self.assertEqual(self.posted_texts(), [])
+        self.assertIn("deferred until Thu 2026-01-01 16:00 EST", self.out)
+
+    def test_force_keeps_the_release_hold(self):
+        self.enqueue(self.deferred(release_min=60))
+        self.flush("--force")
+        self.assertEqual(self.posted_texts(), [])
+        self.assertIn("deferred until", self.out)
+
+    # -- release --
+
+    def test_releases_with_green_checks_and_strips_markers(self):
+        self.prs[A]["headRefOid"] = "moved-by-subprs"
+        self.enqueue(self.deferred(autoMerge="squash"))
+        self.flush()
+        self.assertEqual(self.posted_texts(), [f"<{A}|[api] PR 1>"])
+        self.assertIn(f"checks {A}", self.events())
+        body = self.prs[A]["body"]
+        self.assertNotIn(DEFER, body)
+        self.assertNotIn(MARKER, body)
+        self.assertTrue(body.endswith("PR 1\n\n---\n📣 **Posted to Slack**\n"), body)
+        self.assertIn(f"posted {REPO}#1: badge=appended draft=cleared automerge=squash", self.out)
+        self.assertEqual(self.lines(self.queue), [])
+
+    def test_skipped_checks_and_no_checks_count_as_green(self):
+        self.prs[A]["checks"] = [{"name": "ci", "bucket": "pass"}, {"name": "netlify", "bucket": "skipping"}]
+        self.prs[B]["checks"] = "none"
+        self.enqueue(self.deferred(), self.deferred(B, queued_min=1))
+        self.flush()
+        self.assertEqual(self.posted_texts(), [f"<{A}|[api] PR 1>", f"<{B}|[api] PR 2>"])
+
+    def test_pending_checks_hold_to_next_tick(self):
+        self.prs[A]["checks"] = [{"name": "ci", "bucket": "pass"}, {"name": "e2e", "bucket": "pending"}]
+        e = self.deferred()
+        self.enqueue(e)
+        self.flush()
+        self.assertEqual(self.posted_texts(), [])
+        self.assertEqual(self.lines(self.queue), [e])
+        self.assertIn(f"{REPO}#1 deferred bundle held at release: checks pending (e2e) on sha1", self.out)
+        self.assertNotIn("!!!", self.out)
+        self.prs[A]["checks"] = [{"name": "ci", "bucket": "pass"}, {"name": "e2e", "bucket": "pass"}]
+        self.flush(now=T0 + 1860)
+        self.assertEqual(self.posted_texts(), [f"<{A}|[api] PR 1>"])
+
+    def test_failing_checks_hold_and_log_loudly(self):
+        self.prs[A]["checks"] = [{"name": "lint", "bucket": "fail"}, {"name": "unit", "bucket": "cancel"},
+                                 {"name": "e2e", "bucket": "pending"}]
+        e = self.deferred()
+        self.enqueue(e)
+        self.flush()
+        self.assertEqual(self.posted_texts(), [])
+        self.assertEqual(self.lines(self.queue), [e])
+        self.assertIn(f"!!! {REPO}#1 deferred bundle held at release: CHECKS FAILING (lint, unit) on sha1", self.out)
+
+    def test_checks_error_requeues(self):
+        self.prs[A]["checks"] = "error"
+        self.enqueue(self.deferred())
+        self.flush()
+        self.assertEqual(self.posted_texts(), [])
+        self.assertEqual(len(self.lines(self.queue)), 1)
+        self.assertIn(f"requeued {REPO}#1: gh pr checks: fake gh: checks boom", self.out)
+
+    def test_moved_head_drops_normal_entry_but_not_deferred(self):
+        self.prs[A]["headRefOid"] = "moved"
+        self.prs[B]["headRefOid"] = "moved"
+        self.enqueue(self.deferred(), self.entry(B, queued_min=1))
+        self.flush()
+        self.assertEqual(self.posted_texts(), [f"<{A}|[api] PR 1>"])
+        self.assertIn(f"dropped {REPO}#2: head moved sha2 -> moved", self.out)
+
+    def test_closed_bundle_is_still_dropped_at_release(self):
+        self.prs[A]["state"] = "CLOSED"
+        self.enqueue(self.deferred())
+        self.flush()
+        self.assertEqual(self.posted_texts(), [])
+        self.assertIn(f"dropped {REPO}#1: PR is CLOSED", self.out)
+
+    # -- message --
+
+    def test_also_includes_lists_merged_sub_prs(self):
+        self.sub(5)
+        self.sub(4)
+        self.sub(6, state="OPEN")  # not merged in yet: not included
+        self.enqueue(self.deferred())
+        self.flush()
+        self.assertEqual(self.posted_texts(),
+                         [f"<{A}|[api] PR 1>\nAlso includes: <{SUB(4)}|#4>, <{SUB(5)}|#5>"])
+        self.assertIn(f"list {REPO} base=docs-bundle MERGED", self.events())
+
+    def test_sub_pr_lookup_failure_requeues(self):
+        open(os.path.join(self.fake, "list_fails"), "w").close()
+        self.enqueue(self.deferred())
+        self.flush()
+        self.assertEqual(self.posted_texts(), [])
+        self.assertIn(f"requeued {REPO}#1: sub-PR lookup failed", self.out)
+
+    def test_marker_removed_when_already_badged(self):
+        self.prs[A]["body"] = f"## Summary\nx\n{DEFER}\n\n---\n📣 **Posted to Slack**\n"
+        self.enqueue(self.deferred())
+        self.flush()
+        self.assertEqual(self.prs[A]["body"], "## Summary\nx\n\n---\n📣 **Posted to Slack**\n")
+        self.assertIn("badge=already, marker removed", self.out)
+
+    # -- --only / --now and non-deferred entries --
+
+    def test_only_skips_release_hold_but_not_checks(self):
+        self.prs[A]["checks"] = [{"name": "ci", "bucket": "pending"}]
+        self.enqueue(self.deferred(release_min=600))
+        self.flush("--only", A, expect=1)
+        self.assertEqual(self.posted_texts(), [])
+        self.assertIn("checks pending", self.out)
+        self.prs[A]["checks"] = [{"name": "ci", "bucket": "pass"}]
+        self.flush("--only", A)
+        self.assertEqual(self.posted_texts(), [f"<{A}|[api] PR 1>"])
+
+    def test_now_entry_without_defer_posts_immediately(self):
+        # /post-pr --now never sets defer: --only posts it at once, with no checks call.
+        self.enqueue(self.entry(B))
+        self.flush("--only", B)
+        self.assertEqual(self.posted_texts(), [f"<{B}|[api] PR 2>"])
+        self.assertFalse(any(x.startswith(("checks", "list")) for x in self.events()))
+
+    def test_non_deferred_entry_is_unchanged(self):
+        # Merged sub-PRs and a Stacked follow-ups section don't touch a normal entry's message.
+        self.prs[B].update(headRefName="docs-bundle",
+                           body="## Summary\nx\n\n## Stacked follow-ups\n- #4: sub, merges into this PR")
+        self.sub(4)
+        self.enqueue(self.entry(B, autoMerge="squash"))
+        self.flush()
+        self.assertEqual(self.posted_texts(), [f"<{B}|[api] PR 2>"])
+        ev = [x for x in self.events() if not x.startswith(("view", "api"))]
+        self.assertEqual(ev, [f"post <{B}|[api] PR 2>", f"badge {B} posted=True", f"ready {B}",
+                              f"merge {B} --auto --squash"])
+
+    def test_dry_run_shows_hold_and_release(self):
+        self.enqueue(self.deferred(release_min=60), self.deferred(B, queued_min=1))
+        self.prs[B]["headRefOid"] = "moved"
+        self.flush("--dry-run")
+        self.assertIn(f"DRY would hold {REPO}#1: deferred until", self.out)
+        self.assertIn(f"DRY would post {REPO}#2", self.out)
+        self.assertEqual(self.posted_texts(), [])
+        self.assertEqual(len(self.lines(self.queue)), 2)
+
+    # -- --defer-plan --
+
+    def plan(self, url):
+        return json.loads(self.flush("--defer-plan", url))
+
+    def test_defer_plan_finds_oldest_open_unposted_unapproved_bundle(self):
+        self.prs[A]["body"] = f"x\n{DEFER}"
+        self.prs[B]["body"] = f"x\n{DEFER}\n\n---\n📣 **Posted to Slack**\n"  # posted: not a bundle
+        self.prs[C]["body"] = "x"
+        self.prs[SUB(7)] = dict(self.prs[C], body=f"x\n{DEFER}", headRefName="older-but-approved",
+                                reviewDecision="APPROVED")
+        p = self.plan(C)
+        self.assertEqual(p["bundle"], {"number": 1, "url": A, "title": "", "head": "docs-bundle"})
+        self.assertFalse(p["self"])
+        self.assertEqual(p["releaseAt"], "2026-01-01T21:00:00Z")
+        self.assertEqual(p["releaseLocal"], "Thu 2026-01-01 16:00 EST")
+        self.assertFalse(os.path.exists(self.queue))
+
+    def test_defer_plan_none_and_self(self):
+        self.prs[A]["body"] = "x"
+        self.assertIsNone(self.plan(B)["bundle"])
+        # A PR that already carries the marker is the bundle; a re-run keeps its queued release.
+        self.prs[A]["body"] = f"x\n{DEFER}"
+        self.enqueue(self.deferred(release_min=-120))
+        p = self.plan(A)
+        self.assertTrue(p["self"])
+        self.assertIsNone(p["bundle"])
+        self.assertEqual(p["releaseAt"], iso(T0 - 7200))
 
 
 def iso(epoch):
