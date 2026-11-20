@@ -151,7 +151,7 @@ git ls-remote --heads origin <BASE_REF>    # the trunk must exist on origin
 
 Merge when `mergeable` is `MERGEABLE` and `mergeStateStatus` is `CLEAN` — or `UNSTABLE` only because main-scoped workflows (unit-tests, e2e-tests, Netlify) structurally didn't run, per the note under step 3. Any other state stops here.
 
-**Re-check the parent first.** The trunk's own PR may have been approved or merged since this sub-PR opened. [[create-pr]]'s same-work stacking (same ticket or same Linear project) makes this common, because it stacks onto ordinary feature PRs that reviewers are actively approving.
+**Re-check the parent first.** The trunk's own PR may have been approved or merged since this sub-PR opened. [[create-pr]]'s same-work stacking (same ticket, related ticket or same Linear project) makes this common, because it stacks onto ordinary feature PRs that reviewers are actively approving.
 ```bash
 gh pr list --repo <OWNER/REPO> --head <BASE_REF> --state all --json number,state,reviewDecision -q '.[0]'
 ```

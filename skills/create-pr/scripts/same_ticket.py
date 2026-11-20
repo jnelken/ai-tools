@@ -3,8 +3,9 @@
 
 decide  Pick the base for a new PR into a Concentro repo's default branch:
         stack onto the open, not-yet-approved PR that carries the same (CON-N),
-        or failing that one whose ticket is in the same Linear project, or stay
-        on the default branch. Read-only apart from `git fetch`.
+        or failing that one whose ticket is related (same parent issue, parent and
+        sub-issue, or blocks/blocked by), then one in the same Linear project, or
+        stay on the default branch. Read-only apart from `git fetch`.
 note    Add or update the "Stacked follow-ups" line for a sub-PR in the parent
         PR's body, edited in place through a file.
 """
@@ -104,24 +105,59 @@ def graphql_data(out):
     return out.get("data", out)
 
 
-def ticket_projects(tickets):
-    """Map each CON-N to its Linear project ({id, name}) or None, in one batched query.
+def ticket_info(tickets):
+    """Look up each CON-N's project, parent and blocks relations in one batched query.
 
-    Raises LookupError when Linear can't be reached or doesn't know a ticket, which
-    usually means the wrong workspace: the caller must not read that as "no project".
+    Returns {ticket: {"project": {id, name, status} | None, "parent": "CON-P" | None,
+    "blocks": {...}, "blocked_by": {...}}}. Raises LookupError when Linear can't be
+    reached or doesn't know a ticket, which usually means the wrong workspace: the
+    caller must not read that as "no project".
     """
     numbers = sorted({int(t.split("-")[1]) for t in tickets})
     query = (
         '{ issues(filter: { team: { key: { eq: "CON" } }, number: { in: %s } }, '
-        "first: 250, includeArchived: true) { nodes { identifier project { id name } } } }"
+        "first: 250, includeArchived: true) { nodes { identifier parent { identifier } "
+        "project { id name status { name } } "
+        "relations { nodes { type relatedIssue { identifier } } } "
+        "inverseRelations { nodes { type issue { identifier } } } } } }"
         % json.dumps(numbers)
     )
-    nodes = linear_query(query)["issues"]["nodes"]
-    found = {n["identifier"].upper(): n.get("project") for n in nodes}
+    found = {}
+    for n in linear_query(query)["issues"]["nodes"]:
+        project = n.get("project")
+        if project:
+            project = {"id": project["id"], "name": project["name"],
+                       "status": (project.get("status") or {}).get("name")}
+        found[n["identifier"].upper()] = {
+            "project": project,
+            "parent": ((n.get("parent") or {}).get("identifier") or "").upper() or None,
+            # "A blocks B" is a `blocks` relation on A and an inverse one on B.
+            # Plain `related` (and duplicate/similar) links never count.
+            "blocks": {r["relatedIssue"]["identifier"].upper()
+                       for r in (n.get("relations") or {}).get("nodes", []) if r["type"] == "blocks"},
+            "blocked_by": {r["issue"]["identifier"].upper()
+                           for r in (n.get("inverseRelations") or {}).get("nodes", []) if r["type"] == "blocks"},
+        }
     missing = sorted(set(tickets) - set(found))
     if missing:
         raise LookupError(f"Linear did not return {', '.join(missing)}")
     return found
+
+
+def related_how(ticket, other, info):
+    """How `other` is related to `ticket`, or None: same parent, parent and sub-issue, or blocks."""
+    me, them = info[ticket], info.get(other) or {}
+    if me["parent"] and me["parent"] == them.get("parent"):
+        return f"parent {me['parent']}"
+    if me["parent"] == other:
+        return f"parent {other}"
+    if them.get("parent") == ticket:
+        return f"parent {ticket}"
+    if other in me["blocks"]:
+        return f"blocks {other}"
+    if other in me["blocked_by"]:
+        return f"blocked by {other}"
+    return None
 
 
 def project_denylist(path):
@@ -169,7 +205,7 @@ def decide(args):
         open_ones = [p for p in found if p.get("reviewDecision") != "APPROVED"]
         if not open_ones:
             n = found[0]["number"]
-            label = f"#{n} already approved" if match == "ticket" else f"#{n} {why} already approved"
+            label = f"#{n} already approved" if match == "ticket" else f"#{n} {why}, already approved"
             return result("main", base_line=f"Base: {args.default} ({label})", pr=n,
                           reason="approved", match=match, project=project)
         parent = open_ones[0]
@@ -183,37 +219,52 @@ def decide(args):
         return result("stack", pr=n, head=parent_head, match=match, project=project,
                       base_line=f"Base: stacked onto #{n} ({why}, not yet approved)")
 
-    # 1. Same ticket. Any match at all settles it, approved or not: a same-ticket
-    #    parent always wins over a same-project one.
+    # Each tier settles the decision as soon as it has any match, approved or not:
+    # same ticket, then related ticket, then same project.
     found = matching(prs, ticket, args.branch)
     if found:
         return stack_onto(found, "ticket", f"same {ticket}")
 
-    # 2. Same Linear project, among Jake's other open PRs that carry a ticket.
     others = [p for p in prs if p["headRefName"] != args.branch and title_tickets(p["title"])]
     if not others:
         return result("none", reason=f"no other open PR carries ({ticket}) or any CON ticket")
     try:
         denied = project_denylist(args.config)
-        projects = ticket_projects({ticket} | set().union(*(title_tickets(p["title"]) for p in others)))
+        info = ticket_info({ticket} | set().union(*(title_tickets(p["title"]) for p in others)))
     except Exception as e:  # never block PR creation on Linear
-        note = " ".join(f"Project stacking skipped: {e}".split())
+        note = " ".join(f"Related-ticket and project stacking skipped: {e}".split())
         return result("none", reason=f"no other open PR carries ({ticket})")
 
-    project = projects.get(ticket)
+    # Related ticket: same parent, parent and sub-issue, or blocks / blocked by.
+    related = []
+    for p in sorted(others, key=lambda p: p["number"]):
+        how = next(filter(None, (related_how(ticket, t, info) for t in sorted(title_tickets(p["title"])))), None)
+        if how:
+            related.append((p, how))
+    if related:
+        open_ones = [r for r in related if r[0].get("reviewDecision") != "APPROVED"]
+        how = (open_ones or related)[0][1]
+        return stack_onto([p for p, _ in related], "related", f"related: {how}")
+
+    # Same project, unless its status is Maintenance (evergreen) or it is denylisted.
+    project = info[ticket]["project"]
     if not project:
-        return result("none", reason=f"no other open PR carries ({ticket}); {ticket} has no project")
+        return result("none", reason=f"no related open PR; {ticket} has no project")
+    if (project.get("status") or "").casefold() == "maintenance":
+        return result("none", project=project,
+                      reason=f'no related open PR; project "{project["name"]}" is in Maintenance')
     if {project["id"].casefold(), project["name"].casefold()} & denied:
         return result("none", project=project,
-                      reason=f'no other open PR carries ({ticket}); project "{project["name"]}" is denylisted')
+                      reason=f'no related open PR; project "{project["name"]}" is denylisted')
     found = sorted(
         (p for p in others
-         if any((projects.get(t) or {}).get("id") == project["id"] for t in title_tickets(p["title"]))),
+         if any(((info.get(t) or {}).get("project") or {}).get("id") == project["id"]
+                for t in title_tickets(p["title"]))),
         key=lambda p: p["number"],
     )
     if not found:
         return result("none", project=project,
-                      reason=f'no other open PR is in project "{project["name"]}"')
+                      reason=f'no related open PR or open PR in project "{project["name"]}"')
     return stack_onto(found, "project", f'same project "{project["name"]}"', project)
 
 
