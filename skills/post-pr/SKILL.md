@@ -134,6 +134,7 @@ Only for a PR whose base is the repo's default branch (a sub-PR into a trunk is 
 
 - Deferrable: docs-only (woodrow #1977: three markdown files), tests, behavior-preserving refactors, lint or format fixes, CI, dependency bumps, copy tweaks. Anything step 4's `[hygiene]` tag would cover is always deferrable.
 - Not deferrable: a `bug` or `enhancement` label, any bug fix, any new or changed user-facing behavior.
+- "User-facing" means the product's customers. CI and dev-tooling PRs defer even when they change how developers work (api #1773 changed `/stage-preview` and still waits for 4 PM).
 - **When unsure, it is not deferrable.** Holding a fix until 4 PM costs more than posting a refactor early.
 
 Not deferrable: report `Deferral: not deferrable` and continue at step 3.5 as before.
