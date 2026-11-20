@@ -391,13 +391,23 @@ If the run stopped at a different gate (unconverged review, failing check), say 
 
 ### 8. Pick up in a new tab
 
-After a run that merged a PR (a sub-PR into its trunk, step 3.6) or otherwise finished the branch's work, if the repo's gitignored `.claude/IN_PROGRESS.md` has open items, **start `/pick-up` yourself in a new terminal tab; never offer it or leave it to Jake.** A new tab in an existing workspace, not a new sswt, and not the terminal this run is in:
+After a run that merged a PR (a sub-PR into its trunk, step 3.6) or otherwise finished the branch's work, if the repo's gitignored `.claude/IN_PROGRESS.md` has open items, **start `/pick-up` yourself in a new terminal tab; never offer it or leave it to Jake.** A new tab in an existing workspace, not a new sswt, and **never the session this run is in**: do not invoke `/pick-up` through the Skill tool here, and do not tell Jake to type it here, because its flow compacts the session and puts every open item to the user as a decision, which would bury this run's report:
 
 ```bash
 superset agents create --workspace "$WS" --agent claude --prompt "/pick-up" --json
 ```
 
 `$WS` is a workspace that survives the run: the current one, unless step 3.7 reaps it, in which case the trunk's workspace or the project's root checkout. The file is gitignored and lives in the root checkout, so a worktree tab sees no `IN_PROGRESS.md`; name the root checkout's path in the prompt when `$WS` is a worktree. Spawn it before step 3.7's reap, report it as `- Pick-up: tab spawned (N open items)`, and skip silently when the file is absent or empty.
+
+### 9. Suggest `/compact` before the next task
+
+`/compact` is a built-in command only Jake can type; this skill never runs it. When the run finished a branch's work (it merged a sub-PR in step 3.6, queued an announceable PR, or reaped its sswt) **and the session is heavy**, end the report with one line, no Decision, no question:
+
+```
+- Context: heavy after this PR; consider /compact before new work (workers and PRs from this session keep running)
+```
+
+Heavy means any of: this session has already run `/post-pr` to completion for two or more PRs; it was compacted before and has since run more than 30 turns; or the transcript is plainly long (hours of tool output, many merged PRs). Stay silent when the session is short, when it was compacted or cleared within the last 10 turns, or when this run stopped at a gate (the same branch is about to be worked again). If the session conducts other workers and the next task is an unrelated stream, say `/handoff` instead of `/compact`. Say it at most once per run, and skip it when unattended (no human to read it).
 
 ## When it fires on its own
 
