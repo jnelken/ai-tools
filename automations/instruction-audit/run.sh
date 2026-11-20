@@ -59,6 +59,8 @@ Last month's snapshot: ${PREV:-none (this is the baseline)}" \
     exit 1
   fi
 
+  # The headless run obeys the global status-line rule; drop that sign-off from the report.
+  ANALYSIS="$(printf '%s\n' "$ANALYSIS" | sed -E '${/^(🛑|⚠️|⏳|💡|⛏️|✅|💬)/d;}')"
   { cat "$MEAS"; echo; echo "# Analysis"; echo; echo "$ANALYSIS"; } > "$REPORT"
   echo "report: $REPORT"
   osascript -e "display notification \"Report: $MONTH.md\" with title \"Instruction audit\"" 2>/dev/null || true
