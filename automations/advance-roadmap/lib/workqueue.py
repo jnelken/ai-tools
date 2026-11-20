@@ -73,6 +73,15 @@ def packet(value):
     return out
 
 
+def completed_archive(record, result):
+    """Only a clean archive worker without an input request settles work."""
+    return (record.get('outcome') == 'archive-only' and result.get('outcome') == 'archive-only'
+            and record.get('worker_exit') == 0
+            and record.get('worker') in {'codex', 'cursor', 'claude'}
+            and result.get('provider') == record.get('worker')
+            and result.get('needs_input') is not True)
+
+
 class Store:
     def __init__(self, root=ROOT):
         self.root = Path(root)
@@ -224,6 +233,12 @@ class Store:
             # Re-imports must not advance cooldowns or resurrect settled work.
             encoded = json.dumps(record, sort_keys=True)
             if attempt['record'] == encoded:
+                # Repair only the latest retry left by the old archive-only handling.
+                # Do not disturb a human hold, a newer attempt, or an active worker.
+                if attempt['work_id'] and completed_archive(record, result or {}):
+                    self.db.execute("UPDATE work SET state='done',phase='done',not_before=0,updated=? "
+                                    "WHERE id=? AND latest_stamp=? AND state='retry'",
+                                    (time.time(), attempt['work_id'], stamp))
                 # Migrate an old yielded result with a human question once. Keep a
                 # marker after release so re-importing the same result cannot re-hold it.
                 migrate_input = (record.get('outcome') == 'yielded' and attempt['work_id']
@@ -263,7 +278,8 @@ class Store:
             failures = self.db.execute("SELECT COUNT(*) FROM attempts WHERE work_id=? AND outcome IN ('error','failed','incomplete','blocked','blocked-branch-left','limit_hit')", (work['id'],)).fetchone()[0]
             backoff = min(6 * 3600, 900 * 2 ** min(max(failures - 1, 0), 5))
             state, phase, wake = 'retry', work['phase'], finished + backoff
-            if outcome == 'shipped' and record.get('worker_exit') == 0 and record.get('worker'):
+            if ((outcome == 'shipped' and record.get('worker_exit') == 0 and record.get('worker'))
+                    or completed_archive(record, result)):
                 state, phase, wake = 'done', 'done', 0
             elif (record.get('worker_exit') in (0, None) and result.get('needs_input') is True
                   and str(result.get('input_question') or '').strip()):

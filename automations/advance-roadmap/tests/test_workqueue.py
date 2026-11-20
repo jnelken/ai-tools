@@ -98,6 +98,117 @@ class QueueTest(unittest.TestCase):
         self.store.finish(row)
         self.assertEqual((self.store.list()[0]['state'], self.store.list()[0]['not_before']), ('eligible', 0))
 
+    def test_successful_archive_only_finishes_assignment(self):
+        self.register()
+        self.store.finish({'stamp': '20261110-103001', 'outcome': 'archive-only',
+                           'worker_exit': 0, 'worker': 'codex'},
+                          {'outcome': 'archive-only', 'provider': 'codex'})
+        work = self.store.list()[0]
+        self.assertEqual((work['state'], work['phase'], work['not_before']), ('done', 'done', 0))
+        self.assertIsNone(self.store.hold('a'))
+
+    def test_archive_only_requires_successful_worker_exit_and_worker(self):
+        for index, patch in enumerate(({'worker_exit': 1}, {'worker_exit': None},
+                                       {'worker': None}, {'worker': ''}, {'worker': 'none'})):
+            with self.subTest(patch=patch):
+                stamp = f'20261110-10300{index + 1}'
+                wid = self.store.attempt(stamp, 'a', plan(item=f'DEV-{index + 1}'))
+                row = {'stamp': stamp, 'outcome': 'archive-only', 'worker_exit': 0, 'worker': 'codex'}
+                row.update(patch)
+                self.store.finish(row, {'outcome': 'archive-only', 'provider': 'codex'})
+                state = next(w['state'] for w in self.store.list() if w['id'] == wid)
+                self.assertNotEqual(state, 'done')
+
+    def test_archive_only_requires_consistent_worker_result(self):
+        for index, result in enumerate((None, {}, {'outcome': 'failed'},
+                                        {'outcome': 'archive-only'},
+                                        {'outcome': 'archive-only', 'provider': 'cursor'})):
+            with self.subTest(result=result):
+                stamp = f'20261110-10300{index + 1}'
+                wid = self.store.attempt(stamp, 'a', plan(item=f'DEV-{index + 1}'))
+                self.store.finish({'stamp': stamp, 'outcome': 'archive-only',
+                                   'worker_exit': 0, 'worker': 'codex'}, result)
+                state = next(w['state'] for w in self.store.list() if w['id'] == wid)
+                self.assertNotEqual(state, 'done')
+
+    def test_archive_only_with_question_is_held_for_human(self):
+        self.register()
+        self.store.finish({'stamp': '20261110-103001', 'outcome': 'archive-only',
+                           'worker_exit': 0, 'worker': 'codex'},
+                          {'outcome': 'archive-only', 'provider': 'codex', 'needs_input': True,
+                           'input_question': 'Which account should this use?'})
+        self.assertEqual(self.store.list()[0]['state'], 'human')
+
+    def test_archive_only_with_incomplete_question_remains_retryable(self):
+        self.register()
+        self.store.finish({'stamp': '20261110-103001', 'outcome': 'archive-only',
+                           'worker_exit': 0, 'worker': 'codex'},
+                          {'outcome': 'archive-only', 'provider': 'codex', 'needs_input': True, 'input_question': ''})
+        self.assertEqual(self.store.list()[0]['state'], 'retry')
+
+    def test_reimport_repairs_latest_successful_archive_only_retry_idempotently(self):
+        wid = self.register()
+        row = {'stamp': '20261110-103001', 'outcome': 'archive-only',
+               'worker_exit': 0, 'worker': 'codex'}
+        result = {'outcome': 'archive-only', 'provider': 'codex'}
+        # Model a row persisted by the prior queue version, whose archive-only result fell into retry.
+        with self.store.db:
+            self.store.db.execute('UPDATE attempts SET outcome=?, record=? WHERE stamp=?',
+                                  ('archive-only', json.dumps(row, sort_keys=True), row['stamp']))
+            self.store.db.execute("UPDATE work SET state='retry',not_before=9999999999 WHERE id=?", (wid,))
+        self.store.finish(row, result)
+        work = self.store.list()[0]
+        self.assertEqual((work['state'], work['phase'], work['not_before']), ('done', 'done', 0))
+        self.store.finish(row, result)
+        self.assertEqual(self.store.list()[0]['state'], 'done')
+
+    def test_reimport_never_settles_older_or_human_held_archive_only(self):
+        old_stamp = '20261110-103001'
+        wid = self.register(old_stamp)
+        old = {'stamp': old_stamp, 'outcome': 'archive-only', 'worker_exit': 0, 'worker': 'codex'}
+        with self.store.db:
+            self.store.db.execute('UPDATE attempts SET outcome=?, record=? WHERE stamp=?',
+                                  ('archive-only', json.dumps(old, sort_keys=True), old_stamp))
+        self.register('20261110-153001')
+        self.store.finish(old, {'outcome': 'archive-only', 'provider': 'codex'})
+        self.assertNotEqual(self.store.list()[0]['state'], 'done')
+        latest = {'stamp': '20261110-153001', 'outcome': 'archive-only',
+                  'worker_exit': 0, 'worker': 'codex'}
+        with self.store.db:
+            self.store.db.execute('UPDATE attempts SET outcome=?, record=? WHERE stamp=?',
+                                  ('archive-only', json.dumps(latest, sort_keys=True), latest['stamp']))
+            self.store.db.execute("UPDATE work SET state='human',reason='Awaiting decision' WHERE id=?", (wid,))
+        self.store.finish(latest, {'outcome': 'archive-only', 'provider': 'codex'})
+        self.assertEqual(self.store.list()[0]['state'], 'human')
+
+    def test_reimport_does_not_settle_active_archive_only_attempt(self):
+        wid = self.register()
+        row = {'stamp': '20261110-103001', 'outcome': 'archive-only',
+               'worker_exit': 0, 'worker': 'codex'}
+        with self.store.db:
+            self.store.db.execute('UPDATE attempts SET outcome=?, record=? WHERE stamp=?',
+                                  ('archive-only', json.dumps(row, sort_keys=True), row['stamp']))
+            self.store.db.execute("UPDATE work SET state='active' WHERE id=?", (wid,))
+        self.store.finish(row, {'outcome': 'archive-only', 'provider': 'codex'})
+        self.assertEqual(self.store.list()[0]['state'], 'active')
+
+    def test_completed_archive_only_does_not_reuse_stale_projection(self):
+        self.register()
+        self.store.finish({'stamp': '20261110-103001', 'outcome': 'archive-only',
+                           'worker_exit': 0, 'worker': 'codex'},
+                          {'outcome': 'archive-only', 'provider': 'codex'})
+        saved, out = self.root / 'pending.json', self.root / 'request.json'
+        saved.write_text(json.dumps({'orchestrator': plan(), 'planned_stamp': '20261110-103001',
+                                     'last_stamp': '20261110-103001', 'planned_at': '2026-11-10T10:30:01'}))
+        store_type = q.Store
+        with patch.object(pendingplan, 'CODE_DIR', str(self.code)), patch.object(
+                pendingplan, 'branch_exists', return_value=False), patch.object(
+                pendingplan.workqueue, 'Store', side_effect=lambda: store_type(self.root)):
+            rc = pendingplan.cmd_reuse(SimpleNamespace(file=str(saved), out=str(out), max_age_hours=36, max_attempts=2))
+        self.assertNotEqual(rc, 0)
+        self.assertFalse(saved.exists())
+        self.assertFalse(out.exists())
+
     def test_late_older_attempt_cannot_replace_checkpoint_or_close_newer_work(self):
         wid = self.register()
         self.register('20261110-153001')
