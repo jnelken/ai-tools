@@ -1,10 +1,12 @@
 ---
 name: wrapup-repos
-description: Wrap up in-progress work in one local repo under the personal code dir — pick the dirtiest/most-recently-touched repo, finish obvious low-risk loose ends, run the quick verify, commit on the current branch, and record decisions, ticket candidates, and code-state notes in the repo's `.claude/IN_PROGRESS.md`. Use on-demand ("/wrapup-repos", "wrap up my repos", "tidy my in-progress work") or via the scheduled off-peak launchd job. Safe by design: never pushes, never force/destructive, never commits secrets or build junk.
+description: Wrap up in-progress work in one local repo under the personal code dir — pick the dirtiest/most-recently-touched repo, finish obvious low-risk loose ends, run the quick verify, commit on the current branch, and record decisions, ticket candidates, and code-state notes in the repo's `.claude/IN_PROGRESS.md`. Use on-demand ("/wrapup-repos", "wrap up my repos", "tidy my in-progress work") or via the weekly off-peak automation `wrapup-repos` (launchd runs it through `skill-automation`). Safe by design: never pushes, never force/destructive, never commits secrets or build junk.
+allowed-tools: Read, Edit, Write, Bash, ToolSearch
 ---
 
 > **Personal machines only (OMEN, JXIV).** `install.sh` doesn't link this skill or its automation on
-> the work laptop (`~/dotfiles/bin/is-personal-machine`), and `run.sh` refuses to run there.
+> the work laptop (`~/dotfiles/bin/is-personal-machine`), and the skill itself refuses to run there
+> (see "Unattended contract").
 
 # Wrap up in-progress repo work
 
@@ -20,8 +22,9 @@ stop; never fall back to `~/code`, which holds work checkouts.
 - **On-demand (interactive):** the user invoked you directly. If they named a specific repo or
   asked for something particular, honor that over the auto-selection below. Otherwise auto-select.
   You may briefly confirm your pick if the user is clearly present.
-- **Scheduled (headless / unattended):** you were launched by the off-peak launchd job with no
-  human watching. Be conservative, follow the safety rules to the letter, and leave great notes.
+- **Scheduled (headless / unattended):** `$ARGUMENTS` is `unattended`: `skill-automation` launched you
+  from the off-peak launchd job with no human watching. Be conservative, follow the safety rules to the
+  letter, and leave great notes. See "Unattended contract" at the end.
 
 ## Hard safety rules (never violate)
 
@@ -177,3 +180,24 @@ a failing verify, which stays visible as a code-state note until it's fixed.
 End with a 3–6 line plain-text summary: which repo you picked and why, what you changed, the commit
 hash (if any), build status, and a pointer to `.claude/IN_PROGRESS.md` with item counts per
 section (e.g. "2 decisions, 1 ticket candidate, 1 code-state note"). In a scheduled run this goes to the run log the user scans later.
+
+## Unattended contract
+
+Only when `$ARGUMENTS` is `unattended` (launched by `skill-automation`, which allows reading and editing
+under the personal code dir and denies the rest):
+
+1. **Gate first.** If `~/dotfiles/bin/is-personal-machine` exits 1 (work machine), or `personal-code-dir`
+   exits non-zero, do nothing else and end with `AUTOMATION_RESULT: ok skipped (<why>)`.
+2. Do Steps 1–5 above for ONE repo.
+3. After the final output, refresh the dashboard: `python3 ~/.claude/skills/wrapup-repos/scripts/gen-dashboard.py`
+   (it scans `~/.claude/automations/wrapup-repos/logs/`, the (auto) commits and the IN_PROGRESS.md files and
+   writes `dashboard.html` there). A dashboard failure is a note, not a failed run.
+4. The last output line before any sign-off is one of:
+
+   ```
+   AUTOMATION_RESULT: ok <repo picked, or "nothing to do">
+   AUTOMATION_RESULT: failed <one-line reason>
+   ```
+
+   Use `failed` only when the run could not do its job (no readable code dir, git preflight crashed). A run
+   that found nothing worth doing is `ok`. The runner marks the week done only on `ok`.

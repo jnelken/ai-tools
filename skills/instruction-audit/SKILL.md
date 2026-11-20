@@ -7,14 +7,16 @@ description: >-
   tokens saved and diffs against last month. Report-only; never edits instructions. Use for "audit my
   instructions", "what is eating my context", "instruction overhead", "token overhead check", or the
   monthly scheduled run (automation `instruction-audit`).
-allowed-tools: Read, Grep, Glob, Bash(python3 ~/.claude/skills/instruction-audit/scripts/audit.py *)
+allowed-tools: Read, ToolSearch, Bash(python3 ~/.claude/skills/instruction-audit/scripts/audit.py *), Bash(python3 ~/.ai-tools/bin/agent-profile resolve *), Bash(grep *), Bash(ls *), Bash(wc *), mcp__claude_ai_Slack__slack_send_message
 ---
 
 # Instruction audit
 
-Report-only. The only command you run is `scripts/audit.py`; it writes snapshots and reports under
-`~/.claude/automations/instruction-audit/` and nothing else. Never edit instruction files, skills or
-settings: findings are recommendations for Jake.
+Report-only. Your only writer is `scripts/audit.py`, which writes snapshots and reports under
+`~/.claude/automations/instruction-audit/`; the rest of your Bash is read-only searching (`grep`, `ls`,
+`wc`, the profile resolver), because this build has no Grep or Glob tool. Never edit instruction files,
+skills or settings: findings are recommendations for Jake. The only outward action is the unattended Slack
+post in step 4.
 
 `$ARGUMENTS` picks the mode:
 - `unattended` (the scheduled run): always do steps 1–3, then end with the `AUTOMATION_RESULT` line.
@@ -37,7 +39,7 @@ leave them alone unless Jake asks.
 
 Read the measurements file, the snapshot and the previous snapshot (if any). Follow
 [references/analysis.md](references/analysis.md) for what counts as a win, how to verify each claim, and the
-exact output format. Verify every "stale" or "duplicate" claim with Read, Grep or Glob before writing it.
+exact output format. Verify every "stale" or "duplicate" claim with Read or `grep` before writing it.
 
 ## 3. Save
 
@@ -49,8 +51,29 @@ python3 ~/.claude/skills/instruction-audit/scripts/audit.py save <<'EOF'
 EOF
 ```
 
-It prints the report path. Then tell Jake the top findings and the path (on demand), or print only the
-final line (unattended).
+It prints the report path. On demand, tell Jake the top findings and the path and stop here (no Slack).
+
+## 4. Post to Slack (unattended only)
+
+When `$ARGUMENTS` is `unattended` and `save` succeeded, post one message with
+`mcp__claude_ai_Slack__slack_send_message` (load it with ToolSearch first if it is not loaded).
+
+- **Channel:** `#sandbox-jake`, id `C0BAK0N631R`. This is the test channel until Jake approves the format;
+  then change this line to the real channel and id.
+- **Format**, all numbers from the snapshot and report, nothing recomputed:
+
+  ```
+  **Instruction audit · <YYYY-MM>** (<baseline | Δ vs last month: <neutral-probe delta> tokens>)
+  A fresh session loads **<neutral probe input tokens>** input tokens; instruction files explain ~**<file layers total>** of that.
+  **<n> wins**, top three:
+  1. <win, est. tokens saved>
+  2. ...
+  3. ...
+  Full report: `~/.claude/automations/instruction-audit/reports/<YYYY-MM>.md`
+  ```
+
+- A Slack failure does not fail the audit: still print the `ok` line below and say in one sentence that the
+  post failed.
 
 ## Unattended contract
 

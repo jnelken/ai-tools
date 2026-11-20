@@ -5,10 +5,15 @@
 	<key>Label</key>
 	<string>com.jake.wrapup-repos</string>
 
+	<!-- An automation is a schedule plus a skill name: the work lives in skills/wrapup-repos.
+	     $HOME is expanded by sh. The personal code dir differs per machine, so it is resolved at
+	     run time; an empty result (no personal repos here) is ignored by skill-automation.
+	     Logs go to ~/.claude/automations/wrapup-repos/logs/. -->
 	<key>ProgramArguments</key>
 	<array>
-		<string>/bin/zsh</string>
-		<string>/Users/jake/.claude/automations/wrapup-repos/run.sh</string>
+		<string>/bin/sh</string>
+		<string>-c</string>
+		<string>exec "$HOME/.ai-tools/bin/skill-automation" wrapup-repos --once-per week --add-dir "$("$HOME/.ai-tools/bin/personal-code-dir" 2>/dev/null)"</string>
 	</array>
 
 	<!-- Off-peak, local time (handles DST automatically): once a week, Sunday 2:45am.
@@ -21,10 +26,5 @@
 
 	<key>ProcessType</key>
 	<string>Background</string>
-
-	<key>StandardOutPath</key>
-	<string>/Users/jake/.claude/automations/wrapup-repos/logs/launchd.out.log</string>
-	<key>StandardErrorPath</key>
-	<string>/Users/jake/.claude/automations/wrapup-repos/logs/launchd.err.log</string>
 </dict>
 </plist>

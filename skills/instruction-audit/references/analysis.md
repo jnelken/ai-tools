@@ -6,7 +6,7 @@ Instruction sources to inspect, as needed to back a finding: `~/.claude/CLAUDE.m
 
 Find overhead wins, ranked by estimated tokens saved per session. A win is one of:
 1. Duplicate: the same rule stated in more than one always-loaded layer.
-2. Stale: text naming a file, command, skill, hook or behavior that no longer exists. Verify with Glob or Grep before claiming it.
+2. Stale: text naming a file, command, skill, hook or behavior that no longer exists. Verify with `grep`, `ls` or Read before claiming it.
 3. Situational: guidance that matters only for a narrow task and could move into an on-demand skill or an on-demand-read file instead of being always loaded.
 4. Bloated description: a skill description well past what is needed to trigger it, or two skills whose descriptions overlap.
 5. Growth: any layer whose token count grew sharply since last month; say what was added if the diff shows it.

@@ -3,26 +3,29 @@
 # the skill owns the procedure and declares its own tool allowlist in its `allowed-tools`
 # frontmatter, and --permission-mode dontAsk denies everything that allowlist does not cover.
 #
-#   skill-automation <skill> [--once-per day|week|month] [--force] [--model ID]
+#   skill-automation <skill> [--once-per day|week|month] [--force] [--model ID] [--add-dir PATH]...
 #
 # --once-per  Skip when the skill already succeeded this period, so a scheduler can fire on several
 #             days as a safety net. A run counts as succeeded only when the skill's output contains a
 #             line `AUTOMATION_RESULT: ok ...` (the skill's "Unattended contract"); anything else
 #             is retried at the next trigger.
 # --force     Ignore the once-per marker.
+# --add-dir   Extra directory the skill may read and edit (repeatable; an empty value is ignored, so a
+#             scheduler can pass "$(personal-code-dir)" and get nothing on a machine without one).
 #
 # Runtime files: ~/.claude/automations/<skill>/{logs,state,cwd}. Safe to run by hand.
 set -u
 
 SKILL="${1:-}"
-[ -n "$SKILL" ] && shift || { echo "usage: skill-automation <skill> [--once-per day|week|month] [--force] [--model ID]" >&2; exit 2; }
+[ -n "$SKILL" ] && shift || { echo "usage: skill-automation <skill> [--once-per day|week|month] [--force] [--model ID] [--add-dir PATH]..." >&2; exit 2; }
 
-PERIOD=""; FORCE=0; MODEL="${SKILL_AUTOMATION_MODEL:-claude-sonnet-5-5}"
+PERIOD=""; FORCE=0; ADD_DIRS=(); MODEL="${SKILL_AUTOMATION_MODEL:-claude-sonnet-5-5}"
 while [ $# -gt 0 ]; do
   case "$1" in
     --once-per) PERIOD="${2:-}"; shift 2 ;;
     --force)    FORCE=1; shift ;;
     --model)    MODEL="${2:-}"; shift 2 ;;
+    --add-dir)  [ -n "${2:-}" ] && ADD_DIRS+=(--add-dir "$2"); shift 2 ;;
     *) echo "skill-automation: unknown argument $1" >&2; exit 2 ;;
   esac
 done
@@ -43,24 +46,28 @@ esac
 MARKER="${KEY:+$ROOT/state/$KEY.done}"
 [ -n "$MARKER" ] && [ -e "$MARKER" ] && [ "$FORCE" -eq 0 ] && exit 0
 
-LOG="$ROOT/logs/run-$(date +%Y%m%d-%H%M%S).log"
+STAMP="$(date +%Y%m%d-%H%M%S)"
+LOG="$ROOT/logs/run-$STAMP.log"
 find "$ROOT/logs" -name 'run-*.log' -mtime +90 -delete 2>/dev/null
 ln -sf "$LOG" "$ROOT/logs/latest.log"
 
 {
-  echo "=== skill-automation $SKILL ($(date)) model=$MODEL period=${PERIOD:-none} ==="
+  # Header and footer keep the shapes automations/wrapup-repos/gen-dashboard.py parses.
+  echo "=== $SKILL run $STAMP ($(date)) ==="
+  echo "model=$MODEL  period=${PERIOD:-none}"
   [ -x "$CLAUDE" ] || { echo "FATAL: claude not found at $CLAUDE"; exit 1; }
   [ -f "$HOME/.claude/skills/$SKILL/SKILL.md" ] || { echo "FATAL: no installed skill named $SKILL"; exit 1; }
 
   OUT="$(cd "$ROOT/cwd" && "$CLAUDE" -p "/$SKILL unattended" \
-    --model "$MODEL" --permission-mode dontAsk --output-format text < /dev/null)"
+    --model "$MODEL" --permission-mode dontAsk "${ADD_DIRS[@]}" --output-format text < /dev/null)"
   rc=$?
   echo "$OUT"
+  echo "=== claude exit=$rc  finished $(date) ==="
 
   if [ "$rc" -eq 0 ] && printf '%s\n' "$OUT" | grep -q '^AUTOMATION_RESULT: ok'; then
     [ -n "$MARKER" ] && : > "$MARKER"
     osascript -e "display notification \"$SKILL finished\" with title \"Automation\"" 2>/dev/null || true
-    echo "=== ok $(date) ==="
+    echo "=== ok ==="
   else
     echo "=== NOT ok (exit=$rc, no AUTOMATION_RESULT: ok line); no marker written, next trigger retries ==="
     exit 1

@@ -31,9 +31,12 @@ runner: it runs `claude -p "/<skill> unattended" --permission-mode dontAsk` from
 - **Success** is a line `AUTOMATION_RESULT: ok ...` in the skill's output, written under its
   "Unattended contract" section. Anything else leaves no marker, so the next trigger retries.
 - **Runtime files** live in `~/.claude/automations/<skill>/{logs,state,cwd}`, outside the deploy clone.
-- **Not yet migrated:** `pr-review-batch` (no-LLM flusher), `machine-status` (a server), `reap-sswts`,
-  `advance-roadmap` (a scheduler with its own queue) and `wrapup-repos` (hard-codes its prompt and runs
-  with permissions skipped). Deterministic ones would become a skill that documents and runs their script.
+- **Skill-backed so far:** `instruction-audit`, `wrapup-repos`.
+- **Not yet migrated:** `pr-review-batch` (no-LLM flusher), `machine-status` (a server), `reap-sswts`
+  and `advance-roadmap` (a scheduler with its own queue). A deterministic one would become a skill that
+  documents and runs its script, with `Bash(<that script> *)` as its `allowed-tools`.
+- **A skill's `allowed-tools` also applies when it runs on demand.** It only adds approvals, so a broad
+  list (`wrapup-repos` allows all of `Bash`) pre-approves those tools for the whole interactive run too.
 
 ## `advance-roadmap`
 
@@ -601,11 +604,13 @@ Off-peak, weekly (Sunday 2:45am local time), picks the dirtiest/most-recently
 touched repo under the personal code dir, finishes obvious low-risk loose ends, commits a WIP,
 and reconciles its decisions, ticket candidates, and code-state notes into that repo's
 `.claude/IN_PROGRESS.md`. Single source of truth for the actual workflow is the
-[`wrapup-repos`](../skills/wrapup-repos/SKILL.md) skill — `run.sh` just invokes
-`claude -p` headlessly against it, so editing the skill changes both the on-demand
-`/wrapup-repos` and this scheduled job.
+[`wrapup-repos`](../skills/wrapup-repos/SKILL.md) skill. Skill-backed: the plist runs
+`skill-automation wrapup-repos --once-per week --add-dir <personal code dir>`, so editing the skill
+changes both the on-demand `/wrapup-repos` and this scheduled job. `run.sh` here is only a shim for
+plists loaded before the migration (an old plist still runs it); delete it once OMEN and JXIV have
+re-bootstrapped the plist (`launchctl bootout` then `bootstrap`).
 
-After each run, `run.sh` also regenerates `~/.claude/automations/wrapup-repos/dashboard.html`
-via `gen-dashboard.py` — a self-contained (file://-safe) status page covering run history,
+After each unattended run, the skill regenerates `~/.claude/automations/wrapup-repos/dashboard.html`
+via `skills/wrapup-repos/scripts/gen-dashboard.py` — a self-contained (file://-safe) status page covering run history,
 open `.claude/IN_PROGRESS.md` items, `(auto)` commits, and disabled repos across the personal code dir.
 Open it directly in a browser to check the automation's state without digging through logs.
