@@ -1,18 +1,22 @@
 #!/usr/bin/env python3
-"""Same-ticket stacking helpers for create-pr.
+"""Same-work stacking helpers for create-pr.
 
 decide  Pick the base for a new PR into a Concentro repo's default branch:
         stack onto the open, not-yet-approved PR that carries the same (CON-N),
-        or stay on the default branch. Read-only apart from `git fetch`.
+        or failing that one whose ticket is in the same Linear project, or stay
+        on the default branch. Read-only apart from `git fetch`.
 note    Add or update the "Stacked follow-ups" line for a sub-PR in the parent
         PR's body, edited in place through a file.
 """
 
 import argparse
 import json
+import os
 import re
+import shutil
 import subprocess
 import sys
+import urllib.request
 
 PR_REVIEW_REPOS = {
     "Concentro-Inc/woodrow",
@@ -20,6 +24,10 @@ PR_REVIEW_REPOS = {
     "Concentro-Inc/folio-platform",
 }
 TICKET_RE = re.compile(r"^CON-\d+$")
+TITLE_TICKET_RE = re.compile(r"\((CON-\d+)\)", re.IGNORECASE)
+LINEAR_WORKSPACE = "concentro"
+LINEAR_TIMEOUT = 20
+CONFIG = os.path.join("~", ".claude", "state", "create-pr-stack.json")
 SECTION = "## Stacked follow-ups"
 SECTION_INTRO = "This PR grew after it was first opened:"
 BADGE_RE = re.compile(r"\n+---\n+📣 \*\*Posted to Slack\*\*\s*$")
@@ -29,11 +37,11 @@ def git(*args, check=True):
     return subprocess.run(["git", *args], check=check, text=True, capture_output=True)
 
 
-def list_prs(repo, default, ticket):
+def list_prs(repo, default):
     out = subprocess.run(
         [
             "gh", "pr", "list", "--repo", repo, "--base", default, "--state", "open",
-            "--author", "@me", "--search", f"{ticket} in:title",
+            "--author", "@me", "--limit", "200",
             "--json", "number,headRefName,title,reviewDecision,isDraft",
         ],
         check=True, text=True, capture_output=True,
@@ -50,6 +58,68 @@ def matching(prs, ticket, branch):
     )
 
 
+def title_tickets(title):
+    return {t.upper() for t in TITLE_TICKET_RE.findall(title)}
+
+
+def linear_query(query):
+    """Run a GraphQL query: the `linear` CLI when installed, else the API key over HTTPS."""
+    if shutil.which("linear"):
+        cmd = ["linear", "api", "--workspace", LINEAR_WORKSPACE, query]
+        r = subprocess.run(cmd, text=True, capture_output=True, timeout=LINEAR_TIMEOUT)
+        if r.returncode == 2:  # an older CLI without --workspace: use its default workspace
+            r = subprocess.run(["linear", "api", query], text=True, capture_output=True,
+                               timeout=LINEAR_TIMEOUT)
+        if r.returncode:
+            raise LookupError(f"linear api exited {r.returncode}: {r.stderr.strip()[:160]}")
+        out = json.loads(r.stdout)
+    else:
+        key = os.environ.get("LINEAR_API_TOKEN") or os.environ.get("LINEAR_API_KEY")
+        if not key:
+            raise LookupError("no linear CLI and no LINEAR_API_KEY")
+        req = urllib.request.Request(
+            "https://api.linear.app/graphql", data=json.dumps({"query": query}).encode(),
+            headers={"Authorization": key, "Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(req, timeout=LINEAR_TIMEOUT) as resp:
+            out = json.loads(resp.read())
+    if out.get("errors"):
+        raise LookupError(f"GraphQL error: {out['errors'][0].get('message', '?')}")
+    return out.get("data", out)
+
+
+def ticket_projects(tickets):
+    """Map each CON-N to its Linear project ({id, name}) or None, in one batched query.
+
+    Raises LookupError when Linear can't be reached or doesn't know a ticket, which
+    usually means the wrong workspace: the caller must not read that as "no project".
+    """
+    numbers = sorted({int(t.split("-")[1]) for t in tickets})
+    query = (
+        '{ issues(filter: { team: { key: { eq: "CON" } }, number: { in: %s } }, '
+        "first: 250, includeArchived: true) { nodes { identifier project { id name } } } }"
+        % json.dumps(numbers)
+    )
+    nodes = linear_query(query)["issues"]["nodes"]
+    found = {n["identifier"].upper(): n.get("project") for n in nodes}
+    missing = sorted(set(tickets) - set(found))
+    if missing:
+        raise LookupError(f"Linear did not return {', '.join(missing)}")
+    return found
+
+
+def project_denylist(path):
+    """Names (case-insensitive) or ids that never project-stack. Missing file: empty."""
+    try:
+        with open(os.path.expanduser(path)) as f:
+            items = json.load(f).get("projectDenylist") or []
+    except FileNotFoundError:
+        return set()
+    except (OSError, ValueError, AttributeError) as e:
+        raise LookupError(f"unreadable {path}: {e}") from e
+    return {str(i).strip().casefold() for i in items}
+
+
 def fork_is_in_parent(default, parent_head, head, fetch):
     """True when merging the parent adds no default-branch commits it lacks."""
     if fetch:
@@ -59,9 +129,12 @@ def fork_is_in_parent(default, parent_head, head, fetch):
 
 
 def decide(args):
-    def result(decision, base_line=None, pr=None, head=None, reason=None):
-        return {"decision": decision, "base": head or args.default, "pr": pr,
-                "head": head, "reason": reason, "base_line": base_line}
+    note = None
+
+    def result(decision, base_line=None, pr=None, head=None, reason=None, match=None, project=None):
+        return {"decision": decision, "base": head or args.default, "pr": pr, "head": head,
+                "reason": reason, "base_line": base_line, "match": match,
+                "project": project, "note": note}
 
     ticket = args.ticket.upper()
     if args.repo not in PR_REVIEW_REPOS:
@@ -73,27 +146,59 @@ def decide(args):
         with open(args.prs_json) as f:
             prs = json.load(f)
     else:
-        prs = list_prs(args.repo, args.default, ticket)
+        prs = list_prs(args.repo, args.default)
+
+    def stack_onto(found, match, why, project=None):
+        """The shared rules: skip approved, lowest number first, fork ancestry gate."""
+        open_ones = [p for p in found if p.get("reviewDecision") != "APPROVED"]
+        if not open_ones:
+            n = found[0]["number"]
+            label = f"#{n} already approved" if match == "ticket" else f"#{n} {why} already approved"
+            return result("main", base_line=f"Base: {args.default} ({label})", pr=n,
+                          reason="approved", match=match, project=project)
+        parent = open_ones[0]
+        n, parent_head = parent["number"], parent["headRefName"]
+        if not args.skip_ancestry and not fork_is_in_parent(
+            args.default, parent_head, args.head, fetch=not args.no_fetch
+        ):
+            reason = f"branch is cut from a newer {args.default} than #{n}"
+            return result("main", pr=n, reason=reason, match=match, project=project,
+                          base_line=f"Base: {args.default} (could not stack onto #{n}: {reason})")
+        return result("stack", pr=n, head=parent_head, match=match, project=project,
+                      base_line=f"Base: stacked onto #{n} ({why}, not yet approved)")
+
+    # 1. Same ticket. Any match at all settles it, approved or not: a same-ticket
+    #    parent always wins over a same-project one.
     found = matching(prs, ticket, args.branch)
-    if not found:
+    if found:
+        return stack_onto(found, "ticket", f"same {ticket}")
+
+    # 2. Same Linear project, among Jake's other open PRs that carry a ticket.
+    others = [p for p in prs if p["headRefName"] != args.branch and title_tickets(p["title"])]
+    if not others:
+        return result("none", reason=f"no other open PR carries ({ticket}) or any CON ticket")
+    try:
+        denied = project_denylist(args.config)
+        projects = ticket_projects({ticket} | set().union(*(title_tickets(p["title"]) for p in others)))
+    except Exception as e:  # never block PR creation on Linear
+        note = f"Project stacking skipped: {e}"
         return result("none", reason=f"no other open PR carries ({ticket})")
 
-    open_ones = [p for p in found if p.get("reviewDecision") != "APPROVED"]
-    if not open_ones:
-        n = found[0]["number"]
-        return result("main", base_line=f"Base: {args.default} (#{n} already approved)",
-                      pr=n, reason="approved")
-
-    parent = open_ones[0]
-    n, parent_head = parent["number"], parent["headRefName"]
-    if not args.skip_ancestry and not fork_is_in_parent(
-        args.default, parent_head, args.head, fetch=not args.no_fetch
-    ):
-        reason = f"branch is cut from a newer {args.default} than #{n}"
-        return result("main", pr=n, reason=reason,
-                      base_line=f"Base: {args.default} (could not stack onto #{n}: {reason})")
-    return result("stack", pr=n, head=parent_head,
-                  base_line=f"Base: stacked onto #{n} (same {ticket}, not yet approved)")
+    project = projects.get(ticket)
+    if not project:
+        return result("none", reason=f"no other open PR carries ({ticket}); {ticket} has no project")
+    if {project["id"].casefold(), project["name"].casefold()} & denied:
+        return result("none", project=project,
+                      reason=f'no other open PR carries ({ticket}); project "{project["name"]}" is denylisted')
+    found = sorted(
+        (p for p in others
+         if any((projects.get(t) or {}).get("id") == project["id"] for t in title_tickets(p["title"]))),
+        key=lambda p: p["number"],
+    )
+    if not found:
+        return result("none", project=project,
+                      reason=f'no other open PR is in project "{project["name"]}"')
+    return stack_onto(found, "project", f'same project "{project["name"]}"', project)
 
 
 def add_note(body, pr, title):
@@ -152,6 +257,7 @@ def main(argv=None):
     d.add_argument("--prs-json", help="read the PR list from a file instead of gh (tests)")
     d.add_argument("--no-fetch", action="store_true", help="use the origin refs as they are")
     d.add_argument("--skip-ancestry", action="store_true", help="skip the git check (tests)")
+    d.add_argument("--config", default=CONFIG, help=f"projectDenylist file (default {CONFIG})")
 
     n = sub.add_parser("note", help="record a stacked sub-PR in the parent's body file")
     n.add_argument("--body-file", required=True)
