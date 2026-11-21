@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>com.jake.linear-issue-count</string>
+
+	<!-- A schedule plus a skill name: the work lives in skills/linear-issue-count. Haiku is enough
+	     to run one script and relay its output. Logs: ~/.claude/automations/linear-issue-count/logs/. -->
+	<key>ProgramArguments</key>
+	<array>
+		<string>/bin/sh</string>
+		<string>-c</string>
+		<string>exec "$HOME/.ai-tools/bin/skill-automation" linear-issue-count --once-per week --model claude-haiku-5-5</string>
+	</array>
+
+	<!-- Mondays 9:10am local; a missed run fires on wake. -->
+	<key>StartCalendarInterval</key>
+	<dict><key>Weekday</key><integer>1</integer><key>Hour</key><integer>9</integer><key>Minute</key><integer>10</integer></dict>
+
+	<key>RunAtLoad</key>
+	<false/>
+
+	<key>ProcessType</key>
+	<string>Background</string>
+</dict>
+</plist>
