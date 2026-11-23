@@ -13,10 +13,11 @@ MARKER="$ROOT/state/$WEEK.done"
 mkdir -p "$ROOT/state" "$ROOT/logs" "$ROOT/reports" "$ROOT/cwd"
 [ "${1:-}" = "--force" ] || { [ -e "$MARKER" ] && exit 0; }
 LOG="$ROOT/logs/run-$TODAY.log"
+notify_fail() { osascript -e "display notification \"Decisions audit failed on $HOST; see logs/run-$TODAY.log\" with title \"Weekly audit\"" 2>/dev/null || true; }
 find "$ROOT/logs" -name 'run-*.log' -mtime +90 -delete 2>/dev/null
 {
   echo "=== decisions-audit $TODAY on $HOST ($(date)) ==="
-  [ -x "$CLAUDE" ] || { echo "FATAL: claude not found at $CLAUDE"; exit 1; }
+  [ -x "$CLAUDE" ] || { echo "FATAL: claude not found at $CLAUDE"; notify_fail; exit 1; }
   PROMPT="$(sed -e "s|__SRC__|$SRC|g" -e "s|__HOST__|$HOST|g" "$SRC/prompt.md")"
   OUT="$(cd "$ROOT/cwd" && "$CLAUDE" -p "$PROMPT" --model claude-sonnet-5-5 --permission-mode dontAsk \
     --allowedTools "Workflow Read Bash(date *) Bash(memex *) Bash(ls *) Bash(grep *) mcp__memex__sessions mcp__memex__search mcp__memex__session mcp__memex__show mcp__memex__context mcp__memex__hydrate Read(//$HOME/.claude/projects/**)" \
@@ -29,6 +30,6 @@ find "$ROOT/logs" -name 'run-*.log' -mtime +90 -delete 2>/dev/null
     osascript -e 'display notification "Decisions audit report is ready" with title "Weekly audit"' 2>/dev/null || true
     echo "=== ok ==="
   else
-    echo "=== NOT ok; no marker, next trigger retries ==="; exit 1
+    echo "=== NOT ok; no marker, next trigger retries ==="; notify_fail; exit 1
   fi
 } >> "$LOG" 2>&1
