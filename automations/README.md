@@ -32,6 +32,7 @@ runner: it runs `claude -p "/<skill> unattended" --permission-mode dontAsk` from
   "Unattended contract" section. Anything else leaves no marker, so the next trigger retries.
 - **Runtime files** live in `~/.claude/automations/<skill>/{logs,state,cwd}`, outside the deploy clone.
 - **Skill-backed so far:** `instruction-audit`, `wrapup-repos`.
+- **Prompt-backed, no skill:** `decisions-audit` (weekly audit of Jake's replies to Decisions blocks, run per Mac because memex only sees local sessions). Its `run.sh` runs `claude -p` with an explicit `dontAsk` allowlist, sets `CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0` so the Workflow can outlast headless's 10-minute background cap, and saves stdout as the report (headless `Write`/`Edit` rules did not apply).
 - **Script-backed (no model), for work that is not a skill:** the code stays in `automations/<name>/` and
   the plist runs `bin/script-automation <name> <script>`, which sets the PATH launchd lacks, logs to
   `~/.claude/automations/<name>/logs/<script>.log` (or prints when stdout is a terminal) and runs the
