@@ -7,7 +7,11 @@ posting it. On a tick that crosses a window boundary (windowMin in
 ~/.claude/state/pr-review-batch.json, default 30, so :00 and :30), this posts
 every still-valid entry to #pr-review as its own message, then badges,
 undrafts and enables auto-merge on each posted PR. windowMin 0 flushes on
-every tick. A tick that crosses no boundary exits silently without calling gh.
+every tick. A tick that crosses no boundary exits silently without calling gh,
+except in the grace period: an entry queued within graceMin minutes (default 5,
+0 disables) after the latest boundary is flushed on the next tick, so a PR that
+narrowly missed the window posts within one tick instead of waiting a window.
+Deferred entries are exempt, and lastFlushAt is left alone.
 
 Order, per run (all under one flock):
   1. Claim: merge back any leftover .flushing.* file, rename the queue to
@@ -91,6 +95,8 @@ DEFER_MARKER = "<!-- pr-review-deferred -->"
 DEFAULT_DEFER_RELEASE_AT = "16:00"
 DEFAULT_DEFER_TZ = "America/New_York"
 DEFAULT_WINDOW_MIN = 30
+DEFAULT_GRACE_MIN = 5
+TICK_S = 300  # launchd StartInterval: the longest a tick can lag behind a queued entry
 DEFAULT_SIBLING_HOLD_MIN = 60
 OWNER = "Concentro-Inc"
 SIBLING_REPOS = ("api", "woodrow", "folio-platform")  # also the posting order within a ticket
@@ -163,6 +169,14 @@ def window_min(cfg):
     return max(w, 0)
 
 
+def grace_min(cfg):
+    try:
+        g = float(cfg.get("graceMin", DEFAULT_GRACE_MIN))
+    except (TypeError, ValueError):
+        g = DEFAULT_GRACE_MIN
+    return max(g, 0)
+
+
 def sibling_hold_min(cfg):
     try:
         h = float(cfg.get("siblingHoldMin", DEFAULT_SIBLING_HOLD_MIN))
@@ -182,6 +196,29 @@ def boundary_crossed(now, last, window_minutes):
         return False
     w = window_minutes * 60
     return int(now // w) > int(last // w)
+
+
+def queued_in_grace(now, window_minutes, grace_minutes, entries):
+    """True when an entry was queued within grace_minutes after the latest window
+    boundary and this tick is still within one tick of that grace period, so a PR
+    that narrowly missed the boundary posts on its next tick instead of waiting a
+    whole window. Deferred entries never count (they release at releaseAt). The
+    tick-length slack bounds retries: a held or failed entry is tried on the
+    ticks that follow its queueing, then waits for the next boundary as before."""
+    if window_minutes <= 0 or grace_minutes <= 0:
+        return False
+    w = window_minutes * 60
+    start = int(now // w) * w
+    end = start + grace_minutes * 60
+    if now >= end + TICK_S:
+        return False
+    for e in entries:
+        if e.get("defer"):
+            continue
+        q = parse_iso(e.get("queuedAt") or "")
+        if q is not None and start <= q < end:
+            return True
+    return False
 
 
 # --- Deferral ----------------------------------------------------------------
@@ -899,6 +936,11 @@ def main():
             last = parse_iso(cfg.get("lastFlushAt")) if cfg.get("lastFlushAt") else None
             crossed = boundary_crossed(now, last, window_min(cfg))
             if not crossed and last is not None:
+                queued, _ = read_lines(QUEUE)
+                if not queued_in_grace(now, window_min(cfg), grace_min(cfg), queued):
+                    return 0
+                log(f"grace: queued within {grace_min(cfg):g} min of the window boundary, flushing")
+                flush(None, args.channel)
                 return 0
             cfg["lastFlushAt"] = iso(now)
             write_config(cfg)

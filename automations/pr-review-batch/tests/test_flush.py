@@ -459,6 +459,63 @@ class FlushTest(Harness):
         self.assertEqual(len(self.posted_texts()), 1)
         self.assertEqual(json.load(open(self.config))["lastFlushAt"], iso(T0 + 31 * 60))
 
+    # -- grace period after a boundary --
+
+    def grace_config(self, **kw):
+        with open(self.config, "w") as f:
+            json.dump({"lastFlushAt": iso(T0 + 60), **kw}, f)
+
+    def test_grace_flushes_entry_queued_just_after_boundary(self):
+        self.last_flush(T0 + 60)  # the :00 boundary tick already ran
+        self.enqueue(self.entry(A, queuedAt=iso(T0 + 2 * 60)))
+        self.flush(now=T0 + 7 * 60)  # the next 5-minute tick
+        self.assertEqual(len(self.posted_texts()), 1)
+        self.assertIn("grace:", self.out)
+        # A grace flush leaves the window state alone.
+        self.assertEqual(json.load(open(self.config))["lastFlushAt"], iso(T0 + 60))
+
+    def test_grace_ignores_entry_queued_before_the_boundary(self):
+        self.last_flush(T0 + 60)
+        self.enqueue(self.entry(A, queuedAt=iso(T0 - 60)))
+        self.assertEqual(self.flush(now=T0 + 7 * 60), "")
+        self.assertEqual(self.posted_texts(), [])
+
+    def test_grace_ignores_entry_queued_after_the_grace_period(self):
+        self.last_flush(T0 + 60)
+        self.enqueue(self.entry(A, queuedAt=iso(T0 + 6 * 60)))
+        self.assertEqual(self.flush(now=T0 + 8 * 60), "")
+        self.assertEqual(self.posted_texts(), [])
+
+    def test_grace_stops_retrying_after_one_tick_of_slack(self):
+        self.last_flush(T0 + 60)
+        self.enqueue(self.entry(A, queuedAt=iso(T0 + 2 * 60)))
+        self.assertEqual(self.flush(now=T0 + 11 * 60), "")  # past 5 min grace + 5 min tick
+        self.assertEqual(self.posted_texts(), [])
+
+    def test_grace_zero_disables_it(self):
+        self.grace_config(graceMin=0)
+        self.enqueue(self.entry(A, queuedAt=iso(T0 + 2 * 60)))
+        self.assertEqual(self.flush(now=T0 + 7 * 60), "")
+        self.assertEqual(self.posted_texts(), [])
+
+    def test_grace_custom_length(self):
+        self.grace_config(graceMin=10)
+        self.enqueue(self.entry(A, queuedAt=iso(T0 + 8 * 60)))
+        self.flush(now=T0 + 12 * 60)
+        self.assertEqual(len(self.posted_texts()), 1)
+
+    def test_grace_never_releases_a_deferred_entry(self):
+        self.last_flush(T0 + 60)
+        self.enqueue(self.entry(A, queuedAt=iso(T0 + 2 * 60), defer=True, releaseAt=iso(T0 + 600 * 60)))
+        self.assertEqual(self.flush(now=T0 + 7 * 60), "")
+        self.assertEqual(self.events(), [])
+        self.assertEqual(self.posted_texts(), [])
+
+    def test_grace_without_state_waits_for_boundary(self):
+        self.enqueue(self.entry(A, queuedAt=iso(T0 + 2 * 60)))
+        self.flush(now=T0 + 7 * 60)  # first tick ever: just start counting windows
+        self.assertEqual(self.posted_texts(), [])
+
     def test_empty_boundary_tick_still_records(self):
         # An empty :00 tick must advance lastFlushAt, or an entry queued at :10
         # would flush on the :15 tick instead of waiting for :30.

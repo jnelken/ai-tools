@@ -13,7 +13,7 @@ description: >-
 
 ## Overview
 
-The last mile of a PR: review it until it's quiet, confirm CI is green, and queue it for `#pr-review`. The team's review capacity is limited, so announcements go out in batches: the `pr-review-batch` flusher (a launchd job, [`automations/pr-review-batch`](../../automations/pr-review-batch/flush.py)) releases the queue on window boundaries (`:00`/`:30` by default), one Slack message per PR, and only then flips the two signals that tell humans a PR is ready for eyes.
+The last mile of a PR: review it until it's quiet, confirm CI is green, and queue it for `#pr-review`. The team's review capacity is limited, so announcements go out in batches: the `pr-review-batch` flusher (a launchd job, [`automations/pr-review-batch`](../../automations/pr-review-batch/flush.py)) releases the queue on window boundaries (`:00`/`:30` by default; an entry queued within 5 minutes after a boundary still goes out on the next tick, `graceMin` in `pr-review-batch.json`), one Slack message per PR, and only then flips the two signals that tell humans a PR is ready for eyes.
 
 **A PR that fixes no bug and ships no feature can wait** (step 3.4). Docs, tests, refactors, lint, CI, dependency and copy PRs are *deferred* to the 4 PM ET weekday release, and every such PR a repo produces that day rides in one bundle: the first one becomes the bundle, later ones merge into it as sub-PRs. Reviewers see at most one deferrable PR per repo per day.
 

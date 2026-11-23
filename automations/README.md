@@ -485,6 +485,15 @@ python3 -c 'import json,os;p=os.path.expanduser("~/.claude/state/pr-review-batch
 `windowMin: 0` flushes on every tick, which turns batching off. Keep the queue even then: it
 still holds cross-repo siblings so they are announced together.
 
+**Grace period after a boundary.** A PR that finishes review a minute after `:00` or `:30`
+would otherwise wait a whole window. `graceMin` (same file, default 5, `0` disables) keeps the
+queue open for that long: an entry queued within `graceMin` minutes after the latest boundary is
+flushed on the next tick, so it posts within 5 minutes of being queued. The check reads each
+entry's `queuedAt`, and a tick stops counting one tick (5 minutes) after the grace period ends,
+so a held or failed entry is retried at most twice before it waits for the next boundary.
+Deferred entries are exempt (they release at `releaseAt`), and a grace flush leaves
+`lastFlushAt` alone.
+
 **Cross-repo siblings.** When one CON ticket needs a PR in api and another in woodrow (or
 folio-platform), reviewers should see them together and know the merge order. For a queued
 entry in one of those three repos whose text carries `(CON-N)`, the flusher looks up Jake's open
