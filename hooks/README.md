@@ -127,6 +127,17 @@ Gated on `SUPERSET_TERMINAL_ID` + `SUPERSET_WORKSPACE_ID`; always exits 0 and pr
 
 Same two entries with `--harness codex`. Codex pins hook trust per entry in `~/.codex/config.toml` (`[hooks.state]`, hashed on the command string), so after editing `hooks.json` the new entries must be re-trusted in Codex's hooks UI before they run. Codex's payload matches Claude's (`session_id`, `turn_id`, `transcript_path`, `cwd`, `hook_event_name`, `model`, `prompt`), verified 2026-10-13. Codex sub-agents (spawned agents, the memory-writing agent) run these hooks inside the parent's terminal with their own `session_id`, so the hook pins the terminal to the first session it names and ignores prompts/stops from any other session while the tab has a name — which also means `/new` in a Codex tab keeps the old slug until the tab is renamed or the state file in `~/.cache/superset-tab-title/` is removed. Codex has no sign-off convention, so its stops show `○`.
 
+## pr-session-title.py
+
+A **Claude Code `PostToolUse` (matcher `Bash`) + `UserPromptSubmit` hook** that names the session after the PR it just opened, e.g. `woodrow#1345`, `api#5821`, `folio-platform#4567`. Claude Code only lets `UserPromptSubmit` set a session title (`hookSpecificOutput.sessionTitle`, same effect as `/rename`), so it is two-phase: the `PostToolUse` side notices a successful `gh pr create` / `pr:create` whose output carries a `github.com/<owner>/<repo>/pull/<n>` URL and stashes the title in `~/.cache/pr-session-title/<session_id>.json`; the next prompt emits it. The repo name comes from the URL, never the cwd. `gh pr view|edit|checks` print PR URLs too, so the command must be a create command as well. When one session opens several PRs the newest wins.
+
+Overwrite rule (checked at both phases against `~/.claude/sessions/<pid>.json`): rename when the session has no name, only Claude's own `derived`/`auto` name, or a name that is itself `<repo>#<n>` (an older PR); keep any other `/rename` name, and skip when the session file can't be found or the prompt is itself `/rename`. Always exits 0; stdout is empty or one JSON object. `PR_SESSION_TITLE_DEBUG=<file>` logs decisions. Tests: `bash hooks/tests/pr-session-title.test.sh`.
+
+```json
+"PostToolUse":      [{ "matcher": "Bash", "hooks": [{ "type": "command", "command": "python3 \"$HOME/.claude/hooks/pr-session-title.py\" --event posttool", "timeout": 5 }] }],
+"UserPromptSubmit": [{ "hooks": [{ "type": "command", "command": "python3 \"$HOME/.claude/hooks/pr-session-title.py\" --event prompt", "timeout": 5 }] }]
+```
+
 ## post-yesterdays-ccusage.sh
 
 Posts daily ccusage summaries (Claude + Codex token usage) to a Slack channel via incoming webhook. Triggered on every Claude Code session start; catches up any days missed since the last successful post.
