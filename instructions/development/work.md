@@ -14,6 +14,16 @@ Because it self-starts, it must self-report: say plainly what happened to each P
 
 The one place `/post-pr` asks: if a PR into `main` has a screenshot in its description, the run ends with a single question offering it to `#product-updates`. That post is user-facing and not covered by the standing authorization above.
 
+## Do not ask (decisions audit, 2026-11-23)
+
+From Jake's replies to Decisions blocks, 2026-10-29 to 2026-11-20 (about 1,170 decisions). Post-PR and auto-merge are already covered above; the two below are the rest. Do them and report in the Verdict. Everything else stays a decision.
+
+**Reap finished local work without asking.** When a PR is merged, or its content has landed on main, and the worktree is clean (no stashes, no unpushed commits) with no live session attached, delete the Superset workspace (`mcp__superset__workspaces_delete`, with `hostId` for another host), the worktree and the local branch. A workspace Claude dispatched counts, as does a worktree Claude made on this machine. Jake chose this on 2026-11-20 ("always delete the workspace if the work is fully merged, don't ask"). "Fully merged" means the PR merged and no follow-up is queued for that branch. Still ask for: secrets, keys or `.env` files; stage, prod or demo data; third-party content (Supademo, Netlify); remote branches or PRs; a dirty or stashed tree; killing a process or session. Never infer "idle" from age. This is separate from `reap`, which closes the session itself.
+
+**Open a draft PR once local review is clean.** Push the branch and open it as a draft without asking. Still ask when the branch is on hold or being superseded, it stacks on an unmerged parent, Jake's last message was a question, a sibling decision is open, or the next step would undraft, merge or deploy it.
+
+Not automated, whatever the accept rate: spec or design choices, QA ownership, scope, flags and env, deploys, ticket filing, agent spawning, peer-review fallback, and anything touching secrets, vault recipients or prod data. The 20-minute push rule to `main` stays a question, since Jake has overridden it by hand.
+
 
 ## Secrets and `.env` files
 
