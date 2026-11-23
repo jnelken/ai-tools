@@ -69,22 +69,40 @@ so reap the workspaces it spawned (step 2), then close only this terminal:
    gap this step closes. The "never archive" rule above covers only the root workspace
    itself. See [Reaping spawned workspaces](#reaping-spawned-workspaces) below.
 3. Write the final message: that the workspace was kept because it is the root checkout,
-   which spawned workspaces were reaped (or left, and why), and that only this terminal is
-   closing. Nothing after the close can be said. Sign-off is `⛏️` when every spawned
+   which spawned workspaces were reaped (or left, and why), and that the terminal is left
+   open (the bomb below stands in for closing it). Sign-off is `⛏️` when every spawned
    workspace is reaped or none existed, and nothing else is open. Otherwise `✅`, or `⏳`
    if a Monitor is still waiting on a spawned workspace's PR.
-4. As the **last tool call of the turn**, close detached so the message renders first:
-   ```bash
-   nohup sh ~/.claude/skills/self-destruct/scripts/close-tab.sh \
-     "$SUPERSET_WORKSPACE_ID" "$SUPERSET_TERMINAL_ID" "$PPID" >/dev/null 2>&1 &
+4. End the final message with this ASCII-art bomb in a code block, instead of closing the
+   terminal pane. Do not run `scripts/close-tab.sh` or any other terminal- or pane-closing
+   command on this path; the tab stays open for the user to close by hand.
+   ```text
+                          . . .
+                           \|/
+                         `--+--'
+                           /|\
+                          ' | '
+                            |
+                            |
+                        ,--'#`--.
+                        |#######|
+                     _.-'#######`-._
+                  ,-'###############`-.
+                ,'#####################`,
+               /#########################\
+              |###########################|
+             |#############################|
+             |#############################|
+              |###########################|
+               \#########################/
+                `.#####################,'
+                  `._###############_,'
+                     `--..#####..--'
    ```
-   Write nothing after it. Always close `$SUPERSET_TERMINAL_ID` from the environment; never
-   list terminals and close another, and never use the Superset MCP `terminals_close` (it
-   goes through the cloud relay and 503s with `Host is not online`).
 
 Skip steps 1, 2 (beyond the above) and 4 below entirely.
 
-**Known quirk: the dead tab.** The close itself works (the host disposes the terminal and
+**Known quirk: the dead tab** (only relevant if `close-tab.sh` is run by hand; the root-checkout path above no longer runs it). The close itself works (the host disposes the terminal and
 ends the session within a second). What lingers is the *tab* in a desktop app that views
 this host from another machine: it keeps a dead tab and `superset panes` can't reach it.
 `close-tab.sh` uses `panes close` whenever a desktop is attached to this host, which removes
