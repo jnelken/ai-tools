@@ -22,7 +22,7 @@ Use this skill when asked to generate a monthly team email update for internal, 
    - shipped product changes
    - reliability and correctness work, reported as improvements rather than as a defect list (see the section rules)
    - platform, data-integrity and permission work — always reported, in `Foundations`
-   - delivery tooling and process changes only when they clearly improved speed, quality, or operational safety
+   - delivery tooling and process changes only when they clearly improved speed, quality, or operational safety, and only as a win in their end state (see the `Behind The Scenes` rules)
 5. Group commits into business-readable themes, not raw commit-by-commit bullets.
 6. Keep the final draft concise: roughly 450-580 words, usually 7-9 narrative bullets total before the numbers, including 2-3 in `Foundations`. (The pre-2026-08 target of 380-450 predates the `Foundations` section and is no longer reachable without dropping real work.)
 7. Add inline markdown links to the most representative 1-3 PRs for each theme when the landed work can be tied to merged PRs.
@@ -210,11 +210,9 @@ humans who merged them, so the paragraph may say "drafted N fixes" without doubl
 
 ## Behind The Scenes
 
+[Optional — omit unless a delivery-tooling change is a genuine, finished win. See the section rules.]
+
 - **[Theme title]**: [1-2 sentence explanation of how this helped the team move faster, reduced risk, or improved quality, with inline PR links.]
-
-## Claudio's [First Month | Month]
-
-[One paragraph per the Claudio section rules — optional, include when Claudio was active.]
 
 ## Numbers
 
@@ -226,10 +224,18 @@ humans who merged them, so the paragraph may say "drafted N fixes" without doubl
 - **Reliability improvements**: [N]
 - **Avg commits per developer**: [N]
 
+## Claudio's [First Month | Month]
+
+[One paragraph per the Claudio section rules — optional, include when Claudio was active.]
+
 ## MVPs
+
+[Optional — only with 3 or more active developers. See the section rules.]
 
 - **[Developer]** — MVP: [best stat label] ([N] or [short count phrase])
 - **[Developer]** — MVP: [best stat label] ([N] or [short count phrase])
+
+## Up Next
 
 [One short closing paragraph on what the team is focused on next month.]
 ```
@@ -239,14 +245,18 @@ humans who merged them, so the paragraph may say "drafted N fixes" without doubl
 - Section order is fixed:
   1. `What We Shipped`
   2. `Foundations`
-  3. `Behind The Scenes`
-  4. `Claudio's Month` (optional — see "Claudio (AI teammate) section")
-  5. `Numbers`
-  6. `MVPs`
+  3. `Behind The Scenes` (optional — usually absent)
+  4. `Numbers` (opens with the trend chart directly under the header)
+  5. `Claudio's Month` (optional — see "Claudio (AI teammate) section")
+  6. `MVPs` (optional — only with 3 or more active developers)
+  7. `Up Next` (the closing paragraph, always under this heading)
+  The October 2026 draft was reordered and trimmed to this shape by hand (Numbers before
+  Claudio, no MVPs, no Behind The Scenes, `Up Next` heading); this is the shape to produce.
 - Omit empty sections.
 - `What We Shipped` is for visible product work and meaningful workflow improvements employees would recognize as progress.
 - `Foundations` is for substantial engineering work with no demoable surface: data standardization and correctness projects, platform and job-system reliability, access-control and permission hardening, environment isolation, performance work. **Always include this section** — platform reliability matters increasingly to the company, and because this work has nothing to show on screen, a format organized around features drops it even in months where it was the single largest investment. Omit it only when the month genuinely contains none of it, never because it was hard to phrase.
-- `Behind The Scenes` is narrower: delivery tooling, CI, testing infrastructure, and process changes that made the team faster or safer. Platform and data work belongs in `Foundations`, not here.
+- `Behind The Scenes` is narrower and rarely appears: delivery tooling, CI, testing infrastructure, and process changes that made the team faster or safer. Platform and data work belongs in `Foundations`, not here. **Include an item only as a win in its end state.** Commit history shows interim steps that were later reversed or replaced, and describing the interim step reports a change that was not a win. Before writing any item, check what the tooling looks like at the end of the month (and ask the user when the history is ambiguous). Do not report a step that was just a stopgap.
+  - **E2E testing (October 2026).** The browser-based end-to-end suite was too flaky to keep in CI, so it ended the month on demand only (the `/e2e` PR command). Moving it from every PR to a nightly schedule was just an interim step, not the result; never report "E2E now runs on a schedule". If CI testing comes up at all, frame it as a CI optimization: less developer time spent chasing false failures, and more reliance on smaller, modular tests (unit tests, now sharded across four runners). Quantify only with a number you can source (hours estimated from the fix and flake-chasing PRs, or CI minutes); otherwise state the benefit without a figure. Never invent an hours figure.
 
 - **There is deliberately no "fixes" section.** A section organized around defects narrates the month as a list of mistakes and oversights, which misrepresents work that was mostly deliberate investment. This is a rule about *framing*, not omission — reliability work is still reported, in the section that fits:
   - A fix that gives users a capability or a safeguard they can notice → `What We Shipped`.
@@ -272,7 +282,7 @@ humans who merged them, so the paragraph may say "drafted N fixes" without doubl
   2026 was published as 692 commits and the chart shows 726. Mention any such mismatch in the
   terminal report. Needs macOS Quick Look for the PNG; otherwise it leaves only the SVG.
 - `Reliability improvements` is a heuristic count of business-readable reliability clusters, not every tiny patch commit. Count across the **full** commit set including AI-authored work — that work skews toward small correctness fixes, so counting only human-authored commits undercounts it badly (8 vs 12 for August 2026).
-- `MVPs` should give each active developer one short, numeric stat they can credibly claim for the month. The stat does not need to use the same category for every person.
+- `MVPs` is omitted when there are fewer than 3 active developers: with two people, naming MVPs reads as a head-to-head. When it is included, give each active developer one short, numeric stat they can credibly claim for the month. The stat does not need to use the same category for every person.
 - **Derive both the count and the named areas from the full attributed set**, AI-authored work included. It is easy to update the number and forget the areas, because the areas usually come from reading that person's own-authored commits — but AI-authored work often concentrates in *different* areas than a person's hand-written commits (in August 2026 it was mostly interface correctness and CI automation, which appeared nowhere in the hand-written totals). A stat whose number counts 131 PRs while its areas describe only 101 of them is wrong in the part a reader actually reads.
 
 ## Style examples
