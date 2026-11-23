@@ -235,7 +235,7 @@ humans who merged them, so the paragraph may say "drafted N fixes" without doubl
 - **[Developer]** — MVP: [best stat label] ([N] or [short count phrase])
 - **[Developer]** — MVP: [best stat label] ([N] or [short count phrase])
 
-## Up Next
+## This Month
 
 [One short closing paragraph on what the team is focused on next month.]
 ```
@@ -249,9 +249,9 @@ humans who merged them, so the paragraph may say "drafted N fixes" without doubl
   4. `Numbers` (opens with the trend chart directly under the header)
   5. `Claudio's Month` (optional — see "Claudio (AI teammate) section")
   6. `MVPs` (optional — only with 3 or more active developers)
-  7. `Up Next` (the closing paragraph, always under this heading)
+  7. `This Month` (the closing paragraph, always under this heading)
   The October 2026 draft was reordered and trimmed to this shape by hand (Numbers before
-  Claudio, no MVPs, no Behind The Scenes, `Up Next` heading); this is the shape to produce.
+  Claudio, no MVPs, no Behind The Scenes, `This Month` heading); this is the shape to produce.
 - Omit empty sections.
 - `What We Shipped` is for visible product work and meaningful workflow improvements employees would recognize as progress.
 - `Foundations` is for substantial engineering work with no demoable surface: data standardization and correctness projects, platform and job-system reliability, access-control and permission hardening, environment isolation, performance work. **Always include this section** — platform reliability matters increasingly to the company, and because this work has nothing to show on screen, a format organized around features drops it even in months where it was the single largest investment. Omit it only when the month genuinely contains none of it, never because it was hard to phrase.
