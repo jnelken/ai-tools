@@ -299,6 +299,14 @@ class FlushTest(Harness):
         self.flush()
         self.assert_dropped("base feature/x is not the default branch main")
 
+    def test_drop_never_announced_repo(self):
+        self.last_flush(T0 - 60)
+        self.enqueue(self.entry(A, repo="Concentro-Inc/internal-tools"))
+        self.flush()
+        self.assertEqual(self.posted_texts(), [])
+        self.assertEqual(self.lines(self.queue), [])
+        self.assertIn("dropped Concentro-Inc/internal-tools#1: repo is never announced", self.out)
+
     def test_drop_already_posted(self):
         self.last_flush(T0 - 60)
         self.enqueue(self.entry(A))

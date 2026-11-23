@@ -15,7 +15,8 @@ Order, per run (all under one flock):
      the newest entry (queuedAt, then line order) per URL.
   2. Revalidate with gh. Drop (and log) entries whose PR is not OPEN, whose
      base is not the default branch, whose URL is already in
-     pr-review-posted.jsonl, or whose head moved past headSha. Anything that
+     pr-review-posted.jsonl, whose repo is never announced (internal-tools),
+     or whose head moved past headSha. Anything that
      merely failed (gh error, timeout) is requeued.
   2b. Pair cross-repo siblings: for an entry in api, woodrow or folio-platform
      whose text carries (CON-N), find Jake's open PRs into the default branch
@@ -93,6 +94,9 @@ DEFAULT_WINDOW_MIN = 30
 DEFAULT_SIBLING_HOLD_MIN = 60
 OWNER = "Concentro-Inc"
 SIBLING_REPOS = ("api", "woodrow", "folio-platform")  # also the posting order within a ticket
+# Repos whose PRs are never announced: they stay drafts for Jake, like Claudio's drafter leaves
+# them. /post-pr skips the enqueue for these; this drops a line that got queued anyway.
+NEVER_ANNOUNCED = {"concentro-inc/internal-tools"}
 TICKET_RE = re.compile(r"\((CON-\d+)\)")
 SUBPR_RE = re.compile(r"^- #(\d+)\b", re.MULTILINE)
 GH_TIMEOUT = 60
@@ -334,6 +338,8 @@ def revalidate(e, posted):
     """('post', pr_info) | ('drop', reason) | ('requeue', reason)."""
     if e["url"] in posted:
         return "drop", "already in pr-review-posted.jsonl"
+    if str(e.get("repo", "")).lower() in NEVER_ANNOUNCED:
+        return "drop", "repo is never announced to #pr-review (its PRs stay drafts for Jake)"
     res = run("gh", "pr", "view", e["url"], "--json", "state,baseRefName,headRefOid,headRefName,isDraft")
     if res is None or res.returncode != 0:
         return "requeue", f"gh pr view: {err(res)}"

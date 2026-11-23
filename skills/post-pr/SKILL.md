@@ -46,6 +46,7 @@ Targeting matters more than it looks: `/peer-review` resolves against the **curr
 
 ## When NOT to use
 
+- The PR is in `Concentro-Inc/internal-tools`: it is never announced. Run steps 1-3 for the review and CI, then stop at step 3.5; it stays a draft for Jake.
 - No PR exists for the branch yet — that's [[create-pr]]. Come back here after.
 - Work is mid-flight (dirty tree, task not finished). Announcing a WIP branch wastes reviewer attention and burns Codex rounds on an unfinished diff.
 - The user only wants a review pass with no PR-side effects — that's `/peer-review local`.
@@ -168,6 +169,8 @@ python3 -I ~/.claude/automations/pr-review-batch/flush.py --defer-plan "$URL"
 - **No bundle** — this PR becomes today's bundle. Add `<!-- pr-review-deferred -->` to the end of its body, read and written through a file and only if it isn't there yet (the same snippet as step 4's queued marker), then continue to step 4 and queue it with `"defer": true` and the printed `releaseAt`. Report `Deferral: deferrable (<reason>), new <repo> bundle, releases <releaseLocal>`. If the flusher isn't loaded on this machine (step 4's safety net), don't defer: nothing would release it. Report `Deferral: skipped (flusher not loaded)` and post as usual.
 
 ### 3.5. Check whether this PR is externally announceable
+
+**Repos that are never announced.** `Concentro-Inc/internal-tools` PRs never reach `#pr-review`: Jake is the only owner and reviewer, and Claudio's drafter already leaves them as drafts for him (`prDrafter.ts`, `keepDraft`). Reviews and CI (steps 1-3) run as normal, then **skip steps 4 and 6.5 and stop**: no enqueue, no badge, no `gh pr ready`, no auto-merge. The PR stays a draft for Jake. Report `Slack: not announced — internal-tools PRs stay drafts for Jake` and run `review-metrics run --outcome skipped`. The flusher also drops any internal-tools line that was queued anyway (`NEVER_ANNOUNCED` in `flush.py`).
 
 ```bash
 gh pr view <PR_NUMBER> --repo <OWNER/REPO> --json baseRefName -q .baseRefName
