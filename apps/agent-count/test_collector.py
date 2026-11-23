@@ -113,5 +113,21 @@ class CollectorTests(unittest.TestCase):
         self.assertTrue(output.getvalue().startswith("2 ! |"))
 
 
+    def test_offline_host_is_listed_once_and_still_flags_coverage(self):
+        host = {"name": "jake2", "groups": [], "error": "Offline; activity unknown",
+                "timestamp": time.time()}
+        with patch.object(c, "collect_local", return_value=([], [])), \
+                patch.object(c, "remote_hosts", return_value={"hosts": [host], "errors": []}), \
+                patch.object(c.shutil, "which", return_value="superset"), \
+                patch.object(c, "cli_snapshot", return_value={}), \
+                patch.object(c, "read_json", return_value={}):
+            data = c.collect()
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            c.menu(data)
+        self.assertEqual(output.getvalue().count("Offline; activity unknown"), 1)
+        self.assertIn(" !", output.getvalue().splitlines()[0])
+
+
 if __name__ == "__main__":
     unittest.main()

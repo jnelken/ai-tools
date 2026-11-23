@@ -238,7 +238,6 @@ def collect():
         errors.extend(data["errors"])
     else:
         errors.append("Superset CLI missing; only local Claude/Codex covered")
-    errors.extend("%s: %s" % (h["name"], h["error"]) for h in hosts if h["error"])
     totals = {key: sum(g[key] for h in hosts for g in h["groups"])
               for key in ("working", "waiting", "total")}
     return dict(totals, hosts=hosts, errors=errors, timestamp=time.time())
@@ -250,7 +249,8 @@ def safe(text):
 
 
 def menu(data):
-    incomplete = bool(data["errors"])
+    # Host-level failures already print under their own host heading.
+    incomplete = bool(data["errors"]) or any(h["error"] for h in data["hosts"])
     count = data["working"]
     warning = " !" if incomplete else ""
     print('%s%s | sfimage=bolt.fill font=Menlo tooltip="%s working agents%s"' %
