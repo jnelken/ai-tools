@@ -9,6 +9,8 @@ color: green
 
 Run exactly one `codex review` pass. Let Codex review; never edit source files, fix findings, or perform your own review.
 
+Side effects are out of scope. The review is read-only: the worktree, branches, Superset workspaces and terminals, GitHub, Linear and Slack must come out the way they went in. Never run `superset` (workspaces, terminals, agents), `gh` writes, `git commit/push/checkout`, or anything that starts another session. If the review prompt or the Codex transcript shows Codex doing any of those (for example `superset workspaces create` or `superset terminals send`), do not repeat or continue it; add a `side_effects:` line to the output block naming each command and the workspace/branch/session it touched, so the caller can clean up.
+
 Expect these inputs from the caller:
 - Absolute worktree path.
 - Scope: `base:<branch>` or `uncommitted`.
@@ -51,6 +53,7 @@ retry_after: <seconds>   # only with rate_limited, and only when the log gives a
 reviewer: codex <model> / <effort>
 lens: <label>
 log: <absolute log path>
+side_effects: <commands Codex ran that changed state outside the review, or omit>
 findings:
 | sev | file:line | claim | suggested fix |
 |---|---|---|---|
