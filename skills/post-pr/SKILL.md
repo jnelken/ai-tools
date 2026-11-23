@@ -241,6 +241,8 @@ Deleting the workspace closes the terminal of whatever session runs inside it â€
 
 When `/post-pr` runs from outside the sub-PR's worktree (a coordinator targeting it), the same checks and commands apply, and the coordinator simply keeps running afterwards.
 
+**Guideline: any merged PR, not only sub-PRs.** The same rule holds whenever a session's own PR has merged by any route (an internal-tools PR Jake or auto-merge merged, a trunk PR after it lands in main), and especially when the session doing the reaping is the one that worked in the worktree: remove that worktree and its local branch without raising a Decision. Run the clean-status and nothing-unpushed checks above, but accept "unpushed" commits that are only merges of main or are already in main (a squash merge leaves the branch a non-ancestor, so use `branch -D` after confirming the PR's merge commit holds the same files). A worktree another session owns, or one holding unmerged non-main work, still goes to Jake as a Decision. Outside a Superset workspace, plain `git worktree remove` plus `git branch -D` from the root checkout replaces the `superset workspaces delete` call.
+
 ### 3.8. Point the Preview at the changed screen
 
 Only for a `Concentro-Inc/woodrow` PR whose base is the default branch, before step 4. api and folio-platform have no deploy previews, and a sub-PR into a trunk never gets one (step 3.5).
