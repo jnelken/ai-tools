@@ -20,7 +20,7 @@ For addressing comments **already posted** on a GitHub PR by a bot reviewer, see
 
 Review rounds use the **latest sol** for Codex and the **latest Opus** for Claude, both at **high** effort. Name the tier, not a version: a newer model of that tier replaces the current one when it ships.
 
-- **Codex:** the latest sol (`gpt-6.1-sol` today). `codex review` has no `-m` flag, so the model comes from `model` in `~/.codex/config.toml`, which must name it; a default that drifts to another tier (this once ran a review on `gpt-6-astra`) is a bug to fix there, not to work around per call.
+- **Codex:** the latest sol (`gpt-6.1-sol` today). `codex review` has no `-m` flag and ignores `review_model`, so the `codex-reviewer` agent pins it with `-c model=<sol>` on every call. The active `CODEX_HOME`'s default `model` may be another tier for everyday work (on jake1, `~/.codex-work` defaults to terra); without the pin a review silently runs on that tier (2026-11-23, folio-platform #89; once before on `gpt-6-astra`).
 - **Claude:** the latest Opus, via `model: opus` in `agents/claude-reviewer.md` (the alias tracks the latest).
 - **Effort:** high. The one documented exception is step 2's step-down to medium on a round 3+ that follows a P1-free round; never go below medium.
 
