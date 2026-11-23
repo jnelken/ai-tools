@@ -41,7 +41,8 @@ When authoring a skill elsewhere first (spike, cloud agent, another repo):
 New automations are skills first: the procedure lives in `skills/<name>/` (with its own `scripts/`), runs
 on demand as `/<name>`, and declares its tool allowlist in `allowed-tools`. The automation stores only the
 schedule and the skill name, run through `bin/skill-automation`. See "Skill-backed automations" in
-`automations/README.md`. Do not add a bespoke `run.sh` that embeds a prompt.
+`automations/README.md`. Do not add a bespoke `run.sh` that embeds a prompt. A deterministic job with no
+model is not a skill: keep its script in `automations/<name>/` and run it through `bin/script-automation`.
 
 ## Agent permissions
 

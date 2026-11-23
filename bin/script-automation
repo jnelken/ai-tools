@@ -1,0 +1,42 @@
+#!/bin/sh
+# Run a script-backed automation: a deterministic job with no model, for work that is not a skill.
+# An automation is still a schedule plus a name; the code lives in automations/<name>/ and
+# install.sh links it to ~/.claude/automations/<name>/. For automations that need a model, see
+# bin/skill-automation.
+#
+#   script-automation <name> <script> [script args...]
+#
+# Output goes to ~/.claude/automations/<name>/logs/<script basename>.log unless stdout is a
+# terminal, so a hand run (for example `... reap.py --dry-run`) prints directly. Safe to run by hand.
+set -u
+
+NAME="${1:-}"; SCRIPT="${2:-}"
+if [ -z "$NAME" ] || [ -z "$SCRIPT" ]; then
+  echo "usage: script-automation <name> <script> [script args...]" >&2
+  exit 2
+fi
+shift 2
+
+# launchd gives a bare environment: put superset, gh, git and jq on PATH, in the same order
+# an interactive shell has them.
+export PATH="$HOME/superset/bin:$HOME/.superset/bin:/opt/homebrew/bin:/usr/local/bin:$HOME/.local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+: "${USER:=$(id -un)}"
+export USER
+
+DIR="$HOME/.claude/automations/$NAME"
+if [ ! -f "$DIR/$SCRIPT" ]; then
+  echo "script-automation: no $DIR/$SCRIPT (run ~/.ai-tools/install.sh?)" >&2
+  exit 1
+fi
+mkdir -p "$DIR/logs"
+LOG="$DIR/logs/${SCRIPT%.*}.log"
+
+case "$SCRIPT" in
+  *.py) set -- python3 -I "$DIR/$SCRIPT" "$@" ;;
+  *)    set -- "$DIR/$SCRIPT" "$@" ;;
+esac
+
+if [ -t 1 ]; then
+  exec "$@"
+fi
+exec "$@" >>"$LOG" 2>&1

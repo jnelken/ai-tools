@@ -10,7 +10,7 @@
 	<array>
 		<string>/bin/sh</string>
 		<string>-c</string>
-		<string>exec "$HOME/.claude/automations/reap-sswts/run.sh"</string>
+		<string>exec "$HOME/.ai-tools/bin/script-automation" reap-sswts reap.py</string>
 	</array>
 
 	<!-- Every 10 minutes. The 60-minute grace lives in reap.py (REAP_SSWTS_GRACE_MIN). -->

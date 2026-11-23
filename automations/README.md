@@ -32,9 +32,14 @@ runner: it runs `claude -p "/<skill> unattended" --permission-mode dontAsk` from
   "Unattended contract" section. Anything else leaves no marker, so the next trigger retries.
 - **Runtime files** live in `~/.claude/automations/<skill>/{logs,state,cwd}`, outside the deploy clone.
 - **Skill-backed so far:** `instruction-audit`, `wrapup-repos`.
-- **Not yet migrated:** `pr-review-batch` (no-LLM flusher), `machine-status` (a server), `reap-sswts`
-  and `advance-roadmap` (a scheduler with its own queue). A deterministic one would become a skill that
-  documents and runs its script, with `Bash(<that script> *)` as its `allowed-tools`.
+- **Script-backed (no model), for work that is not a skill:** the code stays in `automations/<name>/` and
+  the plist runs `bin/script-automation <name> <script>`, which sets the PATH launchd lacks, logs to
+  `~/.claude/automations/<name>/logs/<script>.log` (or prints when stdout is a terminal) and runs the
+  script with `python3 -I`. `pr-review-batch` and `reap-sswts` are script-backed; their `run.sh` is a
+  one-line wrapper around the runner, kept as the stable entry point that `post-pr` and
+  `pr-review-gaps` call. A 5-minute flusher stays out of `claude -p` on purpose: that would be a
+  model session per run.
+- **Neither yet:** `machine-status` (a server) and `advance-roadmap` (a scheduler with its own queue).
 - **A skill's `allowed-tools` also applies when it runs on demand.** It only adds approvals, so a broad
   list (`wrapup-repos` allows all of `Bash`) pre-approves those tools for the whole interactive run too.
 

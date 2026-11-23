@@ -10,7 +10,7 @@
 	<array>
 		<string>/bin/sh</string>
 		<string>-c</string>
-		<string>exec "$HOME/.claude/automations/pr-review-batch/run.sh"</string>
+		<string>exec "$HOME/.ai-tools/bin/script-automation" pr-review-batch flush.py</string>
 	</array>
 
 	<!-- Every 5 minutes. The batching window (windowMin, default 30 → :00/:30)
