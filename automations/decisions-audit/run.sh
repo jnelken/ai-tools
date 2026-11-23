@@ -20,7 +20,7 @@ find "$ROOT/logs" -name 'run-*.log' -mtime +90 -delete 2>/dev/null
   [ -x "$CLAUDE" ] || { echo "FATAL: claude not found at $CLAUDE"; notify_fail; exit 1; }
   PROMPT="$(sed -e "s|__SRC__|$SRC|g" -e "s|__HOST__|$HOST|g" "$SRC/prompt.md")"
   OUT="$(cd "$ROOT/cwd" && "$CLAUDE" -p "$PROMPT" --model claude-sonnet-5-5 --permission-mode dontAsk \
-    --allowedTools "Workflow Read Bash(date *) Bash(memex *) Bash(ls *) Bash(grep *) mcp__memex__sessions mcp__memex__search mcp__memex__session mcp__memex__show mcp__memex__context mcp__memex__hydrate Read(//$HOME/.claude/projects/**)" \
+    --allowedTools "Workflow Read ToolSearch mcp__claude_ai_Slack__slack_send_message Bash(date *) Bash(memex *) Bash(ls *) Bash(grep *) mcp__memex__sessions mcp__memex__search mcp__memex__session mcp__memex__show mcp__memex__context mcp__memex__hydrate Read(//$HOME/.claude/projects/**)" \
     --add-dir "$HOME/.claude/projects" --add-dir "$SRC" --output-format text < /dev/null)"
   rc=$?
   printf '%s\n' "$OUT" > "$ROOT/reports/$TODAY.md"
