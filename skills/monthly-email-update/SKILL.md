@@ -1,6 +1,6 @@
 ---
 name: monthly-email-update
-description: Generate a monthly engineering update for non-technical internal employees from team commit history across woodrow and api. Use when asked for a monthly recap, internal newsletter-style update, or company-facing summary of what the team shipped, fixed, and improved behind the scenes.
+description: Generate a monthly engineering update for non-technical internal employees from team commit history across woodrow and api. Use when asked for a monthly recap, internal newsletter-style update, or company-facing summary of what the team shipped and strengthened.
 ---
 
 # Monthly Email Update Skill
@@ -27,6 +27,7 @@ Use this skill when asked to generate a monthly team email update for internal, 
 6. Keep the final draft concise: roughly 450-580 words, usually 7-9 narrative bullets total before the numbers, including 2-3 in `Foundations`. (The pre-2026-08 target of 380-450 predates the `Foundations` section and is no longer reachable without dropping real work.)
 7. Add inline markdown links to the most representative 1-3 PRs for each theme when the landed work can be tied to merged PRs.
 8. Avoid ticket IDs, repo names, internal module paths, and low-level implementation detail. Feature names, product-surface names, and named technologies (e.g. DataGrid, embeddings, vector search) are allowed and encouraged when paired with a brief plain-English gloss per the writing rules.
+9. **Wins only, everywhere.** Every sentence in the email states what is now true or newly possible, never a past flaw. Do not write that something "used to", "no longer", "now refuses", "instead of", "recovers from" or "survives" a failure; do not name bugs, gaps, leaks, flakes, outages, duplicates or mistakes, in bullets, titles, the intro, or the Claudio paragraph. Rewrite from the end state: `Uploads resume automatically after a dropped connection`, not `Uploads no longer fail on a dropped connection`. Before saving the draft, scan it for those words and for "fix", "failure", "prevent", "overwrit", "bad" and "stale", and rewrite each hit unless it is a product feature name or the Claudio phrase "drafted N fixes the team reviewed and merged". Alert and bug counts are inputs to the Claudio paragraph's time-saved math, not its headline.
 
 ## Collection workflow
 
@@ -162,12 +163,14 @@ SLACK_BOT_TOKEN="$(koyeb secrets reveal CLAUDIO_SLACK_BOT_TOKEN)" \
 - **Baseline, October 2026:** 67 alerts, 34 bug reports, 22 handoffs, 23 questions, 5 sweeps,
   29 linked (27 repeat alerts plus 2 confirmed duplicates) → 51.0 h ≈ 6.4 dev-days; 33 PRs merged.
 
-Copy rule: one paragraph (about 55–70 words, a little longer than `Behind The Scenes`). Say what
-Claudio is in one clause, give the headline counts and shipped handoffs with 1–2 PR links, then
-"We estimate that saved about H hours of engineering time, roughly D working days (at 10–30
-minutes per item)." Round hours to the nearest 5 and days to the nearest half. Claudio is not
-an MVP, and its triage numbers stay out of `Numbers` (its PRs are counted there through the
-humans who merged them, so the paragraph may say "drafted N fixes" without double-counting).
+Copy rule: one paragraph (about 55–70 words, wins only). Lead with the time saved: "Claudio, our
+in-house AI teammate in Slack, saved the team about H hours of engineering time, roughly D working
+days (our estimate, at 10–30 minutes per item)." Then say what it handled, in one sentence: the
+alert, bug-and-feedback-report and question counts, and "drafted N fixes the team reviewed and
+merged" with 1–2 PR links. Leave out the repeat-alert and duplicate counts (they only feed the
+hours math). Round hours to the nearest 5 and days to the nearest half. Claudio is not an MVP, and
+its triage numbers stay out of `Numbers` (its PRs are counted there through the humans who merged
+them, so the paragraph may say "drafted N fixes" without double-counting).
 
 ## Writing rules
 
@@ -175,7 +178,7 @@ humans who merged them, so the paragraph may say "drafted N fixes" without doubl
 - Focus on what changed for the company, the product, support burden, delivery speed, or reliability.
 - Keep most bullets to one sentence. Use a second sentence only when it meaningfully improves clarity.
 - Prefer concrete language:
-  - good: `Improved account setup so new customers hit fewer edge-case failures`
+  - good: `Made account setup smoother and more consistent for new customers`
   - bad: `Refactored signup validation and request plumbing`
 - Name the feature, then teach it. When a bullet references a real product surface, technology, or concept, say what it is in one short plain-English clause so a non-technical reader — and eventually a client — learns something. Do not leave raw jargon standing alone, and do not replace the name with pure outcome language that hides what actually shipped.
   - good: `Rolled out DataGrid — a faster, more scannable table view — across dashboards so dense data is easier to compare at a glance`
@@ -183,7 +186,7 @@ humans who merged them, so the paragraph may say "drafted N fixes" without doubl
   - bad (too abstract): `Made tables easier to read`
 - Assume the reader is smart but new. A one-line gloss ("X, which is Y") is almost always enough; do not lecture.
 - Internal work belongs only when you can explain why it mattered:
-  - good: `Made test coverage more reliable so issues are caught before they reach customers`
+  - good: `Strengthened automated checks so changes reach customers already verified`
   - bad: `Migrated E2E specs and CI helpers`
 - Do not overclaim roadmap certainty in the close.
 
@@ -260,12 +263,12 @@ humans who merged them, so the paragraph may say "drafted N fixes" without doubl
 
 - **There is deliberately no "fixes" section.** A section organized around defects narrates the month as a list of mistakes and oversights, which misrepresents work that was mostly deliberate investment. This is a rule about *framing*, not omission — reliability work is still reported, in the section that fits:
   - A fix that gives users a capability or a safeguard they can notice → `What We Shipped`.
-  - A fix that hardens the platform, corrects data, or closes a permission gap → `Foundations`.
+  - A fix that hardens the platform, corrects data, or tightens a permission rule → `Foundations`.
   - Describe the resulting behavior, not the defect. Good: `Same-named files in different folders stay distinct.` Bad: `Fixed a bug where same-named files overwrote each other.`
   - Same rule in `Numbers`: the row is `Reliability improvements`, never "bugs fixed" or "defects resolved".
 
 - Name the project, not the category. A `Foundations` bullet titled **Percentage standardization** reads as a piece of work with a beginning and an end; one titled "Platform and data integrity" reads as routine maintenance and buries the thing that actually happened.
-- `Foundations` bullets follow the same writing rules as every other: name the system, then say in one plain clause what it means for someone using Folio. Never let it become a list of internal components. Good: `Some values were stored as "45" and others as "0.45", so the same figure could read differently depending on where you looked.` Bad: `Enforced the percentage decimal-fraction contract at extraction time.`
+- `Foundations` bullets follow the same writing rules as every other: name the system, then say in one plain clause what it means for someone using Folio. Never let it become a list of internal components. Good: `Percentages are saved one consistent way, so the same figure reads the same everywhere in Folio.` Bad: `Enforced the percentage decimal-fraction contract at extraction time.`
 - `Numbers` should show 4-6 simple headline metrics. Prefer counts and averages that can be explained quickly.
 - `Numbers` opens with a small 12-month trend chart (commits landed and PRs merged per month),
   generated, not hand-drawn:
@@ -289,8 +292,8 @@ humans who merged them, so the paragraph may say "drafted N fixes" without doubl
 
 | Too technical | Better |
 |---|---|
-| Extracted shared form schema validation and normalized API error mapping | Reduced the number of edge-case form failures and made validation behavior more consistent, which should mean fewer avoidable support issues and cleaner launches for new workflow changes. |
-| Split Playwright coverage into package-level specs and CI jobs | Made automated checks more dependable, so the team gets earlier warning when important flows break before changes reach customers. |
+| Extracted shared form schema validation and normalized API error mapping | Made form validation more consistent across the app, which means smoother experiences for customers and cleaner launches for new workflow changes. |
+| Split Playwright coverage into package-level specs and CI jobs | Made automated checks more dependable, so important flows are verified before changes reach customers. |
 | Migrated dashboards to DataGrid and fixed chip overflow | Rolled out DataGrid — a new table component that renders dense data faster and handles long tag lists cleanly — across several dashboards, so comparing records side by side is quicker and less cluttered. |
 | Added backend groundwork for embeddings and vector search | Started building the search plumbing that lets AI features find the most relevant documents by meaning, not just keywords (called embeddings and vector search). It is early, but it is the foundation for smarter chat, retrieval, and file-context features later this year. |
 
