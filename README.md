@@ -42,6 +42,7 @@ after installing SwiftBar (`brew install --cask swiftbar`).
 | [`peer-review`](skills/peer-review) | Review with Claude for Codex-authored changes, Codex otherwise |
 | [`pick-up`](skills/pick-up) | Resume open work from `IN_PROGRESS.md`, running plan docs, and recent harness plans, each open item put to the user as a Zen-format decision (no plan mode), then `/compact` before the work; offer to copy harness plans into the repo; `sweep` flags only evidence-backed done/tracked plan threads |
 | [`post-pr`](skills/post-pr) | Take a finished PR the rest of the way: review until clean, watch CI, queue for the next `#pr-review` window (the `pr-review-batch` flusher posts, badges, undrafts, enables auto-merge) |
+| [`release`](skills/release) | Release the `/post-pr` queue early: run the `pr-review-batch` flusher now on this Mac and the other one (via a Superset terminal); `all` or PR URLs also skip sibling and 4 PM deferral holds |
 | [`pr-review-gaps`](skills/pr-review-gaps) | Find sswt PRs never posted to `#pr-review`, with a hold-list for deliberately parked ones |
 | [`prod-query`](skills/prod-query) | Read-only production customer-tenant data questions via the api repo's audited `query:prod-readonly` script — CLI contract, RUM id → tenant mapping, safe query cookbook, PII rules |
 | [`rebase-after-squash`](skills/rebase-after-squash) | Resolve rebase-after-squash-merge conflicts cleanly |
