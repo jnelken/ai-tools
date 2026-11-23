@@ -91,7 +91,9 @@ If the monthly window has very little activity, say so plainly and keep the upda
 ## Attributing Claude-generated work
 
 Claude opens PRs under the `app/claude` author and authors commits as `Claude` /
-`claude[bot]`. That work is real and belongs to a human. Resolve the owner with this
+`claude[bot]`. Claudio (the Slack bot, see below) does the same under `app/claudio-in-slack`
+with `claudio/...` branches and commits as `Claudio` / `claudio-in-slack[bot]` (33 of October
+2026's 320 PRs). That work is real and belongs to a human. Resolve the owner with this
 cascade, stopping at the first rule that applies:
 
 1. **Branch prefix.** A branch starting with a person's handle is theirs —
@@ -124,38 +126,48 @@ not "Human commits landed" — the label would misdescribe what is being counted
 ## Claudio (AI teammate) section
 
 Claudio is the in-house Claude triage bot in Slack (`internal-tools/services/claudio-slack-bot`,
-live since 2026-09-14). It writes no PRs, so none of the commit or PR numbers above see its work.
-Include a short section for it whenever it was active in the month. The time-saved figure comes
-from a script so the number is computed the same way every month:
+live since 2026-09-14). Since October 2026 it also drafts fix PRs (see the attribution cascade);
+those are already inside the commit and PR numbers, attributed to the human who merged them, so
+the script's hours cover triage and handoffs only. Include a short section for it whenever it was
+active in the month. The time-saved figure comes from a script so the number is computed the same
+way every month:
 
 ```bash
-cd /Users/jake/code/internal-tools   # or any worktree with the branch from internal-tools#42
+cd /Users/jake/code/internal-tools/services/claudio-slack-bot
 SLACK_BOT_TOKEN="$(koyeb secrets reveal CLAUDIO_SLACK_BOT_TOKEN)" \
-  npm run impact:monthly -w claudio-slack-bot -- --month YYYY-MM \
+  pnpm run impact:monthly --month YYYY-MM \
   --dms <D…,D…> --cache /tmp/claudio-YYYY-MM.json
 ```
 
 - **DM ids:** the token can read DMs but not list them. Get the ids from Datadog
-  (`service:claudio-slack-bot @channel:D*`, grouped by `@channel`); September 2026 had only
-  `D0C1QHCKYMC`.
+  (`service:claudio-slack-bot @channel:D*`, grouped by `@channel`). Indexed logs only reach back
+  7–15 days, so a month-end run for a past month finds nothing: reuse the previous month's ids
+  (`D0C1QHCKYMC` was the only DM in September and the only one used for October) and say in the
+  terminal report that DMs opened since then are missing, so the figure is a floor.
 - **Duplicates need a hand check.** The script prints candidate threads. Open each one, and
   re-run with the confirmed roots in `--duplicates <ts,…>` (the cache makes re-runs free).
 - **Unit and rates** live in the script (`MINUTES` in `monthlyImpact.ts`): one unit per thread,
   not per message. Alert triage 15 min, bug/feedback triage 20, fix handoff 30 (added on top of
   its triage), question answered 10, sweep 10, repeat or duplicate linked 15. Rates were agreed
   2026-10 ("Moderate"). Change them in the script, not in the email, so months stay comparable.
-- **Shipped handoffs:** "at least N have shipped" counts distinct fixes whose PRs trace back to a
-  Claudio handoff thread. Check them by hand: open the handoff threads and match them to merged PRs.
+- **Shipped fixes:** count merged PRs authored by `app/claudio-in-slack`
+  (`gh pr list --search "merged:… author:app/claudio-in-slack"`), or for September, distinct fixes
+  whose PRs trace back to a Claudio handoff thread (check by hand). The candidate list flags
+  threads where Claudio only discusses duplicated work; a duplicate is a thread that re-files an
+  earlier ticket or alert, not one that merely mentions an overlapping PR.
 - **Baseline, September 2026** (Sep 14–30): 30 alerts, 12 bug reports, 8 handoffs, 7 questions,
   2 sweeps, 11 linked (7 repeat alerts plus 4 confirmed duplicates) → 19.8 h ≈ 2.5 dev-days.
   Earlier Slack-search estimates counted messages and roughly doubled this; don't compare
   against them.
+- **Baseline, October 2026:** 67 alerts, 34 bug reports, 22 handoffs, 23 questions, 5 sweeps,
+  29 linked (27 repeat alerts plus 2 confirmed duplicates) → 51.0 h ≈ 6.4 dev-days; 33 PRs merged.
 
 Copy rule: one paragraph (about 55–70 words, a little longer than `Behind The Scenes`). Say what
 Claudio is in one clause, give the headline counts and shipped handoffs with 1–2 PR links, then
 "We estimate that saved about H hours of engineering time, roughly D working days (at 10–30
 minutes per item)." Round hours to the nearest 5 and days to the nearest half. Claudio is not
-an MVP, and its numbers stay out of `Numbers`.
+an MVP, and its triage numbers stay out of `Numbers` (its PRs are counted there through the
+humans who merged them, so the paragraph may say "drafted N fixes" without double-counting).
 
 ## Writing rules
 
@@ -206,6 +218,8 @@ an MVP, and its numbers stay out of `Numbers`.
 
 ## Numbers
 
+![Commits landed and PRs merged per month, last 12 months](YYYY-MM-numbers.png)
+
 - **Active developers**: [N]
 - **Commits landed**: [N]
 - **PRs merged**: [N]
@@ -243,6 +257,20 @@ an MVP, and its numbers stay out of `Numbers`.
 - Name the project, not the category. A `Foundations` bullet titled **Percentage standardization** reads as a piece of work with a beginning and an end; one titled "Platform and data integrity" reads as routine maintenance and buries the thing that actually happened.
 - `Foundations` bullets follow the same writing rules as every other: name the system, then say in one plain clause what it means for someone using Folio. Never let it become a list of internal components. Good: `Some values were stored as "45" and others as "0.45", so the same figure could read differently depending on where you looked.` Bad: `Enforced the percentage decimal-fraction contract at extraction time.`
 - `Numbers` should show 4-6 simple headline metrics. Prefer counts and averages that can be explained quickly.
+- `Numbers` opens with a small 12-month trend chart (commits landed and PRs merged per month),
+  generated, not hand-drawn:
+
+  ```bash
+  python3 /Users/jake/code/ai-tools/skills/monthly-email-update/scripts/numbers-chart.py \
+    --month YYYY-MM --out-dir /Users/jake/code/folio-platform/docs/monthly-email-updates
+  ```
+
+  It writes `YYYY-MM-numbers.png` (and `.svg`) beside the draft and prints the monthly series as
+  JSON. Cross-check the last point against the draft's `Commits landed` and `PRs merged`; they
+  must match. It counts every month the same way (`gh` for PRs, no-merge commits on `origin/main`
+  with the calendar month as the window), so earlier published figures may differ: September
+  2026 was published as 692 commits and the chart shows 726. Mention any such mismatch in the
+  terminal report. Needs macOS Quick Look for the PNG; otherwise it leaves only the SVG.
 - `Reliability improvements` is a heuristic count of business-readable reliability clusters, not every tiny patch commit. Count across the **full** commit set including AI-authored work — that work skews toward small correctness fixes, so counting only human-authored commits undercounts it badly (8 vs 12 for August 2026).
 - `MVPs` should give each active developer one short, numeric stat they can credibly claim for the month. The stat does not need to use the same category for every person.
 - **Derive both the count and the named areas from the full attributed set**, AI-authored work included. It is easy to update the number and forget the areas, because the areas usually come from reading that person's own-authored commits — but AI-authored work often concentrates in *different* areas than a person's hand-written commits (in August 2026 it was mostly interface correctness and CI automation, which appeared nowhere in the hand-written totals). A stat whose number counts 131 PRs while its areas describe only 101 of them is wrong in the part a reader actually reads.
