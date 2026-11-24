@@ -2497,6 +2497,20 @@ class FollowupTest(unittest.TestCase):
         self.assertTrue(doc["findings"])  # deterministic findings remain
         self.assertNotIn(self.ANALYST_FINDING["title"], [f["title"] for f in doc["findings"]])
 
+    def test_analyst_falls_over_when_codex_fails_to_launch(self):
+        stamp = "20261013-103004"
+        (self.root / "runs" / stamp).mkdir(parents=True)
+        (self.root / "runs.jsonl").write_text(json.dumps(json.loads((FIXTURES / "runs-row.json").read_text())) + "\n")
+        (self.root / "stub-claude-analyst.txt").write_text(self.analyst_fence())
+        # Point Codex at a missing binary so run_analyst raises OSError; Claude should still answer.
+        p = self.run_followup(
+            "scan", "--stage", "tooling", "--origin", "batch-2026-10-13", "--stamp", stamp,
+            env={"ADVANCE_ROADMAP_FOLLOWUP_ANALYST": "1",
+                 "ADVANCE_ROADMAP_CODEX_BIN": str(self.root / "missing-codex-bin")})
+        doc = json.loads(p.stdout)
+        self.assertEqual(doc["analyst"], "claude: answered")
+        self.assertIn(self.ANALYST_FINDING["title"], [f["title"] for f in doc["findings"]])
+
     def test_analyst_rejects_non_string_evidence_source_without_raising(self):
         stamp = "20261013-103004"
         (self.root / "runs" / stamp).mkdir(parents=True)

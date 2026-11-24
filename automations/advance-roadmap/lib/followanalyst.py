@@ -148,8 +148,11 @@ def analyze(st, findings, files):
             transcript, answer, exit_code, provider_result = run_analyst(
                 st, provider, prompt, sandbox)
         except (OSError, subprocess.TimeoutExpired) as e:
-            st["analyst"] = f"failed: {e}"
-            return [], []
+            # Launch/timeout on one provider must not skip an available fallback.
+            errored.append(provider)
+            st.setdefault("analyst_errors", []).append(
+                {"provider": provider, "at": followrepair.now_iso(), "error": f"{type(e).__name__}: {e}"})
+            continue
         # Echoed banners in a successful final answer are not a live limit (shared live-limit rule).
         banner = usagelib.live_limit_banner(
             transcript, exit_code=exit_code, final_answer=answer, provider_result=provider_result)
@@ -163,12 +166,16 @@ def analyze(st, findings, files):
             continue
         break
     else:
-        if limited:
+        if limited and not errored:
             st["analyst"] = (
                 f"skipped: {' and '.join(limited)} hit "
                 f"{'their limits' if len(limited) > 1 else 'its limit'}")
         elif errored:
-            st["analyst"] = f"failed: {' and '.join(errored)} exited with error"
+            bits = []
+            if limited:
+                bits.append(f"{' and '.join(limited)} hit limit")
+            bits.append(f"{' and '.join(errored)} failed")
+            st["analyst"] = "failed: " + "; ".join(bits)
         else:
             st["analyst"] = "skipped: no analyst under its usage gate"
         return [], []
