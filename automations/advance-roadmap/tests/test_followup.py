@@ -1862,6 +1862,68 @@ class FollowupTest(unittest.TestCase):
         self.assertEqual(self.calls("review"), [])
         self.assertEqual(self.report()[-1]["kind"], "unknown-builder")
 
+    def test_builder_that_ships_is_self_merged_hard_stop(self):
+        self.shipped_item("20261014-050000")
+        self.run_followup("hook", "item-done", "--stamp", "20261014-050000")
+        self.set("stub-worker.json", {"mode": "ok", "outcome": "shipped"})
+        self.run_followup("drain", env=self.repair_env())
+        st = self.state("cleanup-20261014-050000")
+        self.assertEqual(st["status"], "blocked")
+        self.assertEqual(self.report()[-1]["kind"], "builder-self-merged")
+        self.assertEqual(self.calls("review"), [])
+        self.assertFalse(any(c["args"][:2] == ["pr", "merge"] for c in self.calls("gh")))
+
+    def test_skipped_deploy_check_is_not_success(self):
+        self.shipped_item("20261014-050000")
+        self.run_followup("hook", "item-done", "--stamp", "20261014-050000")
+        self.set("stub-gh.json", {
+            "checks": "pass", "deploy": "success",
+            "check_runs": [{"name": "Vercel", "status": "completed", "conclusion": "skipped"}],
+        })
+        self.run_followup("drain", env=self.repair_env(ADVANCE_ROADMAP_FOLLOWUP_DEPLOY_TIMEOUT_S="0.5"))
+        st = self.state("cleanup-20261014-050000")
+        self.assertNotEqual(st.get("validation", {}).get("deploy"), "success")
+        self.assertNotEqual(st["status"], "done")
+        self.assertTrue(st["findings"][0]["status"] in ("open", "deferred"))
+
+    def test_unreadable_pr_head_does_not_clear_reviewed_sha(self):
+        self.shipped_item("20261014-050000")
+        self.run_followup("hook", "item-done", "--stamp", "20261014-050000")
+        self.set("stub-gh.json", {"checks": "pass", "deploy": "success", "head_unreadable": True})
+        self.run_followup("drain", env=self.repair_env())
+        st = self.state("cleanup-20261014-050000")
+        self.assertEqual(st["status"], "pending")
+        self.assertIsNotNone(st.get("reviewed_sha"))
+        self.assertEqual(st["next"]["step"], "land")
+        self.assertEqual(len(self.calls("review")), 1)
+        self.set("stub-gh.json", {"checks": "pass", "deploy": "success"})
+        self.run_followup("drain", env=self.repair_env())
+        self.assertEqual(self.state("cleanup-20261014-050000")["status"], "done", self.report())
+        self.assertEqual(len(self.calls("review")), 1)  # no extra review round
+
+    def test_already_merged_pr_is_adopted_after_drain_dies(self):
+        self.shipped_item("20261014-050000")
+        self.run_followup("hook", "item-done", "--stamp", "20261014-050000")
+        # First pass: merge succeeds, then deploy fails so we stop with merged persisted.
+        self.set("stub-gh.json", {"checks": "pass", "deploy": "failure", "merge_commit": "head"})
+        self.run_followup("drain", env=self.repair_env())
+        st = self.state("cleanup-20261014-050000")
+        self.assertTrue(st.get("merged"))
+        self.assertTrue(st.get("merge_commit"))
+        # Simulate a kill that lost in-memory state but left disk: clear merged, keep sha gone,
+        # force merge to fail while PR is already MERGED.
+        st.pop("merged", None)
+        st.pop("merge_commit", None)
+        st["status"] = "pending"
+        st["next"] = {"step": "land", "round": 1}
+        (self.root / "followups" / st["key"] / "state.json").write_text(json.dumps(st))
+        self.set("stub-gh.json", {"checks": "pass", "deploy": "success", "merge_fails": True,
+                                  "pr_state": "MERGED", "merge_commit": "head"})
+        self.run_followup("drain", env=self.repair_env())
+        st = self.state("cleanup-20261014-050000")
+        self.assertEqual(st["status"], "done", self.report())
+        self.assertTrue(st.get("merged"))
+
 
 if __name__ == "__main__":
     unittest.main()

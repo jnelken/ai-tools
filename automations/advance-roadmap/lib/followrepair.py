@@ -73,6 +73,12 @@ def stage_dir(key):
     return STATE / key
 
 
+def persist_stage(st):
+    """Write stage state immediately (e.g. after merge) so a killed drain can resume."""
+    st["updated_at"] = now_iso()
+    write_json(stage_dir(st["key"]) / "state.json", st)
+
+
 # ── usage ────────────────────────────────────────────────────────────────────
 
 def usage(*args, timeout=180):
@@ -361,7 +367,7 @@ def run_builder(st, repo_dir, findings, rnd, chain, review_text):
         return "failed", (f"no builder CLI could run (missing: {missing})" if missing
                           else "worker.sh ran no provider and reported no usage gate or limit")
     if res.get("outcome") == "shipped" or res.get("merge_commit"):
-        return "failed", "the builder merged on its own; follow-up merges need the runner's clean review"
+        return "self-merged", "the builder merged on its own; follow-up merges need the runner's clean review"
     validation = res.get("validation") or {}
     v = st.setdefault("validation", {})
     v["builder"] = validation.get("status")
@@ -624,7 +630,14 @@ def deploy_state(slug, sha):
                 if r.get("status") != "completed":
                     states.append("pending")
                 else:
-                    states.append("success" if r.get("conclusion") in ("success", "neutral", "skipped") else "failure")
+                    # Skipped/neutral is not a verified deploy (fail-closed; README invariant).
+                    conc = r.get("conclusion")
+                    if conc == "success":
+                        states.append("success")
+                    elif conc in ("neutral", "skipped"):
+                        states.append("pending")
+                    else:
+                        states.append("failure")
     if not states:
         return None
     if "failure" in states:
@@ -672,23 +685,35 @@ def land(st, repo_dir, findings):
         if checks not in ("passed", "none"):
             return False, f"PR checks {checks} on {st['pr_url']}", checks in ("pending", "unreadable")
         head = gh("pr", "view", st["pr_url"], "--json", "headRefOid", "--jq", ".headRefOid")
-        head_sha = head.stdout.strip() if head.returncode == 0 else ""
+        if head.returncode != 0:
+            return False, f"could not read PR head for {st['pr_url']}: {(head.stderr or head.stdout).strip()[:200]}", True
+        head_sha = head.stdout.strip()
         if head_sha != reviewed:
             st["reviewed_sha"] = None
             st["next"] = {"step": "review", "round": (st.get("next") or {}).get("round", 1)}
-            return False, (f"PR head {head_sha[:9] or 'unreadable'} is not the reviewed commit {reviewed[:9]}; "
+            persist_stage(st)
+            return False, (f"PR head {head_sha[:9] or 'empty'} is not the reviewed commit {reviewed[:9]}; "
                            "re-reviewing before any merge"), True
         p = gh("pr", "merge", st["pr_url"], "--merge", "--match-head-commit", reviewed)
         if p.returncode != 0 and re.search(r"merge commits? (are|is) not allowed", p.stdout + p.stderr, re.I):
             p = gh("pr", "merge", st["pr_url"], "--squash", "--match-head-commit", reviewed)
         if p.returncode != 0:
-            return False, f"could not merge {st['pr_url']}: {(p.stderr or p.stdout).strip()[:300]}", False
-        st["merged"] = True
+            # Already merged (drain died after merge): adopt rather than block permanently.
+            state = gh("pr", "view", st["pr_url"], "--json", "state", "--jq", ".state")
+            if state.returncode == 0 and state.stdout.strip().upper() == "MERGED":
+                st["merged"] = True
+                persist_stage(st)
+            else:
+                return False, f"could not merge {st['pr_url']}: {(p.stderr or p.stdout).strip()[:300]}", False
+        else:
+            st["merged"] = True
+            persist_stage(st)
     if not st.get("merge_commit"):
         sha = gh("pr", "view", st["pr_url"], "--json", "mergeCommit", "--jq", ".mergeCommit.oid").stdout.strip()
         if not sha:
             return False, f"merged {st['pr_url']} but could not read its merge commit", True
         st["merge_commit"] = sha
+        persist_stage(st)
         sync_root_checkout(repo_dir)
     sha = st["merge_commit"]
     if v.get("deploy") not in ("success", "none"):

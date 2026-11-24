@@ -175,12 +175,21 @@ def gh(args):
         print("Some Check\tfail\t0\thttps://example.com", file=sys.stderr)
         sys.exit(1)
     if args[:2] == ["pr", "merge"]:
+        if g.get("merge_fails"):
+            print("already merged", file=sys.stderr)
+            sys.exit(1)
         want = opt(args, "--match-head-commit")
         if want and want != pr_head(g):
             print("GraphQL: Head branch was modified. Review and try the merge again.", file=sys.stderr)
             sys.exit(1)
         return
     if args[:2] == ["pr", "view"]:
+        if "state" in args:
+            print(g.get("pr_state", "OPEN"))
+            return
+        if g.get("head_unreadable") and "headRefOid" in args:
+            print("timed out", file=sys.stderr)
+            sys.exit(99)
         # "merge_commit": "head" stands the PR head in for the merge commit (a real, fetchable sha).
         merge = pr_head(g) if g.get("merge_commit") == "head" else "f" * 40
         print(pr_head(g) if "headRefOid" in args else merge)
@@ -193,10 +202,16 @@ def gh(args):
         print("HTTP 502: Bad Gateway", file=sys.stderr)
         sys.exit(1)
     if args[0] == "api" and args[1].endswith("/status"):
+        if g.get("check_runs") is not None:
+            print(json.dumps({"statuses": []}))
+            return
         state = {"success": "success", "failure": "failure"}.get(deploy)
         print(json.dumps({"statuses": [{"context": "Vercel", "state": state}] if state else []}))
         return
     if args[0] == "api":
+        if g.get("check_runs") is not None:
+            print(json.dumps({"check_runs": g["check_runs"]}))
+            return
         print(json.dumps({"check_runs": []}))
 
 

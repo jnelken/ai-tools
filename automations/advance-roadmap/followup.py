@@ -351,15 +351,45 @@ def quiescent(repo):
     return True, ""
 
 
+class RepoLock:
+    """Holds every lock file for a repo (primary + thread locks) or none."""
+
+    def __init__(self, claims):
+        self.claims = claims
+        self.ok = bool(claims)
+
+    def close(self):
+        for c in self.claims:
+            c.close()
+        self.claims = []
+        self.ok = False
+
+
 def take_repo_lock(repo):
-    """Exclusive non-blocking lock so repairs in one repo are serialized across drains."""
+    """Exclusive non-blocking lock on every repo-locks/<repo>[.tN].lock file.
+
+    Matches run.sh thread locks so a follow-up never races a concurrent batch thread.
+    """
     if not repo:
         return None
     try:
         require_id(repo, "repo")
     except ValueError:
         return None
-    return Claim(ROOT / "repo-locks" / f"{repo}.lock")
+    paths = repo_lock_files(repo)
+    # Ensure the primary lock path exists even when no thread locks do yet.
+    primary = ROOT / "repo-locks" / f"{repo}.lock"
+    if primary not in paths:
+        paths = [primary, *paths]
+    claims = []
+    for path in paths:
+        c = Claim(path)
+        if not c.ok:
+            for held in claims:
+                held.close()
+            return RepoLock([])
+        claims.append(c)
+    return RepoLock(claims)
 
 
 def child_complete(stamp, external=None):
@@ -383,7 +413,11 @@ def child_complete(stamp, external=None):
 
 
 def ready(st):
-    """No age bypass — wait until every child run and cleanup is terminal."""
+    """No age bypass — wait until every child run and cleanup is terminal.
+
+    When repair is enabled, also require the repo quiescent so a tooling stage
+    does not race a concurrent batch thread before take_repo_lock.
+    """
     if st["stage"] == STAGES["cleanup"]:
         return quiescent(st.get("repo"))
     children = st.get("children") or []
@@ -398,6 +432,8 @@ def ready(st):
             continue
         if other.get("status") in active:
             return False, f"{other['key']} has not finished"
+    if repair_enabled() and st.get("repo"):
+        return quiescent(st.get("repo"))
     return True, ""
 
 
@@ -1780,10 +1816,19 @@ def process(st, issues=None):
     todo = [f for f in fs if f.get("status") in ("open", "deferred")]
     open_n = sum(1 for f in fs if f.get("status") == "open")
     if repair_enabled() and (todo or awaits_repair(st)):
+        step = (st.get("next") or {}).get("step")
         if not todo and awaits_repair(st):
-            # Resuming land/review with findings already marked fixed mid-flight — rebuild todo
-            # from open/deferred only; land finishes whatever the stage still owns.
-            todo = [f for f in fs if f.get("status") in ("open", "deferred")] or list(fs)
+            # Resume mid-flight without re-owning another stage's duplicates.
+            owned = [f for f in fs if f.get("status") in ("open", "deferred")]
+            if owned:
+                todo = owned
+            elif step in ("land", "review"):
+                # Findings already fixed/duplicate; finish land/review without a builder brief.
+                todo = [f for f in fs if f.get("status") != "duplicate"] or list(fs)
+            else:
+                report(st, "repair-empty", "no owned open findings left to repair")
+                cas_status(st, RUNNING, DONE, next=None, reported_at=now_iso())
+                return
         repo_dir, why = safe_repo(st.get("repo"))
         if not repo_dir:
             block(st, "unsafe-repo", why, retry=False)
@@ -1842,8 +1887,11 @@ def repair(st, repo_dir, todo, issues=None):
                 return defer(st, todo, detail, f"builder round {rnd}", issues)
             if kind == "unknown":
                 return block(st, "unknown-usage", detail)
+            if kind == "self-merged":
+                # Merge owner is land(); a builder that shipped is a hard stop (never retry).
+                return block(st, "builder-self-merged", detail, retry=False)
             if kind != "ok":
-                return block(st, "builder", detail, retry="merged on its own" not in (detail or ""))
+                return block(st, "builder", detail, retry=True)
             nxt = {"step": "review", "round": rnd}
         elif step == "review":
             if st.get("builder_provider") not in followrepair.REVIEWERS:
