@@ -1,0 +1,294 @@
+#!/usr/bin/env python3
+"""Linear tickets for advance-roadmap follow-ups (followup.py): find, dedupe, defer, close.
+
+A follow-up ticket exists only for work a usage gate stopped: it carries the remaining findings,
+their evidence, the branch/PR, what was already validated, when the provider resets and the exact
+next step. Every one has exactly one repo/* label (created through jnelken-linear's jlin.py) and a
+fenced metadata block in its description — rewritten on every deferral, so it is authoritative —
+that later runs on any machine read back:
+
+    ```advance-roadmap-followup
+    {"workflow": "advance-roadmap-followup", "key": "...", "stage": "...", "finding_ids": [...],
+     "branch": "...", "pr_url": "...", "builder_provider": "...", ...}
+    ```
+
+Older tickets written before the block existed are matched by finding text instead, so fresh
+evidence goes onto them as a comment rather than a duplicate ticket. Linear is reached only through
+the personal `linear` CLI (workspace jnelken) — never MCP.
+"""
+import json
+import os
+import re
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+WORKFLOW = "advance-roadmap-followup"
+META_BLOCK = re.compile(r"```" + re.escape(WORKFLOW) + r"\s*\n(.*?)\n```", re.S)
+
+
+def _workspace():
+    return os.environ.get("ADVANCE_ROADMAP_LINEAR_WORKSPACE", "jnelken")
+
+
+def _linear_bin():
+    # Read each call so tests (and ADVANCE_ROADMAP_LINEAR_BIN wrappers) take effect after import.
+    return os.environ.get("ADVANCE_ROADMAP_LINEAR_BIN", "linear")
+PAGE = 100
+OPEN_ISSUES = """query($after: String, $first: Int!) {
+  issues(first: $first, after: $after, filter: {
+    team: { key: { eq: "DEV" } },
+    state: { type: { nin: ["completed", "canceled"] } }
+  }) {
+    pageInfo { hasNextPage endCursor }
+    nodes { id identifier title description url
+            state { name type }
+            labels { nodes { name parent { name } } } }
+  }
+}"""
+
+
+class LinearError(RuntimeError):
+    pass
+
+
+def linear(*args, timeout=120):
+    try:
+        p = subprocess.run([_linear_bin(), "--workspace", _workspace(), *args], capture_output=True,
+                           text=True, timeout=timeout, stdin=subprocess.DEVNULL)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        raise LinearError(f"linear {args[0]}: {e}") from e
+    if p.returncode != 0:
+        raise LinearError(f"linear {' '.join(args[:2])}: exit {p.returncode}: {(p.stderr or p.stdout).strip()[:300]}")
+    return p.stdout
+
+
+def gql(query, variables):
+    out = linear("api", query, "--variables-json", json.dumps(variables))
+    try:
+        data = json.loads(out)
+    except ValueError as e:
+        raise LinearError(f"linear api: unparseable output: {out[:200]}") from e
+    if data.get("errors"):
+        raise LinearError(f"linear api: {data['errors']}")
+    return data.get("data") or {}
+
+
+def fetch_open():
+    """Every open DEV issue, following the cursor until the last page (no silent cap)."""
+    issues, after = [], None
+    for _ in range(200):
+        page = (gql(OPEN_ISSUES, {"after": after, "first": PAGE}).get("issues") or {})
+        issues += page.get("nodes") or []
+        info = page.get("pageInfo") or {}
+        if not info.get("hasNextPage"):
+            return issues
+        after = info.get("endCursor")
+        if not after:
+            break
+    raise LinearError("linear api: pagination did not end")
+
+
+def parse_meta(description):
+    m = META_BLOCK.search(description or "")
+    if not m:
+        return None
+    try:
+        meta = json.loads(m.group(1))
+    except ValueError:
+        return None
+    return meta if isinstance(meta, dict) and meta.get("workflow") == WORKFLOW else None
+
+
+def repo_label(issue):
+    names = [l.get("name") for l in ((issue.get("labels") or {}).get("nodes") or [])
+             if (l.get("parent") or {}).get("name") == "repo"]
+    return names[0] if len(names) == 1 else None
+
+
+def norm(text):
+    return " ".join(re.sub(r"[^a-z0-9]+", " ", str(text).lower()).split())
+
+
+def followup_tickets(issues):
+    """Open tickets that carry the follow-up metadata block: [(issue, meta)]."""
+    return [(i, m) for i in issues if (m := parse_meta(i.get("description")))]
+
+
+def match(issues, finding):
+    """The open ticket already tracking this finding, or None: by finding id in a metadata block
+    first, else (older tickets with no block) by the finding's title text in the same repo.
+
+    Legacy title match requires the ticket's single repo/* label to equal the finding's repo —
+    never attach via an unlabeled issue or cross-repo prose.
+    """
+    want = finding.get("repo")
+    for issue in issues:
+        meta = parse_meta(issue.get("description"))
+        if not (meta and finding["id"] in (meta.get("finding_ids") or [])):
+            continue
+        # Metadata match still requires the same repo (meta.repo or the single repo/* label).
+        ticket_repo = meta.get("repo") or repo_label(issue)
+        if want and ticket_repo != want:
+            continue
+        return issue
+    title = norm(finding["title"])
+    if len(title) < 12:
+        return None
+    if not want:
+        return None
+    for issue in issues:
+        if parse_meta(issue.get("description")):
+            continue
+        if repo_label(issue) != want:
+            continue
+        if title in norm(f"{issue.get('title')} {issue.get('description')}"):
+            return issue
+    return None
+
+
+def render_findings(findings):
+    lines = []
+    for f in findings:
+        lines.append(f"- **{f['title']}** (`{f['id']}`, {f['kind']}) — fix: {f.get('fix') or 'see evidence'}")
+        for ev in f.get("evidence") or []:
+            lines.append(f"  - `{ev.get('source')}`: {ev.get('quote')}")
+    return "\n".join(lines)
+
+
+def owner_fields(owner):
+    """The subset of a finding_owners entry that recovery needs (key/branch/PR/builder)."""
+    if not isinstance(owner, dict):
+        return {}
+    return {k: owner.get(k) for k in ("key", "stage", "branch", "pr_url", "builder_provider")
+            if owner.get(k) is not None}
+
+
+def description(stage, findings, quota=None, next_step="", validation=None, finding_status=None,
+                finding_owners=None):
+    ids = [f["id"] for f in findings]
+    status = dict(finding_status or {})
+    for f in findings:
+        status.setdefault(f["id"], f.get("status") or "open")
+    owners = {fid: owner_fields(o) for fid, o in (finding_owners or {}).items() if owner_fields(o)}
+    remaining = [f for f in findings if status.get(f["id"]) != "fixed"]
+    # Ticket-level identity is the owner of remaining work — never a sibling stage that only
+    # finished other findings and whose merged PR must not be resumed. Deferrals omit
+    # finding_owners and keep this stage's branch/PR.
+    head = remaining[0] if remaining else (findings[0] if findings else None)
+    head_owner = owners.get(head["id"]) if head else None
+    if remaining and head_owner and head_owner.get("key"):
+        meta_key = head_owner["key"]
+        meta_stage = head_owner.get("stage") or stage["stage"]
+        meta_branch = head_owner.get("branch")
+        meta_pr = head_owner.get("pr_url")
+        meta_builder = head_owner.get("builder_provider")
+    elif remaining and finding_owners is not None:
+        # Partial-progress rewrite with no owner for the remainder: strip this stage's merged PR.
+        meta_key, meta_stage = stage["key"], stage["stage"]
+        meta_branch = meta_pr = meta_builder = None
+    else:
+        meta_key, meta_stage = stage["key"], stage["stage"]
+        meta_branch, meta_pr = stage.get("branch"), stage.get("pr_url")
+        meta_builder = stage.get("builder_provider")
+    meta = {"workflow": WORKFLOW, "key": meta_key, "stage": meta_stage, "repo": stage["repo"],
+            "origin": stage.get("origin"), "stamp": stage.get("stamp"), "item": stage.get("item"),
+            "finding_ids": ids, "finding_status": status,
+            "branch": meta_branch, "pr_url": meta_pr,
+            # Which provider built the branch: the reviewer on another machine must be a different one.
+            "builder_provider": meta_builder,
+            # When this block was written: a recovery trusts it over older local state.
+            "updated_at": stage.get("ticket_meta_at")}
+    if owners:
+        meta["finding_owners"] = owners
+    q = quota or {}
+    parts = [
+        f"advance-roadmap's {meta_stage} follow-up for "
+        + (f"`{stage.get('item')}` ({stage.get('stamp')})" if stage.get("item") else f"run `{stage.get('origin')}`")
+        + " found these and could not finish them: a provider usage gate stopped it.",
+        "## Remaining findings", render_findings(remaining) if remaining else "_(none — awaiting close)_",
+        "## State",
+        f"- Branch: `{meta_branch or 'not created yet'}`" + (f" · PR: {meta_pr}" if meta_pr else ""),
+        f"- Validation so far: {render_validation(validation or stage.get('validation'))}",
+        f"- Stopped on: {q.get('provider') or '?'} ({q.get('role') or '?'}) — {q.get('cause') or 'over its usage gate'}"
+        + (f"; resets {q['reset_at']}" if q.get("reset_at") else ""),
+        f"- Next step: {next_step}",
+        "Owned by `followup.py` (not the roadmap planner): it resumes this on its own once the provider resets, "
+        "and closes the ticket only after every tracked finding is verified fixed (checks, clean review, merge, "
+        "deploy).",
+        f"```{WORKFLOW}\n{json.dumps(meta)}\n```",
+    ]
+    return "\n\n".join(parts) + "\n"
+
+
+def render_validation(v):
+    if not v:
+        return "none yet"
+    bits = []
+    if v.get("builder"):
+        bits.append(f"builder verification {v['builder']}")
+    if v.get("reviews"):
+        bits.append("reviews " + ", ".join(f"r{r['round']} {r['verdict']}" for r in v["reviews"]))
+    if v.get("checks"):
+        bits.append(f"PR checks {v['checks']}")
+    if v.get("deploy"):
+        bits.append(f"deploy {v['deploy']}")
+    return "; ".join(bits) or "none yet"
+
+
+def title_for(stage, findings):
+    head = findings[0]["title"][:90]
+    more = f" (+{len(findings) - 1} more)" if len(findings) > 1 else ""
+    return f"Follow-up ({stage['stage']}): {head}{more}"
+
+
+def with_file(text, fn):
+    with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False, encoding="utf-8") as f:
+        f.write(text)
+        path = f.name
+    try:
+        return fn(path)
+    finally:
+        os.unlink(path)
+
+
+def jlin_path():
+    skill = Path(os.environ.get("ADVANCE_ROADMAP_SKILL_DIR", str(Path.home() / ".claude/skills/advance-roadmap")))
+    return Path(os.environ.get("ADVANCE_ROADMAP_JLIN", str(skill.parent / "jnelken-linear" / "jlin.py")))
+
+
+def create(stage, findings, quota, next_step):
+    """File one ticket for the stage's remaining findings, through jlin.py (exactly one repo label)."""
+    if not stage.get("repo"):
+        raise LinearError("stage has no repo; refusing ticket create")
+    body = description(stage, findings, quota, next_step)
+
+    def run(path):
+        try:
+            p = subprocess.run([sys.executable, str(jlin_path()), "new", "--repo", stage["repo"],
+                                "--title", title_for(stage, findings), "--description-file", path,
+                                "--state", "backlog"], capture_output=True, text=True, timeout=180,
+                               stdin=subprocess.DEVNULL)
+        except (OSError, subprocess.TimeoutExpired) as e:
+            raise LinearError(f"jlin.py new: {e}") from e
+        if p.returncode != 0:
+            raise LinearError(f"jlin.py new: exit {p.returncode}: {(p.stderr or p.stdout).strip()[:300]}")
+        m = re.search(r"\b(DEV-\d+)\b", p.stdout)
+        if not m:
+            raise LinearError(f"jlin.py new: no issue id in {p.stdout.strip()[:200]!r}")
+        return m.group(1)
+    return with_file(body, run)
+
+
+def comment(identifier, body):
+    with_file(body, lambda path: linear("issue", "comment", "add", identifier, "--body-file", path))
+
+
+def update_description(identifier, body):
+    """Rewrite the description, whose metadata block is the one recovery reads."""
+    with_file(body, lambda path: linear("issue", "update", identifier, "--description-file", path))
+
+
+def mark_done(identifier):
+    linear("issue", "update", identifier, "--state", "Done")

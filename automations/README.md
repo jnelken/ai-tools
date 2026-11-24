@@ -256,11 +256,16 @@ plus notes), written only through [`lib/runmemory.py`](advance-roadmap/lib/runme
 directory and rewrites atomically so concurrent runs can't lose each other's rows. `has-stamp` is what
 Step 0 uses to tell a finished run from a killed one.
 
-### Follow-ups (deterministic report-only — DEV-232 Phase B slice 2)
+### Follow-ups (report + Linear tickets — DEV-242 slice 3a)
 
 [`followup.py`](advance-roadmap/followup.py) reports what a finished run's records prove went wrong
 (deterministic recognition tests in [`lib/followscan.py`](advance-roadmap/lib/followscan.py); no
-model). It does **not** repair, open PRs, merge, install, or write Linear — those arrive in slice 3.
+model). Slice 3a adds Linear ticket **recovery, dedupe, deferral helpers and close** via
+[`lib/followticket.py`](advance-roadmap/lib/followticket.py) (CLI only, never MCP). New tickets are
+filed by `defer()` when repair hits a usage gate — that path lands with slice 3b; this slice parks
+open findings for repair without creating tickets on every scan. It does **not** repair, open PRs,
+merge, install, or run the analyst — those are slices 3b/3c. `ADVANCE_ROADMAP_FOLLOWUP_REPAIR=1` is
+reserved for 3b; until then recovered/parked ticket work stays ineligible.
 
 | Stage | Trigger | Corpus |
 | --- | --- | --- |
@@ -269,11 +274,15 @@ model). It does **not** repair, open PRs, merge, install, or write Linear — th
 
 Non-shipped outcomes are never cleanup triggers. Scans are pure reads of the original files
 (stamp-scoped validation for `runs.jsonl`). Tooling waits indefinitely; `status` shows age + reason.
+Repo identity on tickets is the `repo/*` label (or metadata.repo), never title/body prose. Deploy
+evidence for close is structured (`validation.deploy` in `{success, none}`); a skipped deploy is
+never treated as success.
 
 **Hooks.** `daily_batch.py` queues cleanup on ship, drains per repo once its threads stop, then
 queues/drains the batch tooling pass (isolated: raise/hang/kill cannot change batch outcomes).
 `run.sh` EXIT trap does the same for a lone chain. Conductor: see its SKILL.md. Idempotent hooks,
-kernel stage claims, interrupted `running` stages resume. `ADVANCE_ROADMAP_FOLLOWUPS=0` disables.
+kernel stage claims, interrupted `running` stages resume. `ADVANCE_ROADMAP_FOLLOWUPS=0` disables;
+`ADVANCE_ROADMAP_FOLLOWUP_LINEAR=0` disables Linear reads/writes.
 
 ```sh
 F=~/.claude/automations/advance-roadmap/followup.py

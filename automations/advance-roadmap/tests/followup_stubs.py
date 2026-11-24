@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Offline stand-ins for followup.py's report-only surface (test_followup.py).
+"""Offline stand-ins for followup.py's report + ticket surface (test_followup.py).
 
   followup_stubs.py usage ...     lib/usage.py: gates/gate/quota-record from $ROOT/stub-usage.json
+  followup_stubs.py linear ...    linear: paginated issues (and failing commands) from $ROOT/stub-linear.json
+  followup_stubs.py jlin ...      jlin.py new: files DEV-900
 
-Every call is appended to $ROOT/stub-calls.jsonl. Slice 3 will add worker/review/gh/linear and
-analyst stubs when the model pass returns.
+Every call is appended to $ROOT/stub-calls.jsonl. Slice 3b will add worker/review/gh and analyst stubs.
 """
 import json
 import os
@@ -69,5 +70,32 @@ def usage(args):
                           "providers": out}))
 
 
+def linear(args):
+    lin = cfg("stub-linear.json", {"pages": [[]]})
+    args = args[2:] if args[:1] == ["--workspace"] else args
+    if args[0] == "api":
+        after = json.loads(opt(args, "--variables-json")).get("after")
+        i = int(after or 0)
+        pages = lin["pages"]
+        note("linear", cmd="api", page=i)
+        print(json.dumps({"data": {"issues": {"nodes": pages[i], "pageInfo": {
+            "hasNextPage": i + 1 < len(pages), "endCursor": str(i + 1)}}}}))
+        return
+    body_file = opt(args, "--body-file") or opt(args, "--description-file")
+    body = Path(body_file).read_text() if body_file else None
+    failed = any(" ".join(args).startswith(prefix) for prefix in lin.get("fail") or [])
+    note("linear", cmd=" ".join(args[:3]), issue=args[3] if len(args) > 3 else None, body=body, args=args,
+         failed=failed)
+    if failed:   # "fail": ["issue update DEV-501"] → that command exits 1, like a transient API error
+        print("Error: request failed (503)", file=sys.stderr)
+        sys.exit(1)
+
+
+def jlin(args):
+    desc = Path(opt(args, "--description-file")).read_text()
+    note("jlin", repo=opt(args, "--repo"), title=opt(args, "--title"), state=opt(args, "--state"), description=desc)
+    print("Created DEV-900: https://linear.app/jnelken/issue/DEV-900")
+
+
 if __name__ == "__main__":
-    {"usage": usage}[sys.argv[1]](sys.argv[2:])
+    {"usage": usage, "linear": linear, "jlin": jlin}[sys.argv[1]](sys.argv[2:])
