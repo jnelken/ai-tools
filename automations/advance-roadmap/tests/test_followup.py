@@ -192,7 +192,7 @@ class FollowupTest(unittest.TestCase):
         lock = self.root / "repo-locks" / "demo.t2.lock"
         lock.parent.mkdir(parents=True)
         with open(lock, "a") as held:
-            fcntl.lockf(held, fcntl.LOCK_EX)
+            fcntl.flock(held, fcntl.LOCK_EX)  # same mechanism as Claim / run.sh zsystem flock
             out = self.run_followup("drain").stdout
         self.assertIn("demo.t2.lock is held", out)
         self.assertEqual(self.state("cleanup-20261014-050000")["status"], "waiting")
@@ -215,7 +215,7 @@ class FollowupTest(unittest.TestCase):
         lock = self.root / "repo-locks" / "demo.lock"
         lock.parent.mkdir(parents=True)
         with open(lock, "a") as held:
-            fcntl.lockf(held, fcntl.LOCK_EX)
+            fcntl.flock(held, fcntl.LOCK_EX)
             out = self.run_followup("drain", "--stage", "tooling").stdout
             self.assertIn("cleanup-s1 has not finished", out)
             self.assertEqual(self.state("tooling-batch-old")["status"], "waiting")
@@ -2156,6 +2156,37 @@ class FollowupTest(unittest.TestCase):
                 self.assertIn(f"demo.t{i}.lock", held)
         finally:
             lock.close()
+
+    def test_claim_flock_contends_with_zsystem_flock(self):
+        """Claim and run.sh must share flock(2) — a zsh holder blocks take_repo_lock."""
+        import followup as fu
+        os.environ["ADVANCE_ROADMAP_ROOT"] = str(self.root)
+        fu.ROOT = self.root
+        lock_path = self.root / "repo-locks" / "demo.lock"
+        lock_path.parent.mkdir(parents=True)
+        lock_path.touch()
+        # Hold with zsystem flock like run.sh, then Claim must fail.
+        holder = subprocess.Popen(
+            ["zsh", "-c",
+             f'zmodload zsh/system; exec {{FD}}<>{lock_path}; '
+             f'zsystem flock -e -f FD {lock_path}; sleep 30'],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        try:
+            deadline = time.time() + 5
+            while time.time() < deadline:
+                # Wait until the holder has the lock.
+                probe = fu.Claim(lock_path)
+                if not probe.ok:
+                    break
+                probe.close()
+                time.sleep(0.05)
+            else:
+                self.fail("zsh flock holder never acquired the lock")
+            lock = fu.take_repo_lock("demo")
+            self.assertTrue(lock is None or not lock.ok or not lock.claims)
+        finally:
+            holder.kill()
+            holder.wait(timeout=5)
 
     def test_eligible_reviewers_excludes_prior_builders(self):
         """Owner-policy table: eligible_reviewers never returns a prior builder."""

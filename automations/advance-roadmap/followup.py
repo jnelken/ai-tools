@@ -201,13 +201,16 @@ def new_stage(key, stage, repo, origin, **extra):
 
 
 class Claim:
-    """An exclusive, non-blocking kernel lock on one file; released when closed or the process dies."""
+    """An exclusive, non-blocking kernel lock on one file; released when closed or the process dies.
+
+    Uses flock(2) via fcntl.flock so it contends with run.sh's `zsystem flock` (same mechanism).
+    """
 
     def __init__(self, path):
         path.parent.mkdir(parents=True, exist_ok=True)
         self.fh = open(path, "a")
         try:
-            fcntl.lockf(self.fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            fcntl.flock(self.fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
             self.ok = True
         except OSError:
             self.ok = False
