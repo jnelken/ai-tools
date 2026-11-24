@@ -2522,9 +2522,28 @@ class FollowupTest(unittest.TestCase):
         (self.root / "stub-codex-fail").write_text("")
         (self.root / "stub-claude-analyst.txt").write_text("I found nothing worth reporting.\n")
         doc, titles = self.analyst_scan("stub-analyst.txt", answer=True)
-        self.assertTrue(doc["analyst"].startswith("failed:") or "no findings" in doc["analyst"]
-                        or doc["analyst"].startswith("claude:"), doc["analyst"])
+        # Codex exited non-zero (ignored its -o fence); Claude answered with no fence.
+        self.assertEqual(doc["analyst"], "claude: no findings block")
         self.assertNotIn(self.ANALYST_FINDING["title"], titles)
+
+    def test_drain_records_verified_analyst_finding(self):
+        """Non-dry-run path: analyst finding persists on the stage after drain."""
+        stamp = "20261013-103004"
+        run = self.root / "runs" / stamp
+        run.mkdir(parents=True)
+        (run / "orchestrator-result.json").write_text((FIXTURES / "orchestrator-result.json").read_text())
+        (run / "worker-result.json").write_text(json.dumps({
+            "outcome": "failed", "repo": "ai-tools", "summary": "x"}))
+        (self.root / "runs.jsonl").write_text(json.dumps(json.loads((FIXTURES / "runs-row.json").read_text())) + "\n")
+        (self.root / "stub-analyst.txt").write_text(self.analyst_fence())
+        self.run_followup("hook", "run-end", "--origin", "batch-analyst", "--stamp", stamp)
+        self.run_followup("drain", "--stage", "tooling", "--origin", "batch-analyst",
+                          env={"ADVANCE_ROADMAP_FOLLOWUP_ANALYST": "1",
+                               "ADVANCE_ROADMAP_FOLLOWUP_LINEAR": "0"})
+        st = self.state("tooling-batch-analyst")
+        self.assertEqual(st["analyst"], "codex: answered")
+        self.assertIn(self.ANALYST_FINDING["title"], [f["title"] for f in st["findings"]])
+        self.assertNotIn("_analyst_paste", st)
 
     def test_analyst_runs_inside_corpus_sandbox(self):
         stamp = "20261013-103004"

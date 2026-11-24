@@ -32,6 +32,14 @@ CORPUS_PROMPT_MAX_BYTES = int(os.environ.get("ADVANCE_ROADMAP_FOLLOWUP_ANALYST_C
 CODEX = os.environ.get("ADVANCE_ROADMAP_CODEX_BIN", "/opt/homebrew/bin/codex")
 CLAUDE = os.environ.get("ADVANCE_ROADMAP_CLAUDE_BIN", "/Users/jake/.local/bin/claude")
 PROVIDERS = ("codex", "claude")
+ALLOWED_KINDS = frozenset({
+    "wrong-knowledge", "misfiring-automation", "repeated-manual-work",
+    "fragile-tooling", "misleading-surface", "newly-dead-mechanisms", "analyst",
+})
+CLAUDE_DENY_TOOLS = (
+    "Read,Edit,Write,NotebookEdit,Bash,MultiEdit,Glob,Grep,"
+    "WebFetch,WebSearch,Task,Agent,SendMessage,ListMcpResources,ReadMcpResource"
+)
 
 
 def enabled():
@@ -170,9 +178,11 @@ def accept_findings(st, findings, files, doc, provider=None):
         title = raw.get("title")
         if not isinstance(title, str) or not title.strip():
             continue
-        kind = raw.get("kind") if isinstance(raw.get("kind"), str) and raw.get("kind") else "analyst"
-        key = raw.get("key") if isinstance(raw.get("key"), str) and raw.get("key") else title
-        fix = raw.get("fix") if isinstance(raw.get("fix"), str) else ""
+        # Free text is capped; kind is allowlisted; key is derived from verified evidence.
+        kind_raw = raw.get("kind") if isinstance(raw.get("kind"), str) else ""
+        kind = kind_raw if kind_raw in ALLOWED_KINDS else "analyst"
+        title = title.strip()[:200]
+        fix = (raw.get("fix") if isinstance(raw.get("fix"), str) else "")[:400]
         raw_ev = raw.get("evidence") or []
         # Every evidence entry must be a dict that verifies — drop the whole finding otherwise.
         if not isinstance(raw_ev, list) or not raw_ev or not all(isinstance(e, dict) for e in raw_ev):
@@ -208,6 +218,9 @@ def accept_findings(st, findings, files, doc, provider=None):
             rejected.append(followscan.non_finding(
                 title, "rejected: its evidence is not in the corpus", raw_ev))
             continue
+        # Key from first verified evidence — not model-supplied — so finding_id can't forge tickets.
+        first = ev_objs[0]
+        key = f"{Path(first['source']).name}:{first['quote'][:80]}"
         f = followscan.finding(st["stage"], st["repo"], kind, title, key, ev_objs, fix)
         if f["id"] not in known:
             kept.append(f)
@@ -253,11 +266,12 @@ def run_analyst(st, provider, prompt, sandbox):
             timeout=TOKENS_TIMEOUT_S, text=True)
         transcript = raw.read_text(errors="replace")
     else:
-        # No Read/Bash/Edit — answer only from the inlined corpus in the prompt.
+        # No built-in tools / MCP — answer only from the inlined corpus in the prompt.
         p = procrun.run(
             [CLAUDE, "-p", prompt, "--permission-mode", "plan",
-             "--allowedTools", "",
-             "--disallowedTools", "Read,Edit,Write,NotebookEdit,Bash,MultiEdit,Glob,Grep",
+             "--tools", "",
+             "--strict-mcp-config", "--mcp-config", "{}",
+             "--disallowedTools", CLAUDE_DENY_TOOLS,
              "--output-format", "json"],
             timeout=ANALYST_TIMEOUT_S, text=True, cwd=str(sandbox))
         raw_json = d / "analyst-claude.json"

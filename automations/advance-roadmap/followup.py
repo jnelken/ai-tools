@@ -1784,7 +1784,11 @@ def scan(st):
         cleanups = [s for s in all_stages() if s.get("stamp") in children]
         findings, quiet = followscan.tooling_scan(ROOT, children, cleanups, st.get("run_dirs"))
         files = followscan.corpus_files(ROOT, children, st.get("run_dirs"), stages=cleanups)
-    more, rejected = followanalyst.analyze(st, findings, files)
+    try:
+        more, rejected = followanalyst.analyze(st, findings, files)
+    except Exception as e:  # optional analyst must never abort deterministic findings
+        st["analyst"] = f"failed: {type(e).__name__}: {e}"
+        more, rejected = [], []
     st["findings"] = findings + more
     st["non_findings"] = quiet + rejected
     st["corpus"] = [str(p) for p in files]
