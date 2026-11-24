@@ -1036,9 +1036,15 @@ def cmd_pick_orchestrators(args: argparse.Namespace) -> None:
 
 
 def cmd_gate(args: argparse.Namespace) -> None:
-    """Refresh, then exit 0 when the provider may take this role now and GATED_EXIT when it is
-    over its gate or limited. Prints the gate as one JSON line (state, reason, reset)."""
-    gate = provider_gate(refresh(Path(args.root)), args.provider, args.role)
+    """Exit 0 when the provider may take this role now and GATED_EXIT when it is over its gate
+    or limited. Prints the gate as one JSON line (state, reason, reset).
+
+    Default refreshes probes then saves. --readonly loads the saved file only (no refresh/save) —
+    used by follow-up dry-run scans so `followup.py scan` does not mutate shared usage state.
+    """
+    root = Path(args.root)
+    state = load(root) if getattr(args, "readonly", False) else refresh(root)
+    gate = provider_gate(state, args.provider, args.role)
     print(json.dumps({"provider": args.provider, "role": args.role, **gate,
                       "reset_at": epoch_to_iso(gate.get("reset_epoch"))}))
     sys.exit(0 if gate["available"] else GATED_EXIT)
@@ -1271,6 +1277,8 @@ def main() -> None:
     p = sub.add_parser("gate")
     p.add_argument("--role", required=True, choices=sorted(ROLE_PROVIDERS))
     p.add_argument("--provider", required=True, choices=["claude", "codex", "cursor"])
+    p.add_argument("--readonly", action="store_true",
+                   help="load saved usage only; do not refresh probes or save")
     p.set_defaults(func=cmd_gate)
 
     p = sub.add_parser("gates")

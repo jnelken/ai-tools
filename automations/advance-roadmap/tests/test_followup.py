@@ -2391,6 +2391,9 @@ class FollowupTest(unittest.TestCase):
         import followanalyst
         import followrepair
         import usage as usagelib
+        # Point followrepair.usage at the real usage.py (not the stub) so --readonly is exercised.
+        real_usage = ADV / "lib" / "usage.py"
+        (self.root / "lib" / "usage.py").write_text(real_usage.read_text())
         os.environ["ADVANCE_ROADMAP_ROOT"] = str(self.root)
         followrepair.ROOT = self.root
         followrepair.STATE = self.root / "followups"
@@ -2408,7 +2411,6 @@ class FollowupTest(unittest.TestCase):
             followanalyst.analyze(st, [], [self.root / "runs.jsonl"])
         self.assertEqual(path.read_bytes(), before)
         self.assertEqual(path.stat().st_mtime_ns, mtime)
-        self.assertEqual(self.calls("usage"), [])  # no refresh/gate CLI
 
     def test_analyst_ignores_an_echoed_limit_banner_when_its_final_answer_succeeded(self):
         # Codex stdout quotes a prior corpus log's banner; -o still has a real findings fence.

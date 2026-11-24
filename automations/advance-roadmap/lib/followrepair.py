@@ -100,9 +100,13 @@ def gates(role):
     return g if isinstance(g, list) and g else None
 
 
-def gate_one(role, provider):
+def gate_one(role, provider, *, readonly=False):
+    """usage.py gate for one provider. readonly=True loads saved state without refresh/save."""
     try:
-        rc, out = usage("gate", "--role", role, "--provider", provider)
+        args = ["gate", "--role", role, "--provider", provider]
+        if readonly:
+            args.append("--readonly")
+        rc, out = usage(*args)
         if rc not in (0, 3):
             return None
         return {**json.loads(out), "available": rc == 0}
