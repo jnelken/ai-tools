@@ -765,25 +765,33 @@ def ticket_description_payload(st, findings, ident, issues=None, finding_status=
             break
     if meta is None and st.get("ticket_body"):
         meta = followticket.parse_meta(st.get("ticket_body") or "")
+    already_on_ticket = set()
     if meta:
         prior_status = dict(meta.get("finding_status") or {})
         prior_owners = meta.get("finding_owners") or {}
-        for fid in list(meta.get("finding_ids") or []) + list(prior_status):
+        ticket_key = meta.get("key")
+        already_on_ticket = set(meta.get("finding_ids") or []) | set(prior_status)
+        for fid in already_on_ticket:
             status.setdefault(fid, prior_status.get(fid, "open"))
             if fid not in by_id:
                 by_id[fid] = {"id": fid, "title": fid, "kind": "ticket", "fix": f"see {ident}",
                               "status": status.get(fid, "open"), "ticket": ident, "evidence": []}
             if fid not in owners and isinstance(prior_owners.get(fid), dict):
                 owners[fid] = followticket.owner_fields(prior_owners[fid])
+            elif fid not in owners and ticket_key:
+                # Metadata named another stage as ticket key — preserve it over this stage.
+                owners[fid] = {"key": ticket_key, "stage": meta.get("stage"),
+                               "branch": meta.get("branch"), "pr_url": meta.get("pr_url"),
+                               "builder_provider": meta.get("builder_provider")}
     for f in by_id.values():
         status.setdefault(f["id"], f.get("status") or "open")
     for f in findings:
         fid = f.get("id")
         if not fid:
             continue
-        # Duplicates stay under the ticket's existing owner — never steal for this stage.
-        if f.get("status") == "duplicate" or f.get("duplicate_of"):
-            status.setdefault(fid, f.get("status") or "open")
+        # Duplicates / IDs already on the ticket stay under the ticket's existing owner.
+        if f.get("status") == "duplicate" or f.get("duplicate_of") or fid in already_on_ticket:
+            status.setdefault(fid, f.get("status") or status.get(fid) or "open")
             continue
         owners.setdefault(fid, stage_owner_snapshot(st))
         status[fid] = f.get("status") or status.get(fid) or "open"
@@ -794,12 +802,14 @@ def rewrite_ticket_description(st, ident, findings, quota=None, next_step="", va
                                finding_status=None, finding_owners=None, issues=None):
     """Invariant owner for every Linear description rewrite (dedupe, deferral, partial progress).
 
-    Under the tickets lock: fetch current open issues, merge, write. Callers may pass a drain
-    snapshot to keep updated after the write; the merge always uses a fresh fetch so a concurrent
-    run cannot erase a finding ID added after the drain started. create() does not go through here.
+    Under the tickets lock: fetch current open issues, require the target ticket in that fetch,
+    merge, write. Raises LinearError if the ticket is missing (caller retains pending work).
     """
     with TicketIndex():
         live = followticket.fetch_open()
+        if not any(i.get("identifier") == ident for i in live):
+            raise followticket.LinearError(
+                f"{ident} not in open issues; refusing description rewrite")
         merged, status, owners = ticket_description_payload(
             st, findings, ident, issues=live, finding_status=finding_status,
             finding_owners=finding_owners)
@@ -934,16 +944,21 @@ def stage_repair_verified(ost):
     return v.get("deploy") in DEPLOY_OK
 
 
-def finding_verified_fixed(fid, current=None):
-    """A finding is fixed only after some stage verified its repair end-to-end."""
+def finding_verified_fixed(fid, current=None, owner_key=None):
+    """A finding is fixed only after its owner (or the completing stage) verified repair end-to-end."""
+    allowed = {k for k in (owner_key, (current or {}).get("key")) if k}
     seen = set()
     for ost in ([current] if current else []) + all_stages():
         key = ost.get("key")
         if key in seen:
             continue
         seen.add(key)
+        if allowed and key not in allowed:
+            continue
+        if not stage_repair_verified(ost):
+            continue
         for f in ost.get("findings") or []:
-            if f.get("id") == fid and f.get("status") == "fixed" and stage_repair_verified(ost):
+            if f.get("id") == fid and f.get("status") == "fixed":
                 return True
     return False
 
@@ -1135,6 +1150,7 @@ def ticket_close_verdict(ident, current=None, issues=None):
 
     Every path that calls mark_done (finish → close_tickets, drain → retry_closes → close_tickets)
     must go through this. 'unread' means Linear metadata could not be read — retain pending_close.
+    Each finding must be verified fixed by its recorded owner stage (or the completing stage).
     """
     ok, meta_ids = load_ticket_meta_ids(ident, issues)
     if not ok:
@@ -1142,9 +1158,17 @@ def ticket_close_verdict(ident, current=None, issues=None):
     tracked = ticket_tracked_ids(ident, current=current, extras=meta_ids)
     if not tracked:
         return "incomplete"
-    if all(finding_verified_fixed(fid, current=current) for fid in tracked):
-        return "ready"
-    return "incomplete"
+    owners = {}
+    for issue in issues or []:
+        if issue.get("identifier") == ident:
+            meta = followticket.parse_meta(issue.get("description") or "") or {}
+            owners = meta.get("finding_owners") or {}
+            break
+    for fid in tracked:
+        owner_key = (owners.get(fid) or {}).get("key") if isinstance(owners.get(fid), dict) else None
+        if not finding_verified_fixed(fid, current=current, owner_key=owner_key):
+            return "incomplete"
+    return "ready"
 
 
 def ticket_ready_to_close(ident, current=None, issues=None):
