@@ -2363,13 +2363,27 @@ class FollowupTest(unittest.TestCase):
         self.assertNotIn(self.ANALYST_FINDING["title"], titles)
 
     def test_a_limited_analyst_saves_its_limit_first_then_fails_over(self):
+        # Dry-run scan: parse-limit + stage-local hit only (no shared usage record-limit).
         (self.root / "stub-codex-limit").write_text("")
         self.set("stub-usage.json", {"record_limit_fails": True})
         doc, titles = self.analyst_scan("stub-claude-analyst.txt", answer=True)
         self.assertEqual(doc["analyst"], "claude: answered")
         self.assertIn(self.ANALYST_FINDING["title"], titles)
-        cmds = [c.get("cmd") or c["tool"] for c in self.calls() if c["tool"] in ("usage", "usage-record-limit")]
-        self.assertLess(cmds.index("parse-limit"), cmds.index("usage-record-limit"))
+        cmds = [c.get("cmd") for c in self.calls("usage")]
+        self.assertIn("parse-limit", cmds)
+        self.assertEqual(self.calls("usage-record-limit"), [])
+
+    def test_drain_analyst_limit_records_shared_usage(self):
+        # Non-dry-run path still gates the provider for everyone else.
+        import followanalyst
+        import followrepair
+        os.environ["ADVANCE_ROADMAP_ROOT"] = str(self.root)
+        followrepair.ROOT = self.root
+        followrepair.STATE = self.root / "followups"
+        (self.root / "lib").mkdir(exist_ok=True)
+        st = {"key": "cleanup-limit", "dry_run": False}
+        (self.root / "followups" / st["key"]).mkdir(parents=True)
+        followanalyst.record_analyst_limit(st, "codex", "You've hit your usage limit.")
         self.assertEqual([(c["provider"], c["scope"]) for c in self.calls("usage-record-limit")],
                          [("codex", "analyst")])
 

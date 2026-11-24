@@ -356,7 +356,11 @@ def run_analyst(st, provider, prompt, sandbox):
 
 
 def record_analyst_limit(st, provider, text):
-    """Keep the hit in the stage first, then gate the provider for everyone else."""
+    """Keep the hit in the stage first, then gate the provider for everyone else.
+
+    Dry-run scans (st['dry_run']) keep the hit stage-local only — never write the shared
+    usage limit store, so `followup.py scan` stays non-mutating outside its temp dir.
+    """
     try:
         rc, out = followrepair.usage(
             "parse-limit", "--provider", provider, "--text", text, "--scope", "analyst")
@@ -367,6 +371,8 @@ def record_analyst_limit(st, provider, text):
         hit = {"provider": provider, "exact_cli_text": text}
     st.setdefault("limits", []).append({"role": "analyst", "at": followrepair.now_iso(), **hit})
     followrepair.write_json(followrepair.stage_dir(st["key"]) / f"analyst-limit-{provider}.json", hit)
+    if st.get("dry_run"):
+        return
     try:
         followrepair.usage(
             "record-limit", "--provider", provider, "--text", text, "--scope", "analyst")
