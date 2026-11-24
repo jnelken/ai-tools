@@ -37,9 +37,17 @@ DEPLOY_TIMEOUT_S = float(os.environ.get("ADVANCE_ROADMAP_FOLLOWUP_DEPLOY_TIMEOUT
 DEPLOY_NONE_AFTER_S = float(os.environ.get("ADVANCE_ROADMAP_FOLLOWUP_DEPLOY_NONE_S", "180"))
 GH = os.environ.get("ADVANCE_ROADMAP_GH_BIN", "gh")
 AI_TOOLS_HOME = Path(os.environ.get("AI_TOOLS_HOME", str(Path.home() / ".ai-tools")))
-# review.sh's reviewer order for each builder; the builder may start only if one of these is free.
-REVIEWERS = {"cursor": ("codex", "claude"), "codex": ("cursor", "claude"), "claude": ("codex", "cursor")}
+# Must match review.sh cross_provider_reviewers (Cursor is disabled for roadmap reviews).
+# Owner of "who may review whom": this map — feasibility() is the only gate that starts a builder.
+REVIEWERS = {"cursor": ("codex", "claude"), "codex": ("claude",), "claude": ("codex",)}
 OUT = ("over", "limited")
+# Batch-budget / incremental vars inherited from a parent run.sh must not reach the child.
+CHILD_ENV_DROP = (
+    "ADVANCE_ROADMAP_LANE", "ADVANCE_ROADMAP_BATCH_PID", "ADVANCE_ROADMAP_THREAD",
+    "SUPERSET_WORKSPACE_PATH", "SUPERSET_TERMINAL_ID",
+    "ADVANCE_ROADMAP_BUDGET_REVIEWERS", "ADVANCE_ROADMAP_BUDGET_REVIEW_STRATEGY",
+    "ADVANCE_ROADMAP_BUDGET_REVIEW_FALLBACK_REASON", "ADVANCE_ROADMAP_INCREMENTAL_PHASE",
+)
 
 
 def now_iso():
@@ -309,9 +317,9 @@ def builder_request(st, findings, rnd, review_text, branch, resume):
 def child_env(st, extra=None):
     env = {**os.environ, FOLLOWUP_ENV: "1", "ADVANCE_ROADMAP_TARGET_REPO": st["repo"],
            "PERSONAL_CODE_DIR": shared.code_dir() or ""}
-    # A drain started from a Superset terminal must never point its builder at that terminal's workspace.
-    for k in ("ADVANCE_ROADMAP_LANE", "ADVANCE_ROADMAP_BATCH_PID", "ADVANCE_ROADMAP_THREAD",
-              "SUPERSET_WORKSPACE_PATH", "SUPERSET_TERMINAL_ID"):
+    # Drop parent-batch / Superset terminal context so the child is not budget-gated or
+    # pointed at the drain's own workspace.
+    for k in CHILD_ENV_DROP:
         env.pop(k, None)
     env.update(extra or {})
     return env
@@ -563,11 +571,12 @@ def gh(*args, timeout=120):
     try:
         return subprocess.run([GH, *args], capture_output=True, text=True, timeout=timeout, stdin=subprocess.DEVNULL)
     except (OSError, subprocess.TimeoutExpired) as e:
-        return subprocess.CompletedProcess([GH, *args], 1, "", str(e))
+        # Distinct from a real gh exit 1: land must treat invocation errors as retryable.
+        return subprocess.CompletedProcess([GH, *args], 99, "", str(e))
 
 
 def pr_checks(url):
-    """passed | none | failed | pending (still running after the timeout)."""
+    """passed | none | failed | pending | unreadable (gh invocation error; retryable)."""
     deadline = time.time() + CHECKS_TIMEOUT_S
     while True:
         p = gh("pr", "checks", url)
@@ -576,7 +585,15 @@ def pr_checks(url):
             return "none"
         if p.returncode == 0:
             return "passed"
+        if p.returncode == 99:
+            return "unreadable"
         if p.returncode != 8:
+            # Invocation errors (timeout / OSError via gh()) are retryable; a real
+            # `gh pr checks` failure still exits 1 but usually with check lines.
+            err = (p.stderr or "").lower()
+            if p.returncode == 1 and not (p.stdout or "").strip() and (
+                    "timed out" in err or "timeout" in err or "errno" in err):
+                return "unreadable"
             return "failed"
         if time.time() >= deadline:
             return "pending"
@@ -653,7 +670,7 @@ def land(st, repo_dir, findings):
         checks = pr_checks(st["pr_url"])
         v["checks"] = checks
         if checks not in ("passed", "none"):
-            return False, f"PR checks {checks} on {st['pr_url']}", checks == "pending"
+            return False, f"PR checks {checks} on {st['pr_url']}", checks in ("pending", "unreadable")
         head = gh("pr", "view", st["pr_url"], "--json", "headRefOid", "--jq", ".headRefOid")
         head_sha = head.stdout.strip() if head.returncode == 0 else ""
         if head_sha != reviewed:

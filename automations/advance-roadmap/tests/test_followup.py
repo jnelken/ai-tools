@@ -1626,16 +1626,62 @@ class FollowupTest(unittest.TestCase):
         self.assertEqual(len(self.calls("jlin")), 1)
 
     def test_a_builder_with_no_free_reviewer_is_not_started(self):
+        """feasibility must match review.sh: cursor is never a reviewer (REVIEWERS owner)."""
         self.shipped_item("20261014-050000")
         self.run_followup("hook", "item-done", "--stamp", "20261014-050000")
+        # Only cursor is free as a "reviewer"; review.sh would never pick it for any builder.
         self.set("stub-usage.json", {"reviewer": {"codex": "over", "claude": "limited", "cursor": "ok"},
                                      "reset_at": "2026-10-14T13:00:00", "reset_epoch": time.time() + 600})
         self.set("stub-worker.json", {"mode": "ok"})
         self.run_followup("drain", env=self.repair_env())
         st = self.state("cleanup-20261014-050000")
-        [w] = self.calls("worker")
-        self.assertEqual(w["providers"], "codex claude")
-        self.assertEqual(st["status"], "done")
+        self.assertEqual(self.calls("worker"), [])
+        self.assertEqual(st["status"], "deferred")
+        self.assertTrue(st.get("quota"))
+
+    def test_codex_builder_not_started_when_only_cursor_reviewer_is_free(self):
+        self.shipped_item("20261014-050000")
+        self.run_followup("hook", "item-done", "--stamp", "20261014-050000")
+        # Workers: only codex free. Reviewers: only cursor free — review.sh reviews codex with claude only.
+        self.set("stub-usage.json", {
+            "worker": {"codex": "ok", "cursor": "over", "claude": "over"},
+            "reviewer": {"cursor": "ok", "codex": "over", "claude": "over"},
+            "reset_at": "2026-10-14T13:00:00", "reset_epoch": time.time() + 600})
+        self.run_followup("drain", env=self.repair_env())
+        st = self.state("cleanup-20261014-050000")
+        self.assertEqual(self.calls("worker"), [])
+        self.assertEqual(st["status"], "deferred")
+
+    def test_child_env_strips_batch_budget_vars_from_launcher(self):
+        self.shipped_item("20261014-050000")
+        self.run_followup("hook", "item-done", "--stamp", "20261014-050000")
+        env = self.repair_env(
+            ADVANCE_ROADMAP_BUDGET_REVIEWERS="codex",
+            ADVANCE_ROADMAP_BUDGET_REVIEW_STRATEGY="cross-provider",
+            ADVANCE_ROADMAP_BUDGET_REVIEW_FALLBACK_REASON="x",
+            ADVANCE_ROADMAP_INCREMENTAL_PHASE="reviewing",
+        )
+        self.run_followup("drain", env=env)
+        st = self.state("cleanup-20261014-050000")
+        self.assertEqual(st["status"], "done", self.report())
+        [launcher] = (self.root / "followups" / st["key"]).glob("build-*/worker-launch.zsh")
+        text = launcher.read_text()
+        for bad in ("ADVANCE_ROADMAP_BUDGET_REVIEWERS", "ADVANCE_ROADMAP_BUDGET_REVIEW_STRATEGY",
+                    "ADVANCE_ROADMAP_BUDGET_REVIEW_FALLBACK_REASON", "ADVANCE_ROADMAP_INCREMENTAL_PHASE"):
+            self.assertNotIn(bad, text)
+
+    def test_unreadable_pr_checks_are_retryable_not_blocked(self):
+        self.shipped_item("20261014-050000")
+        self.run_followup("hook", "item-done", "--stamp", "20261014-050000")
+        self.set("stub-gh.json", {"checks": "unreadable", "deploy": "success"})
+        self.run_followup("drain", env=self.repair_env())
+        st = self.state("cleanup-20261014-050000")
+        self.assertEqual(st["status"], "pending", self.report())
+        self.assertEqual(st["validation"]["checks"], "unreadable")
+        self.assertFalse(any(c["args"][:2] == ["pr", "merge"] for c in self.calls("gh")))
+        self.set("stub-gh.json", {"checks": "pass", "deploy": "success"})
+        self.run_followup("drain", env=self.repair_env())
+        self.assertEqual(self.state("cleanup-20261014-050000")["status"], "done", self.report())
 
     def test_an_unavailable_review_is_not_quota_when_only_the_builder_is_out(self):
         self.shipped_item("20261014-050000")

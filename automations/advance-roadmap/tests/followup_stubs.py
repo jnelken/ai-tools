@@ -166,7 +166,14 @@ def gh(args):
         if g["checks"] == "none":
             print("no checks reported on the 'x' branch")
             sys.exit(1)
-        sys.exit(0 if g["checks"] == "pass" else 1)
+        if g["checks"] == "unreadable":
+            # Mimic followrepair.gh OSError/timeout → returncode 99.
+            print("timed out", file=sys.stderr)
+            sys.exit(99)
+        if g["checks"] == "pass":
+            sys.exit(0)
+        print("Some Check\tfail\t0\thttps://example.com", file=sys.stderr)
+        sys.exit(1)
     if args[:2] == ["pr", "merge"]:
         want = opt(args, "--match-head-commit")
         if want and want != pr_head(g):
