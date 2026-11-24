@@ -770,7 +770,8 @@ def dedupe(st, issues):
     posted = set(st.setdefault("evidence_posted", []))
     commented = set(st.setdefault("evidence_commented", []))
     for f in st["findings"]:
-        if f.get("status") not in ("open", "deferred"):
+        # Include duplicate: ownership may flip before evidence lands; retries must still finish.
+        if f.get("status") not in ("open", "deferred", "duplicate"):
             continue
         issue = f.get("ticket") and next((i for i in issues if i.get("identifier") == f["ticket"]), None) \
             or followticket.match(issues, f)
@@ -1007,13 +1008,17 @@ def retry_deferral_syncs():
 
 
 def evidence_sync_pending(st):
-    """True when an evidence comment and/or description rewrite is still unfinished."""
+    """True when an evidence comment and/or description rewrite is still unfinished.
+
+    Duplicates count: dedupe may flip status to duplicate before the comment lands, and a
+    retry must still finish that evidence even though repair is owned elsewhere.
+    """
     posted = set(st.get("evidence_posted") or [])
     commented = set(st.get("evidence_commented") or [])
     if commented - posted:
         return True
     for f in st.get("findings") or []:
-        if f.get("status") not in ("open", "deferred"):
+        if f.get("status") not in ("open", "deferred", "duplicate"):
             continue
         ident = f.get("ticket")
         if not ident or ident == st.get("recovered_from"):

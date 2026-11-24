@@ -1047,6 +1047,46 @@ class FollowupTest(unittest.TestCase):
         self.assertFalse(st.get("pending_ticket_sync"))
         self.assertEqual(st["findings"][0].get("ticket"), "DEV-777")
 
+    def test_duplicate_evidence_comment_failure_is_retried(self):
+        """Marking duplicate before a failed comment must still leave pending evidence to retry."""
+        import followup as fu
+        fu.ROOT = self.root
+        fu.STATE = self.root / "followups"
+        os.environ["ADVANCE_ROADMAP_ROOT"] = str(self.root)
+        os.environ["ADVANCE_ROADMAP_LINEAR_BIN"] = self.env["ADVANCE_ROADMAP_LINEAR_BIN"]
+        key_mine, key_other = "cleanup-dup-mine", "cleanup-dup-other"
+        fid = "aaaaaaaaaaaa"
+        title = "reject an empty listing before saving the catalog"
+        for key, status in ((key_other, "running"), (key_mine, "running")):
+            d = self.root / "followups" / key
+            d.mkdir(parents=True)
+            findings = [{"id": fid, "title": title, "kind": "t", "fix": "f", "status": "open",
+                         "repo": "demo", "evidence": [{"source": "t", "quote": title}]}]
+            (d / "state.json").write_text(json.dumps({
+                "key": key, "stage": "project-cleanup", "repo": "demo", "status": status,
+                "findings": findings, "evidence_posted": [], "evidence_commented": [],
+                "blockers": [],
+            }))
+        ticket = self.meta_ticket("DEV-777", {
+            "key": key_other, "stage": "project-cleanup", "finding_ids": [fid],
+            "finding_owners": {fid: {"key": key_other}},
+        })
+        self.set("stub-linear.json", {"pages": [[ticket]], "fail": ["issue comment add DEV-777"]})
+        st = fu.load(key_mine)
+        fu.dedupe(st, [ticket])
+        self.assertEqual(st["findings"][0]["status"], "duplicate")
+        self.assertTrue(st.get("pending_evidence_sync"), st)
+        tag = f"DEV-777:{fid}:{key_mine}"
+        self.assertNotIn(tag, st.get("evidence_posted") or [])
+        (self.root / "stub-calls.jsonl").unlink(missing_ok=True)
+        self.set("stub-linear.json", {"pages": [[ticket]]})
+        fu.dedupe(st, [ticket])
+        comments = [c for c in self.calls("linear") if str(c.get("cmd", "")).startswith("issue comment")
+                    and c.get("issue") == "DEV-777"]
+        self.assertTrue(comments)
+        self.assertIn(tag, st.get("evidence_posted") or [])
+        self.assertFalse(st.get("pending_evidence_sync"))
+
 
 if __name__ == "__main__":
     unittest.main()
