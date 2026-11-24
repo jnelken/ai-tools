@@ -834,10 +834,9 @@ def dedupe(st, issues):
         owner = (owned or {}).get("key") or meta.get("key")
         other = owner and owner != st["key"] and load(owner)
         if owner and owner != st["key"]:
-            # Honor the ticket's recorded owner even when that stage is absent on this machine —
-            # recovery rebuilds it; this stage must not schedule a second repair.
-            if not other or other.get("status") not in (DONE, BLOCKED, "skipped"):
-                f.update(status="duplicate", duplicate_of=owner)
+            f.update(status="duplicate", duplicate_of=owner)
+            if other and finding_verified_fixed(f["id"], current=other, owner_key=owner):
+                f["status"] = "fixed"
         tag = f"{issue['identifier']}:{f['id']}:{st['key']}"
         if tag in posted or issue.get("identifier") == st.get("recovered_from"):
             continue
@@ -1060,6 +1059,7 @@ def sync_deferral_tickets(st, findings, quota, next_step, note, issues=None):
                             win_id,
                             "advance-roadmap follow-up deferred again for quota.\n\n" + body)
                         try:
+                            require_ticket_repo(ident, st.get("repo"), issues=live_after)
                             followticket.comment(
                                 ident,
                                 f"Duplicate of `{win_id}` (concurrent deferral create); canceling.")
@@ -1291,12 +1291,7 @@ def stage_owner_snapshot(ost):
 
 
 def finding_owners_for_partial(st, status_map, prev_meta=None):
-    """Per-finding ownership for a partial-progress rewrite.
-
-    Fixed findings credit the completing stage. Unfinished ones keep their prior owner (index,
-    sibling stage, or previous ticket meta) and never inherit this stage's merged PR — recovery
-    must resume them at a build step under their own branch/PR (or none).
-    """
+    """Owners for partial rewrite: credit this stage only for findings it verified."""
     prev_meta = prev_meta or {}
     prev_owners = prev_meta.get("finding_owners") or {}
     prev_ticket = {k: prev_meta.get(k) for k in ("key", "stage", "branch", "pr_url", "builder_provider")}
