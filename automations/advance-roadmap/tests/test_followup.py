@@ -2770,6 +2770,30 @@ class FollowupTest(unittest.TestCase):
         text, _ = followanalyst.inline_corpus([self.root / "runs.jsonl"], stamps=[stamp])
         self.assertIn(stamp, text)
 
+    def test_inline_runs_jsonl_stops_collecting_at_byte_budget(self):
+        """Matching stamp rows must not accumulate unbounded memory before the paste cap."""
+        import followanalyst
+        stamp = "20261013-103004"
+        other = "20261012-999999"
+        # Many large matching rows plus a late unique marker that must be omitted once budget fills.
+        chunks = [
+            json.dumps({"stamp": other, "payload": "ignored-" + ("y" * 5000)}) + "\n",
+        ]
+        for i in range(40):
+            chunks.append(json.dumps({"stamp": stamp, "i": i, "payload": "x" * 2000}) + "\n")
+        chunks.append(json.dumps({"stamp": stamp, "marker": "AFTER_BUDGET_UNIQUE_TOKEN"}) + "\n")
+        path = self.root / "runs.jsonl"
+        path.write_text("".join(chunks))
+        budget = 5000
+        raw = followanalyst._file_text_for_prompt(path, [stamp], max_bytes=budget)
+        self.assertLessEqual(len(raw.encode("utf-8")), budget)
+        self.assertGreater(len(raw), 0)
+        self.assertNotIn("AFTER_BUDGET_UNIQUE_TOKEN", raw)
+        self.assertNotIn("ignored-", raw)
+        text, _ = followanalyst.inline_corpus([path], stamps=[stamp], max_bytes=budget)
+        self.assertLessEqual(len(text.encode("utf-8")), budget)
+        self.assertNotIn("AFTER_BUDGET_UNIQUE_TOKEN", text)
+
     def test_analyst_cwd_sandbox_has_no_corpus_files(self):
         import followanalyst
         import followrepair

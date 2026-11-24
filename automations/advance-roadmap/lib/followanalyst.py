@@ -362,22 +362,38 @@ def _utf8_budget_slice(text, max_bytes):
     return ""
 
 
-def _file_text_for_prompt(path, stamps):
+def _file_text_for_prompt(path, stamps, max_bytes=None):
     """File text for the prompt; runs.jsonl is stamp-filtered when stamps are known.
 
     Reads through followscan.read_text so large worker logs are capped before paste truncation.
+    For stamp-filtered runs.jsonl, stop collecting once max_bytes (UTF-8) is filled so a large
+    historical log cannot accumulate unbounded matching rows in memory.
     """
     path = Path(path)
     if path.name == "runs.jsonl" and stamps:
+        budget = CORPUS_PROMPT_MAX_BYTES if max_bytes is None else max(0, int(max_bytes))
         lines = []
+        used = 0
         wanted = set(stamps)
         for line in followscan.iter_jsonl_lines(path):
+            if used >= budget:
+                break
             try:
                 row = json.loads(line)
             except ValueError:
                 continue
-            if isinstance(row, dict) and row.get("stamp") in wanted:
-                lines.append(line if line.endswith("\n") else line + "\n")
+            if not (isinstance(row, dict) and row.get("stamp") in wanted):
+                continue
+            entry = line if line.endswith("\n") else line + "\n"
+            n = len(entry.encode("utf-8"))
+            if used + n > budget:
+                slice_ = _utf8_budget_slice(entry, budget - used)
+                if slice_:
+                    lines.append(slice_)
+                    used = budget
+                break
+            lines.append(entry)
+            used += n
         return "".join(lines)
     return followscan.read_text(path)
 
@@ -423,13 +439,6 @@ def inline_corpus(files, max_bytes=CORPUS_PROMPT_MAX_BYTES, stamps=None):
     parts, used, pasted = [], 0, {}
     for path in files:
         path = Path(path).resolve()
-        try:
-            text = _file_text_for_prompt(path, stamps)
-        except OSError as e:
-            note = f"### {path}\n(unreadable: {e})\n"
-            used += len(note.encode("utf-8"))
-            parts.append(note)
-            continue
         header = f"### {path}\n```\n"
         footer = "\n```\n"
         overhead = len(header.encode("utf-8")) + len(footer.encode("utf-8"))
@@ -437,6 +446,14 @@ def inline_corpus(files, max_bytes=CORPUS_PROMPT_MAX_BYTES, stamps=None):
         if room <= 0:
             parts.append(f"### {path}\n(truncated: corpus budget exhausted)\n")
             break
+        try:
+            # Pass room so stamp-filtered runs.jsonl stops collecting once the budget fills.
+            text = _file_text_for_prompt(path, stamps, max_bytes=room)
+        except OSError as e:
+            note = f"### {path}\n(unreadable: {e})\n"
+            used += len(note.encode("utf-8"))
+            parts.append(note)
+            continue
         marker = "\n…(truncated)"
         marker_n = len(marker.encode("utf-8"))
         if len(text.encode("utf-8")) <= room:
