@@ -290,7 +290,7 @@ def jlin(args):
 
 
 def codex(args):
-    note("codex", args=args[:2])
+    note("codex", args=args[:2], cwd=os.getcwd())
     try:
         print((ROOT / "stub-codex-transcript.txt").read_text())
     except OSError:
@@ -298,8 +298,13 @@ def codex(args):
     if (ROOT / "stub-codex-limit").exists():
         print("You've hit your usage limit. Upgrade to Pro or try again at 7:00 PM.")
         sys.exit(1)
+    out = opt(args, "-o")
+    if out:
+        Path(out).write_text((ROOT / "stub-analyst.txt").read_text())
     print("session id: 11111111-2222-3333-4444-555555555555")
-    Path(opt(args, "-o")).write_text((ROOT / "stub-analyst.txt").read_text())
+    if (ROOT / "stub-codex-fail").exists():
+        print("codex crashed", file=sys.stderr)
+        sys.exit(1)
 
 
 def claude(args):

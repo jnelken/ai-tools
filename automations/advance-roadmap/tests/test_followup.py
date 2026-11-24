@@ -2462,6 +2462,26 @@ class FollowupTest(unittest.TestCase):
                     fu.cmd_scan(args)
         self.assertEqual(sorted(set(keys)), ["scan-batch-x-7-111", "scan-batch-x-7-222"])
 
+    def test_analyst_ignores_final_answer_when_provider_exits_nonzero(self):
+        (self.root / "stub-codex-fail").write_text("")
+        (self.root / "stub-claude-analyst.txt").write_text("I found nothing worth reporting.\n")
+        doc, titles = self.analyst_scan("stub-analyst.txt", answer=True)
+        self.assertTrue(doc["analyst"].startswith("failed:") or "no findings" in doc["analyst"]
+                        or doc["analyst"].startswith("claude:"), doc["analyst"])
+        self.assertNotIn(self.ANALYST_FINDING["title"], titles)
+
+    def test_analyst_runs_inside_corpus_sandbox(self):
+        stamp = "20261013-103004"
+        (self.root / "runs" / stamp).mkdir(parents=True)
+        (self.root / "runs.jsonl").write_text(json.dumps(json.loads((FIXTURES / "runs-row.json").read_text())) + "\n")
+        (self.root / "stub-analyst.txt").write_text(self.analyst_fence())
+        self.run_followup("scan", "--stage", "tooling", "--origin", "batch-2026-10-13", "--stamp", stamp,
+                          env={"ADVANCE_ROADMAP_FOLLOWUP_ANALYST": "1"})
+        calls = self.calls("codex")
+        self.assertTrue(calls)
+        cwd = calls[0].get("cwd") or ""
+        self.assertIn("corpus-sandbox", cwd)
+
 
 if __name__ == "__main__":
     unittest.main()
