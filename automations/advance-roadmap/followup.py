@@ -1517,17 +1517,20 @@ def ticket_close_verdict(ident, current=None, issues=None):
         return "incomplete"
     owners = {}
     ticket_repo = None
+    ticket_key = None
     for issue in issues or []:
         if issue.get("identifier") == ident:
             meta = followticket.parse_meta(issue.get("description") or "") or {}
             owners = meta.get("finding_owners") or {}
             ticket_repo = meta.get("repo") or followticket.repo_label(issue)
+            ticket_key = meta.get("key")
             break
     want_repo = (current or {}).get("repo")
     if not want_repo or ticket_repo != want_repo:
         return "incomplete"
     for fid in tracked:
-        owner_key = (owners.get(fid) or {}).get("key") if isinstance(owners.get(fid), dict) else None
+        per = owners.get(fid) if isinstance(owners.get(fid), dict) else None
+        owner_key = (per or {}).get("key") or ticket_key
         if not finding_verified_fixed(fid, current=current, owner_key=owner_key):
             return "incomplete"
     return "ready"
