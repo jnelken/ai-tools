@@ -84,6 +84,7 @@ HOME = os.path.expanduser("~")
 STATE = os.path.join(HOME, ".claude", "state")
 QUEUE = os.path.join(STATE, "pr-review-queue.jsonl")
 POSTED = os.path.join(STATE, "pr-review-posted.jsonl")
+HOLDS = os.path.join(STATE, "pr-review-holds.jsonl")
 CONFIG = os.path.join(STATE, "pr-review-batch.json")
 LOCK = os.path.join(STATE, "pr-review-queue.lock")
 CHANNEL = "C0APAAD3PP0"  # #pr-review
@@ -295,6 +296,44 @@ def append_lines(path, entries):
         return
     with open(path, "a", encoding="utf-8") as f:
         f.write("".join(json.dumps(e, ensure_ascii=False) + "\n" for e in entries))
+
+
+def prune_holds():
+    """Drop holds whose PR is MERGED or CLOSED. Holds are hand-written notes that nothing else
+    removes, so a merged PR would stay "parked" in Sparky's queue view forever. Only a confirmed
+    terminal state removes a line: a gh failure, an odd payload, and any line this cannot parse all
+    stay. The rewrite touches only the lines it decided to drop, re-reading the file first so a
+    hold appended meanwhile (the skill appends without this lock) survives."""
+    try:
+        with open(HOLDS, encoding="utf-8") as f:
+            lines = f.read().splitlines()
+    except FileNotFoundError:
+        return
+    finished = set()
+    for raw in lines:
+        try:
+            h = json.loads(raw)
+            repo, pr = h["repo"], int(h["pr"])
+        except (ValueError, KeyError, TypeError):
+            continue
+        res = run("gh", "pr", "view", f"https://github.com/{repo}/pull/{pr}", "--json", "state")
+        if res.returncode != 0:
+            continue
+        try:
+            state = json.loads(res.stdout).get("state")
+        except (ValueError, AttributeError):
+            continue
+        if state in ("MERGED", "CLOSED"):
+            finished.add(raw)
+            log(f"hold dropped: {repo}#{pr} is {state}")
+    if not finished:
+        return
+    with open(HOLDS, encoding="utf-8") as f:
+        current = f.read().splitlines()
+    tmp = HOLDS + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        f.write("".join(x + "\n" for x in current if x not in finished))
+    os.replace(tmp, HOLDS)
 
 
 def newest_per_url(entries):
@@ -946,6 +985,10 @@ def main():
             write_config(cfg)
             if not crossed:
                 return 0  # first tick ever: start counting windows from here
+            try:
+                prune_holds()
+            except Exception as ex:  # housekeeping must never keep the queue from flushing
+                log(f"prune_holds failed: {ex!r}")
             if not os.path.exists(QUEUE) and not glob.glob(QUEUE + ".flushing.*"):
                 return 0
         ok = flush(args.only, args.channel)

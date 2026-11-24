@@ -118,7 +118,7 @@ a periodic/ad-hoc audit and needs a confirmation step every time.
   (e.g. via the `cleanup-local-branches` skill), remove its `pr-review-holds.jsonl` and
   `pr-review-queue.jsonl` entries too — same cleanup rule `/post-pr` specifies for
   `pr-review-posted.jsonl`. (The flusher also drops a queued PR on its own once it is no longer
-  open.)
+  open, and on each window tick drops a hold whose PR is merged or closed.)
 - Treating a queued PR as a gap — it is already on its way; posting it again would double-post.
 
 ## Why this exists

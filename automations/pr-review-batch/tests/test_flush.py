@@ -224,6 +224,34 @@ class Harness(unittest.TestCase):
         return [r["text"] for r in self.srv.requests]
 
 class FlushTest(Harness):
+    def test_boundary_tick_prunes_holds_for_finished_prs_only(self):
+        holds = os.path.join(self.state, "pr-review-holds.jsonl")
+        self.prs[A]["state"] = "MERGED"
+        self.prs[B]["state"] = "CLOSED"
+        keep = [{"repo": REPO, "pr": 3, "reason": "parked"}, {"repo": REPO, "pr": 9, "reason": "gh fails"}]
+        with open(holds, "w") as f:
+            for n, why in ((1, "merged"), (2, "closed")):
+                f.write(json.dumps({"repo": REPO, "pr": n, "reason": why}) + "\n")
+            f.write(json.dumps(keep[0]) + "\n" + json.dumps(keep[1]) + "\n" + "not json\n")
+            f.write(json.dumps({"repo": REPO, "pr": 4, "reason": "no trailing newline"}))
+        self.last_flush(T0 - 1800)
+        self.flush()
+        with open(holds) as f:
+            left = f.read().splitlines()
+        self.assertEqual(json.loads(left[0]), keep[0])
+        self.assertEqual(json.loads(left[1]), keep[1])
+        self.assertEqual(left[2], "not json")
+        self.assertEqual(len(left), 4)  # the 4th is PR 4, whose gh lookup fails (not in prs.json)
+
+    def test_mid_window_tick_leaves_holds_alone(self):
+        holds = os.path.join(self.state, "pr-review-holds.jsonl")
+        self.prs[A]["state"] = "MERGED"
+        with open(holds, "w") as f:
+            f.write(json.dumps({"repo": REPO, "pr": 1, "reason": "merged"}) + "\n")
+        self.last_flush(T0)
+        self.flush(now=T0 + 600)
+        self.assertEqual(len(self.lines(holds)), 1)
+
     # -- happy path / order --
 
     def test_posts_badges_undrafts_automerges_in_order(self):
