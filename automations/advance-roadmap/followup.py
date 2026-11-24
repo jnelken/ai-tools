@@ -768,6 +768,7 @@ def dedupe(st, issues):
     if not issues:
         return
     posted = set(st.setdefault("evidence_posted", []))
+    commented = set(st.setdefault("evidence_commented", []))
     for f in st["findings"]:
         if f.get("status") not in ("open", "deferred"):
             continue
@@ -789,7 +790,11 @@ def dedupe(st, issues):
         body = (f"advance-roadmap follow-up `{st['key']}` saw this again:\n\n"
                 + followticket.render_findings([f]))
         try:
-            followticket.comment(issue["identifier"], body)
+            # Comment and rewrite are tracked apart so a failed rewrite retry does not re-comment.
+            if tag not in commented:
+                followticket.comment(issue["identifier"], body)
+                commented.add(tag)
+                st["evidence_commented"] = sorted(commented)
             rewrite_ticket_description(
                 st, issue["identifier"], [f], quota=st.get("quota"),
                 next_step=f"see evidence on {issue['identifier']}", issues=issues)
@@ -797,6 +802,7 @@ def dedupe(st, issues):
         except followticket.LinearError as e:
             report(st, "linear", f"could not add evidence to {issue['identifier']}: {e}")
     st["evidence_posted"] = sorted(posted)
+    st["evidence_commented"] = sorted(commented)
 
 
 def next_step_text(st, step):
@@ -1306,9 +1312,10 @@ def close_tickets(st, issues=None):
                 index.drop_tickets({ident})
                 closed.add(ident)
                 log(f"{st['key']}: closed {ident}")
-                for issue in (issues or []):
-                    if issue.get("identifier") == ident:
-                        issue["description"] = "(closed)"
+                # Drop from the drain's shared open-issue snapshot so a later stage cannot
+                # legacy-title-match the closed ticket and fail a description rewrite.
+                if issues is not None:
+                    issues[:] = [i for i in issues if i.get("identifier") != ident]
         except followticket.LinearError as e:
             report(st, "linear", f"merged and deployed, but could not close {ident}: {e}",
                    "the next drain retries closing it")

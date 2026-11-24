@@ -921,6 +921,71 @@ class FollowupTest(unittest.TestCase):
                 if c.get("cmd") == "issue update DEV-501" and "Done" in (c.get("args") or [])]
         self.assertTrue(done, self.calls("linear"))
 
+    def test_close_removes_ticket_from_shared_open_snapshot(self):
+        """Closing must drop the issue from the drain snapshot so later stages cannot rematch it."""
+        import followup as fu
+        fu.ROOT = self.root
+        fu.STATE = self.root / "followups"
+        os.environ["ADVANCE_ROADMAP_ROOT"] = str(self.root)
+        os.environ["ADVANCE_ROADMAP_LINEAR_BIN"] = self.env["ADVANCE_ROADMAP_LINEAR_BIN"]
+        key = "cleanup-close-snap"
+        fid = "aaaaaaaaaaaa"
+        d = self.root / "followups" / key
+        d.mkdir(parents=True)
+        (d / "state.json").write_text(json.dumps({
+            "key": key, "stage": "project-cleanup", "repo": "demo", "status": "done",
+            "merge_commit": "abc",
+            "validation": {"checks": "passed", "reviews": [{"verdict": "clean"}], "deploy": "success"},
+            "findings": [{"id": fid, "status": "fixed", "ticket": "DEV-501", "title": "x",
+                          "kind": "t", "fix": "f", "evidence": []}],
+            "pending_close": [{"ticket": "DEV-501", "commented": True}], "blockers": [],
+        }))
+        (self.root / "followups" / "tickets.json").write_text(json.dumps({
+            fid: {"ticket": "DEV-501", "key": key, "at": time.time()}}))
+        ticket = self.meta_ticket("DEV-501", {"key": key, "finding_ids": [fid]})
+        issues = [ticket]
+        self.set("stub-linear.json", {"pages": [[ticket]]})
+        st = fu.load(key)
+        fu.close_tickets(st, issues=issues)
+        self.assertEqual(issues, [])
+        self.assertEqual(st.get("pending_close"), [])
+
+    def test_dedupe_retries_rewrite_without_reposting_evidence_comment(self):
+        """If the evidence comment lands but the rewrite fails, retry only the unfinished rewrite."""
+        import followup as fu
+        fu.ROOT = self.root
+        fu.STATE = self.root / "followups"
+        os.environ["ADVANCE_ROADMAP_ROOT"] = str(self.root)
+        os.environ["ADVANCE_ROADMAP_LINEAR_BIN"] = self.env["ADVANCE_ROADMAP_LINEAR_BIN"]
+        key = "cleanup-evidence-split"
+        fid = "aaaaaaaaaaaa"
+        title = "reject an empty listing before saving the catalog"
+        d = self.root / "followups" / key
+        d.mkdir(parents=True)
+        finding = {"id": fid, "title": title, "kind": "t", "fix": "f", "status": "open",
+                   "repo": "demo", "evidence": [{"source": "t", "quote": title}]}
+        st = {"key": key, "stage": "project-cleanup", "repo": "demo", "status": "running",
+              "findings": [finding], "evidence_posted": [], "evidence_commented": [], "blockers": []}
+        (d / "state.json").write_text(json.dumps(st))
+        ticket = self.legacy_ticket("DEV-777", title, f"Seen before: {title}", repo="demo")
+        self.set("stub-linear.json", {"pages": [[ticket]], "fail": ["issue update DEV-777"]})
+        fu.dedupe(st, [ticket])
+        comments = [c for c in self.calls("linear") if str(c.get("cmd", "")).startswith("issue comment")
+                    and c.get("issue") == "DEV-777"]
+        self.assertEqual(len(comments), 1, comments)
+        self.assertIn(f"DEV-777:{fid}:{key}", st.get("evidence_commented") or [])
+        self.assertNotIn(f"DEV-777:{fid}:{key}", st.get("evidence_posted") or [])
+        (self.root / "stub-calls.jsonl").unlink(missing_ok=True)
+        self.set("stub-linear.json", {"pages": [[ticket]]})
+        fu.dedupe(st, [ticket])
+        comments2 = [c for c in self.calls("linear") if str(c.get("cmd", "")).startswith("issue comment")
+                     and c.get("issue") == "DEV-777"]
+        self.assertEqual(comments2, [], "retry must not re-comment")
+        updates = [c for c in self.calls("linear") if c.get("cmd") == "issue update DEV-777"
+                   and "--description-file" in (c.get("args") or [])]
+        self.assertTrue(updates)
+        self.assertIn(f"DEV-777:{fid}:{key}", st.get("evidence_posted") or [])
+
 
 if __name__ == "__main__":
     unittest.main()
