@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""advance-roadmap follow-up runner — report + tickets + repair (DEV-242 slice 3b).
+"""advance-roadmap follow-up runner — report + tickets + repair + analyst (DEV-242).
 
 After work ships, scan logs for proven problems and record findings. Slice 3a added Linear ticket
 recovery, dedupe, deferral and close (lib/followticket.py). Slice 3b connects repair: a delegated
 builder, independent cross-provider review, PR checks, merge, deploy verification and ticket
-finish/deferral (lib/followrepair.py). No model analyst yet (slice 3c). Stages under
-$ROOT/followups/<key>/:
+finish/deferral (lib/followrepair.py). Slice 3c adds an optional read-only model analyst
+(lib/followanalyst.py) over each stage's bounded corpus. Stages under $ROOT/followups/<key>/:
 
   project-cleanup    one per shipped item once the repo is quiescent
   tooling-hardening  one per batch/run/conductor session once children + cleanups finish
@@ -13,17 +13,20 @@ $ROOT/followups/<key>/:
   followup.py hook item-done --stamp S [--run-dir D] [--origin O]
   followup.py hook run-end --origin O [--stamp S ...] [--run-dir D ...]
   followup.py drain [--repo R] [--origin O] [--wait-s N]
+  followup.py scan --stage cleanup|tooling (--stamp S | --origin O --stamp S ...)
   followup.py status [--origin O] [--json]
 
 ADVANCE_ROADMAP_FOLLOWUP=1 suppresses nested follow-ups.
 ADVANCE_ROADMAP_FOLLOWUP_LINEAR=0 disables Linear reads/writes.
 ADVANCE_ROADMAP_FOLLOWUP_REPAIR=1 enables the repair loop (builder → review → land).
+ADVANCE_ROADMAP_FOLLOWUP_ANALYST=0 disables the optional model analyst (on by default).
 """
 import argparse
 import fcntl
 import json
 import os
 import re
+import shutil
 import signal
 import sys
 import time
@@ -33,6 +36,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 sys.path.insert(0, str(HERE / "lib"))
+import followanalyst  # noqa: E402
 import followrepair  # noqa: E402
 import followscan  # noqa: E402
 import followticket  # noqa: E402
@@ -1763,7 +1767,7 @@ def retry_closes(issues=None):
 # ── ANALYZE (deterministic recognition tests only — no model) ────────────────
 
 def scan(st):
-    """Recognize findings (pure reads; no excerpts)."""
+    """Recognize findings (deterministic reads), then optional analyst over the same corpus."""
     if st["stage"] == STAGES["cleanup"]:
         if st.get("run_dir"):
             run_dir = Path(st["run_dir"])
@@ -1780,8 +1784,9 @@ def scan(st):
         cleanups = [s for s in all_stages() if s.get("stamp") in children]
         findings, quiet = followscan.tooling_scan(ROOT, children, cleanups, st.get("run_dirs"))
         files = followscan.corpus_files(ROOT, children, st.get("run_dirs"), stages=cleanups)
-    st["findings"] = findings
-    st["non_findings"] = quiet
+    more, rejected = followanalyst.analyze(st, findings, files)
+    st["findings"] = findings + more
+    st["non_findings"] = quiet + rejected
     st["corpus"] = [str(p) for p in files]
     st["scanned"] = True
     return st
@@ -2093,6 +2098,29 @@ def summary_line(rows):
 
 # ── CLI ──────────────────────────────────────────────────────────────────────
 
+def cmd_scan(a):
+    """Dry run: findings and non-findings a stage would act on. No durable state, repairs or tickets."""
+    if a.stage == "cleanup":
+        key = f"scan-{a.stamp[0]}"
+        require_id(key, "key")
+        st = {"key": key, "stage": STAGES["cleanup"], "stamp": a.stamp[0], "usage_snapshots": [],
+              "repo": (read_json(ROOT / "runs" / a.stamp[0] / "worker-result.json") or {}).get("repo")}
+    else:
+        require_id(a.origin, "origin")
+        key = f"scan-{a.origin}"
+        require_id(key, "key")
+        st = {"key": key, "stage": STAGES["tooling"], "children": a.stamp, "origin": a.origin,
+              "repo": followscan.TOOLING_REPO, "usage_snapshots": []}
+    stage_dir(st["key"]).mkdir(parents=True, exist_ok=True)
+    try:
+        scan(st)
+    finally:
+        shutil.rmtree(stage_dir(st["key"]), ignore_errors=True)
+    print(json.dumps({"findings": st.get("findings") or [], "non_findings": st.get("non_findings") or [],
+                      "analyst": st.get("analyst")}, indent=1))
+    return 0
+
+
 def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -2107,6 +2135,10 @@ def main(argv=None):
     d.add_argument("--origin")
     d.add_argument("--stage", choices=sorted(STAGES))
     d.add_argument("--wait-s", type=float, default=0.0, help="wait this long for repos/children to finish")
+    s = sub.add_parser("scan", help="dry-run recognition (+ optional analyst); no durable state")
+    s.add_argument("--stage", choices=sorted(STAGES), required=True)
+    s.add_argument("--stamp", action="append", default=[])
+    s.add_argument("--origin", default="dry-run")
     t = sub.add_parser("status")
     t.add_argument("--origin")
     t.add_argument("--json", action="store_true")
@@ -2135,6 +2167,17 @@ def main(argv=None):
             p.error(str(e))
         signal.signal(signal.SIGTERM, lambda *_: sys.exit(143))
         return drain(a.repo, a.origin, a.stage, a.wait_s)
+    if a.cmd == "scan":
+        if not a.stamp:
+            p.error("scan needs --stamp")
+        try:
+            for stamp in a.stamp:
+                require_id(stamp, "stamp")
+            if a.stage != "cleanup":
+                require_id(a.origin, "origin")
+        except ValueError as e:
+            p.error(str(e))
+        return cmd_scan(a)
     try:
         if a.origin:
             require_id(a.origin, "origin")

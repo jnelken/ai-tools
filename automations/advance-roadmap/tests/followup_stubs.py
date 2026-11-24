@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Offline stand-ins for followup.py's report + ticket + repair surface (test_followup.py).
+"""Offline stand-ins for followup.py's report + ticket + repair + analyst surface (test_followup.py).
 
   followup_stubs.py usage ...     lib/usage.py: gates/gate/quota-record from $ROOT/stub-usage.json
   followup_stubs.py worker ...    worker.sh: builds on the follow-up branch per $ROOT/stub-worker.json
@@ -8,9 +8,10 @@
   followup_stubs.py linear ...    linear: paginated issues (and failing commands) from $ROOT/stub-linear.json
   followup_stubs.py jlin ...      jlin.py new: files DEV-900
   followup_stubs.py workspaces .. lib/workspaces.py launch: a worktree, the command run detached
+  followup_stubs.py codex ...     codex exec -o FILE: analyst answer in $ROOT/stub-analyst.txt
+  followup_stubs.py claude ...    claude -p --output-format json: $ROOT/stub-claude-analyst.txt
 
 Every call is appended to $ROOT/stub-calls.jsonl. Nothing here reaches GitHub or Linear.
-Slice 3c will add analyst (codex/claude) stubs.
 """
 import json
 import os
@@ -20,7 +21,8 @@ import time
 from pathlib import Path
 
 ROOT = Path(os.environ["ADVANCE_ROADMAP_ROOT"])
-ROLES = {"worker": ("cursor", "codex", "claude"), "reviewer": ("codex", "cursor", "claude")}
+ROLES = {"worker": ("cursor", "codex", "claude"), "reviewer": ("codex", "cursor", "claude"),
+         "analyst": ("codex", "claude")}
 
 
 def cfg(name, default=None):
@@ -287,6 +289,25 @@ def jlin(args):
     print("Created DEV-900: https://linear.app/jnelken/issue/DEV-900")
 
 
+def codex(args):
+    note("codex", args=args[:2])
+    try:
+        print((ROOT / "stub-codex-transcript.txt").read_text())
+    except OSError:
+        pass
+    if (ROOT / "stub-codex-limit").exists():
+        print("You've hit your usage limit. Upgrade to Pro or try again at 7:00 PM.")
+        sys.exit(1)
+    print("session id: 11111111-2222-3333-4444-555555555555")
+    Path(opt(args, "-o")).write_text((ROOT / "stub-analyst.txt").read_text())
+
+
+def claude(args):
+    note("claude", args=args[:1])
+    print(json.dumps({"type": "result", "result": (ROOT / "stub-claude-analyst.txt").read_text(),
+                      "session_id": "claude-analyst-session"}))
+
+
 if __name__ == "__main__":
     {"usage": usage, "worker": worker, "review": review, "gh": gh, "linear": linear, "jlin": jlin,
-     "workspaces": workspaces}[sys.argv[1]](sys.argv[2:])
+     "codex": codex, "claude": claude, "workspaces": workspaces}[sys.argv[1]](sys.argv[2:])

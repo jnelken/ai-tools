@@ -256,18 +256,22 @@ plus notes), written only through [`lib/runmemory.py`](advance-roadmap/lib/runme
 directory and rewrites atomically so concurrent runs can't lose each other's rows. `has-stamp` is what
 Step 0 uses to tell a finished run from a killed one.
 
-### Follow-ups (report + tickets + repair — DEV-242 slice 3b)
+### Follow-ups (report + tickets + repair + analyst — DEV-242)
 
 [`followup.py`](advance-roadmap/followup.py) reports what a finished run's records prove went wrong
-(deterministic recognition tests in [`lib/followscan.py`](advance-roadmap/lib/followscan.py); no
-model). Slice 3a added Linear ticket **recovery, dedupe, deferral helpers and close** via
+(deterministic recognition tests in [`lib/followscan.py`](advance-roadmap/lib/followscan.py)).
+Slice 3a added Linear ticket **recovery, dedupe, deferral helpers and close** via
 [`lib/followticket.py`](advance-roadmap/lib/followticket.py) (CLI only, never MCP). Slice 3b wires
 **repair** through [`lib/followrepair.py`](advance-roadmap/lib/followrepair.py): a delegated builder
 (`worker.sh` in its own workspace), independent cross-provider review (`review.sh`), PR checks,
 merge at the reviewed HEAD, deploy verification (fail-closed; a skipped deploy is not success), and
 ai-tools install via the deploy clone's `install.sh`. `ADVANCE_ROADMAP_FOLLOWUP_REPAIR=1` enables
 the loop; without it, open findings stay parked. Quota stops call `defer()` (ticket create/update).
-The model analyst remains slice 3c.
+Slice 3c adds an optional read-only **model analyst** ([`lib/followanalyst.py`](advance-roadmap/lib/followanalyst.py))
+over each stage's bounded corpus: Codex then Claude, usage-gated, process-group deadlines. Findings
+are accepted only from the provider's final answer and only when every cited quote verifies in an
+allowed corpus file; rejected or unavailable analyst output never drops deterministic findings.
+`ADVANCE_ROADMAP_FOLLOWUP_ANALYST=0` disables it.
 
 | Stage | Trigger | Corpus |
 | --- | --- | --- |
@@ -290,6 +294,7 @@ kernel stage claims, interrupted `running` stages resume. `ADVANCE_ROADMAP_FOLLO
 F=~/.claude/automations/advance-roadmap/followup.py
 python3 $F status [--origin batch-2026-10-14] [--json]
 python3 $F drain [--repo R] [--wait-s 600]
+python3 $F scan --stage tooling --origin batch-2026-10-13 --stamp 20261013-103004   # dry run
 ```
 
 Tests: `tests/test_followup.py` (Oct 13 replay in `tests/fixtures/oct13`).

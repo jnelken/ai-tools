@@ -143,6 +143,12 @@ class RoutingTests(unittest.TestCase):
         usage.recompute_flags(self.state)
         return self.state["providers"]
 
+    def test_analyst_role_is_codex_then_claude_never_cursor(self):
+        self.assertEqual(usage.ROLE_PROVIDERS["analyst"], ("codex", "claude"))
+        self.assertNotIn("cursor", usage.ROLE_PROVIDERS["analyst"])
+        gate = usage.provider_gate(self.state, "cursor", "analyst")
+        self.assertEqual(gate["state"], "n/a")
+
     def test_codex_under_thresholds_is_available(self):
         usage.apply_codex(self.state, probed(usage.parse_codex_rate_limits(app_server_result()), "app_server"))
         self.assertTrue(self.flags()["codex"]["available_for_orchestrator"])

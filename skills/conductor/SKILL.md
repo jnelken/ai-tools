@@ -121,10 +121,11 @@ with no logged review is flagged). Then tell the user plainly:
 On `failed`, `limit_hit` or an incomplete result, report what the log shows and ask how to proceed;
 never retry silently in a loop. Don't clean up the builder's branch.
 
-## 4. Follow-ups (end of the session — deterministic report-only)
+## 4. Follow-ups (end of the session)
 
-Same commands as the batch (`F=~/.claude/automations/advance-roadmap/followup.py`). Slice 2 is
-**report-only** (recognition tests, no model/repair/PRs/Linear).
+Same commands as the batch (`F=~/.claude/automations/advance-roadmap/followup.py`). Recognition is
+deterministic; an optional model analyst may run during scan when enabled (usage-gated; off with
+`ADVANCE_ROADMAP_FOLLOWUP_ANALYST=0`). Repair/Linear follow the env flags from `automations/README.md`.
 
 1. After each `shipped` / `shipped-deploy-failed` item:
    `python3 $F hook item-done --stamp <stamp> --run-dir <dir> --origin conductor-<session stamp>`.
@@ -134,7 +135,7 @@ Same commands as the batch (`F=~/.claude/automations/advance-roadmap/followup.py
 3. `python3 $F drain --origin conductor-<session stamp> --wait-s 600` then
    `python3 $F status --origin conductor-<session stamp>` (waiting stages show age + reason).
 
-Hooks are idempotent. Drain makes no model calls in slice 2.
+Hooks are idempotent.
 
 ## What this skill does not do
 

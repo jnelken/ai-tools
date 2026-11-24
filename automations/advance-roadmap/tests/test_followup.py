@@ -1,4 +1,4 @@
-"""followup.py report + tickets + repair (DEV-242 slice 3b). Temp ADVANCE_ROADMAP_ROOT; one test per behavior."""
+"""followup.py report + tickets + repair + analyst (DEV-242). Temp ADVANCE_ROADMAP_ROOT; one test per behavior."""
 import fcntl
 import json
 import os
@@ -46,6 +46,8 @@ class FollowupTest(unittest.TestCase):
                        if not k.startswith(("ADVANCE_ROADMAP_", "GIT_", "SUPERSET_"))},
                     "ADVANCE_ROADMAP_ROOT": str(self.root), "PERSONAL_CODE_DIR": str(self.code),
                     "ADVANCE_ROADMAP_SUPERSET": "0",
+                    # Deterministic suite: analyst off unless a test opts in with stubs.
+                    "ADVANCE_ROADMAP_FOLLOWUP_ANALYST": "0",
                     "ADVANCE_ROADMAP_FOLLOWUP_INSTALL": "0", "ADVANCE_ROADMAP_FOLLOWUP_POLL_S": "0.2",
                     "ADVANCE_ROADMAP_FOLLOWUP_WORKTREES": str(t / "worktrees"),
                     "ADVANCE_ROADMAP_FOLLOWUP_DEPLOY_NONE_S": "0",
@@ -54,6 +56,8 @@ class FollowupTest(unittest.TestCase):
                     "ADVANCE_ROADMAP_WORKER_POLL_S": "0.1",
                     "ADVANCE_ROADMAP_GH_BIN": self.wrapper(t, "gh"),
                     "ADVANCE_ROADMAP_LINEAR_BIN": self.wrapper(t, "linear"),
+                    "ADVANCE_ROADMAP_CODEX_BIN": self.wrapper(t, "codex"),
+                    "ADVANCE_ROADMAP_CLAUDE_BIN": self.wrapper(t, "claude"),
                     "ADVANCE_ROADMAP_JLIN": str(self.py_wrapper(t, "jlin")),
                     "AI_TOOLS_HOME": str(t / "no-ai-tools"),
                     "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_NOSYSTEM": "1",
@@ -2292,6 +2296,116 @@ class FollowupTest(unittest.TestCase):
         self.assertEqual(st["status"], "pending", self.report())
         self.assertEqual(len(self.calls("review")), before)  # never reached review.sh again
         self.assertIn("ff-merge", self.report()[-1]["reason"])
+
+    # ── tooling analysis (slice 3c) ──
+
+    def test_tooling_dry_run_on_the_oct13_evidence_keeps_only_quoted_analyst_findings(self):
+        stamp = "20261013-103004"
+        run = self.root / "runs" / stamp
+        run.mkdir(parents=True)
+        (run / "orchestrator-result.json").write_text((FIXTURES / "orchestrator-result.json").read_text())
+        (self.root / "runs.jsonl").write_text(json.dumps(json.loads((FIXTURES / "runs-row.json").read_text())) + "\n")
+        (self.root / "batch-verdicts").mkdir()
+        (self.root / "batch-verdicts" / "apt-sqft.json").write_text(
+            (FIXTURES / "batch-verdict-apt-sqft.json").read_text())
+        good = {"title": "Bookkeeping summary blames the orchestrator limit", "kind": "misleading-surface",
+                "fix": "Name the quota in the alert",
+                "evidence": [{"source": str(self.root / "runs.jsonl"),
+                              "quote": "the orchestrator hit its session limit before triage"}]}
+        bad = {"title": "Invented friction",
+               "evidence": [{"source": str(run / "orchestrator-result.json"),
+                             "quote": "this text is nowhere in the corpus"}]}
+        (self.root / "stub-analyst.txt").write_text(
+            "thinking...\n```FOLLOWUP_FINDINGS_JSON\n" + json.dumps({"findings": [good, bad], "non_findings": [
+                {"title": "planner retried", "why": "by design"}]}) + "\n```\n")
+        p = self.run_followup("scan", "--stage", "tooling", "--origin", "batch-2026-10-13", "--stamp", stamp,
+                              env={"ADVANCE_ROADMAP_FOLLOWUP_ANALYST": "1"})
+        doc = json.loads(p.stdout)
+        kinds = {f["kind"] for f in doc["findings"]}
+        self.assertIn("misfiring-automation", kinds)   # worker after a failed plan
+        self.assertIn("misleading-surface", kinds)     # quota recorded as error; the analyst's finding
+        self.assertIn("wrong-knowledge", kinds)        # contaminated no-work verdict
+        titles = [f["title"] for f in doc["findings"]]
+        self.assertIn(good["title"], titles)
+        self.assertNotIn(bad["title"], titles)
+        self.assertTrue(any(n["title"] == bad["title"] and "rejected" in n["why"] for n in doc["non_findings"]))
+        self.assertTrue(all(f["repo"] == "ai-tools" and f["evidence"] for f in doc["findings"]))
+        self.assertEqual(doc["analyst"], "codex: answered")
+        self.assertEqual(self.calls("worker"), [])
+        self.assertFalse((self.root / "followups" / "tooling-batch-2026-10-13").exists())
+
+    ANALYST_FINDING = {"title": "Bookkeeping summary blames the orchestrator limit", "kind": "misleading-surface",
+                       "quote": "the orchestrator hit its session limit before triage"}
+
+    def analyst_scan(self, answer_file, answer):
+        """A tooling dry run whose analyst answers with a valid, quoted findings fence when `answer`."""
+        stamp = "20261013-103004"
+        (self.root / "runs" / stamp).mkdir(parents=True)
+        (self.root / "runs.jsonl").write_text(json.dumps(json.loads((FIXTURES / "runs-row.json").read_text())) + "\n")
+        (self.root / answer_file).write_text(self.analyst_fence() if answer else "I found nothing worth reporting.\n")
+        p = self.run_followup("scan", "--stage", "tooling", "--origin", "batch-2026-10-13", "--stamp", stamp,
+                              env={"ADVANCE_ROADMAP_FOLLOWUP_ANALYST": "1"})
+        doc = json.loads(p.stdout)
+        return doc, [f["title"] for f in doc["findings"]]
+
+    def analyst_fence(self):
+        f = self.ANALYST_FINDING
+        good = {"title": f["title"], "kind": f["kind"],
+                "evidence": [{"source": str(self.root / "runs.jsonl"), "quote": f["quote"]}]}
+        return "```FOLLOWUP_FINDINGS_JSON\n" + json.dumps({"findings": [good]}) + "\n```\n"
+
+    def test_analyst_findings_come_only_from_its_final_answer(self):
+        # Codex's stdout carries a valid, quoted findings fence; its final answer (-o) has none.
+        (self.root / "stub-codex-transcript.txt").write_text(self.analyst_fence())
+        doc, titles = self.analyst_scan("stub-analyst.txt", answer=False)
+        self.assertEqual(doc["analyst"], "codex: no findings block")
+        self.assertNotIn(self.ANALYST_FINDING["title"], titles)
+
+    def test_a_limited_analyst_saves_its_limit_first_then_fails_over(self):
+        (self.root / "stub-codex-limit").write_text("")
+        self.set("stub-usage.json", {"record_limit_fails": True})
+        doc, titles = self.analyst_scan("stub-claude-analyst.txt", answer=True)
+        self.assertEqual(doc["analyst"], "claude: answered")
+        self.assertIn(self.ANALYST_FINDING["title"], titles)
+        cmds = [c.get("cmd") or c["tool"] for c in self.calls() if c["tool"] in ("usage", "usage-record-limit")]
+        self.assertLess(cmds.index("parse-limit"), cmds.index("usage-record-limit"))
+        self.assertEqual([(c["provider"], c["scope"]) for c in self.calls("usage-record-limit")],
+                         [("codex", "analyst")])
+
+    def test_analyst_ignores_an_echoed_limit_banner_when_its_final_answer_succeeded(self):
+        # Codex stdout quotes a prior corpus log's banner; -o still has a real findings fence.
+        (self.root / "stub-codex-transcript.txt").write_text(
+            "reading runs.jsonl\nYou've hit your usage limit. Upgrade to Pro or try again at 7:00 PM.\n")
+        doc, titles = self.analyst_scan("stub-analyst.txt", answer=True)
+        self.assertEqual(doc["analyst"], "codex: answered")
+        self.assertIn(self.ANALYST_FINDING["title"], titles)
+        self.assertEqual(self.calls("usage-record-limit"), [])
+
+    def test_analyst_disabled_preserves_deterministic_findings_only(self):
+        stamp = "20261013-103004"
+        run = self.root / "runs" / stamp
+        run.mkdir(parents=True)
+        (run / "orchestrator-result.json").write_text((FIXTURES / "orchestrator-result.json").read_text())
+        (self.root / "runs.jsonl").write_text(json.dumps(json.loads((FIXTURES / "runs-row.json").read_text())) + "\n")
+        (self.root / "stub-analyst.txt").write_text(self.analyst_fence())
+        p = self.run_followup("scan", "--stage", "tooling", "--origin", "batch-2026-10-13", "--stamp", stamp)
+        doc = json.loads(p.stdout)
+        self.assertIsNone(doc.get("analyst"))
+        self.assertNotIn(self.ANALYST_FINDING["title"], [f["title"] for f in doc["findings"]])
+        self.assertEqual(self.calls("codex"), [])
+
+    def test_analyst_skips_when_both_providers_are_gated(self):
+        self.set("stub-usage.json", {"analyst": {"codex": "over", "claude": "over"}})
+        stamp = "20261013-103004"
+        (self.root / "runs" / stamp).mkdir(parents=True)
+        (self.root / "runs.jsonl").write_text(json.dumps(json.loads((FIXTURES / "runs-row.json").read_text())) + "\n")
+        (self.root / "stub-analyst.txt").write_text(self.analyst_fence())
+        p = self.run_followup("scan", "--stage", "tooling", "--origin", "batch-2026-10-13", "--stamp", stamp,
+                              env={"ADVANCE_ROADMAP_FOLLOWUP_ANALYST": "1"})
+        doc = json.loads(p.stdout)
+        self.assertIn("skipped:", doc["analyst"])
+        self.assertNotIn(self.ANALYST_FINDING["title"], [f["title"] for f in doc["findings"]])
+        self.assertEqual(self.calls("codex"), [])
 
 
 if __name__ == "__main__":

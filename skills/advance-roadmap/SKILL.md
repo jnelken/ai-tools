@@ -65,10 +65,11 @@ windows are the retired scheduler; its helpers are still imported.) The batch ru
    The consecutive-failure alert is separate and still fires.
    A lone `run.sh` outside a batch still posts its own line.
 
-**Then report what the run proved went wrong (deterministic report-only).** After a ship, a
-**project-cleanup** follow-up reads that run's records; after a batch/chain/conductor session, one
-**tooling-hardening** follow-up reads automation friction. Slice 2 is recognition-only (no model,
-repair, PRs, or Linear). Details: `automations/README.md` → *Follow-ups*.
+**Then report what the run proved went wrong.** After a ship, a **project-cleanup** follow-up reads
+that run's records; after a batch/chain/conductor session, one **tooling-hardening** follow-up reads
+automation friction. Recognition is deterministic (`followscan`); an optional read-only model
+analyst (`followanalyst`, off with `ADVANCE_ROADMAP_FOLLOWUP_ANALYST=0`) may add corpus-verified
+findings. Repair and Linear tickets land when enabled. Details: `automations/README.md` → *Follow-ups*.
 
 **Use Codex and Claude.** Codex is the first planner, with Claude as fallback. Workers use either
 provider and require review from the other. Cursor is disabled, so reviews wait when the other
