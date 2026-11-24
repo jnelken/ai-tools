@@ -360,6 +360,22 @@ class FollowupTest(unittest.TestCase):
         self.assertEqual(self.state("cleanup-20261014-theirs")["status"], "queued")
         self.assertEqual(self.state("cleanup-20261014-mine").get("drained_by"), "batch-mine")
 
+    def test_origin_scoped_drain_does_not_recover_sibling_interrupted(self):
+        """Invariant: origin-scoped drain must not rewrite a sibling origin's running stage."""
+        import followup as fu
+        fu.ROOT = self.root
+        fu.STATE = self.root / "followups"
+        for stamp, origin in (("mine", "batch-mine"), ("theirs", "batch-theirs")):
+            key = f"cleanup-{stamp}"
+            d = self.root / "followups" / key
+            d.mkdir(parents=True)
+            (d / "state.json").write_text(json.dumps({
+                "key": key, "stage": "project-cleanup", "repo": "demo", "origin": origin,
+                "status": "running", "blockers": [], "stamp": stamp}))
+        fu.recover_interrupted(origin="batch-mine")
+        self.assertEqual(fu.load("cleanup-mine")["status"], "queued")
+        self.assertEqual(fu.load("cleanup-theirs")["status"], "running")
+
     def test_timeout_mark_is_claim_reload_recheck_save(self):
         """Timeout recovery owns stage writes via claim → reload → recheck → CAS."""
         import followup as fu

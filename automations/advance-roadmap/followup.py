@@ -416,10 +416,18 @@ def set_ready(st):
     return cas_status(st, ELIGIBLE | {"pending"}, READY)
 
 
-def recover_interrupted():
-    """A stage left `running` whose claim nobody holds was killed mid-step: it resumes next."""
+def recover_interrupted(repo=None, origin=None):
+    """A stage left `running` whose claim nobody holds was killed mid-step: it resumes next.
+
+    When repo/origin are set (origin-scoped drain), only matching stages are rewritten —
+    a sibling batch's running stage must not be touched.
+    """
     for st in all_stages():
         if st.get("status") != RUNNING:
+            continue
+        if repo and st.get("repo") != repo:
+            continue
+        if origin and st.get("origin") != origin:
             continue
         c = claim_stage(st["key"])
         if not c:
@@ -428,6 +436,10 @@ def recover_interrupted():
             st = load(st["key"]) or st
             # CAS: a concurrent drain may have finished between the snapshot and this claim.
             if st.get("status") != RUNNING:
+                continue
+            if repo and st.get("repo") != repo:
+                continue
+            if origin and st.get("origin") != origin:
                 continue
             st.setdefault("blockers", []).append({"at": now_iso(), "kind": "interrupted",
                                                   "reason": "the previous drain stopped mid-stage; resuming"})
@@ -530,7 +542,7 @@ def drain(repo=None, origin=None, stage=None, wait_s=0.0):
     When --origin is set, only that origin's stages are processed (never siblings' stages).
     """
     STATE.mkdir(parents=True, exist_ok=True)
-    recover_interrupted()
+    recover_interrupted(repo=repo, origin=origin)
     deadline = time.time() + wait_s
     while True:
         waiting, progressed = [], False
