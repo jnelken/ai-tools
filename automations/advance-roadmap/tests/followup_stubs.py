@@ -108,7 +108,8 @@ def worker(args):
         used = (opt(args, "--providers") or "cursor").split()[0]
         status = {"used": used, "session_id": f"{used}-sess-{n}"}
         repo = orch.get("repo") or "demo"
-        result = {"outcome": w.get("outcome", "blocked-branch-left"), "branch": orch["branch"],
+        result = {"outcome": w.get("outcome", "blocked-branch-left"),
+                  "branch": w.get("branch", orch["branch"]),
                   "pr_url": f"https://github.com/jnelken/{repo}/pull/7", "summary": "fixed",
                   "validation": {"status": w.get("validation", "passed"), "commands": ["make test → ok"]}}
         rc = int(w.get("exit", 0))

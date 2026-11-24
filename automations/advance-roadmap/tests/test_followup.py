@@ -1939,6 +1939,23 @@ class FollowupTest(unittest.TestCase):
         self.assertNotEqual(st.get("validation", {}).get("deploy"), "success")
         self.assertNotEqual(st["status"], "done")
 
+    def test_latest_deploy_status_per_context_wins(self):
+        """An older failed Vercel status must not block a later success for the same context."""
+        self.shipped_item("20261014-050000")
+        self.run_followup("hook", "item-done", "--stamp", "20261014-050000")
+        self.set("stub-gh.json", {
+            "checks": "pass", "deploy": "success",
+            "statuses": [
+                {"context": "Vercel", "state": "failure", "updated_at": "2026-10-14T10:00:00Z"},
+                {"context": "Vercel", "state": "success", "updated_at": "2026-10-14T10:05:00Z"},
+            ],
+            "check_runs": [],
+        })
+        self.run_followup("drain", env=self.repair_env())
+        st = self.state("cleanup-20261014-050000")
+        self.assertEqual(st["status"], "done", self.report())
+        self.assertEqual(st["validation"]["deploy"], "success")
+
     def test_nonzero_builder_exit_is_rejected_despite_pr_result(self):
         """Exit nonzero with a blocked-branch-left result must not proceed to review/merge."""
         self.shipped_item("20261014-050000")
@@ -1955,6 +1972,18 @@ class FollowupTest(unittest.TestCase):
         self.run_followup("drain", env=self.repair_env())
         self.assertEqual(self.state("cleanup-20261014-050000")["status"], "done", self.report())
         self.assertEqual(len(self.calls("worker")), 2)
+
+    def test_builder_reported_wrong_branch_is_rejected(self):
+        """Stage key owns the branch; a builder cannot rename it into land()."""
+        self.shipped_item("20261014-050000")
+        self.run_followup("hook", "item-done", "--stamp", "20261014-050000")
+        self.set("stub-worker.json", {"mode": "ok", "branch": "roadmap/attacker"})
+        self.run_followup("drain", env=self.repair_env())
+        st = self.state("cleanup-20261014-050000")
+        self.assertEqual(st["status"], "pending", self.report())
+        self.assertEqual(self.calls("review"), [])
+        self.assertIn("roadmap/attacker", self.report()[-1]["reason"])
+        self.assertIn("expected", self.report()[-1]["reason"])
 
     def test_unreadable_pr_head_does_not_clear_reviewed_sha(self):
         self.shipped_item("20261014-050000")

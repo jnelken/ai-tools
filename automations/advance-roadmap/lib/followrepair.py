@@ -259,8 +259,13 @@ def default_base(repo_dir):
     return "origin/main" if ok else "origin/master"
 
 
+def expected_branch(st):
+    """Canonical follow-up branch for this stage — never trust a builder-reported name."""
+    return f"roadmap/followup-{st['key']}"
+
+
 def branch_for(st):
-    return st.get("branch") or f"roadmap/followup-{st['key']}"
+    return st.get("branch") or expected_branch(st)
 
 
 def worktree_of(repo_dir, branch):
@@ -398,7 +403,12 @@ def _interpret_builder_artifacts(st, branch, rnd, rc, status_path, result_path):
     v["builder_commands"] = validation.get("commands") or []
     if res.get("outcome") != "blocked-branch-left" or not res.get("pr_url"):
         return "failed", f"builder ended {res.get('outcome') or f'exit {rc} with no result'}: {(res.get('summary') or '')[:300]}"
-    st["branch"], st["pr_url"] = res.get("branch") or branch, res["pr_url"]
+    # Invariant — the stage key owns the branch name; a builder cannot rename it.
+    want = expected_branch(st)
+    reported = res.get("branch") or branch
+    if reported != want:
+        return "failed", f"builder reported branch {reported!r}, expected {want!r}"
+    st["branch"], st["pr_url"] = want, res["pr_url"]
     # Catch a builder that merged but reported blocked-branch-left (launder path).
     state = gh("pr", "view", st["pr_url"], "--json", "state", "--jq", ".state")
     if state.returncode == 0 and state.stdout.strip().upper() == "MERGED":
@@ -435,7 +445,7 @@ def _adopt_finished_build(st, branch, rnd):
 
 def run_builder(st, repo_dir, findings, rnd, chain, review_text):
     """("ok"|"quota"|"failed"|"self-merged"|"unknown", detail): one worker.sh pass."""
-    branch = branch_for(st)
+    branch = expected_branch(st)
     st["branch"] = branch
     adopted = _adopt_finished_build(st, branch, rnd)
     if adopted is not None:
@@ -701,6 +711,22 @@ def pr_checks(url):
 DEPLOY_NAME = re.compile(r"vercel|netlify|deploy", re.I)
 
 
+def _latest_deploy_rows(rows, name_key, time_keys):
+    """Keep only the newest row per deploy-looking name (context or check-run name)."""
+    best = {}
+    for r in rows:
+        name = r.get(name_key) or ""
+        if not DEPLOY_NAME.search(name):
+            continue
+        stamp = ""
+        for k in time_keys:
+            stamp = r.get(k) or stamp
+        prev = best.get(name)
+        if prev is None or stamp >= prev[0]:
+            best[name] = (stamp, r)
+    return [pair[1] for pair in best.values()]
+
+
 def deploy_state(slug, sha):
     """success | failure | pending | None (both APIs answered; nothing deploy-looking yet) | error
     (an API call failed or answered garbage, so absence is not proven)."""
@@ -716,10 +742,11 @@ def deploy_state(slug, sha):
             rows = None
         if not isinstance(rows, list):
             return "error"
-        for r in rows:
-            if key == "statuses" and DEPLOY_NAME.search(r.get("context") or ""):
+        if key == "statuses":
+            for r in _latest_deploy_rows(rows, "context", ("updated_at", "created_at")):
                 states.append({"success": "success", "pending": "pending"}.get(r.get("state"), "failure"))
-            elif key == "check_runs" and DEPLOY_NAME.search(r.get("name") or ""):
+        else:
+            for r in _latest_deploy_rows(rows, "name", ("completed_at", "started_at")):
                 if r.get("status") != "completed":
                     states.append("pending")
                 else:
@@ -780,7 +807,7 @@ def verify_pr_target(st, repo_dir):
     url = st.get("pr_url") or ""
     if not re.search(rf"github\.com/{re.escape(slug)}/pull/\d+", url, re.I):
         return False, f"PR {url} is not in {slug}"
-    want_head = st.get("branch") or branch_for(st)
+    want_head = expected_branch(st)
     want_base = default_base(repo_dir).split("/", 1)[-1]
     p = gh("pr", "view", url, "--json", "headRefName,baseRefName")
     if p.returncode != 0:
