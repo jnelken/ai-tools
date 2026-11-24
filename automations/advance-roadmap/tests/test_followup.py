@@ -1232,6 +1232,28 @@ class FollowupTest(unittest.TestCase):
         self.assertFalse(st.get("pending_ticket_sync"))
         self.assertEqual(st["findings"][0].get("ticket"), "DEV-777")
 
+    def test_partial_owners_preserve_live_fixed_owner(self):
+        """A rewrite must not steal ownership of a finding another stage already fixed."""
+        import followup as fu
+        fu.ROOT = self.root
+        fu.STATE = self.root / "followups"
+        st = {"key": "cleanup-mine", "stage": "project-cleanup", "repo": "demo",
+              "branch": "roadmap/mine", "pr_url": "https://example/pr/1",
+              "builder_provider": "cursor", "merge_commit": "abc1234",
+              "validation": {"checks": "passed",
+                             "reviews": [{"verdict": "clean", "head": "abc1234", "round": 1}],
+                             "deploy": "success"},
+              "findings": [{"id": "aaaaaaaaaaaa", "status": "fixed"}]}
+        prev = {"finding_owners": {
+            "aaaaaaaaaaaa": {"key": "cleanup-other", "builder_provider": "codex"},
+            "bbbbbbbbbbbb": {"key": "cleanup-other", "builder_provider": "codex"},
+        }}
+        # Local stage verified aaaa; bbbb is only fixed in Linear (not locally).
+        owners = fu.finding_owners_for_partial(
+            st, {"aaaaaaaaaaaa": "fixed", "bbbbbbbbbbbb": "fixed"}, prev)
+        self.assertEqual(owners["aaaaaaaaaaaa"]["key"], "cleanup-mine")
+        self.assertEqual(owners["bbbbbbbbbbbb"]["key"], "cleanup-other")
+
     def test_partial_progress_preserves_live_fixed_and_skips_recomment(self):
         """Retry must not demote Linear-fixed findings or re-post the partial-progress comment."""
         import followup as fu

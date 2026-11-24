@@ -1303,7 +1303,9 @@ def finding_owners_for_partial(st, status_map, prev_meta=None):
     by_stage[st["key"]] = st
     owners = {}
     for fid, status in status_map.items():
-        if status == "fixed":
+        # Credit this stage only for findings it verified. Live-fixed rows owned elsewhere keep
+        # their recorded owner so the close gate still checks the right stage.
+        if status == "fixed" and finding_verified_fixed(fid, current=st, owner_key=st["key"]):
             owners[fid] = stage_owner_snapshot(st)
             continue
         prior = prev_owners.get(fid) if isinstance(prev_owners.get(fid), dict) else None
@@ -1317,6 +1319,13 @@ def finding_owners_for_partial(st, status_map, prev_meta=None):
                            "branch": None, "pr_url": None,
                            "builder_provider": (prior or {}).get("builder_provider")
                            or prev_ticket.get("builder_provider")}
+        elif status == "fixed":
+            # Fixed in Linear but not by us and no prior owner — keep ticket-level key if any.
+            owners[fid] = followticket.owner_fields(prior) if prior else {
+                "key": prev_ticket.get("key") or st["key"],
+                "stage": prev_ticket.get("stage") or st.get("stage"),
+                "builder_provider": prev_ticket.get("builder_provider"),
+            }
         else:
             snap = stage_owner_snapshot(st)
             snap.update(branch=None, pr_url=None)
