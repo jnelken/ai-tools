@@ -934,6 +934,8 @@ def rewrite_ticket_description(st, ident, findings, quota=None, next_step="", va
         merged, status, owners = ticket_description_payload(
             st, findings, ident, issues=live, finding_status=finding_status,
             finding_owners=finding_owners)
+        # Stamp before render so the published metadata.updated_at matches local ticket_meta_at.
+        st["ticket_meta_at"] = time.time()
         body = followticket.description(st, merged, quota, next_step, validation=validation,
                                         finding_status=status, finding_owners=owners)
         followticket.update_description(ident, body)
@@ -942,7 +944,6 @@ def rewrite_ticket_description(st, ident, findings, quota=None, next_step="", va
             if issue.get("identifier") == ident:
                 issue["description"] = body
     st["ticket_body"] = body[:6000]
-    st["ticket_meta_at"] = time.time()
     return body
 
 
