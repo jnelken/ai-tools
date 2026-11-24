@@ -119,14 +119,10 @@ def analyze(st, findings, files):
                 continue
             # Invariant (owner: live_limit_banner + paste scrub): gate only on a live CLI limit.
             # The analyst prompt inlines the corpus, so transcripts echo quoted banners; strip those
-            # bodies before detection. Empty -o with exit 0 is "no findings", not a limit.
+            # bodies before detection so live_limit_banner never sees paste-only banners.
             scrubbed = _transcript_without_paste(st, transcript)
             banner = usagelib.live_limit_banner(
                 scrubbed, exit_code=exit_code, final_answer=answer, provider_result=provider_result)
-            if (banner and exit_code == 0 and not (answer or "").strip()
-                    and not usagelib.provider_is_error(provider_result)
-                    and not usagelib.provider_reported_limit(provider_result)):
-                banner = None
             if banner:
                 record_analyst_limit(st, provider, banner)
                 limited.append(provider)
@@ -237,6 +233,8 @@ def accept_findings(st, findings, files, doc, provider=None):
         first = ev_objs[0]
         key = f"{Path(first['source']).name}:{first['quote'][:80]}"
         f = followscan.finding(st["stage"], st["repo"], kind, title, key, ev_objs, fix)
+        # Provenance: analyst findings ticket/report only — never autonomous repair (followup.repair_todo).
+        f["source"] = "analyst"
         if f["id"] not in known:
             kept.append(f)
             known.add(f["id"])

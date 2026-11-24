@@ -2440,14 +2440,15 @@ class FollowupTest(unittest.TestCase):
         self.assertEqual(self.calls("usage-record-limit"), [])
 
     def test_analyst_empty_final_answer_does_not_treat_corpus_banner_as_a_limit(self):
-        # exit 0 + empty -o + banner only from echoed corpus must not gate the provider.
+        # exit 0 + empty -o + banner only inside echoed paste must not gate (owner: paste scrub).
         stamp = "20261013-103004"
         (self.root / "runs" / stamp).mkdir(parents=True)
         banner = "You've hit your usage limit. Upgrade to Pro or try again at 7:00 PM."
         row = {**json.loads((FIXTURES / "runs-row.json").read_text()), "note": banner}
-        (self.root / "runs.jsonl").write_text(json.dumps(row) + "\n")
-        (self.root / "stub-codex-transcript.txt").write_text(
-            json.dumps(row) + "\n" + banner + "\n")
+        body = json.dumps(row) + "\n"
+        (self.root / "runs.jsonl").write_text(body)
+        # Transcript echoes the paste body only — no separate CLI limit line outside it.
+        (self.root / "stub-codex-transcript.txt").write_text(body)
         (self.root / "stub-analyst.txt").write_text("")
         p = self.run_followup("scan", "--stage", "tooling", "--origin", "batch-2026-10-13", "--stamp", stamp,
                               env={"ADVANCE_ROADMAP_FOLLOWUP_ANALYST": "1"})
@@ -2567,6 +2568,24 @@ class FollowupTest(unittest.TestCase):
                     fu.cmd_scan(args)
         self.assertEqual(sorted(set(keys)), ["scan-batch-x-7-111", "scan-batch-x-7-222"])
 
+    def test_cleanup_scan_dry_run_reads_repo_from_worker_result(self):
+        stamp = "20261014-050000"
+        self.shipped_item(stamp)
+        p = self.run_followup("scan", "--stage", "cleanup", "--stamp", stamp,
+                              env={"ADVANCE_ROADMAP_FOLLOWUP_ANALYST": "0"})
+        doc = json.loads(p.stdout)
+        self.assertTrue(doc["findings"])
+        wr = json.loads((self.root / "runs" / stamp / "worker-result.json").read_text())
+        self.assertEqual(wr["repo"], "demo")
+        # Findings cite the cleanup repo from worker-result.
+        self.assertTrue(any(f.get("repo") == "demo" for f in doc["findings"]))
+
+    def test_cleanup_scan_rejects_multiple_stamps(self):
+        p = self.run_followup("scan", "--stage", "cleanup", "--stamp", "a", "--stamp", "b",
+                              check=False, env={"ADVANCE_ROADMAP_FOLLOWUP_ANALYST": "0"})
+        self.assertNotEqual(p.returncode, 0)
+        self.assertIn("exactly one --stamp", (p.stderr or "") + (p.stdout or ""))
+
     def test_analyst_ignores_final_answer_when_provider_exits_nonzero(self):
         (self.root / "stub-codex-fail").write_text("")
         (self.root / "stub-claude-analyst.txt").write_text("I found nothing worth reporting.\n")
@@ -2592,7 +2611,20 @@ class FollowupTest(unittest.TestCase):
         st = self.state("tooling-batch-analyst")
         self.assertEqual(st["analyst"], "codex: answered")
         self.assertIn(self.ANALYST_FINDING["title"], [f["title"] for f in st["findings"]])
+        self.assertTrue(any(f.get("source") == "analyst" and f["title"] == self.ANALYST_FINDING["title"]
+                            for f in st["findings"]))
         self.assertNotIn("_analyst_paste", st)
+
+    def test_analyst_findings_are_excluded_from_autonomous_repair(self):
+        import followup as fu
+        analyst = {"id": "aaaaaaaaaaaa", "title": self.ANALYST_FINDING["title"], "status": "open",
+                   "source": "analyst", "kind": "analyst", "repo": "ai-tools"}
+        det = {"id": "bbbbbbbbbbbb", "title": "deterministic", "status": "open",
+               "kind": "misfiring-automation", "repo": "ai-tools"}
+        self.assertEqual(fu.repair_todo([analyst]), [])
+        self.assertEqual(fu.repair_todo([analyst, det]), [det])
+        st = {"findings": [analyst], "branch": "roadmap/x", "status": "deferred"}
+        self.assertFalse(fu.awaits_repair(st))
 
     def test_analyst_runs_inside_corpus_sandbox(self):
         stamp = "20261013-103004"

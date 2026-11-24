@@ -464,6 +464,15 @@ def repair_enabled():
     return os.environ.get("ADVANCE_ROADMAP_FOLLOWUP_REPAIR", "0") == "1"
 
 
+def repair_todo(findings):
+    """Open/deferred findings eligible for autonomous repair (owner of analyst exclusion).
+
+    Invariant: model-analyst findings (source=analyst) are ticket/report only — never builder input.
+    """
+    return [f for f in findings or []
+            if f.get("status") in ("open", "deferred") and f.get("source") != "analyst"]
+
+
 def awaits_repair(st):
     """True when the stage holds unfinished ticket work that only the repair loop can advance."""
     step = (st.get("next") or {}).get("step")
@@ -472,8 +481,7 @@ def awaits_repair(st):
     if st.get("recovered_from") and st.get("status") == "deferred":
         return True
     if st.get("branch") or st.get("pr_url"):
-        todo = [f for f in st.get("findings") or [] if f.get("status") in ("open", "deferred")]
-        return bool(todo)
+        return bool(repair_todo(st.get("findings")))
     return False
 
 
@@ -1837,18 +1845,20 @@ def process(st, issues=None):
         save(st)
     fs = st.get("findings") or []
     quiet = st.get("non_findings") or []
-    todo = [f for f in fs if f.get("status") in ("open", "deferred")]
+    todo = repair_todo(fs)
     open_n = sum(1 for f in fs if f.get("status") == "open")
     if repair_enabled() and (todo or awaits_repair(st)):
         step = (st.get("next") or {}).get("step")
         if not todo and awaits_repair(st):
             # Resume mid-flight without re-owning another stage's duplicates.
-            owned = [f for f in fs if f.get("status") in ("open", "deferred")]
+            owned = repair_todo(fs)
             if owned:
                 todo = owned
             elif step in ("land", "review"):
                 # Findings already fixed/duplicate; finish land/review without a builder brief.
-                todo = [f for f in fs if f.get("status") != "duplicate"] or list(fs)
+                # Prefer non-analyst rows so a mid-flight resume never feeds model titles to the builder.
+                non_analyst = [f for f in fs if f.get("source") != "analyst" and f.get("status") != "duplicate"]
+                todo = non_analyst or [f for f in fs if f.get("status") != "duplicate"] or list(fs)
             else:
                 report(st, "repair-empty", "no owned open findings left to repair")
                 cas_status(st, RUNNING, DONE, next=None, reported_at=now_iso())
@@ -2107,6 +2117,8 @@ def cmd_scan(a):
     # Unique per invocation so concurrent dry runs never share / delete each other's dir.
     uniq = f"{os.getpid()}-{time.time_ns()}"
     if a.stage == "cleanup":
+        if len(a.stamp) != 1:
+            raise SystemExit("scan --stage cleanup takes exactly one --stamp")
         key = f"scan-{a.stamp[0]}-{uniq}"
         require_id(key, "key")
         st = {"key": key, "stage": STAGES["cleanup"], "stamp": a.stamp[0], "usage_snapshots": [],
@@ -2177,6 +2189,8 @@ def main(argv=None):
     if a.cmd == "scan":
         if not a.stamp:
             p.error("scan needs --stamp")
+        if a.stage == "cleanup" and len(a.stamp) != 1:
+            p.error("scan --stage cleanup takes exactly one --stamp")
         try:
             for stamp in a.stamp:
                 require_id(stamp, "stamp")
