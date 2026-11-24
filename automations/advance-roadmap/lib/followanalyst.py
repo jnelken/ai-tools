@@ -36,6 +36,16 @@ def enabled():
     return os.environ.get("ADVANCE_ROADMAP_FOLLOWUP_ANALYST", "1") == "1"
 
 
+def gate_one_readonly(role, provider):
+    """provider_gate from the saved usage file — no refresh/save (dry-run owner)."""
+    try:
+        state = usagelib.load(followrepair.ROOT)
+        gate = usagelib.provider_gate(state, provider, role)
+        return {**gate, "available": bool(gate.get("available"))}
+    except (OSError, ValueError, TypeError, KeyError):
+        return None
+
+
 def corpus_stamps(st):
     """Stamp set for stamp-scoped evidence checks (runs.jsonl / verdicts)."""
     stamp = st.get("stamp")
@@ -149,11 +159,13 @@ def analyze(st, findings, files):
     prompt = analyst_prompt(st, findings, sandbox_files)
     # Invariant (owner: analyze gate check): every path to run_analyst must see an
     # available gate; an unreadable gate (None) is unavailable — fail closed.
+    # Dry-run owner: gate_one_readonly — never refresh/save the shared usage store.
+    gate_fn = gate_one_readonly if st.get("dry_run") else followrepair.gate_one
     limited, errored = [], []
     provider = None
     answer = ""
     for provider in PROVIDERS:
-        gate = followrepair.gate_one("analyst", provider)
+        gate = gate_fn("analyst", provider)
         st.setdefault("usage_snapshots", []).append({
             "at": followrepair.now_iso(), "role": "analyst", "provider": provider, "gate": gate})
         if gate is None or not gate.get("available"):

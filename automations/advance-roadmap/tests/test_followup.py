@@ -2387,6 +2387,29 @@ class FollowupTest(unittest.TestCase):
         self.assertEqual([(c["provider"], c["scope"]) for c in self.calls("usage-record-limit")],
                          [("codex", "analyst")])
 
+    def test_dry_run_gate_does_not_mutate_shared_usage_file(self):
+        import followanalyst
+        import followrepair
+        import usage as usagelib
+        os.environ["ADVANCE_ROADMAP_ROOT"] = str(self.root)
+        followrepair.ROOT = self.root
+        followrepair.STATE = self.root / "followups"
+        usagelib.save(self.root, usagelib.empty_state())
+        path = usagelib.usage_path(self.root)
+        before = path.read_bytes()
+        mtime = path.stat().st_mtime_ns
+        with mock.patch.object(followanalyst, "run_analyst",
+                               return_value=("ok", self.analyst_fence(), 0, None)):
+            st = {"key": "dry-gate", "dry_run": True, "stage": "tooling-hardening",
+                  "repo": "ai-tools", "children": ["20261013-103004"], "usage_snapshots": []}
+            (self.root / "followups" / st["key"]).mkdir(parents=True)
+            (self.root / "runs.jsonl").write_text(
+                json.dumps(json.loads((FIXTURES / "runs-row.json").read_text())) + "\n")
+            followanalyst.analyze(st, [], [self.root / "runs.jsonl"])
+        self.assertEqual(path.read_bytes(), before)
+        self.assertEqual(path.stat().st_mtime_ns, mtime)
+        self.assertEqual(self.calls("usage"), [])  # no refresh/gate CLI
+
     def test_analyst_ignores_an_echoed_limit_banner_when_its_final_answer_succeeded(self):
         # Codex stdout quotes a prior corpus log's banner; -o still has a real findings fence.
         (self.root / "stub-codex-transcript.txt").write_text(
