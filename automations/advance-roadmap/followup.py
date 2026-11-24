@@ -780,6 +780,24 @@ def _issue_repo(issue):
     return meta.get("repo") or followticket.repo_label(issue)
 
 
+def require_ticket_repo(ident, want_repo, issues=None):
+    """Shared write-path guard: return the open issue after enforcing repo match, or raise."""
+    pool = list(issues) if issues is not None else None
+    if pool is None:
+        pool = followticket.fetch_open()
+    target = next((i for i in pool if i.get("identifier") == ident), None)
+    if not target and issues is not None:
+        pool = followticket.fetch_open()
+        target = next((i for i in pool if i.get("identifier") == ident), None)
+    if not target:
+        raise followticket.LinearError(f"{ident} not in open issues; refusing ticket write")
+    ticket_repo = _issue_repo(target)
+    if want_repo and ticket_repo != want_repo:
+        raise followticket.LinearError(
+            f"{ident} repo {ticket_repo!r} != stage repo {want_repo!r}; refusing ticket write")
+    return target
+
+
 def dedupe(st, issues):
     """Attach existing tickets to fresh findings and fold this run's evidence into them once."""
     if not issues:
@@ -824,6 +842,7 @@ def dedupe(st, issues):
         try:
             # Comment and rewrite are tracked apart so a failed rewrite retry does not re-comment.
             if tag not in commented:
+                require_ticket_repo(issue["identifier"], want_repo, issues=issues)
                 followticket.comment(issue["identifier"], body)
                 commented.add(tag)
                 st["evidence_commented"] = sorted(commented)
@@ -922,15 +941,7 @@ def rewrite_ticket_description(st, ident, findings, quota=None, next_step="", va
     want_repo = st.get("repo")
     with TicketIndex():
         live = followticket.fetch_open()
-        target = next((i for i in live if i.get("identifier") == ident), None)
-        if not target:
-            raise followticket.LinearError(
-                f"{ident} not in open issues; refusing description rewrite")
-        ticket_repo = _issue_repo(target)
-        if want_repo and ticket_repo != want_repo:
-            raise followticket.LinearError(
-                f"{ident} repo {ticket_repo!r} != stage repo {want_repo!r}; "
-                f"refusing description rewrite")
+        require_ticket_repo(ident, want_repo, issues=live)
         merged, status, owners = ticket_description_payload(
             st, findings, ident, issues=live, finding_status=finding_status,
             finding_owners=finding_owners)
@@ -1015,8 +1026,12 @@ def sync_deferral_tickets(st, findings, quota, next_step, note, issues=None):
                     followticket.comment(
                         ident, "advance-roadmap follow-up deferred again for quota.\n\n" + body)
                 if remaining:
-                    # Create then reconcile: another machine may have filed between match and create.
+                    # Record the create immediately so a failed post-create fetch cannot duplicate it.
                     ident = followticket.create(st, remaining, quota, next_step)
+                    st.setdefault("owned_tickets", []).append(ident)
+                    for f in remaining:
+                        f["ticket"] = ident
+                        index.add(f["id"], ident, st["key"])
                     live_after = followticket.fetch_open()
                     winner = None
                     for f in remaining:
@@ -1036,13 +1051,13 @@ def sync_deferral_tickets(st, findings, quota, next_step, note, issues=None):
                             f["ticket"] = win_id
                             index.add(f["id"], win_id, st["key"])
                         index.drop_tickets({ident})
+                        st["owned_tickets"] = [t for t in st["owned_tickets"] if t != ident]
                         body = rewrite_ticket_description(
                             st, win_id, remaining, quota=quota, next_step=next_step, issues=issues)
                         followticket.comment(
                             win_id,
                             "advance-roadmap follow-up deferred again for quota.\n\n" + body)
                         try:
-                            # Cancel — never mark_done here (close gate is for verified fixes only).
                             followticket.comment(
                                 ident,
                                 f"Duplicate of `{win_id}` (concurrent deferral create); canceling.")
@@ -1052,10 +1067,6 @@ def sync_deferral_tickets(st, findings, quota, next_step, note, issues=None):
                             report(st, "linear",
                                    f"could not cancel duplicate deferral ticket {ident}: {e}")
                     else:
-                        st["owned_tickets"].append(ident)
-                        for f in remaining:
-                            f["ticket"] = ident
-                            index.add(f["id"], ident, st["key"])
                         if issues is not None:
                             issues.append({
                                 "identifier": ident,
@@ -1379,6 +1390,7 @@ def note_partial_progress(st, ident, status_map, issues=None, already_commented=
     fixed_ids = sorted(fid for fid, s in status_map.items() if s == "fixed")
     owners = finding_owners_for_partial(st, status_map, prev_meta)
     if not already_commented:
+        require_ticket_repo(ident, st.get("repo"), issues=issues)
         followticket.comment(ident, body)
         if on_commented:
             on_commented()
