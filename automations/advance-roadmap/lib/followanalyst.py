@@ -117,12 +117,9 @@ def analyze(st, findings, files):
                 st.setdefault("analyst_errors", []).append(
                     {"provider": provider, "at": followrepair.now_iso(), "error": f"{type(e).__name__}: {e}"})
                 continue
-            # Echoed banners in a successful final answer are not a live limit (shared live-limit rule).
-            # Corpus paste often quotes prior limit text — those must not gate providers.
+            # Echoed banners in a successful final answer are not a live limit (owner: live_limit_banner).
             banner = usagelib.live_limit_banner(
                 transcript, exit_code=exit_code, final_answer=answer, provider_result=provider_result)
-            if banner and _banner_from_paste(st, banner):
-                banner = None
             if banner:
                 record_analyst_limit(st, provider, banner)
                 limited.append(provider)
@@ -198,15 +195,16 @@ def accept_findings(st, findings, files, doc, provider=None):
         if not isinstance(raw_ev, list) or not raw_ev or not all(isinstance(e, dict) for e in raw_ev):
             rejected.append(followscan.non_finding(
                 title, "rejected: its evidence is not in the corpus",
-                [e for e in raw_ev if isinstance(e, dict)] if isinstance(raw_ev, list) else []))
+                _safe_evidence(
+                    [e for e in raw_ev if isinstance(e, dict)] if isinstance(raw_ev, list) else [])))
             continue
         if any(_resolve_source(e.get("source")) is None for e in raw_ev):
             rejected.append(followscan.non_finding(
-                title, "rejected: its evidence is not in the corpus", raw_ev))
+                title, "rejected: its evidence is not in the corpus", _safe_evidence(raw_ev)))
             continue
         if not all(followscan.evidence_holds(e, files, stamps) for e in raw_ev):
             rejected.append(followscan.non_finding(
-                title, "rejected: its evidence is not in the corpus", raw_ev))
+                title, "rejected: its evidence is not in the corpus", _safe_evidence(raw_ev)))
             continue
         # Also require the quote to appear in the exact pasted (possibly truncated) body.
         paste = st.get("_analyst_paste") or {}
@@ -219,14 +217,14 @@ def accept_findings(st, findings, files, doc, provider=None):
                     break
             if not ok_paste:
                 rejected.append(followscan.non_finding(
-                    title, "rejected: its evidence is not in the corpus", raw_ev))
+                    title, "rejected: its evidence is not in the corpus", _safe_evidence(raw_ev)))
                 continue
         try:
             ev_objs = [followscan.evidence(e["source"], e["quote"]) for e in raw_ev]
         except (OSError, TypeError, ValueError):
             # evidence_holds is whitespace-normalized; evidence() requires an exact span.
             rejected.append(followscan.non_finding(
-                title, "rejected: its evidence is not in the corpus", raw_ev))
+                title, "rejected: its evidence is not in the corpus", _safe_evidence(raw_ev)))
             continue
         # Key from first verified evidence — not model-supplied — so finding_id can't forge tickets.
         first = ev_objs[0]
@@ -237,9 +235,26 @@ def accept_findings(st, findings, files, doc, provider=None):
             known.add(f["id"])
     for raw in raw_non:
         if isinstance(raw, dict) and isinstance(raw.get("title"), str) and raw.get("title").strip():
-            why = raw.get("why") if isinstance(raw.get("why"), str) else ""
-            rejected.append(followscan.non_finding(raw["title"], why, []))
+            title = TITLE_SAFE.sub("", raw["title"].strip())[:200].strip()
+            if not title:
+                continue
+            why = TITLE_SAFE.sub(
+                "", (raw.get("why") if isinstance(raw.get("why"), str) else ""))[:400].strip()
+            rejected.append(followscan.non_finding(title, why, []))
     return kept, rejected
+
+
+def _safe_evidence(ev):
+    """Cap model-controlled evidence fields persisted on rejection rows."""
+    out = []
+    for e in ev or []:
+        if not isinstance(e, dict):
+            continue
+        src, quote = e.get("source"), e.get("quote")
+        if not isinstance(src, str) or not isinstance(quote, str):
+            continue
+        out.append({"source": src[:500], "quote": quote[:500]})
+    return out
 
 
 def run_analyst(st, provider, prompt, sandbox):
@@ -398,13 +413,6 @@ def quote_in_paste(quote, body):
     """True when the quote appears in the pasted body (whitespace-normalized)."""
     q = " ".join(str(quote or "").split())
     return bool(q) and q in " ".join(str(body or "").split())
-
-
-def _banner_from_paste(st, banner):
-    """True when the limit banner text also appears in the inlined corpus paste."""
-    paste = st.get("_analyst_paste") or {}
-    blob = "\n".join(paste.values())
-    return bool(banner) and banner.strip() in blob
 
 
 def analyst_prompt(st, findings, files):

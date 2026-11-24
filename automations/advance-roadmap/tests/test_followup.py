@@ -2431,12 +2431,44 @@ class FollowupTest(unittest.TestCase):
 
     def test_analyst_ignores_an_echoed_limit_banner_when_its_final_answer_succeeded(self):
         # Codex stdout quotes a prior corpus log's banner; -o still has a real findings fence.
+        # Owner of the echoed-banner rule is live_limit_banner's success test (exit 0 + final answer).
         (self.root / "stub-codex-transcript.txt").write_text(
             "reading runs.jsonl\nYou've hit your usage limit. Upgrade to Pro or try again at 7:00 PM.\n")
         doc, titles = self.analyst_scan("stub-analyst.txt", answer=True)
         self.assertEqual(doc["analyst"], "codex: answered")
         self.assertIn(self.ANALYST_FINDING["title"], titles)
         self.assertEqual(self.calls("usage-record-limit"), [])
+
+    def test_analyst_still_records_a_live_limit_when_the_corpus_quotes_the_same_banner(self):
+        # Corpus paste often quotes prior limit text; a real failed limit must still gate.
+        stamp = "20261013-103004"
+        (self.root / "runs" / stamp).mkdir(parents=True)
+        banner = "You've hit your usage limit. Upgrade to Pro or try again at 7:00 PM."
+        (self.root / "runs.jsonl").write_text(
+            json.dumps({**json.loads((FIXTURES / "runs-row.json").read_text()),
+                        "note": banner}) + "\n")
+        (self.root / "stub-codex-limit").write_text("")
+        (self.root / "stub-claude-analyst.txt").write_text(self.analyst_fence())
+        p = self.run_followup("scan", "--stage", "tooling", "--origin", "batch-2026-10-13", "--stamp", stamp,
+                              env={"ADVANCE_ROADMAP_FOLLOWUP_ANALYST": "1"})
+        doc = json.loads(p.stdout)
+        self.assertEqual(doc["analyst"], "claude: answered")
+        self.assertIn(self.ANALYST_FINDING["title"], [f["title"] for f in doc["findings"]])
+        self.assertIn("parse-limit", [c.get("cmd") for c in self.calls("usage")])
+
+    def test_analyst_sanitizes_model_supplied_non_findings(self):
+        stamp = "20261013-103004"
+        (self.root / "runs" / stamp).mkdir(parents=True)
+        (self.root / "runs.jsonl").write_text(json.dumps(json.loads((FIXTURES / "runs-row.json").read_text())) + "\n")
+        dirty = {"title": "ok <script>alert(1)</script> title", "why": "because " + ("x" * 500)}
+        (self.root / "stub-analyst.txt").write_text(
+            "```FOLLOWUP_FINDINGS_JSON\n" + json.dumps({"findings": [], "non_findings": [dirty]}) + "\n```\n")
+        p = self.run_followup("scan", "--stage", "tooling", "--origin", "batch-2026-10-13", "--stamp", stamp,
+                              env={"ADVANCE_ROADMAP_FOLLOWUP_ANALYST": "1"})
+        doc = json.loads(p.stdout)
+        nf = next(n for n in doc["non_findings"] if "ok" in n["title"] and "title" in n["title"])
+        self.assertNotIn("<script>", nf["title"])
+        self.assertLessEqual(len(nf["why"]), 400)
 
     def test_analyst_disabled_preserves_deterministic_findings_only(self):
         stamp = "20261013-103004"
