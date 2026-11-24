@@ -700,6 +700,40 @@ class FollowupTest(unittest.TestCase):
         self.assertTrue(updates)
         self.assertEqual(followticket.parse_meta(updates[-1]["body"])["builder_provider"], "codex")
 
+    def test_defer_discards_cross_repo_index_entry(self):
+        """A stale tickets.json entry for another repo must not rewrite that issue on deferral."""
+        import followup as fu
+        fu.ROOT = self.root
+        fu.STATE = self.root / "followups"
+        os.environ["ADVANCE_ROADMAP_ROOT"] = str(self.root)
+        os.environ["ADVANCE_ROADMAP_LINEAR_BIN"] = self.env["ADVANCE_ROADMAP_LINEAR_BIN"]
+        os.environ["ADVANCE_ROADMAP_JLIN"] = self.env["ADVANCE_ROADMAP_JLIN"]
+        key = "cleanup-defer-index"
+        fid = "cccccccccccc"
+        d = self.root / "followups" / key
+        d.mkdir(parents=True)
+        findings = [{"id": fid, "title": "quota stopped the builder", "kind": "unresolved-review",
+                     "fix": "resume", "status": "open", "repo": "demo", "stage": "project-cleanup",
+                     "evidence": [{"source": "t", "quote": "quota stopped the builder"}]}]
+        st = {"key": key, "stage": "project-cleanup", "repo": "demo", "status": "running",
+              "findings": findings, "owned_tickets": [], "builder_provider": "cursor"}
+        (d / "state.json").write_text(json.dumps(st))
+        (self.root / "followups" / "tickets.json").write_text(json.dumps({
+            fid: {"ticket": "DEV-777", "key": "cleanup-other", "at": time.time()}}))
+        foreign = self.meta_ticket("DEV-777", {
+            "key": "cleanup-other", "stage": "project-cleanup", "finding_ids": [fid],
+            "repo": "mailcruxh",
+        }, repo="mailcruxh")
+        self.set("stub-linear.json", {"pages": [[foreign]]})
+        quota = {"provider": "cursor", "cause": "over its gate", "reset_at": "soon",
+                 "reset_epoch": time.time() + 60}
+        fu.defer(st, findings, quota, "builder round 1", issues=[])
+        self.assertNotEqual(findings[0].get("ticket"), "DEV-777")
+        self.assertEqual(findings[0].get("ticket"), "DEV-900")
+        self.assertFalse(any(c.get("issue") == "DEV-777" for c in self.calls("linear")))
+        index = json.loads((self.root / "followups" / "tickets.json").read_text())
+        self.assertEqual((index.get(fid) or {}).get("ticket"), "DEV-900")
+
     def test_defer_attaches_to_live_ticket_instead_of_creating_duplicate(self):
         """Immediately before create, recheck Linear and attach when another machine already filed."""
         import followup as fu

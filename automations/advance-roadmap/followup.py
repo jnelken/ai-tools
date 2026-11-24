@@ -551,6 +551,10 @@ class TicketIndex:
     def add(self, fid, ident, key):
         self.entries[fid] = {"ticket": ident, "key": key, "at": time.time()}
 
+    def drop_finding(self, fid):
+        self.entries.pop(fid, None)
+        _TICKET_LOCK["entries"] = self.entries
+
     def drop_tickets(self, idents):
         self.entries = {k: e for k, e in self.entries.items() if e.get("ticket") not in idents}
         _TICKET_LOCK["entries"] = self.entries
@@ -932,11 +936,29 @@ def sync_deferral_tickets(st, findings, quota, next_step, note, issues=None):
     deferral as already recorded (which would suppress identical retries and leave metadata stale).
     """
     with TicketIndex() as index:
+        # Live fetch once under the lock so index/ticket ids are checked against real repos.
+        try:
+            live = followticket.fetch_open()
+        except followticket.LinearError:
+            live = None
+        by_ident = {i.get("identifier"): i for i in (live or [])}
         attached = set()
         for f in findings:
+            want = f.get("repo") or st.get("repo")
+            if f.get("ticket"):
+                hit = by_ident.get(f["ticket"]) if live is not None else None
+                if live is not None and (not hit or (want and _issue_repo(hit) != want)):
+                    f.pop("ticket", None)
+                    index.drop_finding(f["id"])
             if not f.get("ticket") and index.ticket(f["id"]):
-                f["ticket"] = index.ticket(f["id"])
-                attached.add(f["ticket"])
+                ident = index.ticket(f["id"])
+                hit = by_ident.get(ident) if live is not None else None
+                if live is not None and hit and (not want or _issue_repo(hit) == want):
+                    f["ticket"] = ident
+                    attached.add(ident)
+                else:
+                    # Stale/cross-repo index entry — discard and fall through to match/create.
+                    index.drop_finding(f["id"])
         ticketed = {}
         for f in findings:
             if f.get("ticket"):
@@ -955,7 +977,9 @@ def sync_deferral_tickets(st, findings, quota, next_step, note, issues=None):
             fresh = [f for f in findings if not f.get("ticket")]
             if fresh:
                 # Recheck live Linear immediately before create — another machine may have filed.
-                live = followticket.fetch_open()
+                if live is None:
+                    live = followticket.fetch_open()
+                    by_ident = {i.get("identifier"): i for i in live}
                 late = {}
                 remaining = []
                 for f in fresh:
