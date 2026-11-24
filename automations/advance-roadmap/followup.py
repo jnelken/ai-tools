@@ -365,9 +365,8 @@ class RepoLock:
         self.ok = False
 
 
-# How many run.sh thread slots a repair preclaims. Must cover THREAD values a later
-# batch may open after we start (plan-approval can raise THREADS_PER_REPO).
-REPO_THREAD_LOCK_CEILING = 16
+# How many run.sh thread slots a repair preclaims. Shared with run.sh's THREAD cap.
+REPO_THREAD_LOCK_CEILING = 64
 
 
 def take_repo_lock(repo):
@@ -383,11 +382,7 @@ def take_repo_lock(repo):
         require_id(repo, "repo")
     except ValueError:
         return None
-    try:
-        configured = int(os.environ.get("ADVANCE_ROADMAP_THREADS_PER_REPO", "3"))
-    except ValueError:
-        configured = 3
-    n = max(REPO_THREAD_LOCK_CEILING, max(1, min(configured, 32)))
+    n = REPO_THREAD_LOCK_CEILING
     base = ROOT / "repo-locks"
     paths = [base / f"{repo}.lock"]
     paths.extend(base / f"{repo}.t{i}.lock" for i in range(1, n + 1))

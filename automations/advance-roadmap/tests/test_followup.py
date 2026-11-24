@@ -1448,7 +1448,8 @@ class FollowupTest(unittest.TestCase):
             self.run_followup("drain", env=self.repair_env())
             st = self.state("cleanup-20261014-050000")
             fid = st["findings"][0]["id"]
-            self.assertEqual(st["status"], "blocked")
+            # Failed checks block before merge; a red deploy after merge stays pending (retryable).
+            self.assertEqual(st["status"], "blocked" if checks == "fail" else "pending")
             # Evidence/description rewrites may update the ticket; never close it as Done.
             self.assertFalse(any(
                 c["cmd"].startswith("issue update") and "--state" in (c.get("args") or [])

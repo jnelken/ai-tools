@@ -907,7 +907,8 @@ def land(st, repo_dir, findings):
     if v.get("deploy") not in ("success", "none"):
         v["deploy"] = verify_deploy(origin_slug(repo_dir), sha, repo_dir)
         if v["deploy"] not in ("success", "none"):
-            return False, f"merged {sha[:9]} but the deploy is {v['deploy']}", v["deploy"] in ("timeout", "unverified")
+            # Always retryable once merged — a failed deploy must not strand main as blocked.
+            return False, f"merged {sha[:9]} but the deploy is {v['deploy']}", True
     if st["repo"] == followscan.TOOLING_REPO and v.get("install") not in ("installed", "skipped"):
         v["install"] = install_ai_tools(sha)
         if v["install"] not in ("installed", "skipped"):
