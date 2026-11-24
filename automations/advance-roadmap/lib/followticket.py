@@ -260,6 +260,8 @@ def jlin_path():
 
 def create(stage, findings, quota, next_step):
     """File one ticket for the stage's remaining findings, through jlin.py (exactly one repo label)."""
+    if not stage.get("repo"):
+        raise LinearError("stage has no repo; refusing ticket create")
     body = description(stage, findings, quota, next_step)
 
     def run(path):

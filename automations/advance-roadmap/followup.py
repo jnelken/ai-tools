@@ -1123,7 +1123,11 @@ def cancel_duplicate_tickets(st, issues=None):
             followticket.linear("issue", "update", ident, "--state", "Canceled")
             done.add(ident)
         except followticket.LinearError as e:
-            report(st, "linear", f"could not cancel duplicate deferral ticket {ident}: {e}")
+            # Already absent from open issues means a prior cancel landed; clear the pending entry.
+            if "not in open issues" in str(e):
+                done.add(ident)
+            else:
+                report(st, "linear", f"could not cancel duplicate deferral ticket {ident}: {e}")
     st["pending_cancel"] = [e for e in st.get("pending_cancel") or [] if e.get("ticket") not in done]
     return done
 
