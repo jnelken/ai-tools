@@ -805,8 +805,11 @@ def dedupe(st, issues):
         owned = per.get(f["id"]) if isinstance(per.get(f["id"]), dict) else None
         owner = (owned or {}).get("key") or meta.get("key")
         other = owner and owner != st["key"] and load(owner)
-        if other and other.get("status") not in (DONE, BLOCKED, "skipped"):
-            f.update(status="duplicate", duplicate_of=owner)   # that finding's owner repairs it
+        if owner and owner != st["key"]:
+            # Honor the ticket's recorded owner even when that stage is absent on this machine —
+            # recovery rebuilds it; this stage must not schedule a second repair.
+            if not other or other.get("status") not in (DONE, BLOCKED, "skipped"):
+                f.update(status="duplicate", duplicate_of=owner)
         tag = f"{issue['identifier']}:{f['id']}:{st['key']}"
         if tag in posted or issue.get("identifier") == st.get("recovered_from"):
             continue
@@ -1037,13 +1040,15 @@ def sync_deferral_tickets(st, findings, quota, next_step, note, issues=None):
                             win_id,
                             "advance-roadmap follow-up deferred again for quota.\n\n" + body)
                         try:
+                            # Cancel — never mark_done here (close gate is for verified fixes only).
                             followticket.comment(
                                 ident,
-                                f"Duplicate of `{win_id}` (concurrent deferral create); closing.")
-                            followticket.mark_done(ident)
+                                f"Duplicate of `{win_id}` (concurrent deferral create); canceling.")
+                            followticket.linear(
+                                "issue", "update", ident, "--state", "Canceled")
                         except followticket.LinearError as e:
                             report(st, "linear",
-                                   f"could not close duplicate deferral ticket {ident}: {e}")
+                                   f"could not cancel duplicate deferral ticket {ident}: {e}")
                     else:
                         st["owned_tickets"].append(ident)
                         for f in remaining:

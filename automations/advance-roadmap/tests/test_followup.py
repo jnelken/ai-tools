@@ -776,9 +776,13 @@ class FollowupTest(unittest.TestCase):
                 st, findings, quota, "resume", "note-race", issues=[]))
             self.assertEqual(findings[0]["ticket"], "DEV-501")
             self.assertNotIn("DEV-900", st.get("owned_tickets") or [])
+            canceled = [c for c in self.calls("linear")
+                        if c.get("cmd") == "issue update DEV-900"
+                        and "Canceled" in (c.get("args") or [])]
+            self.assertTrue(canceled, self.calls("linear"))
             done = [c for c in self.calls("linear")
                     if c.get("cmd") == "issue update DEV-900" and "Done" in (c.get("args") or [])]
-            self.assertTrue(done, self.calls("linear"))
+            self.assertEqual(done, [])
         finally:
             followticket.create, followticket.match, followticket.fetch_open = (
                 real_create, real_match, real_fetch)
@@ -1284,8 +1288,33 @@ class FollowupTest(unittest.TestCase):
         self.assertEqual(meta["finding_status"][fid_remote], "fixed")
         self.assertEqual(st.get("pending_partial"), [])
 
+    def test_dedupe_marks_duplicate_from_recorded_owner_without_local_stage(self):
+        """A fresh machine must honor finding_owners even when the owner stage is absent locally."""
+        import followup as fu
+        fu.ROOT = self.root
+        fu.STATE = self.root / "followups"
+        os.environ["ADVANCE_ROADMAP_ROOT"] = str(self.root)
+        os.environ["ADVANCE_ROADMAP_LINEAR_BIN"] = self.env["ADVANCE_ROADMAP_LINEAR_BIN"]
+        key = "cleanup-dup-fresh"
+        fid = "aaaaaaaaaaaa"
+        title = "reject an empty listing before saving the catalog"
+        d = self.root / "followups" / key
+        d.mkdir(parents=True)
+        ticket = self.meta_ticket("DEV-777", {
+            "key": "cleanup-other-machine", "stage": "project-cleanup", "finding_ids": [fid],
+            "finding_owners": {fid: {"key": "cleanup-other-machine", "builder_provider": "codex"}},
+        })
+        st = {"key": key, "stage": "project-cleanup", "repo": "demo", "status": "running",
+              "findings": [{"id": fid, "title": title, "kind": "t", "fix": "f", "status": "open",
+                            "repo": "demo", "evidence": [{"source": "t", "quote": title}]}],
+              "evidence_posted": [], "evidence_commented": [], "blockers": []}
+        (d / "state.json").write_text(json.dumps(st))
+        self.set("stub-linear.json", {"pages": [[ticket]]})
+        fu.dedupe(st, [ticket])
+        self.assertEqual(st["findings"][0]["status"], "duplicate")
+        self.assertEqual(st["findings"][0]["duplicate_of"], "cleanup-other-machine")
+
     def test_dedupe_rejects_cross_repo_ticket_attachment(self):
-        """A finding's stored ticket id must not rewrite an issue from another repo."""
         import followup as fu
         fu.ROOT = self.root
         fu.STATE = self.root / "followups"
