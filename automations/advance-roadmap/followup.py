@@ -621,16 +621,26 @@ def recover_tickets():
                 changed = True
             newer = own and isinstance(meta.get("updated_at"), (int, float)) \
                 and meta["updated_at"] > (st.get("ticket_meta_at") or 0)
-            if meta.get("builder_provider") and (not st.get("builder_provider") or newer) \
-                    and meta["builder_provider"] != st.get("builder_provider") \
-                    and st.get("status") != RUNNING:
-                log(f"{key}: {ident} says {meta['builder_provider']} built "
-                    f"{meta.get('branch') or 'the branch'} "
-                    f"(local state said {st.get('builder_provider')})")
-                st.update(builder_provider=meta["builder_provider"], reviewed_sha=None)
-                changed = True
-            if newer:
+            if newer and st.get("status") != RUNNING:
+                # Another machine's deferral is authoritative: builder, branch and PR must match.
+                if meta.get("builder_provider") and meta["builder_provider"] != st.get("builder_provider"):
+                    log(f"{key}: {ident} says {meta['builder_provider']} built "
+                        f"{meta.get('branch') or 'the branch'} "
+                        f"(local state said {st.get('builder_provider')})")
+                    st["builder_provider"] = meta["builder_provider"]
+                    st["reviewed_sha"] = None
+                    changed = True
+                if meta.get("branch") != st.get("branch") or meta.get("pr_url") != st.get("pr_url"):
+                    st["branch"] = meta.get("branch")
+                    st["pr_url"] = meta.get("pr_url")
+                    changed = True
                 st["ticket_meta_at"] = meta["updated_at"]
+                if issue.get("description"):
+                    st["ticket_body"] = (issue.get("description") or "")[:6000]
+                changed = True
+            elif meta.get("builder_provider") and not st.get("builder_provider") \
+                    and st.get("status") != RUNNING:
+                st.update(builder_provider=meta["builder_provider"], reviewed_sha=None)
                 changed = True
             for f in st.get("findings") or []:
                 if f["id"] in (meta.get("finding_ids") or []) and f.get("ticket") != ident:
@@ -943,7 +953,7 @@ def finish(st, findings):
     st["pending_partial"] = [{"ticket": ident, "status": status_map, "done": False}
                              for ident, status_map in partial]
     apply_partial_progress(st, findings)
-    close_tickets(st)
+    close_tickets(st, issues=None)  # ticket_ready_to_close still reads ticket_body / index
 
 
 def apply_partial_progress(st, findings=None):
@@ -964,21 +974,42 @@ def apply_partial_progress(st, findings=None):
     st["pending_partial"] = [e for e in st.get("pending_partial") or [] if not e.get("done")]
 
 
-def ticket_ready_to_close(ident, current=None):
+def meta_finding_ids(ident, issues=None):
+    """Finding IDs from the ticket's Linear metadata block (authoritative across machines)."""
+    ids = set()
+    for issue in issues or []:
+        if issue.get("identifier") != ident:
+            continue
+        meta = followticket.parse_meta(issue.get("description") or "")
+        if meta:
+            ids.update(meta.get("finding_ids") or [])
+            ids.update((meta.get("finding_status") or {}).keys())
+        break
+    return ids
+
+
+def ticket_ready_to_close(ident, current=None, issues=None):
     """Invariant owner: Done requires every tracked finding verified fixed (checks/review/deploy).
 
     Every path that calls mark_done (finish → close_tickets, drain → retry_closes → close_tickets)
-    must go through this check immediately before the Linear state write.
+    must go through this check immediately before the Linear state write. The check always
+    includes finding IDs from the ticket's Linear metadata, not only local state/index.
     """
-    tracked = ticket_tracked_ids(ident, current=current)
+    extras = meta_finding_ids(ident, issues)
+    if current and current.get("ticket_body"):
+        meta = followticket.parse_meta(current.get("ticket_body") or "")
+        if meta:
+            extras.update(meta.get("finding_ids") or [])
+            extras.update((meta.get("finding_status") or {}).keys())
+    tracked = ticket_tracked_ids(ident, current=current, extras=extras)
     return bool(tracked) and all(finding_verified_fixed(fid, current=current) for fid in tracked)
 
 
-def close_tickets(st):
+def close_tickets(st, issues=None):
     """Persisted in pending_close so a Linear failure is retried by every later drain.
 
     The closing comment and the move to Done are tracked apart, so a retry never posts twice.
-    Revalidates the full tracked finding set immediately before mark_done (see ticket_ready_to_close).
+    Revalidates the full tracked finding set (including Linear metadata IDs) before mark_done.
     """
     closed = set()
     dropped = set()
@@ -986,7 +1017,7 @@ def close_tickets(st):
         return closed
     for entry in st.get("pending_close") or []:
         ident = entry["ticket"]
-        if not ticket_ready_to_close(ident, current=st):
+        if not ticket_ready_to_close(ident, current=st, issues=issues):
             report(st, "close-recheck",
                    f"refusing to Done {ident}: not every tracked finding is verified fixed",
                    "partial progress or a sibling still owns open work")
@@ -1011,9 +1042,15 @@ def close_tickets(st):
     return closed
 
 
-def retry_closes():
+def retry_closes(issues=None):
     """Close tickets an earlier drain verified but could not close in Linear."""
     closed = set()
+    if issues is None and os.environ.get("ADVANCE_ROADMAP_FOLLOWUP_LINEAR", "1") == "1":
+        try:
+            issues = followticket.fetch_open()
+        except followticket.LinearError as e:
+            report(None, "linear", f"could not refresh tickets before close retry: {e}")
+            issues = []
     for snapshot in all_stages():
         if not snapshot.get("pending_close") and not snapshot.get("pending_partial"):
             continue
@@ -1026,7 +1063,7 @@ def retry_closes():
                 apply_partial_progress(st)
                 save(st)
             if st.get("pending_close"):
-                closed |= close_tickets(st)
+                closed |= close_tickets(st, issues=issues)
                 save(st)
         finally:
             c.close()
@@ -1087,14 +1124,20 @@ def process(st, issues=None):
     fs = st.get("findings") or []
     quiet = st.get("non_findings") or []
     todo = [f for f in fs if f.get("status") in ("open", "deferred")]
-    # Slice 3a: no repair. Ticket-bearing unfinished work stays for 3b (eligible() parks it).
+    open_n = sum(1 for f in fs if f.get("status") == "open")
+    # Slice 3a: no repair. Open findings must stay resumable for 3b — never mark DONE over them.
     if repair_enabled() and (todo or awaits_repair(st)):
         # Slice 3b wires repair(st, ...) here.
         report(st, "repair-unwired", "ADVANCE_ROADMAP_FOLLOWUP_REPAIR=1 but repair is not in this slice")
         cas_status(st, RUNNING, BLOCKED)
         return
-    if cas_status(st, RUNNING, DONE, next=None, reported_at=now_iso(),
-                  open_findings=sum(1 for f in fs if f.get("status") == "open")):
+    if todo and not repair_enabled():
+        if cas_status(st, RUNNING, "deferred", reported_at=now_iso(), open_findings=open_n,
+                      next={"step": "build", "round": 1}):
+            log(f"{st['key']}: reported {len(fs)} finding(s), {len(quiet)} non-finding(s); "
+                f"parked for repair ({st.get('mode') or 'tickets'})")
+        return
+    if cas_status(st, RUNNING, DONE, next=None, reported_at=now_iso(), open_findings=open_n):
         log(f"{st['key']}: reported {len(fs)} finding(s), {len(quiet)} non-finding(s) "
             f"({st.get('mode') or 'tickets'})")
 
@@ -1117,7 +1160,7 @@ def drain(repo=None, origin=None, stage=None, wait_s=0.0):
     issues = recover_tickets()
     if issues is None:
         issues = []
-    retry_closes()
+    retry_closes(issues=issues)
     retry_deferral_syncs()
     deadline = time.time() + wait_s
     while True:

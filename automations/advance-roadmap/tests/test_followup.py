@@ -174,8 +174,9 @@ class FollowupTest(unittest.TestCase):
         self.assertEqual(self.state("cleanup-20261014-050000")["status"], "waiting")
         self.run_followup("drain")
         st = self.state("cleanup-20261014-050000")
-        self.assertEqual(st["status"], "done")
+        self.assertEqual(st["status"], "deferred")  # open findings park for repair (slice 3b)
         self.assertTrue(st["findings"])
+        self.assertEqual((st.get("next") or {}).get("step"), "build")
         self.assertFalse(list((self.root / "runs" / "20261014-050000").glob("*.excerpt")))
 
     def test_tooling_waits_indefinitely_no_age_bypass(self):
@@ -199,8 +200,9 @@ class FollowupTest(unittest.TestCase):
             self.assertIn("waiting", status)
             self.assertIn("age", status)
         self.run_followup("drain")
-        self.assertEqual(self.state("cleanup-s1")["status"], "done")
-        self.assertEqual(self.state("tooling-batch-old")["status"], "done")
+        self.assertEqual(self.state("cleanup-s1")["status"], "deferred")  # markers → park for repair
+        # tooling may finish (no findings) or park; either way it is no longer waiting on cleanup
+        self.assertNotEqual(self.state("tooling-batch-old")["status"], "waiting")
 
     def test_conductor_completes_from_worker_result_only(self):
         run = Path(self.tmp.name) / "scratch" / "20261014-090000"
@@ -224,7 +226,7 @@ class FollowupTest(unittest.TestCase):
         (self.root / "followups" / st["key"] / "state.json").write_text(json.dumps(st))
         self.run_followup("drain")
         st = self.state("cleanup-20261014-050000")
-        self.assertEqual(st["status"], "done")
+        self.assertEqual(st["status"], "deferred")  # markers remain → park for repair
         self.assertTrue(any(b["kind"] == "interrupted" for b in st["blockers"]))
 
     def test_oct13_replay_is_deterministic(self):
@@ -324,7 +326,7 @@ class FollowupTest(unittest.TestCase):
         self.shipped_item("ok-repo")
         self.run_followup("hook", "item-done", "--stamp", "ok-repo", "--origin", "batch-c")
         self.run_followup("drain", "--stage", "cleanup", "--origin", "batch-c")
-        self.assertEqual(self.state("cleanup-ok-repo")["status"], "done")
+        self.assertEqual(self.state("cleanup-ok-repo")["status"], "deferred")
         self.assertEqual(self.state("cleanup-no-repo")["status"], "blocked")
 
     def test_followup_failure_never_changes_batch_outcome(self):
@@ -399,7 +401,7 @@ class FollowupTest(unittest.TestCase):
         self.run_followup("hook", "item-done", "--stamp", "20261014-mine", "--origin", "batch-mine")
         self.run_followup("hook", "item-done", "--stamp", "20261014-theirs", "--origin", "batch-theirs")
         self.run_followup("drain", "--stage", "cleanup", "--origin", "batch-mine")
-        self.assertEqual(self.state("cleanup-20261014-mine")["status"], "done")
+        self.assertEqual(self.state("cleanup-20261014-mine")["status"], "deferred")
         self.assertEqual(self.state("cleanup-20261014-theirs")["status"], "queued")
         self.assertEqual(self.state("cleanup-20261014-mine").get("drained_by"), "batch-mine")
 
@@ -506,10 +508,24 @@ class FollowupTest(unittest.TestCase):
         self.assertFalse((self.root / "followups" / key_b / "state.json").exists(),
                          "must not rebuild the completed sibling stage")
 
+    def test_open_findings_park_for_repair_not_done(self):
+        """A scanned stage with open findings stays deferred so slice 3b can resume repair."""
+        self.shipped_item("20261014-050000")
+        self.run_followup("hook", "item-done", "--stamp", "20261014-050000")
+        self.run_followup("drain")
+        st = self.state("cleanup-20261014-050000")
+        self.assertEqual(st["status"], "deferred")
+        self.assertTrue(st["findings"])
+        self.assertEqual((st.get("next") or {}).get("step"), "build")
+        # Parked work is not eligible until repair is enabled.
+        import followup as fu
+        fu.ROOT, fu.STATE = self.root, self.root / "followups"
+        self.assertFalse(fu.eligible(st))
+
     def test_a_finding_already_ticketed_gets_evidence_not_a_duplicate(self):
         self.shipped_item("20261014-050000")
         self.run_followup("hook", "item-done", "--stamp", "20261014-050000")
-        self.run_followup("drain")   # report-only scan
+        self.run_followup("drain")   # scan + park
         st = self.state("cleanup-20261014-050000")
         f = st["findings"][0]
         cases = {
@@ -521,7 +537,8 @@ class FollowupTest(unittest.TestCase):
             with self.subTest(label):
                 (self.root / "stub-calls.jsonl").unlink(missing_ok=True)
                 st = self.state("cleanup-20261014-050000")
-                st.update(status="queued", evidence_posted=[], scanned=False, last_deferral=None)
+                # Clear next so eligible() does not treat this as parked repair work.
+                st.update(status="queued", evidence_posted=[], scanned=False, last_deferral=None, next=None)
                 for g in st["findings"]:
                     g.pop("ticket", None)
                     g["status"] = "open"
