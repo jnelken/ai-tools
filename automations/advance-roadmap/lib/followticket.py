@@ -123,14 +123,19 @@ def match(issues, finding):
     Legacy title match requires the ticket's single repo/* label to equal the finding's repo —
     never attach via an unlabeled issue or cross-repo prose.
     """
+    want = finding.get("repo")
     for issue in issues:
         meta = parse_meta(issue.get("description"))
-        if meta and finding["id"] in (meta.get("finding_ids") or []):
-            return issue
+        if not (meta and finding["id"] in (meta.get("finding_ids") or [])):
+            continue
+        # Metadata match still requires the same repo (meta.repo or the single repo/* label).
+        ticket_repo = meta.get("repo") or repo_label(issue)
+        if want and ticket_repo != want:
+            continue
+        return issue
     title = norm(finding["title"])
     if len(title) < 12:
         return None
-    want = finding.get("repo")
     if not want:
         return None
     for issue in issues:

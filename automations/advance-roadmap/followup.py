@@ -768,22 +768,22 @@ def rewrite_ticket_description(st, ident, findings, quota=None, next_step="", va
                                finding_status=None, finding_owners=None, issues=None):
     """Invariant owner for every Linear description rewrite (dedupe, deferral, partial progress).
 
-    Fetches/uses a current open-issue snapshot, merges via ticket_description_payload, then writes.
-    create() starts a new ticket and does not go through here. Callers pass issues when they already
-    hold a drain snapshot; otherwise this fetches. Raises LinearError on read/write failure.
+    Under the tickets lock: fetch current open issues, merge, write. Callers may pass a drain
+    snapshot to keep updated after the write; the merge always uses a fresh fetch so a concurrent
+    run cannot erase a finding ID added after the drain started. create() does not go through here.
     """
-    live = issues
-    if live is None:
+    with TicketIndex():
         live = followticket.fetch_open()
-    merged, status, owners = ticket_description_payload(
-        st, findings, ident, issues=live, finding_status=finding_status, finding_owners=finding_owners)
-    body = followticket.description(st, merged, quota, next_step, validation=validation,
-                                    finding_status=status, finding_owners=owners)
-    followticket.update_description(ident, body)
-    for issue in live:
-        if issue.get("identifier") == ident:
-            issue["description"] = body
-            break
+        merged, status, owners = ticket_description_payload(
+            st, findings, ident, issues=live, finding_status=finding_status,
+            finding_owners=finding_owners)
+        body = followticket.description(st, merged, quota, next_step, validation=validation,
+                                        finding_status=status, finding_owners=owners)
+        followticket.update_description(ident, body)
+    for snapshot in (live, issues or []):
+        for issue in snapshot:
+            if issue.get("identifier") == ident:
+                issue["description"] = body
     st["ticket_body"] = body[:6000]
     st["ticket_meta_at"] = time.time()
     return body

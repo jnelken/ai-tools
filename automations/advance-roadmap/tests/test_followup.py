@@ -467,6 +467,10 @@ class FollowupTest(unittest.TestCase):
         labeled = self.legacy_ticket("DEV-3", title, f"Seen before: {title}", repo="demo")
         self.assertEqual(followticket.repo_label(labeled), "demo")
         self.assertEqual(followticket.match([labeled], finding)["identifier"], "DEV-3")
+        # Metadata match by finding id must still refuse a cross-repo ticket.
+        cross = self.meta_ticket("DEV-4", {"key": "cleanup-x", "finding_ids": [finding["id"]],
+                                           "repo": "mailcruxh"}, repo="mailcruxh")
+        self.assertIsNone(followticket.match([cross], finding))
 
     def test_skipped_deploy_is_never_success(self):
         """Invariant: validation.deploy must be success|none; skipped/error/pending never close."""
