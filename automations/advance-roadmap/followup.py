@@ -842,13 +842,14 @@ def dedupe(st, issues):
             if other and finding_verified_fixed(f["id"], current=other, owner_key=owner):
                 f["status"] = "fixed"
         tag = f"{issue['identifier']}:{f['id']}:{st['key']}"
-        if tag in posted or issue.get("identifier") == st.get("recovered_from"):
+        if tag in posted:
             continue
+        # recovered_from: skip the redundant "saw this again" comment, but still rewrite metadata.
+        skip_comment = issue.get("identifier") == st.get("recovered_from")
         body = (f"advance-roadmap follow-up `{st['key']}` saw this again:\n\n"
                 + followticket.render_findings([f]))
         try:
-            # Comment and rewrite are tracked apart so a failed rewrite retry does not re-comment.
-            if tag not in commented:
+            if not skip_comment and tag not in commented:
                 require_ticket_repo(issue["identifier"], want_repo, issues=issues)
                 followticket.comment(issue["identifier"], body)
                 commented.add(tag)
