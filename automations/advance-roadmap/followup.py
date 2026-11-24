@@ -669,11 +669,17 @@ def recover_tickets():
                 if st:
                     log(f"{key}: rebuilt from {ident} (no local state on this machine)")
                 continue
+            if repo and existing.get("repo") and existing.get("repo") != repo:
+                log(f"{key}: refusing recovery from {ident}: stage repo "
+                    f"{existing.get('repo')!r} != ticket repo {repo!r}")
+                continue
             c = claim_stage(key)
             if not c:
                 continue
             try:
                 st = load(key) or existing
+                if repo and st.get("repo") and st.get("repo") != repo:
+                    continue
                 changed = False
                 own = meta.get("key") == key or owner.get("key") == key
                 if own and ident not in st.setdefault("owned_tickets", []):
@@ -912,12 +918,7 @@ def ticket_description_payload(st, findings, ident, issues=None, finding_status=
 
 def rewrite_ticket_description(st, ident, findings, quota=None, next_step="", validation=None,
                                finding_status=None, finding_owners=None, issues=None):
-    """Invariant owner for every Linear description rewrite (dedupe, deferral, partial progress).
-
-    Under the tickets lock: fetch current open issues, require the target ticket in that fetch,
-    require its repo (metadata.repo or single repo/* label) to match the stage, merge, write.
-    Raises LinearError if the ticket is missing or cross-repo (caller retains pending work).
-    """
+    """Description-write owner: under lock, require open ticket + matching repo, then merge/write."""
     want_repo = st.get("repo")
     with TicketIndex():
         live = followticket.fetch_open()
@@ -1197,15 +1198,7 @@ def _sha_match(a, b):
 
 
 def stage_repair_verified(ost):
-    """True when a stage's repair landed with checks, a clean final review, merge and deploy.
-
-    Invariant owner for the close gate (finish / retry_closes / recovery → ticket_close_verdict →
-    finding_verified_fixed → here):
-      - deploy success is only validation.deploy in {success, none}
-      - the final review for the merged revision must be clean (not merely some earlier clean)
-      - that review's recorded SHA (head/sha) must match merge_commit
-    A skipped/pending/failed deploy, a later findings review, or an unreviewed merge never closes.
-    """
+    """Close-gate owner: merge_commit + checks + final clean review SHA match + deploy in DEPLOY_OK."""
     v = ost.get("validation") or {}
     merged = ost.get("merge_commit")
     if not merged:
@@ -1500,12 +1493,7 @@ def load_ticket_meta_ids(ident, issues=None):
 
 
 def ticket_close_verdict(ident, current=None, issues=None):
-    """Invariant owner: 'ready' | 'incomplete' | 'unread' immediately before mark_done.
-
-    Every path that calls mark_done (finish → close_tickets, drain → retry_closes → close_tickets)
-    must go through this. 'unread' means Linear metadata could not be read — retain pending_close.
-    Each finding must be verified fixed by its recorded owner stage (or the completing stage).
-    """
+    """Close-gate owner: ready|incomplete|unread. Owner-verified findings; ticket repo matches stage."""
     ok, meta_ids = load_ticket_meta_ids(ident, issues)
     if not ok:
         return "unread"
@@ -1513,11 +1501,16 @@ def ticket_close_verdict(ident, current=None, issues=None):
     if not tracked:
         return "incomplete"
     owners = {}
+    ticket_repo = None
     for issue in issues or []:
         if issue.get("identifier") == ident:
             meta = followticket.parse_meta(issue.get("description") or "") or {}
             owners = meta.get("finding_owners") or {}
+            ticket_repo = meta.get("repo") or followticket.repo_label(issue)
             break
+    want_repo = (current or {}).get("repo")
+    if want_repo and ticket_repo != want_repo:
+        return "incomplete"
     for fid in tracked:
         owner_key = (owners.get(fid) or {}).get("key") if isinstance(owners.get(fid), dict) else None
         if not finding_verified_fixed(fid, current=current, owner_key=owner_key):

@@ -700,6 +700,43 @@ class FollowupTest(unittest.TestCase):
         self.assertTrue(updates)
         self.assertEqual(followticket.parse_meta(updates[-1]["body"])["builder_provider"], "codex")
 
+    def test_close_and_recovery_reject_cross_repo_stage(self):
+        """Close gate and recovery both refuse when the ticket repo does not match the stage."""
+        import followup as fu
+        fu.ROOT = self.root
+        fu.STATE = self.root / "followups"
+        os.environ["ADVANCE_ROADMAP_ROOT"] = str(self.root)
+        os.environ["ADVANCE_ROADMAP_LINEAR_BIN"] = self.env["ADVANCE_ROADMAP_LINEAR_BIN"]
+        key, fid = "cleanup-cross-close", "aaaaaaaaaaaa"
+        d = self.root / "followups" / key
+        d.mkdir(parents=True)
+        sha = "abc1234"
+        (d / "state.json").write_text(json.dumps({
+            "key": key, "stage": "project-cleanup", "repo": "demo", "status": "done",
+            "merge_commit": sha,
+            "validation": {"checks": "passed", "reviews": [{"verdict": "clean", "head": sha}],
+                           "deploy": "success"},
+            "findings": [{"id": fid, "status": "fixed", "ticket": "DEV-501", "title": "x",
+                          "kind": "t", "fix": "f", "evidence": []}],
+            "pending_close": [{"ticket": "DEV-501", "commented": True}], "blockers": [],
+        }))
+        foreign = self.meta_ticket("DEV-501", {
+            "key": key, "finding_ids": [fid], "repo": "mailcruxh",
+        }, repo="mailcruxh")
+        self.assertEqual(fu.ticket_close_verdict("DEV-501", current=fu.load(key), issues=[foreign]),
+                         "incomplete")
+        # Recovery must not mutate the demo stage from a mailcruxh ticket.
+        foreign_open = self.meta_ticket("DEV-502", {
+            "key": key, "finding_ids": ["bbbbbbbbbbbb"], "finding_status": {"bbbbbbbbbbbb": "open"},
+            "repo": "mailcruxh", "updated_at": time.time(),
+        }, repo="mailcruxh")
+        self.set("stub-linear.json", {"pages": [[foreign_open]]})
+        before = fu.load(key)
+        fu.recover_tickets()
+        after = fu.load(key)
+        self.assertEqual(len(after.get("findings") or []), len(before.get("findings") or []))
+        self.assertEqual(after.get("repo"), "demo")
+
     def test_rewrite_refuses_cross_repo_ticket(self):
         """Invariant owner: rewrite_ticket_description must reject a cross-repo open ticket."""
         import followup as fu
@@ -750,15 +787,11 @@ class FollowupTest(unittest.TestCase):
             return "DEV-900"
 
         def match_gated(issues, finding):
-            # Before create: no match (force the create path). After: prefer the concurrent winner.
             if not created["done"]:
                 return None
             return next((i for i in issues if i.get("identifier") == "DEV-501"), None)
 
-        fetches = {"n": 0}
-
         def fetch_open():
-            fetches["n"] += 1
             issues = [dict(winner)]
             if created["done"]:
                 issues.append({
