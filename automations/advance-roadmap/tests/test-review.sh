@@ -129,6 +129,13 @@ print -r -- "echoed prompt: VERDICT: clean      (no findings)"
 [ "\$mode" = limit ] && { print "You've hit your usage limit. Resets 5pm."; exit 1; }
 [ "\$mode" = capacity ] && { print "ERROR: Selected model is at capacity. Please try a different model."; exit 1; }
 [ "\$mode" = http503 ] && { print "stream error: unexpected status 503 Service Unavailable"; exit 1; }
+# Nonzero exit with a clean verdict in the final answer — must NOT be recorded as clean.
+[ "\$mode" = crash-clean ] && {
+  body="reviewer=\$name
+VERDICT: clean"
+  if [ -n "\$last" ]; then print -r -- "\$body" > "\$last"; else print -r -- "\$body"; fi
+  exit 1
+}
 # Zero-exit JSON with is_error:true — only detectable via --result-json (not transcript alone).
 [ "\$mode" = json-limit ] && {
   python3 -c 'import json; print(json.dumps({"type":"result","subtype":"success","is_error":True,"result":"You'\''ve hit your usage limit. Resets 5pm.","session_id":"json-limit-session"}))'
@@ -158,6 +165,13 @@ review() {  # review WORKER ROUND [env...]
   env ADVANCE_ROADMAP_ROOT="$ROOT" ADVANCE_ROADMAP_REVIEW_STRATEGY=cross-provider ADVANCE_ROADMAP_CODEX_BIN="$BIN/codex" \
     ADVANCE_ROADMAP_AGENT_BIN="$BIN/agent" ADVANCE_ROADMAP_CLAUDE_BIN="$BIN/claude" "$@" \
     zsh "$ROOT/review.sh" --repo "$REPO" --worker "$w" --round "$r" --log "$LOG" --base main
+}
+review_excl() {  # review_excl WORKER ROUND "excluded…" [env...] — exercises --exclude-reviewers owner
+  local w="$1" r="$2" excl="$3"; shift 3
+  env ADVANCE_ROADMAP_ROOT="$ROOT" ADVANCE_ROADMAP_REVIEW_STRATEGY=cross-provider ADVANCE_ROADMAP_CODEX_BIN="$BIN/codex" \
+    ADVANCE_ROADMAP_AGENT_BIN="$BIN/agent" ADVANCE_ROADMAP_CLAUDE_BIN="$BIN/claude" "$@" \
+    zsh "$ROOT/review.sh" --repo "$REPO" --worker "$w" --round "$r" --log "$LOG" --base main \
+    --exclude-reviewers "$excl"
 }
 review_default() {  # default strategy, allowing the fake usage resolver to exercise fallback
   local w="$1" r="$2"; shift 2
@@ -214,4 +228,17 @@ check "continuous reviews still obey the live gate" "$rc" 3
 capture="$TMP/reviewer-prompt"
 review codex 1 CAPTURE_PROMPT="$capture" FAKE_CLAUDE=clean >/dev/null
 grep -Fq 'Classify each finding as an instance' "$capture" || { echo "FAIL: missing invariant classification"; exit 1; }
+# Prior-builder exclusion (run_reviewer is the owner): never invoke an excluded provider.
+review_excl cursor 1 "codex" FAKE_CODEX=clean FAKE_CLAUDE=clean >/dev/null
+check "excluded prior builder is skipped" "$(field reviewer)" claude
+rc=0; review_excl cursor 1 "codex claude" FAKE_CODEX=clean FAKE_CLAUDE=clean >/dev/null || rc=$?
+check "all eligible reviewers excluded → unavailable" "$rc" 3
+check "all-excluded logs unavailable" "$(field verdict)" unavailable
+# Failed invocation with VERDICT: clean in the transcript is not mergeable.
+review cursor 1 FAKE_CODEX=crash-clean FAKE_CLAUDE=clean >/dev/null
+check "failed Codex with clean text fails over to Claude" "$(field reviewer)" claude
+check "failover after crash is clean" "$(field verdict)" clean
+rc=0; review cursor 1 FAKE_CODEX=crash-clean FAKE_CLAUDE=crash-clean >/dev/null || rc=$?
+check "all reviewers crashed → unavailable" "$rc" 3
+check "crash-all logs unavailable not clean" "$(field verdict)" unavailable
 echo "all passed"

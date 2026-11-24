@@ -106,6 +106,12 @@ BATCH_PID="${ADVANCE_ROADMAP_BATCH_PID:-}"
 # planner; later threads plan around the earlier ones' plans (PEER_PLANS) and own no bookkeeping.
 THREAD="${ADVANCE_ROADMAP_THREAD:-1}"
 case "$THREAD" in ''|*[!0-9]*|0) THREAD=1 ;; esac
+# Match followup.take_repo_lock's REPO_THREAD_LOCK_CEILING so a repair's preclaimed
+# slots cover every THREAD run.sh may open.
+if [ "$THREAD" -gt 64 ]; then
+  echo "FATAL: ADVANCE_ROADMAP_THREAD=$THREAD exceeds the repair lock ceiling (64)" >&2
+  exit 2
+fi
 PEER_PLANS="${ADVANCE_ROADMAP_PEER_PLANS:-}"
 BATCH_SNAPSHOT="${ADVANCE_ROADMAP_BATCH_SNAPSHOT:-}"
 BUSY_REPOS="${ADVANCE_ROADMAP_BUSY_REPOS:-}"

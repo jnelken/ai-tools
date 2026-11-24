@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
-"""advance-roadmap follow-up runner — report + Linear tickets (DEV-242 slice 3a).
+"""advance-roadmap follow-up runner — report + tickets + repair (DEV-242 slice 3b).
 
-After work ships, scan logs for proven problems and record findings. Slice 3a adds Linear ticket
-recovery, dedupe, deferral and close (lib/followticket.py). No model analyst, repair, PRs, merge
-or install yet (slices 3b/3c). Stages under $ROOT/followups/<key>/:
+After work ships, scan logs for proven problems and record findings. Slice 3a added Linear ticket
+recovery, dedupe, deferral and close (lib/followticket.py). Slice 3b connects repair: a delegated
+builder, independent cross-provider review, PR checks, merge, deploy verification and ticket
+finish/deferral (lib/followrepair.py). No model analyst yet (slice 3c). Stages under
+$ROOT/followups/<key>/:
 
   project-cleanup    one per shipped item once the repo is quiescent
   tooling-hardening  one per batch/run/conductor session once children + cleanups finish
@@ -15,7 +17,7 @@ or install yet (slices 3b/3c). Stages under $ROOT/followups/<key>/:
 
 ADVANCE_ROADMAP_FOLLOWUP=1 suppresses nested follow-ups.
 ADVANCE_ROADMAP_FOLLOWUP_LINEAR=0 disables Linear reads/writes.
-ADVANCE_ROADMAP_FOLLOWUP_REPAIR=1 (slice 3b) unparks recovered ticket work for repair.
+ADVANCE_ROADMAP_FOLLOWUP_REPAIR=1 enables the repair loop (builder → review → land).
 """
 import argparse
 import fcntl
@@ -31,9 +33,13 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 sys.path.insert(0, str(HERE / "lib"))
+import followrepair  # noqa: E402
 import followscan  # noqa: E402
 import followticket  # noqa: E402
 import supervisor as shared  # noqa: E402
+from followrepair import (  # noqa: E402
+    MAX_ROUNDS, builder_alive, feasibility, land, run_builder, run_review, safe_repo,
+)
 
 ROOT = shared.ROOT
 STATE = ROOT / "followups"
@@ -51,7 +57,7 @@ POLL_S = float(os.environ.get("ADVANCE_ROADMAP_FOLLOWUP_POLL_S", "15"))
 SAFE_ID = re.compile(r"[A-Za-z0-9._-]+")
 
 
-# ── shared helpers (slice 3 will share these with the repair module) ─────────
+# ── shared helpers ───────────────────────────────────────────────────────────
 
 def now_iso():
     return datetime.now().isoformat(timespec="seconds")
@@ -182,7 +188,8 @@ def new_stage(key, stage, repo, origin, **extra):
         # Findings carry stable finding_id via followscan.finding; tickets via followticket (slice 3a).
         st = {"key": key, "stage": stage, "repo": repo, "origin": origin, "status": QUEUED,
               "created_at": now_iso(), "attempts": 0, "findings": [], "non_findings": [], "blockers": [],
-              "usage_snapshots": [], "sessions": [], "mode": "tickets", **extra}
+              "usage_snapshots": [], "sessions": [], "validation": {"reviews": []},
+              "branch": None, "pr_url": None, "merge_commit": None, "mode": "tickets", **extra}
         if preexisted or (existing is not None and not _usable_stage(existing)):
             st.setdefault("blockers", []).append({
                 "at": now_iso(), "kind": "recovered",
@@ -194,13 +201,16 @@ def new_stage(key, stage, repo, origin, **extra):
 
 
 class Claim:
-    """An exclusive, non-blocking kernel lock on one file; released when closed or the process dies."""
+    """An exclusive, non-blocking kernel lock on one file; released when closed or the process dies.
+
+    Uses flock(2) via fcntl.flock so it contends with run.sh's `zsystem flock` (same mechanism).
+    """
 
     def __init__(self, path):
         path.parent.mkdir(parents=True, exist_ok=True)
         self.fh = open(path, "a")
         try:
-            fcntl.lockf(self.fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            fcntl.flock(self.fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
             self.ok = True
         except OSError:
             self.ok = False
@@ -344,6 +354,55 @@ def quiescent(repo):
     return True, ""
 
 
+class RepoLock:
+    """Holds every lock file for a repo (primary + thread locks) or none."""
+
+    def __init__(self, claims):
+        self.claims = claims
+        self.ok = bool(claims)
+
+    def close(self):
+        for c in self.claims:
+            c.close()
+        self.claims = []
+        self.ok = False
+
+
+# How many run.sh thread slots a repair preclaims. Shared with run.sh's THREAD cap.
+REPO_THREAD_LOCK_CEILING = 64
+
+
+def take_repo_lock(repo):
+    """Exclusive non-blocking lock on primary + every batch thread slot.
+
+    Owner of repair↔batch exclusion: hold `repo.lock` and `repo.t1`…`tN` (N =
+    REPO_THREAD_LOCK_CEILING) so run.sh cannot open a new thread beside a live repair.
+    Also claims any higher `.t*.lock` files that already exist.
+    """
+    if not repo:
+        return None
+    try:
+        require_id(repo, "repo")
+    except ValueError:
+        return None
+    n = REPO_THREAD_LOCK_CEILING
+    base = ROOT / "repo-locks"
+    paths = [base / f"{repo}.lock"]
+    paths.extend(base / f"{repo}.t{i}.lock" for i in range(1, n + 1))
+    for extra in sorted(base.glob(f"{glob_escape(repo)}.t*.lock")):
+        if extra not in paths:
+            paths.append(extra)
+    claims = []
+    for path in paths:
+        c = Claim(path)
+        if not c.ok:
+            for held in claims:
+                held.close()
+            return RepoLock([])
+        claims.append(c)
+    return RepoLock(claims)
+
+
 def child_complete(stamp, external=None):
     """(done, how): internal via runs.jsonl; external via worker-result.json only."""
     external = external or {}
@@ -365,7 +424,11 @@ def child_complete(stamp, external=None):
 
 
 def ready(st):
-    """No age bypass — wait until every child run and cleanup is terminal."""
+    """No age bypass — wait until every child run and cleanup is terminal.
+
+    When repair is enabled, also require the repo quiescent so a tooling stage
+    does not race a concurrent batch thread before take_repo_lock.
+    """
     if st["stage"] == STAGES["cleanup"]:
         return quiescent(st.get("repo"))
     children = st.get("children") or []
@@ -380,6 +443,8 @@ def ready(st):
             continue
         if other.get("status") in active:
             return False, f"{other['key']} has not finished"
+    if repair_enabled() and st.get("repo"):
+        return quiescent(st.get("repo"))
     return True, ""
 
 
@@ -425,28 +490,32 @@ def eligible(st, now=None):
 
 def set_waiting(st, reason):
     """Mark waiting. Caller must hold the stage claim — no save outside a claim."""
-    if st.get("status") not in ELIGIBLE | {"pending"}:
+    if st.get("status") not in ELIGIBLE | {"pending", "deferred"}:
         return False
     st["waiting_reason"] = reason
     blockers = st.setdefault("blockers", [])
     if not blockers or blockers[-1].get("kind") != "waiting" or blockers[-1].get("reason") != reason:
         blockers.append({"at": now_iso(), "kind": "waiting", "reason": reason})
-    return cas_status(st, ELIGIBLE | {"pending", WAITING}, WAITING)
+    return cas_status(st, ELIGIBLE | {"pending", "deferred", WAITING}, WAITING)
 
 
 def set_ready(st):
-    """Mark ready. Caller must hold the stage claim — no save outside a claim."""
+    """Mark ready. Caller must hold the stage claim — no save outside a claim.
+
+    Deferred stages (quota pause, parked repair) become ready once eligible() says so.
+    """
     if st.get("status") == READY:
         return True
     st.pop("waiting_reason", None)
-    return cas_status(st, ELIGIBLE | {"pending"}, READY)
+    return cas_status(st, ELIGIBLE | {"pending", "deferred"}, READY)
 
 
 def recover_interrupted(repo=None, origin=None):
     """A stage left `running` whose claim nobody holds was killed mid-step: it resumes next.
 
     When repo/origin are set (origin-scoped drain), only matching stages are rewritten —
-    a sibling batch's running stage must not be touched.
+    a sibling batch's running stage must not be touched. A builder that outlived its drain
+    must not be recovered beside a second builder.
     """
     for st in all_stages():
         if st.get("status") != RUNNING:
@@ -455,6 +524,8 @@ def recover_interrupted(repo=None, origin=None):
             continue
         if origin and st.get("origin") != origin:
             continue
+        if builder_alive(st["key"]):
+            continue  # its builder outlived the drain; never start a second beside it
         c = claim_stage(st["key"])
         if not c:
             continue
@@ -466,6 +537,8 @@ def recover_interrupted(repo=None, origin=None):
             if repo and st.get("repo") != repo:
                 continue
             if origin and st.get("origin") != origin:
+                continue
+            if builder_alive(st["key"]):
                 continue
             st.setdefault("blockers", []).append({"at": now_iso(), "kind": "interrupted",
                                                   "reason": "the previous drain stopped mid-stage; resuming"})
@@ -1104,14 +1177,42 @@ def defer(st, findings, quota, step, issues=None):
     stage carrying the same finding — in this drain or a concurrent one — comments instead.
     """
     st.update(status="deferred", quota=quota, deferred_until=quota.get("reset_epoch"))
+    # Quota pauses are not failed attempts — refund so a later post-merge retry isn't capped out.
+    st["attempts"] = max(0, st.get("attempts", 1) - 1)
     next_step = next_step_text(st, step)
     for f in findings:
         f["status"] = "deferred"
     log(f"{st['key']}: deferred at {step} — {quota.get('provider')} {quota.get('cause') or ''} "
         f"resets {quota.get('reset_at')}")
-    if os.environ.get("ADVANCE_ROADMAP_FOLLOWUP_LINEAR", "1") != "1":
-        return
-    sync_deferral_tickets(st, findings, quota, next_step, deferral_note(st, quota, step), issues=issues)
+    if os.environ.get("ADVANCE_ROADMAP_FOLLOWUP_LINEAR", "1") == "1":
+        sync_deferral_tickets(st, findings, quota, next_step, deferral_note(st, quota, step),
+                              issues=issues)
+    save(st)
+
+
+def block(st, kind, reason, retry=True):
+    """A non-quota stop: local report only (never a new ticket), plus progress on owned tickets.
+
+    `retry` stages become `pending` (eligible next drain) up to MAX_ATTEMPTS; otherwise `blocked`.
+    Once a PR is merged, keep retrying deploy/install — the attempt cap must not strand main.
+    """
+    next_step = next_step_text(st, (st.get("next") or {}).get("step", "build"))
+    report(st, kind, reason, next_step)
+    under_cap = st.get("attempts", 0) < MAX_ATTEMPTS or st.get("merged")
+    st["status"] = ("pending" if retry and under_cap else BLOCKED)
+    tickets = sorted({f["ticket"] for f in (st.get("findings") or []) if f.get("ticket")})
+    if tickets and os.environ.get("ADVANCE_ROADMAP_FOLLOWUP_LINEAR", "1") == "1":
+        body = (f"advance-roadmap follow-up progress on `{st['key']}`: "
+                f"{followticket.render_validation(st.get('validation'))}. "
+                + (f"Branch `{st['branch']}`" if st.get("branch") else "")
+                + (f", PR {st['pr_url']}" if st.get("pr_url") else "")
+                + f". Stopped: {reason}.")
+        for ident in tickets:
+            try:
+                followticket.comment(ident, body)
+            except followticket.LinearError as e:
+                report(st, "linear", f"could not update {ident}: {e}")
+    save(st)
 
 
 def cancel_duplicate_tickets(st, issues=None):
@@ -1474,6 +1575,7 @@ def finish(st, findings):
                              for ident, status_map in partial]
     apply_partial_progress(st, findings)
     close_tickets(st, issues=None)  # ticket_ready_to_close still reads ticket_body / index
+    save(st)
 
 
 def apply_partial_progress(st, findings=None, issues=None):
@@ -1685,20 +1787,22 @@ def scan(st):
     return st
 
 
-# ── process / drain (ANALYZE + REPORT + tickets; repair in slice 3b) ──────────
+# ── process / drain (ANALYZE + REPORT + tickets + repair) ─────────────────────
 
 def process(st, issues=None):
-    """ANALYZE, dedupe tickets, then REPORT under the caller's stage claim.
+    """ANALYZE, dedupe tickets, then repair (when enabled) or park/report under the stage claim.
 
-    Unfinished ticket/repair work is parked until ADVANCE_ROADMAP_FOLLOWUP_REPAIR=1 (slice 3b).
     issues=None means Linear could not be read — keep pending_ticket_sync so a later drain retries.
     issues=[] means a successful read found no open tickets.
     """
     linear_unread = issues is None
     live = [] if issues is None else issues
     st.pop("waiting_reason", None)
-    if not cas_status(st, READY, RUNNING, attempts=st.get("attempts", 0) + 1,
-                      next={"step": "analyze"}):
+    # Preserve an in-flight repair step across recoveries; otherwise start at analyze.
+    nxt = st.get("next") if isinstance(st.get("next"), dict) else None
+    if not (nxt and nxt.get("step") in ("build", "review", "land")):
+        nxt = {"step": "analyze"}
+    if not cas_status(st, READY, RUNNING, attempts=st.get("attempts", 0) + 1, next=nxt):
         return
     if not st.get("scanned"):
         scan(st)
@@ -1726,12 +1830,42 @@ def process(st, issues=None):
     quiet = st.get("non_findings") or []
     todo = [f for f in fs if f.get("status") in ("open", "deferred")]
     open_n = sum(1 for f in fs if f.get("status") == "open")
-    # Slice 3a: recovery/dedupe/close + deferral helpers. Ticket *creation* via defer() is for
-    # quota stops during repair (slice 3b) — this drain parks open findings without filing new ones.
     if repair_enabled() and (todo or awaits_repair(st)):
-        # Slice 3b wires repair(st, ...) → defer()/finish() here.
-        report(st, "repair-unwired", "ADVANCE_ROADMAP_FOLLOWUP_REPAIR=1 but repair is not in this slice")
-        cas_status(st, RUNNING, BLOCKED)
+        step = (st.get("next") or {}).get("step")
+        if not todo and awaits_repair(st):
+            # Resume mid-flight without re-owning another stage's duplicates.
+            owned = [f for f in fs if f.get("status") in ("open", "deferred")]
+            if owned:
+                todo = owned
+            elif step in ("land", "review"):
+                # Findings already fixed/duplicate; finish land/review without a builder brief.
+                todo = [f for f in fs if f.get("status") != "duplicate"] or list(fs)
+            else:
+                report(st, "repair-empty", "no owned open findings left to repair")
+                cas_status(st, RUNNING, DONE, next=None, reported_at=now_iso())
+                return
+        repo_dir, why = safe_repo(st.get("repo"))
+        if not repo_dir:
+            block(st, "unsafe-repo", why, retry=False)
+            return
+        busy = ("its builder from an earlier drain is still running" if builder_alive(st["key"])
+                else "a worker or follow-up builder is still running in it"
+                if st.get("repo") in shared.inflight_repos(ROOT) else None)
+        lock = None if busy else take_repo_lock(st.get("repo"))
+        if busy or not lock or not lock.ok:
+            # Not an attempt: someone else is in the repo. Wait so --wait-s keeps polling.
+            why = busy or "its repo lock is held"
+            st["attempts"] = max(0, st.get("attempts", 1) - 1)
+            st["waiting_reason"] = why
+            cas_status(st, RUNNING, WAITING, attempts=st["attempts"])
+            log(f"{st['key']}: {st.get('repo')} is busy ({why}); waiting")
+            if lock and lock.ok:
+                lock.close()
+            return
+        try:
+            repair(st, repo_dir, todo, issues)
+        finally:
+            lock.close()
         return
     if todo and not repair_enabled():
         if cas_status(st, RUNNING, "deferred", reported_at=now_iso(), open_findings=open_n,
@@ -1742,6 +1876,83 @@ def process(st, issues=None):
     if cas_status(st, RUNNING, DONE, next=None, reported_at=now_iso(), open_findings=open_n):
         log(f"{st['key']}: reported {len(fs)} finding(s), {len(quiet)} non-finding(s) "
             f"({st.get('mode') or 'tickets'})")
+
+
+def repair(st, repo_dir, todo, issues=None):
+    """Builder → independent review → land loop. Mutates st under the caller's stage claim."""
+    st.setdefault("validation", {"reviews": []})
+    st.setdefault("sessions", [])
+    nxt = st.get("next") or {"step": "build", "round": 1}
+    if nxt.get("step") == "analyze":
+        nxt = {"step": "build", "round": 1}
+    while True:
+        st["next"] = nxt
+        save(st)
+        if st.get("status") != RUNNING:
+            return
+        step, rnd = nxt["step"], nxt.get("round", 1)
+        if step == "build":
+            kind, detail = feasibility(st, "build")
+            if kind == "unknown":
+                return block(st, "unknown-usage", detail)
+            if kind == "quota":
+                return defer(st, todo, detail, f"builder round {rnd}", issues)
+            kind, detail = run_builder(st, repo_dir, todo, rnd, detail, nxt.get("review_text"))
+            if kind == "quota":
+                return defer(st, todo, detail, f"builder round {rnd}", issues)
+            if kind == "unknown":
+                return block(st, "unknown-usage", detail)
+            if kind == "self-merged":
+                # Merge owner is land(); a builder that shipped is a hard stop (never retry).
+                return block(st, "builder-self-merged", detail, retry=False)
+            if kind != "ok":
+                return block(st, "builder", detail, retry=True)
+            nxt = {"step": "review", "round": rnd}
+            # Persist before the next loop save so a killed drain cannot re-enter build
+            # against already-consumed builder artifacts.
+            st["next"] = nxt
+            save(st)
+        elif step == "review":
+            if st.get("builder_provider") not in followrepair.REVIEWERS:
+                return block(
+                    st, "unknown-builder",
+                    f"which provider built {st.get('branch') or 'the branch'} is not recorded, so no "
+                    "independent reviewer can be chosen; a human must name it (builder_provider in "
+                    "state.json) or close the PR", retry=False)
+            kind, detail = feasibility(st, "review", st["builder_provider"])
+            if kind == "unknown":
+                return block(st, "unknown-usage", detail)
+            if kind == "quota":
+                return defer(st, todo, detail, f"review round {rnd}", issues)
+            verdict, text = run_review(st, repo_dir, rnd)
+            if verdict == "unavailable":
+                reviews = (st.get("validation") or {}).get("reviews") or []
+                limited = reviews[-1].get("limited") if reviews else None
+                # Same exclusion review.sh applied: a prior builder's gate is irrelevant.
+                eligible = followrepair.eligible_reviewers(
+                    st["builder_provider"], followrepair.prior_builders(st))
+                q = followrepair.reviewer_quota(eligible, limited)
+                if q:
+                    return defer(st, todo, q, f"review round {rnd}", issues)
+                return block(st, "review-unavailable",
+                             "every reviewer was at capacity or missing")
+            if verdict == "error":
+                return block(st, "review", f"review.sh failed: {text}")
+            if verdict == "clean":
+                nxt = {"step": "land", "round": rnd}
+            elif rnd < MAX_ROUNDS:
+                nxt = {"step": "build", "round": rnd + 1, "review_text": text}
+            else:
+                return block(
+                    st, "review",
+                    f"the review still reports findings after {MAX_ROUNDS} rounds; "
+                    f"branch {st.get('branch')} and PR {st.get('pr_url')} are left for a human",
+                    retry=False)
+        else:
+            ok, reason, retry = land(st, repo_dir, todo)
+            if not ok:
+                return block(st, "land", reason, retry=retry)
+            return finish(st, todo)
 
 
 def order(st):
@@ -1806,9 +2017,18 @@ def drain(repo=None, origin=None, stage=None, wait_s=0.0):
                 except Exception as e:  # one broken stage must never stop the rest
                     report(st, "crash", f"{type(e).__name__}: {e}")
                     # CAS: only demote if we still own the running transition.
-                    dest = RETRYABLE if st.get("attempts", 0) < MAX_ATTEMPTS else BLOCKED
+                    # A merged stage must stay retryable until deploy/install finish
+                    # (same rule as block()'s merged bypass of the attempt cap).
+                    live = load(st["key"]) or st
+                    dest = (RETRYABLE if (live.get("attempts", 0) < MAX_ATTEMPTS or live.get("merged"))
+                            else BLOCKED)
                     cas_status(st, RUNNING, dest)
-                progressed = True
+                # Repair may release back to waiting (repo lock / live builder) mid-claim.
+                live = load(st["key"]) or st
+                if live.get("status") == WAITING:
+                    waiting.append(f"{live['key']}: {live.get('waiting_reason') or 'waiting'}")
+                else:
+                    progressed = True
             finally:
                 c.close()
         if not waiting or time.time() >= deadline:

@@ -4,7 +4,12 @@
 #
 #   review.sh --repo PATH --worker cursor|codex|claude --round N --log FILE
 #       [--base REF] [--strategy cursor-then-codex|cross-provider]
+#       [--exclude-reviewers "codex claude"]
 #   (--base defaults to origin's default branch: origin/main, or origin/master where that's it)
+#
+# Invariant — a reviewer must never be a provider that built an earlier round on the
+# same stage. Owner: run_reviewer() (refuses --exclude-reviewers before any provider
+# invoke). followrepair.run_review passes prior builders; feasibility() is admission only.
 #
 # Reviewers are read-only. Provider fallback depends on the selected strategy.
 # Findings go to stdout, ending in one line:
@@ -38,7 +43,7 @@ REVIEW_EFFORT="${ADVANCE_ROADMAP_REVIEW_EFFORT:-low}"
 
 export PATH="/opt/homebrew/bin:/opt/homebrew/opt/node@22/bin:/usr/bin:/bin:/usr/sbin:/sbin:/Users/jake/.local/bin"
 
-REPO="" WORKER="" ROUND="" LOG="" BASE=""
+REPO="" WORKER="" ROUND="" LOG="" BASE="" EXCLUDE_REVIEWERS=""
 CONFIGURED_REVIEW_STRATEGY="${ADVANCE_ROADMAP_REVIEW_STRATEGY:-cursor-then-codex}"
 REVIEW_STRATEGY="$CONFIGURED_REVIEW_STRATEGY"
 while [ $# -gt 0 ]; do
@@ -49,9 +54,12 @@ while [ $# -gt 0 ]; do
     --log) LOG="$2"; shift 2 ;;
     --base) BASE="$2"; shift 2 ;;
     --strategy) REVIEW_STRATEGY="$2"; shift 2 ;;
+    --exclude-reviewers) EXCLUDE_REVIEWERS="$2"; shift 2 ;;
     *) echo "unknown arg: $1" >&2; exit 2 ;;
   esac
 done
+# Space-separated providers that must not be invoked (prior builders on a follow-up stage).
+exclude_reviewers=( ${=EXCLUDE_REVIEWERS} )
 # A worktree (Superset workspace) has a .git file, not a directory.
 [ -n "$REPO" ] && [ -e "$REPO/.git" ] || { echo "FATAL: --repo must be a git checkout" >&2; exit 2; }
 [ -n "$ROUND" ] && [ -n "$LOG" ] || { echo "FATAL: --round and --log required" >&2; exit 2; }
@@ -136,6 +144,12 @@ Diff:
 $DIFF"
 
 run_reviewer() {
+  # Owner of prior-builder exclusion: every invoke path goes through here.
+  if (( ${exclude_reviewers[(Ie)$1]} )); then
+    echo "(skipping reviewer $1 — excluded: prior builder on this stage)"
+    echo "reviewer $1 excluded: prior builder on this stage" > "$2"
+    return 127
+  fi
   if [ "${ADVANCE_ROADMAP_CONTINUOUS:-0}" != 1 ] && [ -n "${ADVANCE_ROADMAP_BUDGET_REVIEWERS:-}" ] && [[ " $ADVANCE_ROADMAP_BUDGET_REVIEWERS " != *" $1 "* ]]; then
     echo "reviewer $1 has no batch budget reservation" > "$2"; return 127
   fi
@@ -284,11 +298,19 @@ run_required_review() {
     echo "VERDICT: unavailable"
     return 3
   fi
-  if review_failed "$rc" && rg -q -i "$CAPACITY" "$out" "$out.json" 2>/dev/null; then
-    record_review "$who" unavailable "$phase"
-    echo "REVIEW REQUIRED: $who's model is at capacity; do not merge until this review stage succeeds."
-    echo "VERDICT: unavailable"
-    return 3
+  # Invariant — a failed invocation never yields a mergeable verdict (even if VERDICT: clean
+  # appears in the transcript). Owner: review_failed check before recording verdict.
+  if review_failed "$rc"; then
+    if rg -q -i "$CAPACITY" "$out" "$out.json" 2>/dev/null; then
+      record_review "$who" unavailable "$phase"
+      echo "REVIEW REQUIRED: $who's model is at capacity; do not merge until this review stage succeeds."
+      echo "VERDICT: unavailable"
+      return 3
+    fi
+    record_review "$who" error "$phase"
+    echo "REVIEW REQUIRED: $who exited with a failure; do not trust its verdict text."
+    echo "VERDICT: error"
+    return 1
   fi
   # Codex echoes the prompt (which quotes both verdict lines), so trust the last one.
   verdict="$(verdict_of "$who")"
@@ -337,9 +359,15 @@ run_cross_provider_review() {
       python3 "$USAGE_PY" --root "$ROOT" record-limit --provider "$who" --text "$text" >/dev/null 2>&1 || true
       continue
     fi
-    if review_failed "$rc" && rg -q -i "$CAPACITY" "$out" "$out.json" 2>/dev/null; then
-      echo "(skipping reviewer $who — its model is at capacity)"
-      capacity_list="$capacity_list $who"
+    # Invariant — failed invocation never yields a mergeable verdict (owner: this check
+    # before accepting verdict_of; same rule as run_required_review).
+    if review_failed "$rc"; then
+      if rg -q -i "$CAPACITY" "$out" "$out.json" 2>/dev/null; then
+        echo "(skipping reviewer $who — its model is at capacity)"
+        capacity_list="$capacity_list $who"
+      else
+        echo "(skipping reviewer $who — invocation failed rc=$rc; ignoring verdict text)"
+      fi
       continue
     fi
     used="$who"

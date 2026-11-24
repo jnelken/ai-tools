@@ -1,13 +1,15 @@
-"""followup.py report + tickets (DEV-242 slice 3a). Temp ADVANCE_ROADMAP_ROOT; one test per behavior."""
+"""followup.py report + tickets + repair (DEV-242 slice 3b). Temp ADVANCE_ROADMAP_ROOT; one test per behavior."""
 import fcntl
 import json
 import os
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 from unittest.mock import patch
 
 HERE = Path(__file__).resolve().parent
@@ -21,6 +23,15 @@ sys.path.insert(0, str(ADV / "lib"))
 import followscan  # noqa: E402
 import followticket  # noqa: E402
 import daily_batch  # noqa: E402
+import supervisor  # noqa: E402
+
+
+def pid_alive(pid):
+    try:
+        os.kill(pid, 0)
+        return True
+    except OSError:
+        return False
 
 
 class FollowupTest(unittest.TestCase):
@@ -30,12 +41,18 @@ class FollowupTest(unittest.TestCase):
         self.root, self.code = t / "root", t / "code"
         (self.root / "lib").mkdir(parents=True)
         self.code.mkdir()
+        # SUPERSET_*: a run from a workspace terminal must never aim a stub builder at that workspace.
         self.env = {**{k: v for k, v in os.environ.items()
                        if not k.startswith(("ADVANCE_ROADMAP_", "GIT_", "SUPERSET_"))},
                     "ADVANCE_ROADMAP_ROOT": str(self.root), "PERSONAL_CODE_DIR": str(self.code),
                     "ADVANCE_ROADMAP_SUPERSET": "0",
                     "ADVANCE_ROADMAP_FOLLOWUP_INSTALL": "0", "ADVANCE_ROADMAP_FOLLOWUP_POLL_S": "0.2",
                     "ADVANCE_ROADMAP_FOLLOWUP_WORKTREES": str(t / "worktrees"),
+                    "ADVANCE_ROADMAP_FOLLOWUP_DEPLOY_NONE_S": "0",
+                    "ADVANCE_ROADMAP_FOLLOWUP_DEPLOY_TIMEOUT_S": "2",
+                    "ADVANCE_ROADMAP_FOLLOWUP_CHECKS_TIMEOUT_S": "2",
+                    "ADVANCE_ROADMAP_WORKER_POLL_S": "0.1",
+                    "ADVANCE_ROADMAP_GH_BIN": self.wrapper(t, "gh"),
                     "ADVANCE_ROADMAP_LINEAR_BIN": self.wrapper(t, "linear"),
                     "ADVANCE_ROADMAP_JLIN": str(self.py_wrapper(t, "jlin")),
                     "AI_TOOLS_HOME": str(t / "no-ai-tools"),
@@ -45,7 +62,14 @@ class FollowupTest(unittest.TestCase):
         (self.root / "lib" / "usage.py").write_text(
             f"import runpy, sys\nsys.argv = [{str(STUBS)!r}, 'usage', *sys.argv[1:]]\n"
             f"runpy.run_path({str(STUBS)!r}, run_name='__main__')\n")
+        for name, tool in (("worker.sh", "worker"), ("review.sh", "review")):
+            (self.root / name).write_text(f'#!/bin/sh\nexec {sys.executable} {STUBS} {tool} "$@"\n')
+            (self.root / name).chmod(0o755)
         self.make_repo("demo")
+
+    def repair_env(self, **extra):
+        """Env that unparks the repair loop (slice 3b)."""
+        return {"ADVANCE_ROADMAP_FOLLOWUP_REPAIR": "1", **extra}
 
     def wrapper(self, t, tool):
         path = t / "bin" / tool
@@ -168,7 +192,7 @@ class FollowupTest(unittest.TestCase):
         lock = self.root / "repo-locks" / "demo.t2.lock"
         lock.parent.mkdir(parents=True)
         with open(lock, "a") as held:
-            fcntl.lockf(held, fcntl.LOCK_EX)
+            fcntl.flock(held, fcntl.LOCK_EX)  # same mechanism as Claim / run.sh zsystem flock
             out = self.run_followup("drain").stdout
         self.assertIn("demo.t2.lock is held", out)
         self.assertEqual(self.state("cleanup-20261014-050000")["status"], "waiting")
@@ -191,7 +215,7 @@ class FollowupTest(unittest.TestCase):
         lock = self.root / "repo-locks" / "demo.lock"
         lock.parent.mkdir(parents=True)
         with open(lock, "a") as held:
-            fcntl.lockf(held, fcntl.LOCK_EX)
+            fcntl.flock(held, fcntl.LOCK_EX)
             out = self.run_followup("drain", "--stage", "tooling").stdout
             self.assertIn("cleanup-s1 has not finished", out)
             self.assertEqual(self.state("tooling-batch-old")["status"], "waiting")
@@ -1375,6 +1399,899 @@ class FollowupTest(unittest.TestCase):
         self.assertTrue(comments)
         self.assertIn(tag, st.get("evidence_posted") or [])
         self.assertFalse(st.get("pending_evidence_sync"))
+
+    # ── repair lifecycle (ADVANCE_ROADMAP_FOLLOWUP_REPAIR=1) ──
+
+    def test_a_clean_review_with_passing_checks_merges_and_records_the_repair(self):
+        self.shipped_item("20261014-050000")
+        self.run_followup("hook", "item-done", "--stamp", "20261014-050000")
+        self.run_followup("drain", env=self.repair_env())
+        st = self.state("cleanup-20261014-050000")
+        self.assertEqual(st["status"], "done", self.report())
+        self.assertEqual([f["status"] for f in st["findings"]], ["fixed"])
+        self.assertEqual(st["findings"][0]["kind"], "unresolved-review")
+        self.assertEqual(st["pr_url"], "https://github.com/jnelken/demo/pull/7")
+        self.assertEqual(st["validation"]["checks"], "passed")
+        self.assertEqual(st["validation"]["deploy"], "success")
+        self.assertEqual({(s["role"], s["session_id"]) for s in st["sessions"]},
+                         {("builder", "cursor-sess-0"), ("reviewer", "codex-sess-1")})
+        [w] = self.calls("worker")
+        self.assertEqual(w["followup_env"], "1")
+        self.assertIn("Never use `git stash`", w["brief"])
+        self.assertIn("do NOT merge", w["brief"])
+        self.assertTrue(any(c["args"][:2] == ["pr", "merge"] for c in self.calls("gh")))
+        self.assertTrue(st["usage_snapshots"])
+
+    def test_findings_get_another_round_and_three_unclean_rounds_never_merge(self):
+        self.shipped_item("20261014-050000")
+        self.run_followup("hook", "item-done", "--stamp", "20261014-050000")
+        self.set("stub-review.json", {"verdicts": ["findings", "findings", "findings"]})
+        self.run_followup("drain", env=self.repair_env())
+        st = self.state("cleanup-20261014-050000")
+        self.assertEqual(st["status"], "blocked")
+        self.assertEqual(len(self.calls("worker")), 3)
+        self.assertIn("VERDICT: findings", self.calls("worker")[1]["brief"])
+        self.assertFalse(any(c["args"][:2] == ["pr", "merge"] for c in self.calls("gh")))
+        self.assertEqual(self.calls("jlin"), [])
+        self.assertTrue(any(r["kind"] == "review" for r in self.report()))
+
+    def test_failed_checks_or_a_red_deploy_never_complete_the_ticket(self):
+        self.shipped_item("20261014-050000")
+        stamp_meta = {"key": "cleanup-20261014-050000", "stage": "project-cleanup", "finding_ids": []}
+        self.run_followup("hook", "item-done", "--stamp", "20261014-050000")
+        fid = None
+        for checks, deploy in (("fail", "success"), ("pass", "failure")):
+            self.set("stub-gh.json", {"checks": checks, "deploy": deploy})
+            if fid:
+                self.set("stub-linear.json", {"pages": [[self.meta_ticket(
+                    "DEV-501", {**stamp_meta, "finding_ids": [fid]})]]})
+            self.run_followup("drain", env=self.repair_env())
+            st = self.state("cleanup-20261014-050000")
+            fid = st["findings"][0]["id"]
+            # Failed checks block before merge; a red deploy after merge stays pending (retryable).
+            self.assertEqual(st["status"], "blocked" if checks == "fail" else "pending")
+            # Evidence/description rewrites may update the ticket; never close it as Done.
+            self.assertFalse(any(
+                c["cmd"].startswith("issue update") and "--state" in (c.get("args") or [])
+                and any(a in ("Done", "Canceled") for a in (c.get("args") or []))
+                for c in self.calls("linear")))
+            st.update(status="pending")
+            (self.root / "followups" / st["key"] / "state.json").write_text(json.dumps(st))
+        self.assertEqual(st["validation"]["deploy"], "failed")
+        progress = [c for c in self.calls("linear")
+                    if c["cmd"].startswith("issue comment") and c["issue"] == "DEV-501"]
+        self.assertTrue(any("deploy is failed" in c["body"] for c in progress), progress)
+
+    def test_an_interrupted_stage_resumes_where_it_stopped(self):
+        self.shipped_item("20261014-050000")
+        self.run_followup("hook", "item-done", "--stamp", "20261014-050000")
+        self.set("stub-review.json", {"verdicts": ["clean"], "unavailable": True})
+        self.set("stub-usage.json", {})
+        self.run_followup("drain", env=self.repair_env())
+        st = self.state("cleanup-20261014-050000")
+        self.assertEqual(st["next"]["step"], "review")
+        st["status"] = "running"
+        (self.root / "followups" / st["key"] / "state.json").write_text(json.dumps(st))
+        self.set("stub-review.json", {"verdicts": ["clean"]})
+        self.run_followup("drain", env=self.repair_env())
+        st = self.state("cleanup-20261014-050000")
+        self.assertEqual(st["status"], "done")
+        self.assertEqual(len(self.calls("worker")), 1)
+        self.assertTrue(any(b["kind"] == "interrupted" for b in st["blockers"]))
+
+    def test_an_interrupted_stage_whose_builder_is_still_running_is_left_alone(self):
+        self.shipped_item("20261014-050000")
+        self.run_followup("hook", "item-done", "--stamp", "20261014-050000")
+        st = self.state("cleanup-20261014-050000")
+        st.update(status="running", next={"step": "build", "round": 1})
+        (self.root / "followups" / st["key"] / "state.json").write_text(json.dumps(st))
+        build = self.root / "followups" / st["key"] / "build-r1-a1"
+        build.mkdir()
+        (build / "worker.pid").write_text(str(os.getpid()))
+        self.run_followup("drain", env=self.repair_env())
+        self.assertEqual(self.state(st["key"])["status"], "running")
+        self.assertEqual(self.calls("worker"), [])
+        (build / "worker.exit").write_text("0")
+        self.run_followup("drain", env=self.repair_env())
+        self.assertEqual(self.state(st["key"])["status"], "done")
+
+    def test_a_pr_head_that_moved_after_the_review_is_re_reviewed_never_merged(self):
+        self.shipped_item("20261014-050000")
+        self.run_followup("hook", "item-done", "--stamp", "20261014-050000")
+        self.set("stub-gh.json", {"checks": "pass", "deploy": "success", "head": "0" * 40})
+        self.run_followup("drain", env=self.repair_env())
+        st = self.state("cleanup-20261014-050000")
+        self.assertEqual((st["status"], st["next"]["step"]), ("pending", "review"))
+        self.assertIn("is not the reviewed commit", self.report()[-1]["reason"])
+        self.assertFalse(any(c["args"][:2] == ["pr", "merge"] for c in self.calls("gh")))
+        self.set("stub-gh.json", {"checks": "pass", "deploy": "success"})
+        self.run_followup("drain", env=self.repair_env())
+        st = self.state("cleanup-20261014-050000")
+        self.assertEqual(st["status"], "done", self.report())
+        [merge] = [c["args"] for c in self.calls("gh") if c["args"][:2] == ["pr", "merge"]]
+        head = (self.root / "stub-pr-head.txt").read_text().strip()
+        self.assertEqual(merge[merge.index("--match-head-commit") + 1], head)
+        self.assertEqual(len(self.calls("review")), 2)
+
+    def test_a_deploy_api_error_is_never_read_as_no_deploy(self):
+        self.shipped_item("20261014-050000")
+        self.run_followup("hook", "item-done", "--stamp", "20261014-050000")
+        self.set("stub-gh.json", {"checks": "pass", "deploy": "error"})
+        self.run_followup("drain", env=self.repair_env())
+        st = self.state("cleanup-20261014-050000")
+        self.assertEqual((st["status"], st["validation"]["deploy"]), ("pending", "unverified"))
+        self.assertEqual(st["findings"][0]["status"], "open")
+        self.set("stub-gh.json", {"checks": "pass", "deploy": "none"})
+        self.run_followup("drain", env=self.repair_env())
+        st = self.state("cleanup-20261014-050000")
+        self.assertEqual((st["status"], st["validation"]["deploy"]), ("done", "none"))
+        self.assertEqual(len([c for c in self.calls("gh") if c["args"][:2] == ["pr", "merge"]]), 1)
+
+    def ai_tools_deploy_clone(self):
+        self.make_repo("ai-tools")
+        self.shipped_item("20261014-050000", repo="ai-tools")
+        self.run_followup("hook", "item-done", "--stamp", "20261014-050000")
+        self.set("stub-gh.json", {"checks": "pass", "deploy": "success", "merge_commit": "head"})
+        home = Path(self.tmp.name) / "ai-home"
+        subprocess.run(["git", "clone", "-q",
+                        str(Path(self.tmp.name) / "remotes" / "ai-tools.git"), str(home)],
+                       check=True, env=self.env)
+        return home, {"AI_TOOLS_HOME": str(home), "ADVANCE_ROADMAP_FOLLOWUP_INSTALL": "1"}
+
+    def install_script(self, home, body):
+        script = home / "install.sh"
+        script.write_text(f"#!/bin/sh\necho run >> {Path(self.tmp.name) / 'install-ran'}\n{body}\n")
+        script.chmod(0o755)
+
+    def test_an_ai_tools_repair_is_not_done_until_this_machine_installs_it(self):
+        home, env = self.ai_tools_deploy_clone()
+        self.install_script(home, "exit 1")
+        self.run_followup("drain", env=self.repair_env(**env))
+        st = self.state("cleanup-20261014-050000")
+        self.assertEqual(st["status"], "pending")
+        self.assertEqual((st["validation"]["deploy"], st["validation"]["install"]),
+                         ("success", "install.sh exit 1"))
+        self.assertIn("install failed", self.report()[-1]["reason"])
+        branch = "roadmap/followup-cleanup-20261014-050000"
+        self.install_script(home, f"git -C {home} fetch -q origin {branch} && "
+                                  f"git -C {home} merge -q --ff-only FETCH_HEAD")
+        self.run_followup("drain", env=self.repair_env(**env))
+        st = self.state("cleanup-20261014-050000")
+        self.assertEqual((st["status"], st["validation"]["install"]), ("done", "installed"))
+        self.assertEqual(len([c for c in self.calls("gh") if c["args"][:2] == ["pr", "merge"]]), 1)
+        self.assertEqual((Path(self.tmp.name) / "install-ran").read_text().count("run"), 2)
+
+    def test_an_install_that_exits_0_without_updating_the_deploy_clone_is_not_installed(self):
+        home, env = self.ai_tools_deploy_clone()
+        self.install_script(home, "echo 'deploy clone is dirty; skipping update' >&2\nexit 0")
+        before = self.git(home, "rev-parse", "HEAD")
+        self.run_followup("drain", env=self.repair_env(**env))
+        st = self.state("cleanup-20261014-050000")
+        self.assertEqual(st["status"], "pending")
+        self.assertIn("does not contain", st["validation"]["install"])
+        self.assertIn("install failed", self.report()[-1]["reason"])
+        self.assertEqual(self.git(home, "rev-parse", "HEAD"), before)
+        self.assertEqual(st["findings"][0]["status"], "open")
+
+    def test_repairs_in_one_repo_are_serialized(self):
+        for stamp in ("20261014-050000", "20261014-060000"):
+            self.shipped_item(stamp)
+            self.run_followup("hook", "item-done", "--stamp", stamp)
+        self.set("stub-worker.json", {"mode": "ok", "sleep": 1.5})
+        threads = [threading.Thread(
+            target=self.run_followup, args=("drain", "--wait-s", "60"),
+            kwargs={"env": self.repair_env()}) for _ in range(2)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        spans = sorted((c["start"], c["end"]) for c in self.calls("worker"))
+        self.assertEqual(len(spans), 2)
+        self.assertLessEqual(spans[0][1], spans[1][0])
+        self.assertEqual({self.state(k)["status"] for k in (
+            "cleanup-20261014-050000", "cleanup-20261014-060000")}, {"done"})
+
+    def test_quota_during_the_repair_defers_with_a_ticket(self):
+        self.shipped_item("20261014-050000")
+        self.run_followup("hook", "item-done", "--stamp", "20261014-050000")
+        self.set("stub-worker.json", {"mode": "quota"})
+        self.run_followup("drain", env=self.repair_env())
+        st = self.state("cleanup-20261014-050000")
+        self.assertEqual(st["status"], "deferred")
+        [t] = self.calls("jlin")
+        self.assertEqual((t["repo"], t["state"]), ("demo", "backlog"))
+        self.assertIn("resets 2026-10-14T12:00:00", t["description"])
+        self.assertIn("Next step: `python3 ~/.claude/automations/advance-roadmap/followup.py drain --repo demo`",
+                      t["description"])
+        self.assertIn('"finding_ids": ["' + st["findings"][0]["id"], t["description"])
+        self.assertEqual(st["findings"][0]["ticket"], "DEV-900")
+        self.assertEqual(self.calls("review"), [])
+
+    def test_quota_during_the_review_defers_with_the_branch_and_pr(self):
+        self.shipped_item("20261014-050000")
+        self.run_followup("hook", "item-done", "--stamp", "20261014-050000")
+        out = {"reviewer": {"codex": "over", "cursor": "over", "claude": "over"},
+               "reset_at": "2026-10-14T15:00:00", "reset_epoch": time.time() + 7200}
+        self.set("stub-worker.json", {"mode": "ok", "after_usage": out})
+        self.run_followup("drain", env=self.repair_env())
+        st = self.state("cleanup-20261014-050000")
+        self.assertEqual((st["status"], st["next"]["step"]), ("deferred", "review"))
+        [t] = self.calls("jlin")
+        self.assertIn("pull/7", t["description"])
+        self.assertIn(st["branch"], t["description"])
+        self.assertIn("resets 2026-10-14T15:00:00", t["description"])
+        self.assertIn("it resumes at review round 1", t["description"])
+        self.assertIn('"builder_provider": "cursor"', t["description"])
+        self.assertEqual(self.calls("review"), [])
+        self.run_followup("drain", env=self.repair_env())
+        self.assertEqual(len(self.calls("jlin")), 1)
+
+    def test_a_builder_with_no_free_reviewer_is_not_started(self):
+        """feasibility must match review.sh: cursor is never a reviewer (REVIEWERS owner)."""
+        self.shipped_item("20261014-050000")
+        self.run_followup("hook", "item-done", "--stamp", "20261014-050000")
+        # Only cursor is free as a "reviewer"; review.sh would never pick it for any builder.
+        self.set("stub-usage.json", {"reviewer": {"codex": "over", "claude": "limited", "cursor": "ok"},
+                                     "reset_at": "2026-10-14T13:00:00", "reset_epoch": time.time() + 600})
+        self.set("stub-worker.json", {"mode": "ok"})
+        self.run_followup("drain", env=self.repair_env())
+        st = self.state("cleanup-20261014-050000")
+        self.assertEqual(self.calls("worker"), [])
+        self.assertEqual(st["status"], "deferred")
+        self.assertTrue(st.get("quota"))
+
+    def test_codex_builder_not_started_when_only_cursor_reviewer_is_free(self):
+        self.shipped_item("20261014-050000")
+        self.run_followup("hook", "item-done", "--stamp", "20261014-050000")
+        # Workers: only codex free. Reviewers: only cursor free — review.sh reviews codex with claude only.
+        self.set("stub-usage.json", {
+            "worker": {"codex": "ok", "cursor": "over", "claude": "over"},
+            "reviewer": {"cursor": "ok", "codex": "over", "claude": "over"},
+            "reset_at": "2026-10-14T13:00:00", "reset_epoch": time.time() + 600})
+        self.run_followup("drain", env=self.repair_env())
+        st = self.state("cleanup-20261014-050000")
+        self.assertEqual(self.calls("worker"), [])
+        self.assertEqual(st["status"], "deferred")
+
+    def test_child_env_strips_batch_budget_vars_from_launcher(self):
+        self.shipped_item("20261014-050000")
+        self.run_followup("hook", "item-done", "--stamp", "20261014-050000")
+        env = self.repair_env(
+            ADVANCE_ROADMAP_BUDGET_REVIEWERS="codex",
+            ADVANCE_ROADMAP_BUDGET_REVIEW_STRATEGY="cross-provider",
+            ADVANCE_ROADMAP_BUDGET_REVIEW_FALLBACK_REASON="x",
+            ADVANCE_ROADMAP_INCREMENTAL_PHASE="reviewing",
+        )
+        self.run_followup("drain", env=env)
+        st = self.state("cleanup-20261014-050000")
+        self.assertEqual(st["status"], "done", self.report())
+        [launcher] = (self.root / "followups" / st["key"]).glob("build-*/worker-launch.zsh")
+        text = launcher.read_text()
+        for bad in ("ADVANCE_ROADMAP_BUDGET_REVIEWERS", "ADVANCE_ROADMAP_BUDGET_REVIEW_STRATEGY",
+                    "ADVANCE_ROADMAP_BUDGET_REVIEW_FALLBACK_REASON", "ADVANCE_ROADMAP_INCREMENTAL_PHASE"):
+            self.assertNotIn(bad, text)
+
+    def test_unreadable_pr_checks_are_retryable_not_blocked(self):
+        self.shipped_item("20261014-050000")
+        self.run_followup("hook", "item-done", "--stamp", "20261014-050000")
+        self.set("stub-gh.json", {"checks": "unreadable", "deploy": "success"})
+        self.run_followup("drain", env=self.repair_env())
+        st = self.state("cleanup-20261014-050000")
+        self.assertEqual(st["status"], "pending", self.report())
+        self.assertEqual(st["validation"]["checks"], "unreadable")
+        self.assertFalse(any(c["args"][:2] == ["pr", "merge"] for c in self.calls("gh")))
+        self.set("stub-gh.json", {"checks": "pass", "deploy": "success"})
+        self.run_followup("drain", env=self.repair_env())
+        self.assertEqual(self.state("cleanup-20261014-050000")["status"], "done", self.report())
+
+    def test_an_unavailable_review_is_not_quota_when_only_the_builder_is_out(self):
+        self.shipped_item("20261014-050000")
+        self.run_followup("hook", "item-done", "--stamp", "20261014-050000")
+        self.set("stub-usage.json", {"reviewer": {"cursor": "over"}, "reset_at": "2026-10-14T13:00:00",
+                                     "reset_epoch": time.time() + 600})
+        self.set("stub-review.json", {"verdicts": ["clean"], "unavailable": True})
+        self.run_followup("drain", env=self.repair_env())
+        st = self.state("cleanup-20261014-050000")
+        self.assertEqual(st["builder_provider"], "cursor")
+        self.assertEqual((st["status"], st["next"]["step"]), ("pending", "review"))
+        self.assertEqual(self.calls("jlin"), [])
+        self.assertIsNone(st.get("quota"))
+        self.assertEqual(self.report()[-1]["kind"], "review-unavailable")
+        self.set("stub-usage.json", {"reviewer": {"cursor": "over", "claude": "limited"},
+                                     "reset_at": "2026-10-14T13:00:00", "reset_epoch": time.time() + 600})
+        self.run_followup("drain", env=self.repair_env())
+        st = self.state("cleanup-20261014-050000")
+        self.assertEqual((st["status"], st["quota"]["provider"]), ("deferred", "claude"))
+        self.assertEqual(len(self.calls("jlin")), 1)
+        self.assertNotIn("cursor", st["quota"]["cause"])
+
+    def test_a_review_round_limit_defers_even_when_the_shared_quota_record_fails(self):
+        self.shipped_item("20261014-050000")
+        self.run_followup("hook", "item-done", "--stamp", "20261014-050000")
+        reset = time.time() + 900
+        self.set("stub-usage.json", {"quota_record_fails": True})
+        self.set("stub-review.json", {"verdicts": ["clean"], "unavailable": True, "limited": [
+            {"provider": "codex", "cause": "You've hit your usage limit", "reset_epoch": reset,
+             "reset_at": "2026-10-14T13:15:00"},
+            {"provider": "cursor", "cause": "excluded: the builder", "reset_epoch": reset - 600}]})
+        self.run_followup("drain", env=self.repair_env())
+        st = self.state("cleanup-20261014-050000")
+        self.assertEqual(st["builder_provider"], "cursor")
+        self.assertEqual((st["status"], st["quota"]["provider"]), ("deferred", "codex"))
+        self.assertEqual(st["quota"]["reset_at"], "2026-10-14T13:15:00")
+        self.assertNotIn("cursor", st["quota"]["cause"])
+
+    def test_worker_exit_3_with_every_cli_missing_is_a_local_blocker_not_quota(self):
+        self.shipped_item("20261014-050000")
+        self.run_followup("hook", "item-done", "--stamp", "20261014-050000")
+        self.set("stub-worker.json", {"mode": "missing"})
+        self.run_followup("drain", env=self.repair_env())
+        st = self.state("cleanup-20261014-050000")
+        self.assertEqual(st["status"], "pending")
+        self.assertEqual(self.calls("jlin"), [])
+        self.assertIn("missing", self.report()[-1]["reason"])
+
+    def test_quota_status_without_result_is_adopted_after_drain_dies(self):
+        """A finished quota builder may leave only worker-status.json; adopt it, don't re-dispatch."""
+        self.shipped_item("20261014-050000")
+        self.run_followup("hook", "item-done", "--stamp", "20261014-050000")
+        key = "cleanup-20261014-050000"
+        st = self.state(key)
+        st.update(status="running", next={"step": "build", "round": 1}, attempts=1)
+        (self.root / "followups" / key / "state.json").write_text(json.dumps(st))
+        bdir = self.root / "followups" / key / "build-r1-a1"
+        bdir.mkdir(parents=True)
+        (bdir / "worker.exit").write_text("3\n")
+        (bdir / "worker-status.json").write_text(json.dumps({
+            "used": None, "limited": [{"provider": "cursor", "state": "limited"}],
+            "quota": {"role": "worker", "provider": "cursor", "reset_epoch": time.time() + 3600,
+                      "reset_at": "2026-10-14T12:00:00", "cause": "You've hit your usage limit"}}))
+        # No worker-result.json — the quota path does not write one.
+        self.assertFalse((bdir / "worker-result.json").exists())
+        self.run_followup("drain", env=self.repair_env())
+        st = self.state(key)
+        self.assertEqual(st["status"], "deferred", self.report())
+        self.assertEqual(st["quota"]["provider"], "cursor")
+        self.assertEqual(self.calls("worker"), [])  # adopted; never re-dispatched
+        self.assertTrue((bdir / "consumed").exists())
+
+    def test_a_builder_that_outlives_its_timeout_blocks_every_retry_until_it_exits(self):
+        self.shipped_item("20261014-050000")
+        self.run_followup("hook", "item-done", "--stamp", "20261014-050000")
+        self.py_wrapper(Path(self.tmp.name), "workspaces").rename(self.root / "lib" / "workspaces.py")
+        self.set("stub-worker.json", {"mode": "ok", "sleep": 4})
+        env = self.repair_env(ADVANCE_ROADMAP_SUPERSET="1", ADVANCE_ROADMAP_WORKER_TIMEOUT_MIN="0.02",
+                              ADVANCE_ROADMAP_WORKER_POLL_S="0.1")
+        self.run_followup("drain", env=env)
+        key = "cleanup-20261014-050000"
+        self.assertEqual(self.state(key)["status"], "pending")
+        self.assertIn("still running", self.report()[-1]["reason"])
+        registry = self.root / "inflight" / "demo" / f"followup-{key}.pid"
+        self.assertTrue(registry.exists())
+        out = self.run_followup("drain", env=env).stdout
+        self.assertIn("still running", out)
+        self.assertEqual(len(self.calls("workspaces")), 1)  # never a second builder beside the live one
+        deadline = time.time() + 30
+        while not list((self.root / "followups" / key).glob("build-*/worker.exit")) and time.time() < deadline:
+            time.sleep(0.2)
+        self.set("stub-worker.json", {"mode": "ok"})
+        self.run_followup("drain", env=env)
+        self.assertEqual(self.state(key)["status"], "done", self.report())
+        # Finished build artifacts are adopted — worker.sh is not dispatched again.
+        self.assertEqual(len(self.calls("workspaces")), 1)
+        self.assertFalse(registry.exists())
+
+    def start_plain_build_then_kill_the_drain(self, key, sleep):
+        self.set("stub-worker.json", {"mode": "ok", "sleep": sleep})
+        drain = subprocess.Popen(
+            [sys.executable, str(FOLLOWUP), "drain"], stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL, env={**self.env, **self.repair_env()})
+        deadline = time.time() + 30
+        while not list((self.root / "followups" / key).glob("build-*/worker.pid")) and time.time() < deadline:
+            time.sleep(0.1)
+        drain.kill()
+        drain.wait()
+        [bdir] = (self.root / "followups" / key).glob("build-*")
+        return bdir
+
+    def test_a_plain_worktree_builder_is_registered_and_never_doubled_after_its_drain_dies(self):
+        self.shipped_item("20261014-050000")
+        self.run_followup("hook", "item-done", "--stamp", "20261014-050000")
+        key = "cleanup-20261014-050000"
+        bdir = self.start_plain_build_then_kill_the_drain(key, 3)
+        registry = self.root / "inflight" / "demo" / f"followup-{key}.pid"
+        self.assertTrue(registry.exists())
+        os.kill(int(registry.read_text().strip()), 0)
+        self.assertIn("demo", supervisor.inflight_repos(self.root))
+        self.run_followup("drain", env=self.repair_env())
+        self.assertEqual(self.state(key)["status"], "running")
+        self.assertEqual(len(list((self.root / "followups" / key).glob("build-*"))), 1)
+        deadline = time.time() + 30
+        while not (bdir / "worker.exit").exists() and time.time() < deadline:
+            time.sleep(0.1)
+        self.assertFalse(registry.exists())
+        self.set("stub-worker.json", {"mode": "ok"})
+        self.run_followup("drain", env=self.repair_env())
+        self.assertEqual(self.state(key)["status"], "done", self.report())
+
+    def test_a_dead_launchers_builder_group_is_reaped_before_recovery(self):
+        self.shipped_item("20261014-050000")
+        self.run_followup("hook", "item-done", "--stamp", "20261014-050000")
+        key = "cleanup-20261014-050000"
+        bdir = self.start_plain_build_then_kill_the_drain(key, 60)
+        launcher = int((bdir / "worker.pid").read_text().strip())
+        pgid = int((bdir / "worker.pgid").read_text().strip())
+        self.assertEqual(pgid, launcher)
+        os.kill(launcher, 9)
+        deadline = time.time() + 10
+        while pid_alive(launcher) and time.time() < deadline:
+            time.sleep(0.1)
+        os.killpg(pgid, 0)
+        self.set("stub-worker.json", {"mode": "ok"})
+        out = self.run_followup("drain", env=self.repair_env()).stdout
+        self.assertIn("reaped the builder", out)
+        with self.assertRaises(ProcessLookupError):
+            os.killpg(pgid, 0)
+        st = self.state(key)
+        self.assertEqual(st["status"], "done", self.report())
+        self.assertTrue(any(b["kind"] == "interrupted" for b in st["blockers"]))
+        self.assertFalse((self.root / "inflight" / "demo" / f"followup-{key}.pid").exists())
+        self.assertEqual(len(self.calls("worker")), 1)
+
+    def test_a_drain_from_a_workspace_terminal_never_builds_in_that_workspace(self):
+        self.py_wrapper(Path(self.tmp.name), "workspaces").rename(self.root / "lib" / "workspaces.py")
+        decoy = Path(self.tmp.name) / "decoy"
+        subprocess.run(["git", "init", "-q", str(decoy)], check=True, env=self.env)
+        for superset, stamp in (("1", "20261014-050000"), ("0", "20261014-060000")):
+            with self.subTest(superset=superset):
+                self.shipped_item(stamp)
+                self.run_followup("hook", "item-done", "--stamp", stamp)
+                self.run_followup("drain", env=self.repair_env(
+                    ADVANCE_ROADMAP_SUPERSET=superset, SUPERSET_WORKSPACE_PATH=str(decoy)))
+                key = f"cleanup-{stamp}"
+                self.assertEqual(self.state(key)["status"], "done", self.report())
+                self.assertEqual(list(decoy.glob("fix-*.txt")), [])
+                [launcher] = (self.root / "followups" / key).glob("build-*/worker-launch.zsh")
+                self.assertNotIn(str(decoy), launcher.read_text())
+
+    def test_fixture_and_builder_commits_ignore_the_users_commit_signing(self):
+        with tempfile.TemporaryDirectory() as d:
+            hostile = Path(d) / "gitconfig"
+            hostile.write_text("[commit]\n\tgpgsign = true\n[tag]\n\tgpgsign = true\n"
+                               "[gpg]\n\tformat = ssh\n[user]\n\tsigningkey = /nonexistent/key.pub\n")
+            with mock.patch.dict(os.environ, {"GIT_CONFIG_GLOBAL": str(hostile)}):
+                self.tearDown()
+                self.setUp()
+                self.shipped_item("20261014-050000")
+                self.run_followup("hook", "item-done", "--stamp", "20261014-050000")
+                self.run_followup("drain", env=self.repair_env())
+        self.assertEqual(len(self.calls("worker")), 1)
+        self.assertEqual(self.state("cleanup-20261014-050000")["status"], "done")
+
+    def test_a_recovered_pr_with_no_recorded_builder_is_never_reviewed(self):
+        self.shipped_item("20261014-050000")
+        self.run_followup("hook", "item-done", "--stamp", "20261014-050000")
+        # Scan once without repair so findings exist, then resume at review with no builder.
+        self.run_followup("drain")
+        st = self.state("cleanup-20261014-050000")
+        self.assertTrue(st["findings"])
+        st.update(status="pending", next={"step": "review", "round": 1},
+                  branch="roadmap/followup-cleanup-20261014-050000",
+                  pr_url="https://github.com/jnelken/demo/pull/7",
+                  findings=[{**st["findings"][0], "status": "open"}],
+                  validation={"reviews": []}, sessions=[], scanned=True)
+        st.pop("builder_provider", None)
+        (self.root / "followups" / st["key"] / "state.json").write_text(json.dumps(st))
+        self.run_followup("drain", env=self.repair_env())
+        st = self.state(st["key"])
+        self.assertEqual(st["status"], "blocked")
+        self.assertEqual(self.calls("review"), [])
+        self.assertEqual(self.report()[-1]["kind"], "unknown-builder")
+
+    def test_builder_that_ships_is_self_merged_hard_stop(self):
+        self.shipped_item("20261014-050000")
+        self.run_followup("hook", "item-done", "--stamp", "20261014-050000")
+        self.set("stub-worker.json", {"mode": "ok", "outcome": "shipped"})
+        self.run_followup("drain", env=self.repair_env())
+        st = self.state("cleanup-20261014-050000")
+        self.assertEqual(st["status"], "blocked")
+        self.assertEqual(self.report()[-1]["kind"], "builder-self-merged")
+        self.assertEqual(self.calls("review"), [])
+        self.assertFalse(any(c["args"][:2] == ["pr", "merge"] for c in self.calls("gh")))
+
+    def test_failed_builder_validation_redispatches_on_retry(self):
+        self.shipped_item("20261014-050000")
+        self.run_followup("hook", "item-done", "--stamp", "20261014-050000")
+        self.set("stub-worker.json", {"mode": "ok", "validation": "failed"})
+        self.run_followup("drain", env=self.repair_env())
+        st = self.state("cleanup-20261014-050000")
+        self.assertEqual(st["status"], "pending")
+        self.assertEqual(len(self.calls("worker")), 1)
+        self.assertTrue(list((self.root / "followups" / st["key"]).glob("build-*/consumed")))
+        self.set("stub-worker.json", {"mode": "ok"})
+        self.run_followup("drain", env=self.repair_env())
+        self.assertEqual(len(self.calls("worker")), 2)
+        self.assertEqual(self.state("cleanup-20261014-050000")["status"], "done", self.report())
+
+    def test_skipped_deploy_check_is_not_success(self):
+        self.shipped_item("20261014-050000")
+        self.run_followup("hook", "item-done", "--stamp", "20261014-050000")
+        self.set("stub-gh.json", {
+            "checks": "pass", "deploy": "success",
+            "check_runs": [{"name": "Vercel", "status": "completed", "conclusion": "skipped"}],
+        })
+        self.run_followup("drain", env=self.repair_env(ADVANCE_ROADMAP_FOLLOWUP_DEPLOY_TIMEOUT_S="0.5"))
+        st = self.state("cleanup-20261014-050000")
+        self.assertNotEqual(st.get("validation", {}).get("deploy"), "success")
+        self.assertNotEqual(st["status"], "done")
+        self.assertTrue(st["findings"][0]["status"] in ("open", "deferred"))
+
+    def test_skipped_deploy_check_blocks_status_success(self):
+        """A success commit status must not win over a skipped deploy-named check run."""
+        self.shipped_item("20261014-050000")
+        self.run_followup("hook", "item-done", "--stamp", "20261014-050000")
+        self.set("stub-gh.json", {
+            "checks": "pass", "deploy": "success",
+            "statuses": [{"context": "Vercel", "state": "success"}],
+            "check_runs": [{"name": "Vercel", "status": "completed", "conclusion": "skipped"}],
+        })
+        self.run_followup("drain", env=self.repair_env(ADVANCE_ROADMAP_FOLLOWUP_DEPLOY_TIMEOUT_S="0.5"))
+        st = self.state("cleanup-20261014-050000")
+        self.assertNotEqual(st.get("validation", {}).get("deploy"), "success")
+        self.assertNotEqual(st["status"], "done")
+
+    def test_latest_deploy_status_per_context_wins(self):
+        """An older failed Vercel status must not block a later success for the same context."""
+        self.shipped_item("20261014-050000")
+        self.run_followup("hook", "item-done", "--stamp", "20261014-050000")
+        self.set("stub-gh.json", {
+            "checks": "pass", "deploy": "success",
+            "statuses": [
+                {"context": "Vercel", "state": "failure", "updated_at": "2026-10-14T10:00:00Z"},
+                {"context": "Vercel", "state": "success", "updated_at": "2026-10-14T10:05:00Z"},
+            ],
+            "check_runs": [],
+        })
+        self.run_followup("drain", env=self.repair_env())
+        st = self.state("cleanup-20261014-050000")
+        self.assertEqual(st["status"], "done", self.report())
+        self.assertEqual(st["validation"]["deploy"], "success")
+
+    def test_deploy_prefers_updated_at_over_created_at(self):
+        """updated_at wins even when an older failure was created later than a success."""
+        self.shipped_item("20261014-050000")
+        self.run_followup("hook", "item-done", "--stamp", "20261014-050000")
+        self.set("stub-gh.json", {
+            "checks": "pass", "deploy": "success",
+            "statuses": [
+                # Success was updated most recently; its created_at is older.
+                {"context": "Vercel", "state": "success",
+                 "created_at": "2026-10-14T09:00:00Z", "updated_at": "2026-10-14T11:00:00Z"},
+                # Failure created later but updated earlier — must not win.
+                {"context": "Vercel", "state": "failure",
+                 "created_at": "2026-10-14T10:30:00Z", "updated_at": "2026-10-14T10:30:00Z"},
+            ],
+            "check_runs": [],
+        })
+        self.run_followup("drain", env=self.repair_env())
+        st = self.state("cleanup-20261014-050000")
+        self.assertEqual(st["status"], "done", self.report())
+        self.assertEqual(st["validation"]["deploy"], "success")
+
+    def test_in_progress_check_run_beats_older_completed_success(self):
+        """A newer started check run must win over an older completed success."""
+        self.shipped_item("20261014-050000")
+        self.run_followup("hook", "item-done", "--stamp", "20261014-050000")
+        self.set("stub-gh.json", {
+            "checks": "pass", "deploy": "success",
+            "statuses": [],
+            "check_runs": [
+                {"name": "Vercel", "status": "completed", "conclusion": "success",
+                 "started_at": "2026-10-14T10:00:00Z", "completed_at": "2026-10-14T10:05:00Z"},
+                {"name": "Vercel", "status": "in_progress",
+                 "started_at": "2026-10-14T10:10:00Z"},
+            ],
+        })
+        self.run_followup("drain", env=self.repair_env(ADVANCE_ROADMAP_FOLLOWUP_DEPLOY_TIMEOUT_S="0.5"))
+        st = self.state("cleanup-20261014-050000")
+        self.assertNotEqual(st.get("validation", {}).get("deploy"), "success")
+        self.assertNotEqual(st["status"], "done")
+
+    def test_deploy_config_read_from_merge_commit_not_dirty_tree(self):
+        """A vercel.json added by the PR must prevent deploy:none even if root checkout lacks it."""
+        self.shipped_item("20261014-050000")
+        self.run_followup("hook", "item-done", "--stamp", "20261014-050000")
+        # Builder commits vercel.json on the follow-up branch; root checkout stays without it.
+        self.set("stub-worker.json", {"mode": "ok", "extra_files": {"vercel.json": "{}\n"}})
+        self.set("stub-gh.json", {"checks": "pass", "deploy": "none", "merge_commit": "head"})
+        self.run_followup("drain", env=self.repair_env(ADVANCE_ROADMAP_FOLLOWUP_DEPLOY_NONE_S="0",
+                                                       ADVANCE_ROADMAP_FOLLOWUP_DEPLOY_TIMEOUT_S="0.5"))
+        st = self.state("cleanup-20261014-050000")
+        # Has config at merge commit → empty APIs are timeout/unverified, never "none".
+        self.assertNotEqual(st.get("validation", {}).get("deploy"), "none")
+        self.assertNotEqual(st["status"], "done")
+
+    def test_nonzero_builder_exit_is_rejected_despite_pr_result(self):
+        """Exit nonzero with a blocked-branch-left result must not proceed to review/merge."""
+        self.shipped_item("20261014-050000")
+        self.run_followup("hook", "item-done", "--stamp", "20261014-050000")
+        self.set("stub-worker.json", {"mode": "ok", "exit": 1})
+        self.run_followup("drain", env=self.repair_env())
+        st = self.state("cleanup-20261014-050000")
+        self.assertEqual(st["status"], "pending", self.report())
+        self.assertEqual(self.calls("review"), [])
+        self.assertFalse(any(c["args"][:2] == ["pr", "merge"] for c in self.calls("gh")))
+        self.assertIn("exited 1", self.report()[-1]["reason"])
+        # Retry with a clean exit succeeds.
+        self.set("stub-worker.json", {"mode": "ok"})
+        self.run_followup("drain", env=self.repair_env())
+        self.assertEqual(self.state("cleanup-20261014-050000")["status"], "done", self.report())
+        self.assertEqual(len(self.calls("worker")), 2)
+
+    def test_builder_reported_wrong_branch_is_rejected(self):
+        """Stage key owns the branch; a builder cannot rename it into land()."""
+        self.shipped_item("20261014-050000")
+        self.run_followup("hook", "item-done", "--stamp", "20261014-050000")
+        self.set("stub-worker.json", {"mode": "ok", "branch": "roadmap/attacker"})
+        self.run_followup("drain", env=self.repair_env())
+        st = self.state("cleanup-20261014-050000")
+        self.assertEqual(st["status"], "pending", self.report())
+        self.assertEqual(self.calls("review"), [])
+        self.assertIn("roadmap/attacker", self.report()[-1]["reason"])
+        self.assertIn("expected", self.report()[-1]["reason"])
+
+    def test_clean_review_log_with_nonzero_exit_cannot_merge(self):
+        """A clean reviews.jsonl row is not mergeable when review.sh exits nonzero."""
+        self.shipped_item("20261014-050000")
+        self.run_followup("hook", "item-done", "--stamp", "20261014-050000")
+        self.set("stub-review.json", {"verdicts": ["clean"], "exit": 1})
+        self.run_followup("drain", env=self.repair_env())
+        st = self.state("cleanup-20261014-050000")
+        self.assertNotEqual(st["status"], "done", self.report())
+        self.assertIsNone(st.get("reviewed_sha"))
+        self.assertFalse(any(c["args"][:2] == ["pr", "merge"] for c in self.calls("gh")))
+        self.assertIn("review", self.report()[-1]["kind"])
+
+    def test_findings_review_log_with_nonzero_exit_is_error_not_rebuild(self):
+        """A findings log row with review.sh exit 1 must not burn another builder round."""
+        self.shipped_item("20261014-050000")
+        self.run_followup("hook", "item-done", "--stamp", "20261014-050000")
+        self.set("stub-review.json", {"verdicts": ["findings"], "exit": 1})
+        self.run_followup("drain", env=self.repair_env())
+        st = self.state("cleanup-20261014-050000")
+        self.assertEqual(len(self.calls("worker")), 1)  # no second builder
+        self.assertEqual(self.calls("review")[-1].get("round"), 1)
+        self.assertIn("review", self.report()[-1]["kind"])
+        self.assertNotEqual(st.get("next", {}).get("step"), "build")
+
+    def test_successful_build_persists_review_step_immediately(self):
+        """After build ok, next=review is on disk before review runs (crash recovery)."""
+        self.shipped_item("20261014-050000")
+        self.run_followup("hook", "item-done", "--stamp", "20261014-050000")
+        self.set("stub-review.json", {"verdicts": ["clean"], "unavailable": True})
+        self.run_followup("drain", env=self.repair_env())
+        st = self.state("cleanup-20261014-050000")
+        self.assertEqual(st["next"]["step"], "review")
+        self.assertEqual(len(self.calls("worker")), 1)
+        # A second drain must not re-dispatch the builder — review step was persisted.
+        self.run_followup("drain", env=self.repair_env())
+        self.assertEqual(len(self.calls("worker")), 1)
+        self.assertEqual(self.state("cleanup-20261014-050000")["next"]["step"], "review")
+
+    def test_unreadable_pr_head_does_not_clear_reviewed_sha(self):
+        self.shipped_item("20261014-050000")
+        self.run_followup("hook", "item-done", "--stamp", "20261014-050000")
+        self.set("stub-gh.json", {"checks": "pass", "deploy": "success", "head_unreadable": True})
+        self.run_followup("drain", env=self.repair_env())
+        st = self.state("cleanup-20261014-050000")
+        self.assertEqual(st["status"], "pending")
+        self.assertIsNotNone(st.get("reviewed_sha"))
+        self.assertEqual(st["next"]["step"], "land")
+        self.assertEqual(len(self.calls("review")), 1)
+        self.set("stub-gh.json", {"checks": "pass", "deploy": "success"})
+        self.run_followup("drain", env=self.repair_env())
+        self.assertEqual(self.state("cleanup-20261014-050000")["status"], "done", self.report())
+        self.assertEqual(len(self.calls("review")), 1)  # no extra review round
+
+    def test_already_merged_pr_is_adopted_after_drain_dies(self):
+        self.shipped_item("20261014-050000")
+        self.run_followup("hook", "item-done", "--stamp", "20261014-050000")
+        # First pass: merge succeeds, then deploy fails so we stop with merged persisted.
+        self.set("stub-gh.json", {"checks": "pass", "deploy": "failure", "merge_commit": "head"})
+        self.run_followup("drain", env=self.repair_env())
+        st = self.state("cleanup-20261014-050000")
+        self.assertTrue(st.get("merged"))
+        self.assertTrue(st.get("merge_commit"))
+        # Simulate a kill that lost in-memory state but left disk: clear merged, keep sha gone,
+        # force merge to fail while PR is already MERGED at the reviewed head.
+        st.pop("merged", None)
+        st.pop("merge_commit", None)
+        st["status"] = "pending"
+        st["next"] = {"step": "land", "round": 1}
+        (self.root / "followups" / st["key"] / "state.json").write_text(json.dumps(st))
+        self.set("stub-gh.json", {"checks": "pass", "deploy": "success", "merge_fails": True,
+                                  "pr_state": "MERGED", "merge_commit": "head"})
+        self.run_followup("drain", env=self.repair_env())
+        st = self.state("cleanup-20261014-050000")
+        self.assertEqual(st["status"], "done", self.report())
+        self.assertTrue(st.get("merged"))
+
+    def test_already_merged_pr_with_wrong_head_is_not_adopted(self):
+        """An external MERGED tip that is not reviewed_sha must not finish the stage."""
+        self.shipped_item("20261014-050000")
+        self.run_followup("hook", "item-done", "--stamp", "20261014-050000")
+        # Reach land with a clean review, then simulate an external merge at a different tip.
+        self.set("stub-gh.json", {"checks": "pass", "deploy": "failure", "merge_commit": "head"})
+        self.run_followup("drain", env=self.repair_env())
+        st = self.state("cleanup-20261014-050000")
+        self.assertTrue(st.get("merged"))
+        reviewed = st["reviewed_sha"]
+        st.pop("merged", None)
+        st.pop("merge_commit", None)
+        st["status"] = "pending"
+        st["next"] = {"step": "land", "round": 1}
+        st["reviewed_sha"] = reviewed
+        (self.root / "followups" / st["key"] / "state.json").write_text(json.dumps(st))
+        self.set("stub-gh.json", {"checks": "pass", "deploy": "success", "merge_fails": True,
+                                  "pr_state": "MERGED", "merged_head": "a" * 40, "merge_commit": "head"})
+        self.run_followup("drain", env=self.repair_env())
+        st = self.state("cleanup-20261014-050000")
+        self.assertNotEqual(st["status"], "done", self.report())
+        self.assertFalse(st.get("merged"))
+        self.assertIn("not the reviewed commit", self.report()[-1]["reason"])
+        self.assertEqual(st["next"]["step"], "review")
+
+    def test_take_repo_lock_preclaims_high_thread_slots(self):
+        """Repair holds t1…ceiling so a later run.sh THREAD=8 cannot appear beside it."""
+        import followup as fu
+        os.environ["ADVANCE_ROADMAP_ROOT"] = str(self.root)
+        fu.ROOT = self.root
+        lock = fu.take_repo_lock("demo")
+        try:
+            self.assertTrue(lock and lock.ok and lock.claims)
+            ceiling = fu.REPO_THREAD_LOCK_CEILING
+            held = {Path(c.fh.name).name for c in lock.claims}
+            self.assertIn("demo.lock", held)
+            for i in range(1, ceiling + 1):
+                self.assertIn(f"demo.t{i}.lock", held)
+        finally:
+            lock.close()
+
+    def test_claim_flock_contends_with_zsystem_flock(self):
+        """Claim and run.sh must share flock(2) — a zsh holder blocks take_repo_lock."""
+        import followup as fu
+        os.environ["ADVANCE_ROADMAP_ROOT"] = str(self.root)
+        fu.ROOT = self.root
+        lock_path = self.root / "repo-locks" / "demo.lock"
+        lock_path.parent.mkdir(parents=True)
+        lock_path.touch()
+        # Hold with zsystem flock like run.sh, then Claim must fail.
+        holder = subprocess.Popen(
+            ["zsh", "-c",
+             f'zmodload zsh/system; exec {{FD}}<>{lock_path}; '
+             f'zsystem flock -e -f FD {lock_path}; sleep 30'],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        try:
+            deadline = time.time() + 5
+            while time.time() < deadline:
+                # Wait until the holder has the lock.
+                probe = fu.Claim(lock_path)
+                if not probe.ok:
+                    break
+                probe.close()
+                time.sleep(0.05)
+            else:
+                self.fail("zsh flock holder never acquired the lock")
+            lock = fu.take_repo_lock("demo")
+            self.assertTrue(lock is None or not lock.ok or not lock.claims)
+        finally:
+            holder.kill()
+            holder.wait(timeout=5)
+
+    def test_eligible_reviewers_excludes_prior_builders(self):
+        """Owner-policy table: eligible_reviewers never returns a prior builder."""
+        import followrepair
+        cases = [
+            # (builder, excluded, expected)
+            ("cursor", (), ("codex", "claude")),
+            ("cursor", {"codex"}, ("claude",)),
+            ("cursor", {"codex", "claude"}, ()),
+            ("cursor", {"cursor"}, ("codex", "claude")),  # current worker isn't in REVIEWERS[self]
+            ("codex", {"claude"}, ()),
+            ("claude", {"codex"}, ()),
+            ("claude", (), ("codex",)),
+            ("unknown", {"codex"}, ()),
+        ]
+        for builder, excluded, want in cases:
+            with self.subTest(builder=builder, excluded=excluded):
+                self.assertEqual(followrepair.eligible_reviewers(builder, excluded), want)
+
+    def test_verify_pr_target_policy(self):
+        """Owner-policy table: verify_pr_target accepts only the stage's repo/head/base."""
+        import followrepair as fr
+        repo = self.code / "demo"
+        st = {"key": "cleanup-demo", "repo": "demo", "branch": "roadmap/followup-cleanup-demo",
+              "pr_url": "https://github.com/jnelken/demo/pull/7"}
+        self.set("stub-gh.json", {"head_ref": "roadmap/followup-cleanup-demo", "base_ref": "main"})
+        # Point followrepair.gh at the stub for in-process calls.
+        stub = self.env["ADVANCE_ROADMAP_GH_BIN"]
+        env = {"ADVANCE_ROADMAP_ROOT": str(self.root)}
+        with patch.dict(os.environ, env), patch.object(fr, "GH", stub):
+            ok, _ = fr.verify_pr_target(st, repo)
+            self.assertTrue(ok)
+            st_bad = {**st, "pr_url": "https://github.com/jnelken/other/pull/1"}
+            ok, reason = fr.verify_pr_target(st_bad, repo)
+            self.assertFalse(ok)
+            self.assertIn("not in jnelken/demo", reason)
+            self.set("stub-gh.json", {"head_ref": "wrong-branch", "base_ref": "main"})
+            ok, reason = fr.verify_pr_target(st, repo)
+            self.assertFalse(ok)
+            self.assertIn("wrong-branch", reason)
+            self.set("stub-gh.json", {"head_ref": "roadmap/followup-cleanup-demo", "base_ref": "develop"})
+            ok, reason = fr.verify_pr_target(st, repo)
+            self.assertFalse(ok)
+            self.assertIn("develop", reason)
+
+    def test_land_refuses_pr_for_wrong_repo(self):
+        """Entry-point delegation: land() must not merge a PR outside the stage repo."""
+        self.shipped_item("20261014-050000")
+        self.run_followup("hook", "item-done", "--stamp", "20261014-050000")
+        self.set("stub-review.json", {"verdicts": ["clean"], "unavailable": True})
+        self.run_followup("drain", env=self.repair_env())
+        st = self.state("cleanup-20261014-050000")
+        self.assertEqual(st["next"]["step"], "review")
+        st["pr_url"] = "https://github.com/jnelken/other/pull/99"
+        (self.root / "followups" / st["key"] / "state.json").write_text(json.dumps(st))
+        self.set("stub-review.json", {"verdicts": ["clean"]})
+        self.run_followup("drain", env=self.repair_env())
+        st = self.state("cleanup-20261014-050000")
+        self.assertNotEqual(st["status"], "done", self.report())
+        self.assertFalse(any(c["args"][:2] == ["pr", "merge"] for c in self.calls("gh")))
+        self.assertIn("not in jnelken/demo", self.report()[-1]["reason"])
+
+    def test_run_review_passes_prior_builders_as_exclude(self):
+        """Entry-point delegation: run_review must pass --exclude-reviewers to review.sh."""
+        self.shipped_item("20261014-050000")
+        self.run_followup("hook", "item-done", "--stamp", "20261014-050000")
+        self.set("stub-review.json", {"verdicts": ["findings", "clean"]})
+        self.run_followup("drain", env=self.repair_env())
+        st = self.state("cleanup-20261014-050000")
+        self.assertEqual(st["status"], "done", self.report())
+        reviews = self.calls("review")
+        self.assertEqual(len(reviews), 2)
+        # Round 1: the cursor builder is already recorded before review runs.
+        self.assertIn("cursor", reviews[0].get("exclude") or "")
+        # Round 2: both builders (same provider in the stub) stay excluded.
+        self.assertIn("cursor", reviews[1].get("exclude") or "")
+        self.assertEqual(reviews[0].get("strategy"), "cross-provider")
+
+    def test_run_review_fails_closed_when_ff_merge_fails(self):
+        """A divergent review checkout must not invoke review.sh on a stale tip."""
+        self.shipped_item("20261014-050000")
+        self.run_followup("hook", "item-done", "--stamp", "20261014-050000")
+        self.set("stub-review.json", {"verdicts": ["clean"], "unavailable": True})
+        self.run_followup("drain", env=self.repair_env())
+        st = self.state("cleanup-20261014-050000")
+        self.assertEqual(st["next"]["step"], "review")
+        # Divergent tips: origin and the review checkout each have a unique commit.
+        wt = Path(self.env["ADVANCE_ROADMAP_FOLLOWUP_WORKTREES"]) / st["key"]
+        self.assertTrue(wt.is_dir(), f"expected follow-up worktree at {wt}")
+        base = self.git(wt, "rev-parse", "HEAD")
+        (wt / "origin-only.txt").write_text("origin\n")
+        self.git(wt, "add", "-A")
+        self.git(wt, "commit", "-qm", "origin-only")
+        self.git(wt, "push", "-q", "origin", st["branch"])
+        self.git(wt, "reset", "--hard", "-q", base)
+        (wt / "stale-local.txt").write_text("local\n")
+        self.git(wt, "add", "-A")
+        self.git(wt, "commit", "-qm", "local-only")
+        self.set("stub-review.json", {"verdicts": ["clean"]})
+        before = len(self.calls("review"))
+        self.run_followup("drain", env=self.repair_env())
+        st = self.state("cleanup-20261014-050000")
+        self.assertEqual(st["status"], "pending", self.report())
+        self.assertEqual(len(self.calls("review")), before)  # never reached review.sh again
+        self.assertIn("ff-merge", self.report()[-1]["reason"])
 
 
 if __name__ == "__main__":
