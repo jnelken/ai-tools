@@ -803,6 +803,7 @@ def dedupe(st, issues):
             report(st, "linear", f"could not add evidence to {issue['identifier']}: {e}")
     st["evidence_posted"] = sorted(posted)
     st["evidence_commented"] = sorted(commented)
+    refresh_ticket_sync_flags(st)
 
 
 def next_step_text(st, step):
@@ -1001,6 +1002,63 @@ def retry_deferral_syncs():
             if sync_deferral_tickets(st, findings, quota, next_step, note):
                 log(f"{st['key']}: retried deferral ticket sync")
             save(st)
+        finally:
+            c.close()
+
+
+def evidence_sync_pending(st):
+    """True when an evidence comment and/or description rewrite is still unfinished."""
+    posted = set(st.get("evidence_posted") or [])
+    commented = set(st.get("evidence_commented") or [])
+    if commented - posted:
+        return True
+    for f in st.get("findings") or []:
+        if f.get("status") not in ("open", "deferred"):
+            continue
+        ident = f.get("ticket")
+        if not ident or ident == st.get("recovered_from"):
+            continue
+        if f"{ident}:{f['id']}:{st['key']}" not in posted:
+            return True
+    return False
+
+
+def refresh_ticket_sync_flags(st):
+    """Keep pending_evidence_sync accurate after dedupe so parked stages still retry."""
+    if evidence_sync_pending(st):
+        st["pending_evidence_sync"] = True
+    else:
+        st.pop("pending_evidence_sync", None)
+
+
+def retry_ticket_syncs(issues=None):
+    """Retry dedupe/evidence for stages that parked with unfinished Linear sync.
+
+    Runs at drain start (outside eligible()), so a parked repair stage still finishes metadata.
+    When issues is None (Linear unread), leave pending flags alone.
+    """
+    if os.environ.get("ADVANCE_ROADMAP_FOLLOWUP_LINEAR", "1") != "1":
+        return
+    if issues is None:
+        return
+    for snapshot in all_stages():
+        if not (snapshot.get("pending_ticket_sync") or snapshot.get("pending_evidence_sync")
+                or evidence_sync_pending(snapshot)):
+            continue
+        c = claim_stage(snapshot["key"])
+        if not c:
+            continue
+        try:
+            st = load(snapshot["key"]) or snapshot
+            if not (st.get("pending_ticket_sync") or st.get("pending_evidence_sync")
+                    or evidence_sync_pending(st)):
+                continue
+            dedupe(st, issues)
+            st.pop("pending_ticket_sync", None)
+            refresh_ticket_sync_flags(st)
+            save(st)
+            if not st.get("pending_evidence_sync"):
+                log(f"{st['key']}: finished pending ticket/evidence sync")
         finally:
             c.close()
 
@@ -1380,8 +1438,11 @@ def process(st, issues=None):
     """ANALYZE, dedupe tickets, then REPORT under the caller's stage claim.
 
     Unfinished ticket/repair work is parked until ADVANCE_ROADMAP_FOLLOWUP_REPAIR=1 (slice 3b).
+    issues=None means Linear could not be read — keep pending_ticket_sync so a later drain retries.
+    issues=[] means a successful read found no open tickets.
     """
-    issues = issues if issues is not None else []
+    linear_unread = issues is None
+    live = [] if issues is None else issues
     st.pop("waiting_reason", None)
     if not cas_status(st, READY, RUNNING, attempts=st.get("attempts", 0) + 1,
                       next={"step": "analyze"}):
@@ -1394,7 +1455,12 @@ def process(st, issues=None):
     if st.get("status") != RUNNING:
         return
     if os.environ.get("ADVANCE_ROADMAP_FOLLOWUP_LINEAR", "1") == "1":
-        dedupe(st, issues)
+        if linear_unread:
+            st["pending_ticket_sync"] = True
+        else:
+            dedupe(st, live)
+            st.pop("pending_ticket_sync", None)
+            refresh_ticket_sync_flags(st)
         if st.get("status") != RUNNING:
             return
         save(st)
@@ -1436,11 +1502,10 @@ def drain(repo=None, origin=None, stage=None, wait_s=0.0):
     STATE.mkdir(parents=True, exist_ok=True)
     recover_interrupted(repo=repo, origin=origin)
     issues = recover_tickets()  # None = Linear read failed; [] = no open issues
-    # Pass the real snapshot (including None) into close retries — never substitute [].
+    # Pass the real snapshot (including None) into close/ticket retries — never substitute [].
     retry_closes(issues=issues)
     retry_deferral_syncs()
-    if issues is None:
-        issues = []
+    retry_ticket_syncs(issues=issues)
     deadline = time.time() + wait_s
     while True:
         waiting, progressed = [], False
@@ -1477,6 +1542,7 @@ def drain(repo=None, origin=None, stage=None, wait_s=0.0):
                 if origin:
                     st["drained_by"] = origin
                 try:
+                    # issues may be None (unread) — process must not treat that as "no tickets".
                     process(st, issues)
                 except Exception as e:  # one broken stage must never stop the rest
                     report(st, "crash", f"{type(e).__name__}: {e}")

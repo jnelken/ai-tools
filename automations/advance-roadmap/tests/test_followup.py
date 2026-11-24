@@ -975,6 +975,7 @@ class FollowupTest(unittest.TestCase):
         self.assertEqual(len(comments), 1, comments)
         self.assertIn(f"DEV-777:{fid}:{key}", st.get("evidence_commented") or [])
         self.assertNotIn(f"DEV-777:{fid}:{key}", st.get("evidence_posted") or [])
+        self.assertTrue(st.get("pending_evidence_sync"))
         (self.root / "stub-calls.jsonl").unlink(missing_ok=True)
         self.set("stub-linear.json", {"pages": [[ticket]]})
         fu.dedupe(st, [ticket])
@@ -985,6 +986,66 @@ class FollowupTest(unittest.TestCase):
                    and "--description-file" in (c.get("args") or [])]
         self.assertTrue(updates)
         self.assertIn(f"DEV-777:{fid}:{key}", st.get("evidence_posted") or [])
+        self.assertFalse(st.get("pending_evidence_sync"))
+
+    def test_pending_evidence_sync_retries_while_repair_parked(self):
+        """Drain-start retry must finish evidence rewrite even when eligible() parks repair."""
+        import followup as fu
+        fu.ROOT = self.root
+        fu.STATE = self.root / "followups"
+        os.environ["ADVANCE_ROADMAP_ROOT"] = str(self.root)
+        os.environ["ADVANCE_ROADMAP_LINEAR_BIN"] = self.env["ADVANCE_ROADMAP_LINEAR_BIN"]
+        key = "cleanup-parked-evidence"
+        fid = "aaaaaaaaaaaa"
+        title = "reject an empty listing before saving the catalog"
+        d = self.root / "followups" / key
+        d.mkdir(parents=True)
+        tag = f"DEV-777:{fid}:{key}"
+        (d / "state.json").write_text(json.dumps({
+            "key": key, "stage": "project-cleanup", "repo": "demo", "status": "deferred",
+            "next": {"step": "build", "round": 1}, "pending_evidence_sync": True,
+            "evidence_commented": [tag], "evidence_posted": [],
+            "findings": [{"id": fid, "title": title, "kind": "t", "fix": "f", "status": "deferred",
+                          "repo": "demo", "ticket": "DEV-777",
+                          "evidence": [{"source": "t", "quote": title}]}],
+            "blockers": [], "scanned": True,
+        }))
+        ticket = self.legacy_ticket("DEV-777", title, f"Seen before: {title}", repo="demo")
+        self.set("stub-linear.json", {"pages": [[ticket]]})
+        self.assertFalse(fu.eligible(fu.load(key)))
+        fu.retry_ticket_syncs(issues=[ticket])
+        st = self.state(key)
+        self.assertIn(tag, st.get("evidence_posted") or [])
+        self.assertFalse(st.get("pending_evidence_sync"))
+
+    def test_linear_unread_keeps_pending_ticket_sync(self):
+        """A failed Linear read must not clear ticket sync; a later drain retries dedupe."""
+        import followup as fu
+        fu.ROOT = self.root
+        fu.STATE = self.root / "followups"
+        os.environ["ADVANCE_ROADMAP_ROOT"] = str(self.root)
+        os.environ["ADVANCE_ROADMAP_LINEAR_BIN"] = self.env["ADVANCE_ROADMAP_LINEAR_BIN"]
+        key = "cleanup-unread-sync"
+        fid = "aaaaaaaaaaaa"
+        title = "reject an empty listing before saving the catalog"
+        d = self.root / "followups" / key
+        d.mkdir(parents=True)
+        (d / "state.json").write_text(json.dumps({
+            "key": key, "stage": "project-cleanup", "repo": "demo", "status": "ready",
+            "findings": [{"id": fid, "title": title, "kind": "t", "fix": "f", "status": "open",
+                          "repo": "demo", "evidence": [{"source": "t", "quote": title}]}],
+            "blockers": [], "scanned": True, "attempts": 0,
+        }))
+        fu.process(fu.load(key), issues=None)
+        st = self.state(key)
+        self.assertTrue(st.get("pending_ticket_sync"))
+        self.assertIsNone(st["findings"][0].get("ticket"))
+        ticket = self.legacy_ticket("DEV-777", title, f"Seen before: {title}", repo="demo")
+        self.set("stub-linear.json", {"pages": [[ticket]]})
+        fu.retry_ticket_syncs(issues=[ticket])
+        st = self.state(key)
+        self.assertFalse(st.get("pending_ticket_sync"))
+        self.assertEqual(st["findings"][0].get("ticket"), "DEV-777")
 
 
 if __name__ == "__main__":
