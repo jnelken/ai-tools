@@ -336,10 +336,11 @@ def _file_text_for_prompt(path, stamps):
         wanted = set(stamps)
         for line in followscan.iter_jsonl_lines(path):
             try:
-                if json.loads(line).get("stamp") in wanted:
-                    lines.append(line if line.endswith("\n") else line + "\n")
+                row = json.loads(line)
             except ValueError:
                 continue
+            if isinstance(row, dict) and row.get("stamp") in wanted:
+                lines.append(line if line.endswith("\n") else line + "\n")
         return "".join(lines)
     return path.read_text(errors="replace")
 

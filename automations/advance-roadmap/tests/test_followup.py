@@ -2628,6 +2628,18 @@ class FollowupTest(unittest.TestCase):
         gate = followrepair.gate_one("analyst", "codex", readonly=True)
         self.assertIsNotNone(gate)
         self.assertFalse(gate["available"])
+        usagelib.usage_path(self.root).write_text(json.dumps({"providers": {}}) + "\n")
+        gate = followrepair.gate_one("analyst", "codex", readonly=True)
+        self.assertFalse(gate["available"])
+
+    def test_inline_runs_jsonl_skips_non_object_lines(self):
+        import followanalyst
+        stamp = "20261013-103004"
+        row = json.loads((FIXTURES / "runs-row.json").read_text())
+        (self.root / "runs.jsonl").write_text(
+            "[1,2,3]\n" + json.dumps(row) + "\n")
+        text, _ = followanalyst.inline_corpus([self.root / "runs.jsonl"], stamps=[stamp])
+        self.assertIn(stamp, text)
 
     def test_analyst_cwd_sandbox_has_no_corpus_files(self):
         import followanalyst

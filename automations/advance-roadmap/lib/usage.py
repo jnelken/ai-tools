@@ -1055,6 +1055,9 @@ def cmd_gate(args: argparse.Namespace) -> None:
             raw = json.loads(path.read_text(encoding="utf-8"))
             if not isinstance(raw, dict):
                 raise ValueError("usage state must be an object")
+            saved_providers = raw.get("providers")
+            if not isinstance(saved_providers, dict) or args.provider not in saved_providers:
+                raise ValueError("saved usage state has no entry for provider")
             state = load(root)
             if not isinstance(state.get("providers"), dict):
                 raise ValueError("usage state missing providers")
