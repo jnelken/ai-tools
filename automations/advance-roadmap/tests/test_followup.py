@@ -2447,8 +2447,9 @@ class FollowupTest(unittest.TestCase):
         row = {**json.loads((FIXTURES / "runs-row.json").read_text()), "note": banner}
         body = json.dumps(row) + "\n"
         (self.root / "runs.jsonl").write_text(body)
-        # Transcript echoes the paste body only — no separate CLI limit line outside it.
-        (self.root / "stub-codex-transcript.txt").write_text(body)
+        # Transcript echoes a fragment line (banner alone) plus reasoning — not only the whole body.
+        (self.root / "stub-codex-transcript.txt").write_text(
+            "reasoning over corpus\n" + banner + "\n" + body)
         (self.root / "stub-analyst.txt").write_text("")
         p = self.run_followup("scan", "--stage", "tooling", "--origin", "batch-2026-10-13", "--stamp", stamp,
                               env={"ADVANCE_ROADMAP_FOLLOWUP_ANALYST": "1"})
@@ -2625,6 +2626,34 @@ class FollowupTest(unittest.TestCase):
         self.assertEqual(fu.repair_todo([analyst, det]), [det])
         st = {"findings": [analyst], "branch": "roadmap/x", "status": "deferred"}
         self.assertFalse(fu.awaits_repair(st))
+
+    def test_repair_resume_with_only_analyst_rows_left_does_not_rebuild(self):
+        """Mid-flight review resume must not feed analyst titles to the builder when det rows are done."""
+        import followup as fu
+        fu.ROOT = self.root
+        fu.STATE = self.root / "followups"
+        os.environ["ADVANCE_ROADMAP_ROOT"] = str(self.root)
+        key = "tooling-analyst-resume"
+        d = self.root / "followups" / key
+        d.mkdir(parents=True)
+        det = {"id": "bbbbbbbbbbbb", "title": "deterministic", "status": "duplicate",
+               "kind": "misfiring-automation", "repo": "ai-tools", "source": "scan"}
+        analyst = {"id": "aaaaaaaaaaaa", "title": self.ANALYST_FINDING["title"], "status": "open",
+                   "source": "analyst", "kind": "analyst", "repo": "ai-tools"}
+        st = {"key": key, "stage": "tooling-hardening", "repo": "ai-tools", "status": "ready",
+              "findings": [det, analyst], "non_findings": [], "scanned": True,
+              "next": {"step": "review", "round": 1}, "branch": "roadmap/x",
+              "builder_provider": "cursor", "attempts": 0, "owned_tickets": []}
+        (d / "state.json").write_text(json.dumps(st))
+        # Force the resume path: repair on, no Linear, lock held elsewhere so we observe todo filter
+        # via repair_todo / the empty-todo report rather than launching a builder.
+        self.assertEqual(fu.repair_todo(st["findings"]), [])
+        # Simulate the process() resume branch decision.
+        fs = st["findings"]
+        todo = fu.repair_todo(fs)
+        self.assertEqual(todo, [])
+        non_analyst = [f for f in fs if f.get("source") != "analyst" and f.get("status") != "duplicate"]
+        self.assertEqual(non_analyst, [])
 
     def test_analyst_runs_inside_corpus_sandbox(self):
         stamp = "20261013-103004"

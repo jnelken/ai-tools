@@ -1855,10 +1855,13 @@ def process(st, issues=None):
             if owned:
                 todo = owned
             elif step in ("land", "review"):
-                # Findings already fixed/duplicate; finish land/review without a builder brief.
-                # Prefer non-analyst rows so a mid-flight resume never feeds model titles to the builder.
-                non_analyst = [f for f in fs if f.get("source") != "analyst" and f.get("status") != "duplicate"]
-                todo = non_analyst or [f for f in fs if f.get("status") != "duplicate"] or list(fs)
+                # Finish land/review without a builder brief. Never re-admit analyst rows (repair_todo
+                # is the owner — empty non-analyst means repair-empty, not model titles).
+                todo = [f for f in fs if f.get("source") != "analyst" and f.get("status") != "duplicate"]
+                if not todo:
+                    report(st, "repair-empty", "no owned open findings left to repair")
+                    cas_status(st, RUNNING, DONE, next=None, reported_at=now_iso())
+                    return
             else:
                 report(st, "repair-empty", "no owned open findings left to repair")
                 cas_status(st, RUNNING, DONE, next=None, reported_at=now_iso())

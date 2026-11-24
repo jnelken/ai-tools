@@ -119,8 +119,10 @@ def analyze(st, findings, files):
                 continue
             # Invariant (owner: live_limit_banner + paste scrub): gate only on a live CLI limit.
             # The analyst prompt inlines the corpus, so transcripts echo quoted banners; strip those
-            # bodies before detection so live_limit_banner never sees paste-only banners.
-            scrubbed = _transcript_without_paste(st, transcript)
+            # before detection. Aggressive (line/substring) scrub only on exit 0 — a real CLI limit
+            # still prints its banner outside the paste and must remain visible when exit != 0.
+            scrubbed = _transcript_without_paste(
+                st, transcript, fragments=(exit_code == 0))
             banner = usagelib.live_limit_banner(
                 scrubbed, exit_code=exit_code, final_answer=answer, provider_result=provider_result)
             if banner:
@@ -380,13 +382,36 @@ def _file_text_for_prompt(path, stamps):
     return followscan.read_text(path)
 
 
-def _transcript_without_paste(st, transcript):
-    """Drop inlined corpus bodies from a transcript so echoed banners are not live limits."""
+def _transcript_without_paste(st, transcript, *, fragments=False):
+    """Drop inlined corpus text from a transcript so echoed banners are not live limits.
+
+    Always removes whole pasted bodies. When fragments=True (exit 0), also drops transcript lines
+    that equal a paste line or appear as a substring of a paste body — providers often echo one
+    corpus line of reasoning. When exit != 0, leave CLI-printed banners that happen to match
+    corpus-quoted limit text so a real limit still records.
+    """
     text = transcript or ""
-    for body in (st.get("_analyst_paste") or {}).values():
-        if body and body in text:
+    bodies = [b for b in (st.get("_analyst_paste") or {}).values() if b]
+    paste_lines = set()
+    for body in bodies:
+        if body in text:
             text = text.replace(body, "")
-    return text
+        for line in body.splitlines():
+            s = line.strip()
+            if s:
+                paste_lines.add(s)
+    if not fragments:
+        return text
+    kept = []
+    for line in text.splitlines():
+        s = line.strip()
+        if not s:
+            kept.append(line)
+            continue
+        if s in paste_lines or any(s in body for body in bodies):
+            continue
+        kept.append(line)
+    return "\n".join(kept)
 
 
 def inline_corpus(files, max_bytes=CORPUS_PROMPT_MAX_BYTES, stamps=None):
