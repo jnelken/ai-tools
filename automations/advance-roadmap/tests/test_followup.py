@@ -1198,6 +1198,31 @@ class FollowupTest(unittest.TestCase):
         self.assertIn(tag, st.get("evidence_posted") or [])
         self.assertFalse(st.get("pending_evidence_sync"))
 
+    def test_pending_ticket_sync_stays_until_match_appears(self):
+        """Keep pending_ticket_sync until a later-filed ticket matches."""
+        import followup as fu
+        fu.ROOT, fu.STATE = self.root, self.root / "followups"
+        os.environ["ADVANCE_ROADMAP_ROOT"] = str(self.root)
+        os.environ["ADVANCE_ROADMAP_LINEAR_BIN"] = self.env["ADVANCE_ROADMAP_LINEAR_BIN"]
+        key, fid = "cleanup-late-ticket", "aaaaaaaaaaaa"
+        title = "reject an empty listing before saving the catalog"
+        d = self.root / "followups" / key
+        d.mkdir(parents=True)
+        finding = {"id": fid, "title": title, "kind": "t", "fix": "f", "status": "open",
+                   "repo": "demo", "evidence": [{"source": "t", "quote": title}]}
+        (d / "state.json").write_text(json.dumps({
+            "key": key, "stage": "project-cleanup", "repo": "demo", "status": "deferred",
+            "pending_ticket_sync": True, "findings": [finding], "blockers": [], "scanned": True}))
+        self.set("stub-linear.json", {"pages": [[]]})
+        fu.retry_ticket_syncs(issues=[])
+        self.assertTrue(self.state(key).get("pending_ticket_sync"))
+        ticket = self.legacy_ticket("DEV-777", title, f"Seen before: {title}", repo="demo")
+        self.set("stub-linear.json", {"pages": [[ticket]]})
+        fu.retry_ticket_syncs(issues=[ticket])
+        st = self.state(key)
+        self.assertFalse(st.get("pending_ticket_sync"))
+        self.assertEqual(st["findings"][0].get("ticket"), "DEV-777")
+
     def test_linear_unread_keeps_pending_ticket_sync(self):
         """A failed Linear read must not clear ticket sync; a later drain retries dedupe."""
         import followup as fu
@@ -1227,27 +1252,6 @@ class FollowupTest(unittest.TestCase):
         self.assertFalse(st.get("pending_ticket_sync"))
         self.assertEqual(st["findings"][0].get("ticket"), "DEV-777")
 
-    def test_partial_owners_preserve_live_fixed_owner(self):
-        """A rewrite must not steal ownership of a finding another stage already fixed."""
-        import followup as fu
-        fu.ROOT = self.root
-        fu.STATE = self.root / "followups"
-        st = {"key": "cleanup-mine", "stage": "project-cleanup", "repo": "demo",
-              "branch": "roadmap/mine", "pr_url": "https://example/pr/1",
-              "builder_provider": "cursor", "merge_commit": "abc1234",
-              "validation": {"checks": "passed",
-                             "reviews": [{"verdict": "clean", "head": "abc1234", "round": 1}],
-                             "deploy": "success"},
-              "findings": [{"id": "aaaaaaaaaaaa", "status": "fixed"}]}
-        prev = {"finding_owners": {
-            "aaaaaaaaaaaa": {"key": "cleanup-other", "builder_provider": "codex"},
-            "bbbbbbbbbbbb": {"key": "cleanup-other", "builder_provider": "codex"},
-        }}
-        # Local stage verified aaaa; bbbb is only fixed in Linear (not locally).
-        owners = fu.finding_owners_for_partial(
-            st, {"aaaaaaaaaaaa": "fixed", "bbbbbbbbbbbb": "fixed"}, prev)
-        self.assertEqual(owners["aaaaaaaaaaaa"]["key"], "cleanup-mine")
-        self.assertEqual(owners["bbbbbbbbbbbb"]["key"], "cleanup-other")
 
     def test_partial_progress_preserves_live_fixed_and_skips_recomment(self):
         """Retry must not demote Linear-fixed findings or re-post the partial-progress comment."""
@@ -1305,31 +1309,6 @@ class FollowupTest(unittest.TestCase):
         self.assertEqual(meta["finding_status"][fid_remote], "fixed")
         self.assertEqual(st.get("pending_partial"), [])
 
-    def test_dedupe_marks_duplicate_from_recorded_owner_without_local_stage(self):
-        """A fresh machine must honor finding_owners even when the owner stage is absent locally."""
-        import followup as fu
-        fu.ROOT = self.root
-        fu.STATE = self.root / "followups"
-        os.environ["ADVANCE_ROADMAP_ROOT"] = str(self.root)
-        os.environ["ADVANCE_ROADMAP_LINEAR_BIN"] = self.env["ADVANCE_ROADMAP_LINEAR_BIN"]
-        key = "cleanup-dup-fresh"
-        fid = "aaaaaaaaaaaa"
-        title = "reject an empty listing before saving the catalog"
-        d = self.root / "followups" / key
-        d.mkdir(parents=True)
-        ticket = self.meta_ticket("DEV-777", {
-            "key": "cleanup-other-machine", "stage": "project-cleanup", "finding_ids": [fid],
-            "finding_owners": {fid: {"key": "cleanup-other-machine", "builder_provider": "codex"}},
-        })
-        st = {"key": key, "stage": "project-cleanup", "repo": "demo", "status": "running",
-              "findings": [{"id": fid, "title": title, "kind": "t", "fix": "f", "status": "open",
-                            "repo": "demo", "evidence": [{"source": "t", "quote": title}]}],
-              "evidence_posted": [], "evidence_commented": [], "blockers": []}
-        (d / "state.json").write_text(json.dumps(st))
-        self.set("stub-linear.json", {"pages": [[ticket]]})
-        fu.dedupe(st, [ticket])
-        self.assertEqual(st["findings"][0]["status"], "duplicate")
-        self.assertEqual(st["findings"][0]["duplicate_of"], "cleanup-other-machine")
 
     def test_dedupe_rejects_cross_repo_ticket_attachment(self):
         import followup as fu

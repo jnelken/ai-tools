@@ -1239,10 +1239,15 @@ def retry_ticket_syncs(issues=None):
                     or evidence_sync_pending(st)):
                 continue
             dedupe(st, issues)
-            st.pop("pending_ticket_sync", None)
+            unmatched = [f for f in st.get("findings") or []
+                         if f.get("status") in ("open", "deferred") and not f.get("ticket")]
+            if unmatched:
+                st["pending_ticket_sync"] = True
+            else:
+                st.pop("pending_ticket_sync", None)
             refresh_ticket_sync_flags(st)
             save(st)
-            if not st.get("pending_evidence_sync"):
+            if not st.get("pending_ticket_sync") and not st.get("pending_evidence_sync"):
                 log(f"{st['key']}: finished pending ticket/evidence sync")
         finally:
             c.close()
@@ -1706,7 +1711,12 @@ def process(st, issues=None):
             st["pending_ticket_sync"] = True
         else:
             dedupe(st, live)
-            st.pop("pending_ticket_sync", None)
+            unmatched = [f for f in st.get("findings") or []
+                         if f.get("status") in ("open", "deferred") and not f.get("ticket")]
+            if unmatched:
+                st["pending_ticket_sync"] = True
+            else:
+                st.pop("pending_ticket_sync", None)
             refresh_ticket_sync_flags(st)
         if st.get("status") != RUNNING:
             return
