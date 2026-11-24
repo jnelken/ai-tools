@@ -190,6 +190,11 @@ def gh(args):
             sys.exit(1)
         return
     if args[:2] == ["pr", "view"]:
+        joined = " ".join(args)
+        if "state" in joined and "headRefOid" in joined:
+            print(json.dumps({"state": g.get("pr_state", "OPEN"),
+                              "headRefOid": g.get("merged_head") or pr_head(g)}))
+            return
         if "state" in args:
             print(g.get("pr_state", "OPEN"))
             return

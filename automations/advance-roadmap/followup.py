@@ -365,10 +365,17 @@ class RepoLock:
         self.ok = False
 
 
-def take_repo_lock(repo):
-    """Exclusive non-blocking lock on primary + thread locks up to THREADS_PER_REPO.
+# How many run.sh thread slots a repair preclaims. Must cover THREAD values a later
+# batch may open after we start (plan-approval can raise THREADS_PER_REPO).
+REPO_THREAD_LOCK_CEILING = 16
 
-    Creates `.tN.lock` files so a later batch thread cannot appear beside a live repair.
+
+def take_repo_lock(repo):
+    """Exclusive non-blocking lock on primary + every batch thread slot.
+
+    Owner of repair↔batch exclusion: hold `repo.lock` and `repo.t1`…`tN` (N =
+    REPO_THREAD_LOCK_CEILING) so run.sh cannot open a new thread beside a live repair.
+    Also claims any higher `.t*.lock` files that already exist.
     """
     if not repo:
         return None
@@ -377,14 +384,13 @@ def take_repo_lock(repo):
     except ValueError:
         return None
     try:
-        n = int(os.environ.get("ADVANCE_ROADMAP_THREADS_PER_REPO", "3"))
+        configured = int(os.environ.get("ADVANCE_ROADMAP_THREADS_PER_REPO", "3"))
     except ValueError:
-        n = 3
-    n = max(1, min(n, 3))
+        configured = 3
+    n = max(REPO_THREAD_LOCK_CEILING, max(1, min(configured, 32)))
     base = ROOT / "repo-locks"
     paths = [base / f"{repo}.lock"]
     paths.extend(base / f"{repo}.t{i}.lock" for i in range(1, n + 1))
-    # Also hold any extra thread locks that already exist beyond n.
     for extra in sorted(base.glob(f"{glob_escape(repo)}.t*.lock")):
         if extra not in paths:
             paths.append(extra)

@@ -2043,7 +2043,7 @@ class FollowupTest(unittest.TestCase):
         self.assertTrue(st.get("merged"))
         self.assertTrue(st.get("merge_commit"))
         # Simulate a kill that lost in-memory state but left disk: clear merged, keep sha gone,
-        # force merge to fail while PR is already MERGED.
+        # force merge to fail while PR is already MERGED at the reviewed head.
         st.pop("merged", None)
         st.pop("merge_commit", None)
         st["status"] = "pending"
@@ -2055,6 +2055,47 @@ class FollowupTest(unittest.TestCase):
         st = self.state("cleanup-20261014-050000")
         self.assertEqual(st["status"], "done", self.report())
         self.assertTrue(st.get("merged"))
+
+    def test_already_merged_pr_with_wrong_head_is_not_adopted(self):
+        """An external MERGED tip that is not reviewed_sha must not finish the stage."""
+        self.shipped_item("20261014-050000")
+        self.run_followup("hook", "item-done", "--stamp", "20261014-050000")
+        # Reach land with a clean review, then simulate an external merge at a different tip.
+        self.set("stub-gh.json", {"checks": "pass", "deploy": "failure", "merge_commit": "head"})
+        self.run_followup("drain", env=self.repair_env())
+        st = self.state("cleanup-20261014-050000")
+        self.assertTrue(st.get("merged"))
+        reviewed = st["reviewed_sha"]
+        st.pop("merged", None)
+        st.pop("merge_commit", None)
+        st["status"] = "pending"
+        st["next"] = {"step": "land", "round": 1}
+        st["reviewed_sha"] = reviewed
+        (self.root / "followups" / st["key"] / "state.json").write_text(json.dumps(st))
+        self.set("stub-gh.json", {"checks": "pass", "deploy": "success", "merge_fails": True,
+                                  "pr_state": "MERGED", "merged_head": "a" * 40, "merge_commit": "head"})
+        self.run_followup("drain", env=self.repair_env())
+        st = self.state("cleanup-20261014-050000")
+        self.assertNotEqual(st["status"], "done", self.report())
+        self.assertFalse(st.get("merged"))
+        self.assertIn("not the reviewed commit", self.report()[-1]["reason"])
+        self.assertEqual(st["next"]["step"], "review")
+
+    def test_take_repo_lock_preclaims_high_thread_slots(self):
+        """Repair holds t1…ceiling so a later run.sh THREAD=8 cannot appear beside it."""
+        import followup as fu
+        os.environ["ADVANCE_ROADMAP_ROOT"] = str(self.root)
+        fu.ROOT = self.root
+        lock = fu.take_repo_lock("demo")
+        try:
+            self.assertTrue(lock and lock.ok and lock.claims)
+            ceiling = fu.REPO_THREAD_LOCK_CEILING
+            held = {Path(c.fh.name).name for c in lock.claims}
+            self.assertIn("demo.lock", held)
+            for i in range(1, ceiling + 1):
+                self.assertIn(f"demo.t{i}.lock", held)
+        finally:
+            lock.close()
 
     def test_eligible_reviewers_excludes_prior_builders(self):
         """Owner-policy table: eligible_reviewers never returns a prior builder."""

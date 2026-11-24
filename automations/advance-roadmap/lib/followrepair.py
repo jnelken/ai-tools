@@ -868,9 +868,21 @@ def land(st, repo_dir, findings):
         if p.returncode != 0 and re.search(r"merge commits? (are|is) not allowed", p.stdout + p.stderr, re.I):
             p = gh("pr", "merge", st["pr_url"], "--squash", "--match-head-commit", reviewed)
         if p.returncode != 0:
-            # Already merged (drain died after merge): adopt rather than block permanently.
-            state = gh("pr", "view", st["pr_url"], "--json", "state", "--jq", ".state")
-            if state.returncode == 0 and state.stdout.strip().upper() == "MERGED":
+            # Already merged (drain died after merge): adopt only when the merged head
+            # is still the reviewed SHA — an external merge of a different tip is not ours.
+            state = gh("pr", "view", st["pr_url"], "--json", "state,headRefOid")
+            try:
+                meta = json.loads(state.stdout) if state.returncode == 0 else {}
+            except ValueError:
+                meta = {}
+            if isinstance(meta, dict) and (meta.get("state") or "").upper() == "MERGED":
+                merged_head = meta.get("headRefOid") or ""
+                if merged_head != reviewed:
+                    st["reviewed_sha"] = None
+                    st["next"] = {"step": "review", "round": (st.get("next") or {}).get("round", 1)}
+                    persist_stage(st)
+                    return False, (f"PR is MERGED at {merged_head[:9] or 'unknown'} which is not the "
+                                   f"reviewed commit {reviewed[:9]}; refusing to adopt"), True
                 st["merged"] = True
                 persist_stage(st)
             else:
