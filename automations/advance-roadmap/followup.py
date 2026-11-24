@@ -509,25 +509,41 @@ def mark_running_cleanups_retryable(repo, kind="timeout", reason="cleanup drain 
 
 # ── the local finding → ticket index ─────────────────────────────────────────
 
+# Reentrant tickets lock: nested TicketIndex must not close the fd (that releases the POSIX lock).
+_TICKET_LOCK = {"depth": 0, "fh": None, "entries": None}
+
+
 class TicketIndex:
     """followups/tickets.json under a blocking lock: which open ticket tracks each finding id.
 
     The drain's Linear snapshot is read once, so a ticket filed mid-drain — by this drain or a
-    concurrent one — is only visible here. Hold it across the check-then-create."""
+    concurrent one — is only visible here. Hold it across the check-then-create. Nested enters
+    share one fd so rewrite_ticket_description inside sync_deferral_tickets cannot drop the lock.
+    """
 
     def __init__(self):
-        STATE.mkdir(parents=True, exist_ok=True)
-        self.fh = open(STATE / "tickets.lock", "a")
-        fcntl.lockf(self.fh, fcntl.LOCK_EX)
-        doc = read_json(STATE / "tickets.json")
-        self.entries = doc if isinstance(doc, dict) else {}
+        self._outer = False
 
     def __enter__(self):
+        STATE.mkdir(parents=True, exist_ok=True)
+        if _TICKET_LOCK["depth"] == 0:
+            fh = open(STATE / "tickets.lock", "a")
+            fcntl.lockf(fh, fcntl.LOCK_EX)
+            doc = read_json(STATE / "tickets.json")
+            _TICKET_LOCK["fh"] = fh
+            _TICKET_LOCK["entries"] = doc if isinstance(doc, dict) else {}
+            self._outer = True
+        _TICKET_LOCK["depth"] += 1
+        self.entries = _TICKET_LOCK["entries"]
         return self
 
     def __exit__(self, *exc):
-        write_json(STATE / "tickets.json", self.entries)
-        self.fh.close()
+        _TICKET_LOCK["depth"] -= 1
+        if _TICKET_LOCK["depth"] == 0:
+            write_json(STATE / "tickets.json", _TICKET_LOCK["entries"] or {})
+            _TICKET_LOCK["fh"].close()
+            _TICKET_LOCK["fh"] = None
+            _TICKET_LOCK["entries"] = None
 
     def ticket(self, fid):
         return (self.entries.get(fid) or {}).get("ticket")
@@ -537,6 +553,7 @@ class TicketIndex:
 
     def drop_tickets(self, idents):
         self.entries = {k: e for k, e in self.entries.items() if e.get("ticket") not in idents}
+        _TICKET_LOCK["entries"] = self.entries
 
 
 # ── prior tickets (recovery / dedupe / deferral / close) ──────────────────────
@@ -1130,7 +1147,7 @@ def close_tickets(st, issues=None):
     """Persisted in pending_close so a Linear failure is retried by every later drain.
 
     The closing comment and the move to Done are tracked apart, so a retry never posts twice.
-    Requires a successful Linear metadata read before mark_done; unread keeps the pending entry.
+    Under the tickets lock, fetches current Linear metadata immediately before mark_done.
     """
     closed = set()
     dropped = set()
@@ -1138,34 +1155,38 @@ def close_tickets(st, issues=None):
         return closed
     for entry in st.get("pending_close") or []:
         ident = entry["ticket"]
-        verdict = ticket_close_verdict(ident, current=st, issues=issues)
-        if verdict == "unread":
-            report(st, "close-unread",
-                   f"could not read Linear metadata for {ident}; retaining pending_close",
-                   "the next drain retries after a successful ticket fetch")
-            continue  # retain
-        if verdict != "ready":
-            report(st, "close-recheck",
-                   f"refusing to Done {ident}: not every tracked finding is verified fixed",
-                   "partial progress or a sibling still owns open work")
-            dropped.add(ident)
-            continue
         try:
-            if not entry.get("commented"):
-                followticket.comment(ident, st.get("close_note")
-                                     or f"Fixed by advance-roadmap follow-up `{st['key']}`.")
-                entry["commented"] = True
-            followticket.mark_done(ident)
-            closed.add(ident)
-            log(f"{st['key']}: closed {ident}")
+            with TicketIndex() as index:
+                # Fresh fetch under the same lock as description rewrites — ignore drain snapshot.
+                live = followticket.fetch_open()
+                verdict = ticket_close_verdict(ident, current=st, issues=live)
+                if verdict == "unread":
+                    report(st, "close-unread",
+                           f"could not read Linear metadata for {ident}; retaining pending_close",
+                           "the next drain retries after a successful ticket fetch")
+                    continue  # retain
+                if verdict != "ready":
+                    report(st, "close-recheck",
+                           f"refusing to Done {ident}: not every tracked finding is verified fixed",
+                           "partial progress or a sibling still owns open work")
+                    dropped.add(ident)
+                    continue
+                if not entry.get("commented"):
+                    followticket.comment(ident, st.get("close_note")
+                                         or f"Fixed by advance-roadmap follow-up `{st['key']}`.")
+                    entry["commented"] = True
+                followticket.mark_done(ident)
+                index.drop_tickets({ident})
+                closed.add(ident)
+                log(f"{st['key']}: closed {ident}")
+                for issue in (issues or []):
+                    if issue.get("identifier") == ident:
+                        issue["description"] = "(closed)"
         except followticket.LinearError as e:
             report(st, "linear", f"merged and deployed, but could not close {ident}: {e}",
                    "the next drain retries closing it")
     st["pending_close"] = [e for e in st.get("pending_close") or []
                            if e["ticket"] not in closed and e["ticket"] not in dropped]
-    if closed:
-        with TicketIndex() as index:
-            index.drop_tickets(closed)
     return closed
 
 
