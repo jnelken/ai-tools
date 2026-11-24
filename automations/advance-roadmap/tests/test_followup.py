@@ -890,6 +890,37 @@ class FollowupTest(unittest.TestCase):
         self.assertEqual(st["status"], "deferred")
         self.assertEqual((st.get("next") or {}).get("step"), "build")
 
+    def test_recovery_preserves_verified_fixed_when_linear_stale(self):
+        """A verified local fix must not be demoted when Linear still says open after a rewrite fail."""
+        key = "cleanup-stale-meta"
+        fid = "aaaaaaaaaaaa"
+        d = self.root / "followups" / key
+        d.mkdir(parents=True)
+        (d / "state.json").write_text(json.dumps({
+            "key": key, "stage": "project-cleanup", "repo": "demo", "status": "done",
+            "merge_commit": "abc", "owned_tickets": ["DEV-501"],
+            "validation": {"checks": "passed", "reviews": [{"verdict": "clean"}], "deploy": "success"},
+            "findings": [{"id": fid, "status": "fixed", "ticket": "DEV-501", "title": "x",
+                          "kind": "t", "fix": "f", "evidence": []}],
+            "blockers": [], "scanned": True,
+        }))
+        (self.root / "followups" / "tickets.json").write_text(json.dumps({
+            fid: {"ticket": "DEV-501", "key": key, "at": time.time()}}))
+        # Linear metadata never got the fixed rewrite — still open.
+        ticket = self.meta_ticket("DEV-501", {
+            "key": key, "stage": "project-cleanup", "finding_ids": [fid],
+            "finding_status": {fid: "open"}, "updated_at": time.time(),
+        })
+        self.set("stub-linear.json", {"pages": [[ticket]]})
+        self.run_followup("drain", "--stage", "cleanup")
+        st = self.state(key)
+        self.assertEqual(st["findings"][0]["status"], "fixed")
+        self.assertNotEqual(st["status"], "deferred")
+        self.assertEqual(st.get("pending_close"), [])
+        done = [c for c in self.calls("linear")
+                if c.get("cmd") == "issue update DEV-501" and "Done" in (c.get("args") or [])]
+        self.assertTrue(done, self.calls("linear"))
+
 
 if __name__ == "__main__":
     unittest.main()

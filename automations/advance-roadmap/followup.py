@@ -706,12 +706,21 @@ def recover_tickets():
                         f["ticket"] = ident
                         changed = True
                 # Restore only this owner's open findings (never a sibling's). Reopen locals that
-                # Linear still marks open so a Done stage with a stale "fixed" row resumes.
+                # Linear still marks open so a Done stage with a stale "fixed" row resumes —
+                # except a verified fix after a failed Linear rewrite: keep fixed and retry meta.
                 known = {f["id"]: f for f in st.get("findings") or []}
                 needs_work = False
+                verified_stale = []
                 for fid in todo_ids:
                     if fid in known:
-                        if known[fid].get("status") in ("fixed", "duplicate", DONE):
+                        cur = known[fid].get("status")
+                        if cur in ("fixed", "duplicate", DONE):
+                            if cur == "fixed" and stage_repair_verified(st):
+                                if known[fid].get("ticket") != ident:
+                                    known[fid]["ticket"] = ident
+                                    changed = True
+                                verified_stale.append(fid)
+                                continue
                             known[fid]["status"] = "deferred"
                             known[fid]["ticket"] = ident
                             needs_work = True
@@ -725,6 +734,25 @@ def recover_tickets():
                     })
                     needs_work = True
                     changed = True
+                if verified_stale:
+                    tracked = ticket_tracked_ids(ident, current=st, extras=todo_ids)
+                    status_map = {fid: ("fixed" if finding_verified_fixed(fid, current=st) else "open")
+                                  for fid in tracked}
+                    if tracked and all(s == "fixed" for s in status_map.values()):
+                        st.setdefault("pending_close", [])
+                        if not any(e.get("ticket") == ident for e in st["pending_close"]):
+                            st["pending_close"].append({"ticket": ident, "commented": False})
+                        st.setdefault("close_note", (
+                            f"Fixed findings on `{ident}` verified locally; retrying close after "
+                            f"stale Linear metadata."))
+                        close_tickets(st, issues=issues)
+                        changed = True
+                    else:
+                        pending = st.setdefault("pending_partial", [])
+                        if not any(e.get("ticket") == ident and not e.get("done") for e in pending):
+                            pending.append({"ticket": ident, "status": status_map, "done": False})
+                        apply_partial_progress(st, issues=issues)
+                        changed = True
                 if needs_work and st.get("status") in (DONE, BLOCKED) and st.get("status") != RUNNING:
                     st.update(status="deferred", next={"step": "build", "round": 1}, scanned=True)
                     changed = True
