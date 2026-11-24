@@ -586,7 +586,30 @@ def recover_tickets():
         all_ids = list(meta.get("finding_ids") or status_map)
         open_fids = [fid for fid in all_ids if status_map.get(fid, "open") != "fixed"]
         if not open_fids:
-            continue  # every tracked finding is already fixed; nothing to rebuild
+            # Ticket still open but metadata says all fixed — close only when a local stage
+            # already has verified repair for every finding (never invent validation).
+            key = meta.get("key")
+            try:
+                if key:
+                    require_id(key, "stage key")
+            except ValueError:
+                continue
+            st = load(key) if key else None
+            if st and ticket_close_verdict(ident, current=st, issues=issues) == "ready":
+                c = claim_stage(key)
+                if c:
+                    try:
+                        live = load(key) or st
+                        live.setdefault("pending_close", [])
+                        if not any(e.get("ticket") == ident for e in live["pending_close"]):
+                            live["pending_close"].append({"ticket": ident, "commented": False})
+                        live.setdefault("close_note", (
+                            f"Fixed findings on `{ident}` verified locally; closing stranded open ticket."))
+                        close_tickets(live, issues=issues)
+                        save(live)
+                    finally:
+                        c.close()
+            continue
         partial = bool(owners) or (any(status_map.get(fid) == "fixed" for fid in all_ids)
                                    and bool(status_map))
         # Repo identity: metadata block or the single repo/* label — never title/description prose.
@@ -1131,7 +1154,11 @@ def finish(st, findings):
 
 
 def apply_partial_progress(st, findings=None, issues=None):
-    """Persist partial-progress comments/metadata; retried by later drains like pending_close."""
+    """Persist partial-progress comments/metadata; retried by later drains like pending_close.
+
+    Each attempt recomputes status from live Linear metadata and verified stage state so a retry
+    cannot rewrite a finding from fixed back to open after another stage completed it.
+    """
     if os.environ.get("ADVANCE_ROADMAP_FOLLOWUP_LINEAR", "1") != "1":
         st["pending_partial"] = []
         return
@@ -1140,7 +1167,19 @@ def apply_partial_progress(st, findings=None, issues=None):
             continue
         ident = entry["ticket"]
         try:
-            note_partial_progress(st, ident, entry.get("status") or {}, issues=issues)
+            ok, meta_ids = load_ticket_meta_ids(ident, issues)
+            if not ok:
+                report(st, "partial-unread",
+                       f"could not read Linear metadata for {ident}; retaining pending_partial",
+                       "the next drain retries after a successful ticket fetch")
+                continue
+            tracked = ticket_tracked_ids(ident, current=st, extras=meta_ids)
+            # No owner_key here: a completing stage may verify a finding it just fixed before
+            # finding_owners is rewritten. Close still enforces recorded owners.
+            status_map = {fid: ("fixed" if finding_verified_fixed(fid, current=st) else "open")
+                          for fid in tracked}
+            entry["status"] = status_map
+            note_partial_progress(st, ident, status_map, issues=issues)
             entry["done"] = True
         except followticket.LinearError as e:
             report(st, "linear", f"could not record partial progress on {ident}: {e}",
