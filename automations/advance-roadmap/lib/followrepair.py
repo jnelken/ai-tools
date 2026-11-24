@@ -398,13 +398,17 @@ def _interpret_builder_artifacts(st, branch, rnd, rc, status_path, result_path):
     v["builder_commands"] = validation.get("commands") or []
     if res.get("outcome") != "blocked-branch-left" or not res.get("pr_url"):
         return "failed", f"builder ended {res.get('outcome') or f'exit {rc} with no result'}: {(res.get('summary') or '')[:300]}"
-    if validation.get("status") != "passed":
-        return "failed", f"builder verification did not pass: {validation.get('commands') or res.get('summary', '')[:300]}"
     st["branch"], st["pr_url"] = res.get("branch") or branch, res["pr_url"]
     # Catch a builder that merged but reported blocked-branch-left (launder path).
     state = gh("pr", "view", st["pr_url"], "--json", "state", "--jq", ".state")
     if state.returncode == 0 and state.stdout.strip().upper() == "MERGED":
         return "self-merged", "the builder's PR is already MERGED; follow-up merges need the runner's clean review"
+    # A nonzero exit is never an accepted handoff, even if the result JSON looks complete.
+    if rc != 0:
+        return "failed", (f"builder exited {rc} despite reporting a PR: "
+                          f"{(res.get('summary') or '')[:300]}")
+    if validation.get("status") != "passed":
+        return "failed", f"builder verification did not pass: {validation.get('commands') or res.get('summary', '')[:300]}"
     return "ok", None
 
 
@@ -722,7 +726,10 @@ def deploy_state(slug, sha):
         return "pending" if saw_skipped_deploy else None
     if "failure" in states:
         return "failure"
-    return "pending" if "pending" in states else "success"
+    if "pending" in states or saw_skipped_deploy:
+        # Skipped/neutral beside a success status is still unverified — do not finish.
+        return "pending"
+    return "success"
 
 
 def verify_deploy(slug, sha, repo_dir):

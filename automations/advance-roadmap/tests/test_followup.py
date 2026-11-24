@@ -1901,6 +1901,37 @@ class FollowupTest(unittest.TestCase):
         self.assertNotEqual(st["status"], "done")
         self.assertTrue(st["findings"][0]["status"] in ("open", "deferred"))
 
+    def test_skipped_deploy_check_blocks_status_success(self):
+        """A success commit status must not win over a skipped deploy-named check run."""
+        self.shipped_item("20261014-050000")
+        self.run_followup("hook", "item-done", "--stamp", "20261014-050000")
+        self.set("stub-gh.json", {
+            "checks": "pass", "deploy": "success",
+            "statuses": [{"context": "Vercel", "state": "success"}],
+            "check_runs": [{"name": "Vercel", "status": "completed", "conclusion": "skipped"}],
+        })
+        self.run_followup("drain", env=self.repair_env(ADVANCE_ROADMAP_FOLLOWUP_DEPLOY_TIMEOUT_S="0.5"))
+        st = self.state("cleanup-20261014-050000")
+        self.assertNotEqual(st.get("validation", {}).get("deploy"), "success")
+        self.assertNotEqual(st["status"], "done")
+
+    def test_nonzero_builder_exit_is_rejected_despite_pr_result(self):
+        """Exit nonzero with a blocked-branch-left result must not proceed to review/merge."""
+        self.shipped_item("20261014-050000")
+        self.run_followup("hook", "item-done", "--stamp", "20261014-050000")
+        self.set("stub-worker.json", {"mode": "ok", "exit": 1})
+        self.run_followup("drain", env=self.repair_env())
+        st = self.state("cleanup-20261014-050000")
+        self.assertEqual(st["status"], "pending", self.report())
+        self.assertEqual(self.calls("review"), [])
+        self.assertFalse(any(c["args"][:2] == ["pr", "merge"] for c in self.calls("gh")))
+        self.assertIn("exited 1", self.report()[-1]["reason"])
+        # Retry with a clean exit succeeds.
+        self.set("stub-worker.json", {"mode": "ok"})
+        self.run_followup("drain", env=self.repair_env())
+        self.assertEqual(self.state("cleanup-20261014-050000")["status"], "done", self.report())
+        self.assertEqual(len(self.calls("worker")), 2)
+
     def test_unreadable_pr_head_does_not_clear_reviewed_sha(self):
         self.shipped_item("20261014-050000")
         self.run_followup("hook", "item-done", "--stamp", "20261014-050000")

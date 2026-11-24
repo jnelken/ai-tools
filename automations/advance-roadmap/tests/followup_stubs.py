@@ -110,6 +110,7 @@ def worker(args):
         result = {"outcome": w.get("outcome", "blocked-branch-left"), "branch": orch["branch"],
                   "pr_url": "https://github.com/jnelken/demo/pull/7", "summary": "fixed",
                   "validation": {"status": w.get("validation", "passed"), "commands": ["make test → ok"]}}
+        rc = int(w.get("exit", 0))
     if w.get("after_usage") is not None:
         (ROOT / "stub-usage.json").write_text(json.dumps(w["after_usage"]))
     Path(opt(args, "--status-file")).write_text(json.dumps(status))
@@ -203,6 +204,9 @@ def gh(args):
         print("HTTP 502: Bad Gateway", file=sys.stderr)
         sys.exit(1)
     if args[0] == "api" and args[1].endswith("/status"):
+        if "statuses" in g:
+            print(json.dumps({"statuses": g["statuses"]}))
+            return
         if g.get("check_runs") is not None:
             print(json.dumps({"statuses": []}))
             return
