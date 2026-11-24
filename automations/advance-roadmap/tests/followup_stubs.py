@@ -144,6 +144,8 @@ def review(args):
         f.write(json.dumps({"round": rnd, "reviewer": "codex", "verdict": verdict, "head": head,
                             "session_id": f"codex-sess-{rnd}"}) + "\n")
     print(f"VERDICT: {verdict}\n- finding {rnd}" if verdict != "clean" else "VERDICT: clean")
+    if r.get("exit"):
+        sys.exit(int(r["exit"]))
 
 
 def pr_head(g):

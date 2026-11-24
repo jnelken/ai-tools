@@ -1985,6 +1985,18 @@ class FollowupTest(unittest.TestCase):
         self.assertIn("roadmap/attacker", self.report()[-1]["reason"])
         self.assertIn("expected", self.report()[-1]["reason"])
 
+    def test_clean_review_log_with_nonzero_exit_cannot_merge(self):
+        """A clean reviews.jsonl row is not mergeable when review.sh exits nonzero."""
+        self.shipped_item("20261014-050000")
+        self.run_followup("hook", "item-done", "--stamp", "20261014-050000")
+        self.set("stub-review.json", {"verdicts": ["clean"], "exit": 1})
+        self.run_followup("drain", env=self.repair_env())
+        st = self.state("cleanup-20261014-050000")
+        self.assertNotEqual(st["status"], "done", self.report())
+        self.assertIsNone(st.get("reviewed_sha"))
+        self.assertFalse(any(c["args"][:2] == ["pr", "merge"] for c in self.calls("gh")))
+        self.assertIn("review", self.report()[-1]["kind"])
+
     def test_unreadable_pr_head_does_not_clear_reviewed_sha(self):
         self.shipped_item("20261014-050000")
         self.run_followup("hook", "item-done", "--stamp", "20261014-050000")
