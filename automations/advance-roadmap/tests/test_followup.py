@@ -700,6 +700,89 @@ class FollowupTest(unittest.TestCase):
         self.assertTrue(updates)
         self.assertEqual(followticket.parse_meta(updates[-1]["body"])["builder_provider"], "codex")
 
+    def test_rewrite_refuses_cross_repo_ticket(self):
+        """Invariant owner: rewrite_ticket_description must reject a cross-repo open ticket."""
+        import followup as fu
+        fu.ROOT = self.root
+        fu.STATE = self.root / "followups"
+        os.environ["ADVANCE_ROADMAP_ROOT"] = str(self.root)
+        os.environ["ADVANCE_ROADMAP_LINEAR_BIN"] = self.env["ADVANCE_ROADMAP_LINEAR_BIN"]
+        fid = "aaaaaaaaaaaa"
+        foreign = self.meta_ticket("DEV-777", {
+            "key": "cleanup-other", "finding_ids": [fid], "repo": "mailcruxh",
+        }, repo="mailcruxh")
+        self.set("stub-linear.json", {"pages": [[foreign]]})
+        st = {"key": "cleanup-mine", "stage": "project-cleanup", "repo": "demo",
+              "findings": [{"id": fid, "title": "x", "kind": "t", "fix": "f", "status": "open",
+                            "evidence": []}]}
+        with self.assertRaises(followticket.LinearError) as ctx:
+            fu.rewrite_ticket_description(st, "DEV-777", st["findings"], issues=[foreign])
+        self.assertIn("repo", str(ctx.exception).lower())
+        self.assertFalse(any(c.get("cmd") == "issue update DEV-777" for c in self.calls("linear")))
+
+    def test_defer_reconciles_concurrent_create_winner(self):
+        """After create, attach to a concurrent winner and close the duplicate ticket."""
+        import followup as fu
+        fu.ROOT = self.root
+        fu.STATE = self.root / "followups"
+        os.environ["ADVANCE_ROADMAP_ROOT"] = str(self.root)
+        os.environ["ADVANCE_ROADMAP_LINEAR_BIN"] = self.env["ADVANCE_ROADMAP_LINEAR_BIN"]
+        os.environ["ADVANCE_ROADMAP_JLIN"] = self.env["ADVANCE_ROADMAP_JLIN"]
+        key = "cleanup-defer-race2"
+        fid = "cccccccccccc"
+        d = self.root / "followups" / key
+        d.mkdir(parents=True)
+        findings = [{"id": fid, "title": "quota stopped the builder", "kind": "unresolved-review",
+                     "fix": "resume", "status": "open", "repo": "demo", "stage": "project-cleanup",
+                     "evidence": [{"source": "t", "quote": "quota stopped the builder"}]}]
+        st = {"key": key, "stage": "project-cleanup", "repo": "demo", "status": "running",
+              "findings": findings, "owned_tickets": [], "builder_provider": "cursor"}
+        (d / "state.json").write_text(json.dumps(st))
+        winner = self.legacy_ticket(
+            "DEV-501", "quota stopped the builder",
+            "Seen before: quota stopped the builder", repo="demo")
+        real_create, real_match, real_fetch = (
+            followticket.create, followticket.match, followticket.fetch_open)
+        created = {"done": False}
+
+        def fake_create(stage, fs, quota, next_step):
+            created["done"] = True
+            return "DEV-900"
+
+        def match_gated(issues, finding):
+            # Before create: no match (force the create path). After: prefer the concurrent winner.
+            if not created["done"]:
+                return None
+            return next((i for i in issues if i.get("identifier") == "DEV-501"), None)
+
+        fetches = {"n": 0}
+
+        def fetch_open():
+            fetches["n"] += 1
+            issues = [dict(winner)]
+            if created["done"]:
+                issues.append({
+                    "identifier": "DEV-900", "title": "dup", "description": "",
+                    "labels": {"nodes": [{"name": "demo", "parent": {"name": "repo"}}]}})
+            return issues
+
+        followticket.create, followticket.match, followticket.fetch_open = (
+            fake_create, match_gated, fetch_open)
+        try:
+            self.set("stub-linear.json", {"pages": [[winner]]})
+            quota = {"provider": "cursor", "cause": "over its gate", "reset_at": "soon",
+                     "reset_epoch": time.time() + 60}
+            self.assertTrue(fu.sync_deferral_tickets(
+                st, findings, quota, "resume", "note-race", issues=[]))
+            self.assertEqual(findings[0]["ticket"], "DEV-501")
+            self.assertNotIn("DEV-900", st.get("owned_tickets") or [])
+            done = [c for c in self.calls("linear")
+                    if c.get("cmd") == "issue update DEV-900" and "Done" in (c.get("args") or [])]
+            self.assertTrue(done, self.calls("linear"))
+        finally:
+            followticket.create, followticket.match, followticket.fetch_open = (
+                real_create, real_match, real_fetch)
+
     def test_defer_discards_cross_repo_index_entry(self):
         """A stale tickets.json entry for another repo must not rewrite that issue on deferral."""
         import followup as fu

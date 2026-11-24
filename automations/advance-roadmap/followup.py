@@ -912,13 +912,21 @@ def rewrite_ticket_description(st, ident, findings, quota=None, next_step="", va
     """Invariant owner for every Linear description rewrite (dedupe, deferral, partial progress).
 
     Under the tickets lock: fetch current open issues, require the target ticket in that fetch,
-    merge, write. Raises LinearError if the ticket is missing (caller retains pending work).
+    require its repo (metadata.repo or single repo/* label) to match the stage, merge, write.
+    Raises LinearError if the ticket is missing or cross-repo (caller retains pending work).
     """
+    want_repo = st.get("repo")
     with TicketIndex():
         live = followticket.fetch_open()
-        if not any(i.get("identifier") == ident for i in live):
+        target = next((i for i in live if i.get("identifier") == ident), None)
+        if not target:
             raise followticket.LinearError(
                 f"{ident} not in open issues; refusing description rewrite")
+        ticket_repo = _issue_repo(target)
+        if want_repo and ticket_repo != want_repo:
+            raise followticket.LinearError(
+                f"{ident} repo {ticket_repo!r} != stage repo {want_repo!r}; "
+                f"refusing description rewrite")
         merged, status, owners = ticket_description_payload(
             st, findings, ident, issues=live, finding_status=finding_status,
             finding_owners=finding_owners)
@@ -1002,18 +1010,54 @@ def sync_deferral_tickets(st, findings, quota, next_step, note, issues=None):
                     followticket.comment(
                         ident, "advance-roadmap follow-up deferred again for quota.\n\n" + body)
                 if remaining:
+                    # Create then reconcile: another machine may have filed between match and create.
                     ident = followticket.create(st, remaining, quota, next_step)
-                    st["owned_tickets"].append(ident)
+                    live_after = followticket.fetch_open()
+                    winner = None
                     for f in remaining:
-                        f["ticket"] = ident
-                        index.add(f["id"], ident, st["key"])
-                    if issues is not None:
-                        issues.append({
-                            "identifier": ident, "title": followticket.title_for(st, remaining),
-                            "description": followticket.description(st, remaining, quota, next_step),
-                            "labels": {"nodes": [{"name": st["repo"],
-                                                  "parent": {"name": "repo"}}]}})
-                    log(f"{st['key']}: filed {ident} for {len(remaining)} deferred finding(s)")
+                        for issue in live_after:
+                            if issue.get("identifier") == ident:
+                                continue
+                            if followticket.match([issue], f):
+                                winner = issue
+                                break
+                        if winner:
+                            break
+                    if winner:
+                        win_id = winner["identifier"]
+                        log(f"{st['key']}: concurrent ticket {win_id} won over just-created "
+                            f"{ident}; attaching and closing the duplicate")
+                        for f in remaining:
+                            f["ticket"] = win_id
+                            index.add(f["id"], win_id, st["key"])
+                        index.drop_tickets({ident})
+                        body = rewrite_ticket_description(
+                            st, win_id, remaining, quota=quota, next_step=next_step, issues=issues)
+                        followticket.comment(
+                            win_id,
+                            "advance-roadmap follow-up deferred again for quota.\n\n" + body)
+                        try:
+                            followticket.comment(
+                                ident,
+                                f"Duplicate of `{win_id}` (concurrent deferral create); closing.")
+                            followticket.mark_done(ident)
+                        except followticket.LinearError as e:
+                            report(st, "linear",
+                                   f"could not close duplicate deferral ticket {ident}: {e}")
+                    else:
+                        st["owned_tickets"].append(ident)
+                        for f in remaining:
+                            f["ticket"] = ident
+                            index.add(f["id"], ident, st["key"])
+                        if issues is not None:
+                            issues.append({
+                                "identifier": ident,
+                                "title": followticket.title_for(st, remaining),
+                                "description": followticket.description(
+                                    st, remaining, quota, next_step),
+                                "labels": {"nodes": [{"name": st["repo"],
+                                                      "parent": {"name": "repo"}}]}})
+                        log(f"{st['key']}: filed {ident} for {len(remaining)} deferred finding(s)")
         except followticket.LinearError as e:
             st["pending_deferral_sync"] = {
                 "note": note, "next_step": next_step,
