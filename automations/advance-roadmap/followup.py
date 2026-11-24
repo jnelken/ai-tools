@@ -567,108 +567,123 @@ def recover_tickets():
         open_fids = [fid for fid in all_ids if status_map.get(fid, "open") != "fixed"]
         partial = bool(owners) or (any(status_map.get(fid) == "fixed" for fid in all_ids)
                                    and bool(open_fids) and bool(status_map))
-        head_owner = {}
-        if partial:
-            if not open_fids:
-                continue  # every tracked finding is already fixed; nothing to rebuild
-            head_owner = next((owners[fid] for fid in open_fids if isinstance(owners.get(fid), dict)
-                               and (owners[fid] or {}).get("key")), None) or {}
-        key = (head_owner.get("key") if partial else None) or meta.get("key")
-        if not key:
-            continue
-        try:
-            require_id(key, "stage key")
-        except ValueError:
-            continue
+        if partial and not open_fids:
+            continue  # every tracked finding is already fixed; nothing to rebuild
         # Repo identity: metadata block or the single repo/* label — never title/description prose.
         repo = meta.get("repo") or followticket.repo_label(issue)
-        existing = load(key)
-        if existing is None:
+        # Group open findings by recorded owner so each stage only gets its own work.
+        groups = {}  # key -> {"fids": [...], "owner": {...}}
+        if partial:
+            for fid in open_fids:
+                o = owners.get(fid) if isinstance(owners.get(fid), dict) else {}
+                ok = o.get("key") or meta.get("key")
+                if not ok:
+                    continue
+                groups.setdefault(ok, {"fids": [], "owner": o if o.get("key") else {}})
+                groups[ok]["fids"].append(fid)
+                if o.get("key") and not groups[ok]["owner"].get("key"):
+                    groups[ok]["owner"] = o
+        else:
+            key = meta.get("key")
+            if not key:
+                continue
+            groups[key] = {"fids": list(all_ids), "owner": {}}
+        for key, group in groups.items():
+            try:
+                require_id(key, "stage key")
+            except ValueError:
+                continue
+            owner = group["owner"] or {}
+            todo_ids = group["fids"]
+            if not todo_ids:
+                continue
             if partial:
-                resume_branch, resume_pr = head_owner.get("branch"), head_owner.get("pr_url")
-                next_step, todo_ids = "build", open_fids
-                builder = head_owner.get("builder_provider")
-                stage_name = head_owner.get("stage") or meta.get("stage") or STAGES["cleanup"]
+                resume_branch, resume_pr = owner.get("branch"), owner.get("pr_url")
+                next_step, builder = "build", owner.get("builder_provider")
+                stage_name = owner.get("stage") or meta.get("stage") or STAGES["cleanup"]
             else:
                 resume_branch, resume_pr = meta.get("branch"), meta.get("pr_url")
                 next_step = "review" if resume_pr else "build"
-                todo_ids, builder = all_ids, meta.get("builder_provider")
+                builder = meta.get("builder_provider")
                 stage_name = meta.get("stage") or STAGES["cleanup"]
-            findings = [{"id": fid, "stage": stage_name, "repo": repo, "kind": "ticket",
-                         "title": issue.get("title"), "fix": f"see {ident}", "status": "deferred",
-                         "ticket": ident, "evidence": [{"source": ident, "quote": issue.get("title")}]}
-                        for fid in todo_ids]
-            # new_stage owns claim → write; status/findings arrive via **extra under that claim.
-            st = new_stage(key, stage_name, repo, meta.get("origin"), stamp=meta.get("stamp"),
-                           item=meta.get("item"), recovered_from=ident,
-                           ticket_body=(issue.get("description") or "")[:6000],
-                           status="deferred", branch=resume_branch, pr_url=resume_pr, scanned=True,
-                           builder_provider=builder, owned_tickets=[ident],
-                           ticket_meta_at=meta.get("updated_at"), findings=findings,
-                           next={"step": next_step, "round": 1})
-            if st:
-                log(f"{key}: rebuilt from {ident} (no local state on this machine)")
-            continue
-        c = claim_stage(key)
-        if not c:
-            continue
-        try:
-            st = load(key) or existing
-            changed = False
-            own = meta.get("key") == key
-            if own and ident not in st.setdefault("owned_tickets", []):
-                st["owned_tickets"].append(ident)
-                changed = True
-            newer = own and isinstance(meta.get("updated_at"), (int, float)) \
-                and meta["updated_at"] > (st.get("ticket_meta_at") or 0)
-            if newer and st.get("status") != RUNNING:
-                # Another machine's deferral is authoritative: builder, branch and PR must match.
-                if meta.get("builder_provider") and meta["builder_provider"] != st.get("builder_provider"):
-                    log(f"{key}: {ident} says {meta['builder_provider']} built "
-                        f"{meta.get('branch') or 'the branch'} "
-                        f"(local state said {st.get('builder_provider')})")
-                    st["builder_provider"] = meta["builder_provider"]
-                    st["reviewed_sha"] = None
+            existing = load(key)
+            if existing is None:
+                findings = [{"id": fid, "stage": stage_name, "repo": repo, "kind": "ticket",
+                             "title": issue.get("title"), "fix": f"see {ident}", "status": "deferred",
+                             "ticket": ident, "evidence": [{"source": ident, "quote": issue.get("title")}]}
+                            for fid in todo_ids]
+                st = new_stage(key, stage_name, repo, meta.get("origin"), stamp=meta.get("stamp"),
+                               item=meta.get("item"), recovered_from=ident,
+                               ticket_body=(issue.get("description") or "")[:6000],
+                               status="deferred", branch=resume_branch, pr_url=resume_pr, scanned=True,
+                               builder_provider=builder, owned_tickets=[ident],
+                               ticket_meta_at=meta.get("updated_at"), findings=findings,
+                               next={"step": next_step, "round": 1})
+                if st:
+                    log(f"{key}: rebuilt from {ident} (no local state on this machine)")
+                continue
+            c = claim_stage(key)
+            if not c:
+                continue
+            try:
+                st = load(key) or existing
+                changed = False
+                own = meta.get("key") == key or owner.get("key") == key
+                if own and ident not in st.setdefault("owned_tickets", []):
+                    st["owned_tickets"].append(ident)
                     changed = True
-                if meta.get("branch") != st.get("branch") or meta.get("pr_url") != st.get("pr_url"):
-                    st["branch"] = meta.get("branch")
-                    st["pr_url"] = meta.get("pr_url")
+                newer = own and isinstance(meta.get("updated_at"), (int, float)) \
+                    and meta["updated_at"] > (st.get("ticket_meta_at") or 0)
+                if newer and st.get("status") != RUNNING:
+                    # Owner fields from finding_owners win over ticket-level branch/PR when partial.
+                    src_builder = owner.get("builder_provider") if partial else meta.get("builder_provider")
+                    src_branch = owner.get("branch") if partial else meta.get("branch")
+                    src_pr = owner.get("pr_url") if partial else meta.get("pr_url")
+                    if src_builder and src_builder != st.get("builder_provider"):
+                        log(f"{key}: {ident} says {src_builder} built "
+                            f"{src_branch or 'the branch'} "
+                            f"(local state said {st.get('builder_provider')})")
+                        st["builder_provider"] = src_builder
+                        st["reviewed_sha"] = None
+                        changed = True
+                    if src_branch != st.get("branch") or src_pr != st.get("pr_url"):
+                        st["branch"] = src_branch
+                        st["pr_url"] = src_pr
+                        changed = True
+                    st["ticket_meta_at"] = meta["updated_at"]
+                    if issue.get("description"):
+                        st["ticket_body"] = (issue.get("description") or "")[:6000]
                     changed = True
-                st["ticket_meta_at"] = meta["updated_at"]
-                if issue.get("description"):
-                    st["ticket_body"] = (issue.get("description") or "")[:6000]
-                changed = True
-            elif meta.get("builder_provider") and not st.get("builder_provider") \
-                    and st.get("status") != RUNNING:
-                st.update(builder_provider=meta["builder_provider"], reviewed_sha=None)
-                changed = True
-            for f in st.get("findings") or []:
-                if f["id"] in (meta.get("finding_ids") or []) and f.get("ticket") != ident:
-                    f["ticket"] = ident
+                elif not partial and meta.get("builder_provider") and not st.get("builder_provider") \
+                        and st.get("status") != RUNNING:
+                    st.update(builder_provider=meta["builder_provider"], reviewed_sha=None)
                     changed = True
-            # Restore open findings the ticket gained on another machine (same shape as missing-stage rebuild).
-            open_fids = [fid for fid in all_ids if status_map.get(fid, "open") != "fixed"]
-            known = {f["id"] for f in st.get("findings") or []}
-            added = False
-            for fid in open_fids:
-                if fid in known:
-                    continue
-                st.setdefault("findings", []).append({
-                    "id": fid, "stage": st.get("stage") or STAGES["cleanup"], "repo": st.get("repo"),
-                    "kind": "ticket", "title": issue.get("title"), "fix": f"see {ident}",
-                    "status": "deferred", "ticket": ident,
-                    "evidence": [{"source": ident, "quote": issue.get("title")}],
-                })
-                known.add(fid)
-                added = True
-                changed = True
-            if added and st.get("status") in (DONE, BLOCKED) and st.get("status") != RUNNING:
-                st.update(status="deferred", next={"step": "build", "round": 1}, scanned=True)
-                changed = True
-            if changed:
-                save(st)
-        finally:
-            c.close()
+                for f in st.get("findings") or []:
+                    if f["id"] in (meta.get("finding_ids") or []) and f.get("ticket") != ident:
+                        f["ticket"] = ident
+                        changed = True
+                # Restore only this owner's open findings (never a sibling's).
+                known = {f["id"] for f in st.get("findings") or []}
+                added = False
+                for fid in todo_ids:
+                    if fid in known:
+                        continue
+                    st.setdefault("findings", []).append({
+                        "id": fid, "stage": st.get("stage") or stage_name, "repo": st.get("repo") or repo,
+                        "kind": "ticket", "title": issue.get("title"), "fix": f"see {ident}",
+                        "status": "deferred", "ticket": ident,
+                        "evidence": [{"source": ident, "quote": issue.get("title")}],
+                    })
+                    known.add(fid)
+                    added = True
+                    changed = True
+                if added and st.get("status") in (DONE, BLOCKED) and st.get("status") != RUNNING:
+                    st.update(status="deferred", next={"step": "build", "round": 1}, scanned=True)
+                    changed = True
+                if changed:
+                    save(st)
+            finally:
+                c.close()
     return issues
 
 

@@ -508,6 +508,30 @@ class FollowupTest(unittest.TestCase):
         self.assertFalse((self.root / "followups" / key_b / "state.json").exists(),
                          "must not rebuild the completed sibling stage")
 
+    def test_recovery_rebuilds_each_open_finding_under_its_owner(self):
+        """Two open findings with different finding_owners must not land on one stage."""
+        key_a, key_b = "cleanup-20261014-050000", "cleanup-20261014-060000"
+        fid_a, fid_b = "aaaaaaaaaaaa", "bbbbbbbbbbbb"
+        ticket = self.meta_ticket("DEV-501", {
+            "key": key_a, "stage": "project-cleanup", "repo": "demo",
+            "finding_ids": [fid_a, fid_b],
+            "finding_status": {fid_a: "open", fid_b: "open"},
+            "finding_owners": {
+                fid_a: {"key": key_a, "branch": None, "pr_url": None, "builder_provider": "cursor"},
+                fid_b: {"key": key_b, "branch": "roadmap/b", "pr_url": "https://example/pr/2",
+                        "builder_provider": "codex"},
+            },
+            "branch": None, "pr_url": None, "updated_at": time.time(),
+        })
+        self.set("stub-linear.json", {"pages": [[ticket]]})
+        self.run_followup("drain", "--stage", "cleanup")
+        st_a, st_b = self.state(key_a), self.state(key_b)
+        self.assertEqual([f["id"] for f in st_a["findings"]], [fid_a])
+        self.assertEqual([f["id"] for f in st_b["findings"]], [fid_b])
+        self.assertIsNone(st_a.get("pr_url"))
+        self.assertEqual(st_b.get("pr_url"), "https://example/pr/2")
+        self.assertEqual(st_b.get("builder_provider"), "codex")
+
     def test_open_findings_park_for_repair_not_done(self):
         """A scanned stage with open findings stays deferred so slice 3b can resume repair."""
         self.shipped_item("20261014-050000")
