@@ -1,4 +1,4 @@
-"""followup.py report-only (DEV-232 B2). Temp ADVANCE_ROADMAP_ROOT; one test per behavior."""
+"""followup.py report + tickets (DEV-242 slice 3a). Temp ADVANCE_ROADMAP_ROOT; one test per behavior."""
 import fcntl
 import json
 import os
@@ -19,6 +19,7 @@ MARKER_LINE = "# TODO(advance-roadmap review): reject an empty listing before sa
 sys.path.insert(0, str(ADV))
 sys.path.insert(0, str(ADV / "lib"))
 import followscan  # noqa: E402
+import followticket  # noqa: E402
 import daily_batch  # noqa: E402
 
 
@@ -35,6 +36,8 @@ class FollowupTest(unittest.TestCase):
                     "ADVANCE_ROADMAP_SUPERSET": "0",
                     "ADVANCE_ROADMAP_FOLLOWUP_INSTALL": "0", "ADVANCE_ROADMAP_FOLLOWUP_POLL_S": "0.2",
                     "ADVANCE_ROADMAP_FOLLOWUP_WORKTREES": str(t / "worktrees"),
+                    "ADVANCE_ROADMAP_LINEAR_BIN": self.wrapper(t, "linear"),
+                    "ADVANCE_ROADMAP_JLIN": str(self.py_wrapper(t, "jlin")),
                     "AI_TOOLS_HOME": str(t / "no-ai-tools"),
                     "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_NOSYSTEM": "1",
                     "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@example.com",
@@ -43,6 +46,20 @@ class FollowupTest(unittest.TestCase):
             f"import runpy, sys\nsys.argv = [{str(STUBS)!r}, 'usage', *sys.argv[1:]]\n"
             f"runpy.run_path({str(STUBS)!r}, run_name='__main__')\n")
         self.make_repo("demo")
+
+    def wrapper(self, t, tool):
+        path = t / "bin" / tool
+        path.parent.mkdir(exist_ok=True)
+        path.write_text(f'#!/bin/sh\nexec {sys.executable} {STUBS} {tool} "$@"\n')
+        path.chmod(0o755)
+        return str(path)
+
+    def py_wrapper(self, t, tool):
+        path = t / "bin" / f"{tool}.py"
+        path.parent.mkdir(exist_ok=True)
+        path.write_text(f"import runpy, sys\nsys.argv = [{str(STUBS)!r}, {tool!r}, *sys.argv[1:]]\n"
+                        f"runpy.run_path({str(STUBS)!r}, run_name='__main__')\n")
+        return path
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -94,6 +111,32 @@ class FollowupTest(unittest.TestCase):
     def state(self, key):
         return json.loads((self.root / "followups" / key / "state.json").read_text())
 
+    def set(self, name, value):
+        (self.root / name).write_text(json.dumps(value))
+
+    def calls(self, tool=None):
+        try:
+            rows = [json.loads(l) for l in (self.root / "stub-calls.jsonl").read_text().splitlines()]
+        except OSError:
+            return []
+        return [r for r in rows if tool is None or r["tool"] == tool]
+
+    def report(self):
+        try:
+            return [json.loads(l) for l in (self.root / "followups" / "report.jsonl").read_text().splitlines()]
+        except OSError:
+            return []
+
+    def legacy_ticket(self, ident, title, description="", repo="demo"):
+        labels = {"nodes": [{"name": repo, "parent": {"name": "repo"}}]} if repo else {"nodes": []}
+        return {"id": ident, "identifier": ident, "title": title, "description": description, "url": "",
+                "state": {"name": "Backlog", "type": "backlog"}, "labels": labels}
+
+    def meta_ticket(self, ident, meta, repo="demo"):
+        body = "Follow-up.\n\n```advance-roadmap-followup\n" + json.dumps(
+            {"workflow": "advance-roadmap-followup", "repo": repo, **meta}) + "\n```\n"
+        return self.legacy_ticket(ident, "Follow-up (project-cleanup): something", body, repo)
+
     def test_shipped_item_queues_cleanup_idempotently(self):
         run = self.root / "runs" / "20261014-010000"
         run.mkdir(parents=True)
@@ -106,7 +149,7 @@ class FollowupTest(unittest.TestCase):
         self.assertIn("already queued", again.stdout)
         st = self.state("cleanup-20261014-050000")
         self.assertEqual(st["status"], "queued")
-        self.assertEqual(st.get("mode"), "report-only")
+        self.assertEqual(st.get("mode"), "tickets")
 
     def test_recursion_suppressed_by_env_and_marker(self):
         self.shipped_item("20261014-050000")
@@ -405,6 +448,238 @@ class FollowupTest(unittest.TestCase):
         self.assertEqual(fu.mark_running_cleanups_retryable("demo", "timeout", "deadline"), 1)
         st = fu.load(key)
         self.assertEqual((st["status"], st["blockers"][-1]["kind"]), ("retryable", "timeout"))
+
+    # ── slice 3a: tickets (recovery / dedupe / deferral / close / ownership / deploy) ──
+
+    def test_repo_is_only_from_repo_label_never_prose(self):
+        """Invariant: repo identity is the repo/* label (or metadata.repo), never title/body prose."""
+        prose = self.legacy_ticket(
+            "DEV-1", "Follow-up for mailcruxh deploy",
+            "Repo: mailcruxh\nFix the mailcruxh red deploy.", repo=None)
+        self.assertIsNone(followticket.repo_label(prose))
+        labeled = self.legacy_ticket("DEV-2", "Follow-up for mailcruxh", "see mailcruxh", repo="demo")
+        self.assertEqual(followticket.repo_label(labeled), "demo")
+        finding = {"id": "aaaaaaaaaaaa", "title": "mailcruxh deploy failed", "repo": "mailcruxh"}
+        # Legacy text match must not cross repos when the ticket's only signal is prose.
+        self.assertIsNone(followticket.match([prose], finding))
+        # Same finding text on a demo-labeled ticket stays in demo — never inferred as mailcruxh.
+        hit = followticket.match(
+            [self.legacy_ticket("DEV-3", finding["title"], finding["title"], repo="demo")], finding)
+        self.assertIsNone(hit)  # finding.repo is mailcruxh; ticket label is demo
+
+    def test_skipped_deploy_is_never_success(self):
+        """Invariant: validation.deploy must be success|none; skipped/error/pending never close."""
+        import followup as fu
+        for bad in ("skipped", "error", "pending", "failure", "unverified", "timeout"):
+            st = {"merge_commit": "abc", "validation": {
+                "checks": "passed", "reviews": [{"verdict": "clean"}], "deploy": bad}}
+            self.assertFalse(fu.stage_repair_verified(st), bad)
+        self.assertTrue(fu.stage_repair_verified({
+            "merge_commit": "abc", "validation": {
+                "checks": "passed", "reviews": [{"verdict": "clean"}], "deploy": "success"}}))
+        self.assertTrue(fu.stage_repair_verified({
+            "merged": True, "validation": {
+                "checks": "none", "reviews": [{"verdict": "clean"}], "deploy": "none"}}))
+
+    def test_recovery_resumes_open_findings_at_build_not_under_a_sibling_pr(self):
+        """A fresh machine reading partial-progress metadata must not review the completed PR."""
+        key_a, key_b = "cleanup-20261014-050000", "cleanup-20261014-060000"
+        fid_open, fid_fixed = "aaaaaaaaaaaa", "bbbbbbbbbbbb"
+        ticket = self.meta_ticket("DEV-501", {
+            "key": key_a, "stage": "project-cleanup", "repo": "demo",
+            "finding_ids": [fid_fixed, fid_open],
+            "finding_status": {fid_fixed: "fixed", fid_open: "open"},
+            "finding_owners": {
+                fid_fixed: {"key": key_b, "branch": "roadmap/done", "pr_url": "https://example/pr/9",
+                            "builder_provider": "codex"},
+                fid_open: {"key": key_a, "branch": None, "pr_url": None},
+            },
+            "branch": None, "pr_url": None, "updated_at": time.time(),
+        })
+        self.set("stub-linear.json", {"pages": [[ticket]]})
+        self.run_followup("drain", "--stage", "cleanup")
+        st = self.state(key_a)
+        self.assertIsNotNone(st)
+        self.assertEqual([f["id"] for f in st["findings"]], [fid_open])
+        self.assertIsNone(st.get("pr_url"))
+        self.assertEqual((st.get("next") or {}).get("step"), "build")
+        self.assertEqual(st["status"], "deferred")
+        self.assertFalse((self.root / "followups" / key_b / "state.json").exists(),
+                         "must not rebuild the completed sibling stage")
+
+    def test_a_finding_already_ticketed_gets_evidence_not_a_duplicate(self):
+        self.shipped_item("20261014-050000")
+        self.run_followup("hook", "item-done", "--stamp", "20261014-050000")
+        self.run_followup("drain")   # report-only scan
+        st = self.state("cleanup-20261014-050000")
+        f = st["findings"][0]
+        cases = {
+            "metadata": self.meta_ticket("DEV-777", {"key": "cleanup-other", "stage": "project-cleanup",
+                                                    "finding_ids": [f["id"]]}),
+            "legacy text": self.legacy_ticket("DEV-778", "Old bug", f"Seen before: {f['title']}"),
+        }
+        for label, ticket in cases.items():
+            with self.subTest(label):
+                (self.root / "stub-calls.jsonl").unlink(missing_ok=True)
+                st = self.state("cleanup-20261014-050000")
+                st.update(status="queued", evidence_posted=[], scanned=False, last_deferral=None)
+                for g in st["findings"]:
+                    g.pop("ticket", None)
+                    g["status"] = "open"
+                (self.root / "followups" / st["key"] / "state.json").write_text(json.dumps(st))
+                self.set("stub-linear.json", {"pages": [[ticket]]})
+                self.run_followup("drain")
+                self.assertEqual(self.calls("jlin"), [])
+                comments = [c for c in self.calls("linear") if str(c.get("cmd", "")).startswith("issue comment")]
+                self.assertTrue(any(c.get("issue") == ticket["identifier"] and f["id"] in (c.get("body") or "")
+                                    for c in comments), comments)
+                self.assertEqual(self.state(st["key"])["findings"][0]["ticket"], ticket["identifier"])
+
+    def test_defer_creates_one_ticket_and_retries_failed_description_update(self):
+        """Deferral create/update is idempotent; a failed description rewrite does not advance last_deferral."""
+        import followup as fu
+        fu.ROOT = self.root
+        fu.STATE = self.root / "followups"
+        os.environ["ADVANCE_ROADMAP_ROOT"] = str(self.root)
+        os.environ["ADVANCE_ROADMAP_LINEAR_BIN"] = self.env["ADVANCE_ROADMAP_LINEAR_BIN"]
+        os.environ["ADVANCE_ROADMAP_JLIN"] = self.env["ADVANCE_ROADMAP_JLIN"]
+        key = "cleanup-defer"
+        d = self.root / "followups" / key
+        d.mkdir(parents=True)
+        findings = [{"id": "cccccccccccc", "title": "quota stopped the builder", "kind": "unresolved-review",
+                     "fix": "resume", "status": "open", "repo": "demo", "stage": "project-cleanup",
+                     "evidence": [{"source": "t", "quote": "quota stopped the builder"}]}]
+        st = {"key": key, "stage": "project-cleanup", "repo": "demo", "status": "running",
+              "findings": findings, "owned_tickets": [], "origin": "batch-x", "stamp": "s",
+              "item": "Item", "builder_provider": "cursor"}
+        (d / "state.json").write_text(json.dumps(st))
+        self.set("stub-linear.json", {"pages": [[]]})
+        issues = []
+        quota = {"provider": "cursor", "role": "worker", "cause": "over its gate",
+                 "reset_at": "2026-10-14T18:00:00", "reset_epoch": time.time() + 600}
+        fu.defer(st, findings, quota, "builder round 1", issues=issues)
+        fu.save(st)
+        self.assertEqual(st["status"], "deferred")
+        self.assertEqual(findings[0]["ticket"], "DEV-900")
+        self.assertEqual(st["owned_tickets"], ["DEV-900"])
+        self.assertIsNotNone(st.get("last_deferral"))
+        first_note = st["last_deferral"]
+        self.assertEqual(self.calls("jlin")[0]["repo"], "demo")
+        # Second deferral (new builder) must rewrite the description; failure must not advance note.
+        st["builder_provider"] = "codex"
+        self.set("stub-linear.json", {"pages": [[{
+            "identifier": "DEV-900", "title": "t", "description": "",
+            "labels": {"nodes": [{"name": "demo", "parent": {"name": "repo"}}]}}]],
+            "fail": ["issue update DEV-900"]})
+        (self.root / "stub-calls.jsonl").unlink(missing_ok=True)
+        quota2 = {**quota, "provider": "codex"}
+        fu.defer(st, findings, quota2, "builder round 1", issues=issues)
+        self.assertTrue(st.get("pending_deferral_sync"), st)
+        self.assertEqual(st.get("last_deferral"), first_note)
+        self.set("stub-linear.json", {"pages": [[{
+            "identifier": "DEV-900", "title": "t", "description": "",
+            "labels": {"nodes": [{"name": "demo", "parent": {"name": "repo"}}]}}]]})
+        self.assertTrue(fu.sync_deferral_tickets(
+            st, findings, quota2, fu.next_step_text(st, "builder round 1"),
+            fu.deferral_note(st, quota2, "builder round 1")))
+        self.assertIsNone(st.get("pending_deferral_sync"))
+        self.assertNotEqual(st.get("last_deferral"), first_note)
+        self.assertIn("codex", st["last_deferral"])
+        updates = [c for c in self.calls("linear")
+                   if c.get("cmd") == "issue update DEV-900" and "--description-file" in (c.get("args") or [])]
+        self.assertTrue(updates)
+        self.assertEqual(followticket.parse_meta(updates[-1]["body"])["builder_provider"], "codex")
+
+    def test_finish_closes_a_ticket_only_when_every_tracked_finding_is_fixed(self):
+        """A stage that verifies one finding must not Done a multi-finding ticket (ownership preserved)."""
+        import followup as fu
+        fu.ROOT = self.root
+        fu.STATE = self.root / "followups"
+        os.environ["ADVANCE_ROADMAP_ROOT"] = str(self.root)
+        os.environ["ADVANCE_ROADMAP_LINEAR_BIN"] = self.env["ADVANCE_ROADMAP_LINEAR_BIN"]
+        os.environ["ADVANCE_ROADMAP_JLIN"] = self.env["ADVANCE_ROADMAP_JLIN"]
+        key_a, key_b = "cleanup-20261014-050000", "cleanup-20261014-060000"
+        fid1, fid2 = "aaaaaaaaaaaa", "bbbbbbbbbbbb"
+        for key, fid, status in ((key_a, fid2, "blocked"), (key_b, fid1, "running")):
+            d = self.root / "followups" / key
+            d.mkdir(parents=True)
+            (d / "state.json").write_text(json.dumps({
+                "key": key, "stage": "project-cleanup", "repo": "demo", "status": status,
+                "owned_tickets": ["DEV-501"], "blockers": [],
+                "findings": [{"id": fid, "stage": "project-cleanup", "repo": "demo",
+                              "kind": "unresolved-review", "title": f"finding {fid}",
+                              "fix": "fix", "status": "open", "ticket": "DEV-501",
+                              "evidence": [{"source": "t", "quote": fid}]}],
+            }))
+        (self.root / "followups" / "tickets.json").write_text(json.dumps({
+            fid1: {"ticket": "DEV-501", "key": key_a, "at": time.time()},
+            fid2: {"ticket": "DEV-501", "key": key_a, "at": time.time()},
+        }))
+        ticket = self.meta_ticket("DEV-501", {
+            "key": key_a, "stage": "project-cleanup", "finding_ids": [fid1, fid2],
+            "finding_status": {fid1: "open", fid2: "open"},
+        })
+        self.set("stub-linear.json", {"pages": [[ticket]]})
+        st_b = fu.load(key_b)
+        st_b.update(merge_commit="deadbeef", pr_url="https://example/pr/1",
+                    validation={"checks": "passed", "reviews": [{"verdict": "clean", "round": 1}],
+                                "deploy": "success"},
+                    ticket_body=ticket["description"])
+        fu.finish(st_b, st_b["findings"])
+        fu.save(st_b)
+        self.assertEqual(st_b["status"], "done")
+        self.assertEqual(st_b["findings"][0]["status"], "fixed")
+        done = [c for c in self.calls("linear")
+                if c.get("cmd") == "issue update DEV-501" and "Done" in (c.get("args") or [])]
+        self.assertEqual(done, [], "must not close while fid2 is still open")
+        partial = [c for c in self.calls("linear") if str(c.get("cmd", "")).startswith("issue comment")
+                   and c.get("issue") == "DEV-501" and "partial progress" in (c.get("body") or "")]
+        self.assertTrue(partial, self.calls("linear"))
+        updates = [c for c in self.calls("linear") if c.get("cmd") == "issue update DEV-501"
+                   and "--description-file" in (c.get("args") or [])]
+        self.assertTrue(updates)
+        meta = followticket.parse_meta(updates[0]["body"])
+        self.assertEqual(meta["finding_status"][fid1], "fixed")
+        self.assertEqual(meta["finding_status"][fid2], "open")
+        self.assertEqual(meta["key"], key_a)
+        self.assertIsNone(meta.get("pr_url"))
+        self.assertEqual((meta.get("finding_owners") or {}).get(fid2, {}).get("key"), key_a)
+        self.assertEqual((meta.get("finding_owners") or {}).get(fid1, {}).get("key"), key_b)
+
+    def test_a_ticket_close_that_fails_is_retried_by_later_drains(self):
+        import followup as fu
+        fu.ROOT = self.root
+        fu.STATE = self.root / "followups"
+        os.environ["ADVANCE_ROADMAP_ROOT"] = str(self.root)
+        os.environ["ADVANCE_ROADMAP_LINEAR_BIN"] = self.env["ADVANCE_ROADMAP_LINEAR_BIN"]
+        key = "cleanup-20261014-050000"
+        fid = "aaaaaaaaaaaa"
+        d = self.root / "followups" / key
+        d.mkdir(parents=True)
+        st = {"key": key, "stage": "project-cleanup", "repo": "demo", "status": "done",
+              "merge_commit": "abc", "pr_url": "https://example/pr/1",
+              "validation": {"checks": "passed", "reviews": [{"verdict": "clean"}], "deploy": "success"},
+              "close_note": "Fixed by advance-roadmap follow-up `cleanup-20261014-050000`: deploy success.",
+              "findings": [{"id": fid, "status": "fixed", "ticket": "DEV-501", "title": "x",
+                            "kind": "t", "fix": "f", "evidence": []}],
+              "pending_close": [{"ticket": "DEV-501", "commented": False}], "blockers": []}
+        (d / "state.json").write_text(json.dumps(st))
+        ticket = self.meta_ticket("DEV-501", {"key": key, "stage": "project-cleanup", "finding_ids": [fid]})
+        self.set("stub-linear.json", {"pages": [[ticket]], "fail": ["issue update DEV-501"]})
+        fu.retry_closes()
+        st = self.state(key)
+        self.assertEqual(st["pending_close"], [{"ticket": "DEV-501", "commented": True}])
+        self.assertIn("could not close DEV-501", self.report()[-1]["reason"])
+        self.set("stub-linear.json", {"pages": [[ticket]]})
+        (self.root / "stub-calls.jsonl").unlink(missing_ok=True)
+        fu.retry_closes()
+        st = self.state(key)
+        self.assertEqual(st["pending_close"], [])
+        updates = [c for c in self.calls("linear") if c.get("cmd") == "issue update DEV-501"]
+        self.assertTrue(any("Done" in (c.get("args") or []) for c in updates))
+        closing = [c for c in self.calls("linear") if str(c.get("cmd", "")).startswith("issue comment")
+                   and c.get("issue") == "DEV-501" and "Fixed by" in (c.get("body") or "")]
+        self.assertEqual(len(closing), 0)  # commented=True already; retry only moves to Done
 
 
 if __name__ == "__main__":

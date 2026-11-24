@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""advance-roadmap follow-up runner — deterministic report-only (DEV-232 Phase B slice 2).
+"""advance-roadmap follow-up runner — report + Linear tickets (DEV-242 slice 3a).
 
-After work ships, scan logs for proven problems and record findings. No model, repair, PRs,
-merge, install, or Linear (slice 3). Stages under $ROOT/followups/<key>/:
+After work ships, scan logs for proven problems and record findings. Slice 3a adds Linear ticket
+recovery, dedupe, deferral and close (lib/followticket.py). No model analyst, repair, PRs, merge
+or install yet (slices 3b/3c). Stages under $ROOT/followups/<key>/:
 
   project-cleanup    one per shipped item once the repo is quiescent
   tooling-hardening  one per batch/run/conductor session once children + cleanups finish
@@ -13,6 +14,8 @@ merge, install, or Linear (slice 3). Stages under $ROOT/followups/<key>/:
   followup.py status [--origin O] [--json]
 
 ADVANCE_ROADMAP_FOLLOWUP=1 suppresses nested follow-ups.
+ADVANCE_ROADMAP_FOLLOWUP_LINEAR=0 disables Linear reads/writes.
+ADVANCE_ROADMAP_FOLLOWUP_REPAIR=1 (slice 3b) unparks recovered ticket work for repair.
 """
 import argparse
 import fcntl
@@ -29,6 +32,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 sys.path.insert(0, str(HERE / "lib"))
 import followscan  # noqa: E402
+import followticket  # noqa: E402
 import supervisor as shared  # noqa: E402
 
 ROOT = shared.ROOT
@@ -175,10 +179,10 @@ def new_stage(key, stage, repo, origin, **extra):
         existing = load(key)
         if _usable_stage(existing):
             return None
-        # Findings carry stable finding_id via followscan.finding; ticket fields arrive in slice 3.
+        # Findings carry stable finding_id via followscan.finding; tickets via followticket (slice 3a).
         st = {"key": key, "stage": stage, "repo": repo, "origin": origin, "status": QUEUED,
               "created_at": now_iso(), "attempts": 0, "findings": [], "non_findings": [], "blockers": [],
-              "usage_snapshots": [], "sessions": [], "mode": "report-only", **extra}
+              "usage_snapshots": [], "sessions": [], "mode": "tickets", **extra}
         if preexisted or (existing is not None and not _usable_stage(existing)):
             st.setdefault("blockers", []).append({
                 "at": now_iso(), "kind": "recovered",
@@ -386,9 +390,31 @@ def age_s(st):
         return 0.0
 
 
+def repair_enabled():
+    """Slice 3b flips this on. Until then, recovered ticket work that needs build/review stays parked."""
+    return os.environ.get("ADVANCE_ROADMAP_FOLLOWUP_REPAIR", "0") == "1"
+
+
+def awaits_repair(st):
+    """True when the stage holds unfinished ticket work that only the repair loop can advance."""
+    step = (st.get("next") or {}).get("step")
+    if step in ("build", "review", "land"):
+        return True
+    if st.get("recovered_from") and st.get("status") == "deferred":
+        return True
+    if st.get("branch") or st.get("pr_url"):
+        todo = [f for f in st.get("findings") or [] if f.get("status") in ("open", "deferred")]
+        return bool(todo)
+    return False
+
+
 def eligible(st, now=None):
     now = time.time() if now is None else now
     status = st.get("status")
+    # Park recovered/deferred repair work until slice 3b — otherwise drain would spin forever.
+    if not repair_enabled() and awaits_repair(st) and status in (QUEUED, WAITING, READY, RETRYABLE,
+                                                                  "pending", "deferred"):
+        return False
     if status in ELIGIBLE or status == "pending":  # pending = legacy alias for queued/retryable
         return True
     if status == "deferred":
@@ -481,6 +507,513 @@ def mark_running_cleanups_retryable(repo, kind="timeout", reason="cleanup drain 
     return marked
 
 
+# ── the local finding → ticket index ─────────────────────────────────────────
+
+class TicketIndex:
+    """followups/tickets.json under a blocking lock: which open ticket tracks each finding id.
+
+    The drain's Linear snapshot is read once, so a ticket filed mid-drain — by this drain or a
+    concurrent one — is only visible here. Hold it across the check-then-create."""
+
+    def __init__(self):
+        STATE.mkdir(parents=True, exist_ok=True)
+        self.fh = open(STATE / "tickets.lock", "a")
+        fcntl.lockf(self.fh, fcntl.LOCK_EX)
+        doc = read_json(STATE / "tickets.json")
+        self.entries = doc if isinstance(doc, dict) else {}
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        write_json(STATE / "tickets.json", self.entries)
+        self.fh.close()
+
+    def ticket(self, fid):
+        return (self.entries.get(fid) or {}).get("ticket")
+
+    def add(self, fid, ident, key):
+        self.entries[fid] = {"ticket": ident, "key": key, "at": time.time()}
+
+    def drop_tickets(self, idents):
+        self.entries = {k: e for k, e in self.entries.items() if e.get("ticket") not in idents}
+
+
+# ── prior tickets (recovery / dedupe / deferral / close) ──────────────────────
+
+def recover_tickets():
+    """Open follow-up tickets from earlier runs (any machine), reconciled into local state.
+
+    Returns every open issue (for deduping fresh findings), or None when Linear could not be read.
+    Every stage write is claim → reload → recheck → save.
+    """
+    if os.environ.get("ADVANCE_ROADMAP_FOLLOWUP_LINEAR", "1") != "1":
+        return []
+    fetched_at = time.time()
+    try:
+        issues = followticket.fetch_open()
+    except followticket.LinearError as e:
+        report(None, "linear", f"could not read open follow-up tickets: {e}")
+        return None
+    open_ids = {i.get("identifier") for i in issues}
+    with TicketIndex() as index:
+        index.entries = {k: e for k, e in index.entries.items()
+                         if e.get("ticket") in open_ids or (e.get("at") or 0) >= fetched_at}
+    for issue, meta in followticket.followup_tickets(issues):
+        ident = issue.get("identifier")
+        status_map = meta.get("finding_status") or {}
+        owners = meta.get("finding_owners") or {}
+        all_ids = list(meta.get("finding_ids") or status_map)
+        open_fids = [fid for fid in all_ids if status_map.get(fid, "open") != "fixed"]
+        partial = bool(owners) or (any(status_map.get(fid) == "fixed" for fid in all_ids)
+                                   and bool(open_fids) and bool(status_map))
+        head_owner = {}
+        if partial:
+            if not open_fids:
+                continue  # every tracked finding is already fixed; nothing to rebuild
+            head_owner = next((owners[fid] for fid in open_fids if isinstance(owners.get(fid), dict)
+                               and (owners[fid] or {}).get("key")), None) or {}
+        key = (head_owner.get("key") if partial else None) or meta.get("key")
+        if not key:
+            continue
+        try:
+            require_id(key, "stage key")
+        except ValueError:
+            continue
+        # Repo identity: metadata block or the single repo/* label — never title/description prose.
+        repo = meta.get("repo") or followticket.repo_label(issue)
+        existing = load(key)
+        if existing is None:
+            if partial:
+                resume_branch, resume_pr = head_owner.get("branch"), head_owner.get("pr_url")
+                next_step, todo_ids = "build", open_fids
+                builder = head_owner.get("builder_provider")
+                stage_name = head_owner.get("stage") or meta.get("stage") or STAGES["cleanup"]
+            else:
+                resume_branch, resume_pr = meta.get("branch"), meta.get("pr_url")
+                next_step = "review" if resume_pr else "build"
+                todo_ids, builder = all_ids, meta.get("builder_provider")
+                stage_name = meta.get("stage") or STAGES["cleanup"]
+            findings = [{"id": fid, "stage": stage_name, "repo": repo, "kind": "ticket",
+                         "title": issue.get("title"), "fix": f"see {ident}", "status": "deferred",
+                         "ticket": ident, "evidence": [{"source": ident, "quote": issue.get("title")}]}
+                        for fid in todo_ids]
+            # new_stage owns claim → write; status/findings arrive via **extra under that claim.
+            st = new_stage(key, stage_name, repo, meta.get("origin"), stamp=meta.get("stamp"),
+                           item=meta.get("item"), recovered_from=ident,
+                           ticket_body=(issue.get("description") or "")[:6000],
+                           status="deferred", branch=resume_branch, pr_url=resume_pr, scanned=True,
+                           builder_provider=builder, owned_tickets=[ident],
+                           ticket_meta_at=meta.get("updated_at"), findings=findings,
+                           next={"step": next_step, "round": 1})
+            if st:
+                log(f"{key}: rebuilt from {ident} (no local state on this machine)")
+            continue
+        c = claim_stage(key)
+        if not c:
+            continue
+        try:
+            st = load(key) or existing
+            changed = False
+            own = meta.get("key") == key
+            if own and ident not in st.setdefault("owned_tickets", []):
+                st["owned_tickets"].append(ident)
+                changed = True
+            newer = own and isinstance(meta.get("updated_at"), (int, float)) \
+                and meta["updated_at"] > (st.get("ticket_meta_at") or 0)
+            if meta.get("builder_provider") and (not st.get("builder_provider") or newer) \
+                    and meta["builder_provider"] != st.get("builder_provider") \
+                    and st.get("status") != RUNNING:
+                log(f"{key}: {ident} says {meta['builder_provider']} built "
+                    f"{meta.get('branch') or 'the branch'} "
+                    f"(local state said {st.get('builder_provider')})")
+                st.update(builder_provider=meta["builder_provider"], reviewed_sha=None)
+                changed = True
+            if newer:
+                st["ticket_meta_at"] = meta["updated_at"]
+                changed = True
+            for f in st.get("findings") or []:
+                if f["id"] in (meta.get("finding_ids") or []) and f.get("ticket") != ident:
+                    f["ticket"] = ident
+                    changed = True
+            if changed:
+                save(st)
+        finally:
+            c.close()
+    return issues
+
+
+def dedupe(st, issues):
+    """Attach existing tickets to fresh findings and fold this run's evidence into them once."""
+    if not issues:
+        return
+    posted = set(st.setdefault("evidence_posted", []))
+    for f in st["findings"]:
+        if f.get("status") not in ("open", "deferred"):
+            continue
+        issue = f.get("ticket") and next((i for i in issues if i.get("identifier") == f["ticket"]), None) \
+            or followticket.match(issues, f)
+        if not issue:
+            continue
+        f["ticket"] = issue["identifier"]
+        owner = (followticket.parse_meta(issue.get("description")) or {}).get("key")
+        other = owner and owner != st["key"] and load(owner)
+        if other and other.get("status") not in (DONE, BLOCKED, "skipped"):
+            f.update(status="duplicate", duplicate_of=owner)   # the older stage owns it
+        tag = f"{issue['identifier']}:{f['id']}:{st['key']}"
+        if tag in posted or issue.get("identifier") == st.get("recovered_from"):
+            continue
+        body = (f"advance-roadmap follow-up `{st['key']}` saw this again:\n\n"
+                + followticket.render_findings([f]))
+        try:
+            followticket.comment(issue["identifier"], body)
+            posted.add(tag)
+        except followticket.LinearError as e:
+            report(st, "linear", f"could not add evidence to {issue['identifier']}: {e}")
+    st["evidence_posted"] = sorted(posted)
+
+
+def next_step_text(st, step):
+    where = f" on branch `{st.get('branch')}`" if st.get("branch") else ""
+    pr = f" (PR {st['pr_url']})" if st.get("pr_url") else ""
+    return (f"`python3 ~/.claude/automations/advance-roadmap/followup.py drain --repo {st['repo']}` "
+            f"after the reset: it resumes at {step}{where}{pr}.")
+
+
+def deferral_note(st, quota, step):
+    return (f"{step}|{quota.get('provider')}|{quota.get('reset_at')}|{st.get('builder_provider')}"
+            f"|{st.get('branch')}|{st.get('pr_url')}")
+
+
+def sync_deferral_tickets(st, findings, quota, next_step, note, issues=None):
+    """Create/update Linear tickets for a deferral. Sets last_deferral only after sync succeeds.
+
+    A failed update leaves pending_deferral_sync so a later drain can retry without treating the
+    deferral as already recorded (which would suppress identical retries and leave metadata stale).
+    """
+    with TicketIndex() as index:
+        attached = set()
+        for f in findings:
+            if not f.get("ticket") and index.ticket(f["id"]):
+                f["ticket"] = index.ticket(f["id"])
+                attached.add(f["ticket"])
+        ticketed = {}
+        for f in findings:
+            if f.get("ticket"):
+                ticketed.setdefault(f["ticket"], []).append(f)
+        if note == st.get("last_deferral"):
+            # Same stop: the ticket already says so (unless it is new to this stage).
+            ticketed = {k: v for k, v in ticketed.items() if k in attached}
+        owned = set(st.setdefault("owned_tickets", []))
+        try:
+            st["ticket_meta_at"] = time.time()
+            for ident, fs in ticketed.items():
+                body = followticket.description(st, fs, quota, next_step)
+                if ident in owned:
+                    # Recovery on another machine reads the description — carry this deferral's
+                    # builder, branch and PR, not the first deferral's.
+                    followticket.update_description(ident, body)
+                followticket.comment(ident, "advance-roadmap follow-up deferred again for quota.\n\n" + body)
+            fresh = [f for f in findings if not f.get("ticket")]
+            if fresh:
+                ident = followticket.create(st, fresh, quota, next_step)
+                st["owned_tickets"].append(ident)
+                for f in fresh:
+                    f["ticket"] = ident
+                    index.add(f["id"], ident, st["key"])
+                if issues is not None:
+                    issues.append({"identifier": ident, "title": followticket.title_for(st, fresh),
+                                   "description": followticket.description(st, fresh, quota, next_step),
+                                   "labels": {"nodes": [{"name": st["repo"], "parent": {"name": "repo"}}]}})
+                log(f"{st['key']}: filed {ident} for {len(fresh)} deferred finding(s)")
+        except followticket.LinearError as e:
+            st["pending_deferral_sync"] = {
+                "note": note, "next_step": next_step,
+                "quota": {k: quota.get(k) for k in ("provider", "reset_at", "reset_epoch", "cause", "role")
+                          if quota.get(k) is not None},
+            }
+            report(st, "linear", f"could not ticket the quota deferral: {e}", next_step)
+            return False
+        st["last_deferral"] = note
+        st.pop("pending_deferral_sync", None)
+        return True
+
+
+def defer(st, findings, quota, step, issues=None):
+    """No provider under its gate: ticket the remaining findings (create or update) and wait.
+
+    A ticket this creates goes into the local index and the drain's `issues` snapshot, so a later
+    stage carrying the same finding — in this drain or a concurrent one — comments instead.
+    """
+    st.update(status="deferred", quota=quota, deferred_until=quota.get("reset_epoch"))
+    next_step = next_step_text(st, step)
+    for f in findings:
+        f["status"] = "deferred"
+    log(f"{st['key']}: deferred at {step} — {quota.get('provider')} {quota.get('cause') or ''} "
+        f"resets {quota.get('reset_at')}")
+    if os.environ.get("ADVANCE_ROADMAP_FOLLOWUP_LINEAR", "1") != "1":
+        return
+    sync_deferral_tickets(st, findings, quota, next_step, deferral_note(st, quota, step), issues=issues)
+
+
+def retry_deferral_syncs():
+    """Retry Linear description/comment sync a prior defer left pending after a transient failure."""
+    if os.environ.get("ADVANCE_ROADMAP_FOLLOWUP_LINEAR", "1") != "1":
+        return
+    for snapshot in all_stages():
+        if not snapshot.get("pending_deferral_sync"):
+            continue
+        c = claim_stage(snapshot["key"])
+        if not c:
+            continue
+        try:
+            st = load(snapshot["key"]) or snapshot
+            pending = st.get("pending_deferral_sync")
+            if not pending:
+                continue
+            findings = [f for f in st.get("findings") or [] if f.get("status") == "deferred"]
+            if not findings:
+                findings = list(st.get("findings") or [])
+            quota = pending.get("quota") or st.get("quota") or {}
+            next_step = pending.get("next_step") or next_step_text(
+                st, (st.get("next") or {}).get("step", "build"))
+            note = pending.get("note") or deferral_note(
+                st, quota, (st.get("next") or {}).get("step", "build"))
+            if sync_deferral_tickets(st, findings, quota, next_step, note):
+                log(f"{st['key']}: retried deferral ticket sync")
+            save(st)
+        finally:
+            c.close()
+
+
+# Deploy evidence must be structured (validation.deploy). "skipped" is never success.
+DEPLOY_OK = frozenset({"success", "none"})
+
+
+def stage_repair_verified(ost):
+    """True when a stage's repair landed with checks, a clean review, merge and deploy verified.
+
+    Invariant: deploy success is only validation.deploy in {success, none}. A skipped, pending,
+    failed, error or unverified deploy never closes a ticket.
+    """
+    v = ost.get("validation") or {}
+    if not (ost.get("merge_commit") or ost.get("merged")):
+        return False
+    if v.get("checks") not in ("passed", "none"):
+        return False
+    if not any(r.get("verdict") == "clean" for r in (v.get("reviews") or [])):
+        return False
+    return v.get("deploy") in DEPLOY_OK
+
+
+def finding_verified_fixed(fid, current=None):
+    """A finding is fixed only after some stage verified its repair end-to-end."""
+    seen = set()
+    for ost in ([current] if current else []) + all_stages():
+        key = ost.get("key")
+        if key in seen:
+            continue
+        seen.add(key)
+        for f in ost.get("findings") or []:
+            if f.get("id") == fid and f.get("status") == "fixed" and stage_repair_verified(ost):
+                return True
+    return False
+
+
+def ticket_tracked_ids(ident, current=None, extras=()):
+    """Every finding_id the ticket still tracks: index, metadata on sibling stages, and extras."""
+    ids = set(extras)
+    with TicketIndex() as index:
+        for fid, e in index.entries.items():
+            if e.get("ticket") == ident:
+                ids.add(fid)
+    for ost in ([current] if current else []) + all_stages():
+        for f in ost.get("findings") or []:
+            if f.get("ticket") == ident and f.get("id"):
+                ids.add(f["id"])
+        for owned in ost.get("owned_tickets") or []:
+            if owned != ident:
+                continue
+            meta = followticket.parse_meta(ost.get("ticket_body") or "")
+            if meta:
+                ids.update(meta.get("finding_ids") or [])
+                ids.update((meta.get("finding_status") or {}).keys())
+    return ids
+
+
+def stage_owner_snapshot(ost):
+    """Owning stage/branch/PR for a finding still tracked by ost (may have no PR yet)."""
+    return {"key": ost.get("key"), "stage": ost.get("stage"), "branch": ost.get("branch"),
+            "pr_url": ost.get("pr_url"), "builder_provider": ost.get("builder_provider")}
+
+
+def finding_owners_for_partial(st, status_map, prev_meta=None):
+    """Per-finding ownership for a partial-progress rewrite.
+
+    Fixed findings credit the completing stage. Unfinished ones keep their prior owner (index,
+    sibling stage, or previous ticket meta) and never inherit this stage's merged PR — recovery
+    must resume them at a build step under their own branch/PR (or none).
+    """
+    prev_meta = prev_meta or {}
+    prev_owners = prev_meta.get("finding_owners") or {}
+    prev_ticket = {k: prev_meta.get(k) for k in ("key", "stage", "branch", "pr_url", "builder_provider")}
+    index_keys = {}
+    with TicketIndex() as index:
+        for fid in status_map:
+            entry = index.entries.get(fid) or {}
+            if entry.get("key"):
+                index_keys[fid] = entry["key"]
+    by_stage = {ost["key"]: ost for ost in all_stages() if ost.get("key")}
+    by_stage[st["key"]] = st
+    owners = {}
+    for fid, status in status_map.items():
+        if status == "fixed":
+            owners[fid] = stage_owner_snapshot(st)
+            continue
+        prior = prev_owners.get(fid) if isinstance(prev_owners.get(fid), dict) else None
+        owner_key = (prior or {}).get("key") or index_keys.get(fid) or prev_ticket.get("key")
+        if owner_key and owner_key != st["key"] and owner_key in by_stage:
+            owners[fid] = stage_owner_snapshot(by_stage[owner_key])
+        elif prior and prior.get("key") and prior["key"] != st["key"]:
+            owners[fid] = followticket.owner_fields(prior)
+        elif owner_key and owner_key != st["key"]:
+            owners[fid] = {"key": owner_key, "stage": prev_ticket.get("stage") or st.get("stage"),
+                           "branch": None, "pr_url": None,
+                           "builder_provider": (prior or {}).get("builder_provider")
+                           or prev_ticket.get("builder_provider")}
+        else:
+            snap = stage_owner_snapshot(st)
+            snap.update(branch=None, pr_url=None)
+            owners[fid] = snap
+    return owners
+
+
+def note_partial_progress(st, ident, status_map):
+    """Comment partial progress and rewrite metadata; never mark Done while findings remain open."""
+    remaining = sorted(fid for fid, s in status_map.items() if s != "fixed")
+    fixed_ids = sorted(fid for fid, s in status_map.items() if s == "fixed")
+    body = (f"advance-roadmap follow-up `{st['key']}` verified partial progress on `{ident}`: "
+            f"fixed {', '.join(f'`{i}`' for i in fixed_ids) or '(none)'}; "
+            f"still open {', '.join(f'`{i}`' for i in remaining)}. "
+            f"PR {st.get('pr_url')}, merge `{st.get('merge_commit')}`; "
+            f"{followticket.render_validation(st.get('validation'))}. "
+            "Ticket stays open until every tracked finding_id is verified fixed.")
+    by_id = {}
+    prev_meta = None
+    for ost in [st] + all_stages():
+        for f in ost.get("findings") or []:
+            if f.get("id") in status_map:
+                by_id.setdefault(f["id"], dict(f))
+        if not prev_meta:
+            prev_meta = followticket.parse_meta(ost.get("ticket_body") or "")
+    findings = []
+    for fid, status in status_map.items():
+        row = by_id.get(fid) or {"id": fid, "title": fid, "kind": "ticket", "fix": f"see {ident}",
+                                 "evidence": []}
+        findings.append({**row, "status": status, "ticket": ident})
+    owners = finding_owners_for_partial(st, status_map, prev_meta)
+    st["ticket_meta_at"] = time.time()
+    desc = followticket.description(
+        st, findings, st.get("quota"),
+        next_step=f"repair remaining finding(s): {', '.join(remaining)}" if remaining else "close when ready",
+        validation=st.get("validation"), finding_status=status_map, finding_owners=owners)
+    followticket.comment(ident, body)
+    followticket.update_description(ident, desc)
+    log(f"{st['key']}: partial progress on {ident} (fixed {len(fixed_ids)}/{len(status_map)})")
+
+
+def finish(st, findings):
+    for f in findings:
+        f["status"] = "fixed"
+    st.update(status=DONE, quota=None, deferred_until=None, next=None)
+    st["close_note"] = (f"Fixed by advance-roadmap follow-up `{st['key']}`: PR {st.get('pr_url')}, merge "
+                        f"`{st.get('merge_commit')}`, deploy {(st.get('validation') or {}).get('deploy')}; "
+                        f"{followticket.render_validation(st.get('validation'))}.")
+    close, partial = [], []
+    for ident in sorted({f["ticket"] for f in findings if f.get("ticket")}):
+        tracked = ticket_tracked_ids(ident, current=st,
+                                     extras={f["id"] for f in findings if f.get("ticket") == ident})
+        status_map = {fid: ("fixed" if finding_verified_fixed(fid, current=st) else "open")
+                      for fid in tracked}
+        if tracked and all(s == "fixed" for s in status_map.values()):
+            close.append(ident)
+        else:
+            partial.append((ident, status_map))
+    st["pending_close"] = [{"ticket": ident, "commented": False} for ident in close]
+    st["pending_partial"] = [{"ticket": ident, "status": status_map, "done": False}
+                             for ident, status_map in partial]
+    apply_partial_progress(st, findings)
+    close_tickets(st)
+
+
+def apply_partial_progress(st, findings=None):
+    """Persist partial-progress comments/metadata; retried by later drains like pending_close."""
+    if os.environ.get("ADVANCE_ROADMAP_FOLLOWUP_LINEAR", "1") != "1":
+        st["pending_partial"] = []
+        return
+    for entry in st.get("pending_partial") or []:
+        if entry.get("done"):
+            continue
+        ident = entry["ticket"]
+        try:
+            note_partial_progress(st, ident, entry.get("status") or {})
+            entry["done"] = True
+        except followticket.LinearError as e:
+            report(st, "linear", f"could not record partial progress on {ident}: {e}",
+                   "the next drain retries the partial-progress update")
+    st["pending_partial"] = [e for e in st.get("pending_partial") or [] if not e.get("done")]
+
+
+def close_tickets(st):
+    """Persisted in pending_close so a Linear failure is retried by every later drain.
+
+    The closing comment and the move to Done are tracked apart, so a retry never posts twice.
+    """
+    closed = set()
+    if os.environ.get("ADVANCE_ROADMAP_FOLLOWUP_LINEAR", "1") != "1":
+        return closed
+    for entry in st.get("pending_close") or []:
+        ident = entry["ticket"]
+        try:
+            if not entry.get("commented"):
+                followticket.comment(ident, st.get("close_note")
+                                     or f"Fixed by advance-roadmap follow-up `{st['key']}`.")
+                entry["commented"] = True
+            followticket.mark_done(ident)
+            closed.add(ident)
+            log(f"{st['key']}: closed {ident}")
+        except followticket.LinearError as e:
+            report(st, "linear", f"merged and deployed, but could not close {ident}: {e}",
+                   "the next drain retries closing it")
+    st["pending_close"] = [e for e in st.get("pending_close") or [] if e["ticket"] not in closed]
+    if closed:
+        with TicketIndex() as index:
+            index.drop_tickets(closed)
+    return closed
+
+
+def retry_closes():
+    """Close tickets an earlier drain verified but could not close in Linear."""
+    closed = set()
+    for snapshot in all_stages():
+        if not snapshot.get("pending_close") and not snapshot.get("pending_partial"):
+            continue
+        c = claim_stage(snapshot["key"])
+        if not c:
+            continue
+        try:
+            st = load(snapshot["key"]) or snapshot
+            if st.get("pending_partial"):
+                apply_partial_progress(st)
+                save(st)
+            if st.get("pending_close"):
+                closed |= close_tickets(st)
+                save(st)
+        finally:
+            c.close()
+    return closed
+
+
 # ── ANALYZE (deterministic recognition tests only — no model) ────────────────
 
 def scan(st):
@@ -508,10 +1041,14 @@ def scan(st):
     return st
 
 
-# ── process / drain (ANALYZE + REPORT only) ──────────────────────────────────
+# ── process / drain (ANALYZE + REPORT + tickets; repair in slice 3b) ──────────
 
-def process(st):
-    """ANALYZE then REPORT under the caller's stage claim."""
+def process(st, issues=None):
+    """ANALYZE, dedupe tickets, then REPORT under the caller's stage claim.
+
+    Unfinished ticket/repair work is parked until ADVANCE_ROADMAP_FOLLOWUP_REPAIR=1 (slice 3b).
+    """
+    issues = issues if issues is not None else []
     st.pop("waiting_reason", None)
     if not cas_status(st, READY, RUNNING, attempts=st.get("attempts", 0) + 1,
                       next={"step": "analyze"}):
@@ -523,17 +1060,32 @@ def process(st):
         save(st)
     if st.get("status") != RUNNING:
         return
+    if os.environ.get("ADVANCE_ROADMAP_FOLLOWUP_LINEAR", "1") == "1":
+        dedupe(st, issues)
+        if st.get("status") != RUNNING:
+            return
+        save(st)
     fs = st.get("findings") or []
     quiet = st.get("non_findings") or []
+    todo = [f for f in fs if f.get("status") in ("open", "deferred")]
+    # Slice 3a: no repair. Ticket-bearing unfinished work stays for 3b (eligible() parks it).
+    if repair_enabled() and (todo or awaits_repair(st)):
+        # Slice 3b wires repair(st, ...) here.
+        report(st, "repair-unwired", "ADVANCE_ROADMAP_FOLLOWUP_REPAIR=1 but repair is not in this slice")
+        cas_status(st, RUNNING, BLOCKED)
+        return
     if cas_status(st, RUNNING, DONE, next=None, reported_at=now_iso(),
                   open_findings=sum(1 for f in fs if f.get("status") == "open")):
-        log(f"{st['key']}: reported {len(fs)} finding(s), {len(quiet)} non-finding(s) (report-only)")
+        log(f"{st['key']}: reported {len(fs)} finding(s), {len(quiet)} non-finding(s) "
+            f"({st.get('mode') or 'tickets'})")
 
 
 def order(st):
-    # Prefer cleanups (project) before tooling; oldest first. Slice 3 will prefer stages with
-    # unfinished repair work (branch/PR/ticket) ahead of fresh ones.
-    return (0 if st["stage"] == STAGES["cleanup"] else 1, st.get("created_at") or "")
+    # Prefer stages with unfinished ticket/repair work, then cleanups, oldest first.
+    unfinished = bool(st.get("branch") or st.get("pr_url")
+                      or any(f.get("ticket") for f in st.get("findings") or []))
+    return (0 if unfinished else 1, 0 if st["stage"] == STAGES["cleanup"] else 1,
+            st.get("created_at") or "")
 
 
 def drain(repo=None, origin=None, stage=None, wait_s=0.0):
@@ -543,6 +1095,11 @@ def drain(repo=None, origin=None, stage=None, wait_s=0.0):
     """
     STATE.mkdir(parents=True, exist_ok=True)
     recover_interrupted(repo=repo, origin=origin)
+    issues = recover_tickets()
+    if issues is None:
+        issues = []
+    retry_closes()
+    retry_deferral_syncs()
     deadline = time.time() + wait_s
     while True:
         waiting, progressed = [], False
@@ -579,7 +1136,7 @@ def drain(repo=None, origin=None, stage=None, wait_s=0.0):
                 if origin:
                     st["drained_by"] = origin
                 try:
-                    process(st)
+                    process(st, issues)
                 except Exception as e:  # one broken stage must never stop the rest
                     report(st, "crash", f"{type(e).__name__}: {e}")
                     # CAS: only demote if we still own the running transition.
@@ -611,7 +1168,7 @@ def summary(origin=None):
                      "item": st.get("item"), "findings": len(fs),
                      "open_findings": sum(f.get("status") == "open" for f in fs),
                      "non_findings": len(st.get("non_findings") or []),
-                     "mode": st.get("mode") or "report-only",
+                     "mode": st.get("mode") or "tickets",
                      "age_s": int(age),
                      "waiting_reason": st.get("waiting_reason"),
                      "blocker": reason if status in (BLOCKED, WAITING, RETRYABLE, "pending") else None})
