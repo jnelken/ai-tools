@@ -720,10 +720,13 @@ def dedupe(st, issues):
         if not issue:
             continue
         f["ticket"] = issue["identifier"]
-        owner = (followticket.parse_meta(issue.get("description")) or {}).get("key")
+        meta = followticket.parse_meta(issue.get("description")) or {}
+        per = meta.get("finding_owners") or {}
+        owned = per.get(f["id"]) if isinstance(per.get(f["id"]), dict) else None
+        owner = (owned or {}).get("key") or meta.get("key")
         other = owner and owner != st["key"] and load(owner)
         if other and other.get("status") not in (DONE, BLOCKED, "skipped"):
-            f.update(status="duplicate", duplicate_of=owner)   # the older stage owns it
+            f.update(status="duplicate", duplicate_of=owner)   # that finding's owner repairs it
         tag = f"{issue['identifier']}:{f['id']}:{st['key']}"
         if tag in posted or issue.get("identifier") == st.get("recovered_from"):
             continue
@@ -759,12 +762,18 @@ def ticket_description_payload(st, findings, ident, issues=None, finding_status=
     owners = {fid: followticket.owner_fields(o) for fid, o in (finding_owners or {}).items()
               if followticket.owner_fields(o)}
     meta = None
+    live_desc = st.get("ticket_body") or ""
     for issue in issues or []:
         if issue.get("identifier") == ident:
-            meta = followticket.parse_meta(issue.get("description") or "")
+            live_desc = issue.get("description") or live_desc
+            meta = followticket.parse_meta(live_desc)
             break
-    if meta is None and st.get("ticket_body"):
-        meta = followticket.parse_meta(st.get("ticket_body") or "")
+    if meta is None and live_desc:
+        meta = followticket.parse_meta(live_desc)
+    desc_rows = {}
+    for m in re.finditer(r"- \*\*(.+?)\*\* \(`([^`]+)`, ([^)]+)\) — fix: (.+)", live_desc):
+        title, fid, kind, fix = m.group(1), m.group(2), m.group(3), m.group(4)
+        desc_rows[fid] = {"id": fid, "title": title, "kind": kind, "fix": fix, "evidence": []}
     already_on_ticket = set()
     if meta:
         prior_status = dict(meta.get("finding_status") or {})
@@ -774,8 +783,18 @@ def ticket_description_payload(st, findings, ident, issues=None, finding_status=
         for fid in already_on_ticket:
             status.setdefault(fid, prior_status.get(fid, "open"))
             if fid not in by_id:
-                by_id[fid] = {"id": fid, "title": fid, "kind": "ticket", "fix": f"see {ident}",
-                              "status": status.get(fid, "open"), "ticket": ident, "evidence": []}
+                # Prefer live finding details from stages or the ticket description over an ID stub.
+                row = None
+                for ost in all_stages():
+                    for fr in ost.get("findings") or []:
+                        if fr.get("id") == fid:
+                            row = dict(fr)
+                            break
+                    if row:
+                        break
+                by_id[fid] = row or desc_rows.get(fid) or {
+                    "id": fid, "title": fid, "kind": "ticket", "fix": f"see {ident}", "evidence": []}
+                by_id[fid].update(status=status.get(fid, "open"), ticket=ident)
             if fid not in owners and isinstance(prior_owners.get(fid), dict):
                 owners[fid] = followticket.owner_fields(prior_owners[fid])
             elif fid not in owners and ticket_key:
