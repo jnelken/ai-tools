@@ -1,6 +1,6 @@
 ---
 name: archived-flag-cleanup
-description: Delete the gate code for archived (fully GA) Folio feature flags across api and woodrow — read the archived set from the management DB, compare it across environments, check polarity per call site, prune the orphans, and regenerate both usage manifests. Use when asked to "delete archived flag code", "clean up GA'd feature flags", "retire a feature flag", "remove a flag gate", or after archiving flags in the management portal. Also use when deciding whether a flag is safe to delete.
+description: Delete the gate code for archived (fully GA) Folio feature flags across api and woodrow — read the archived set from the management DB, compare it across environments, check polarity per call site, prune the orphans, and regenerate the api usage manifest. Use when asked to "delete archived flag code", "clean up GA'd feature flags", "retire a feature flag", "remove a flag gate", or after archiving flags in the management portal. Also use when deciding whether a flag is safe to delete.
 ---
 
 # Archived Feature Flag Cleanup
@@ -292,7 +292,7 @@ throwaway worktree and run the real checks:
 git worktree add -f -b _integration_check /tmp/integ origin/main
 cd /tmp/integ
 for B in <branches in merge order>; do git merge --no-ff -m "merge $B" "$B"; done
-# resolve: regenerate manifests; delete BOTH sides of an adjacent-entry conflict
+# resolve: regenerate api's manifest; delete BOTH sides of an adjacent-entry conflict
 pnpm run typecheck && pnpm exec vitest run <the flag test dirs>
 grep -c '^<<<<<<<' app/lib/feature-flags.ts   # must be 0
 cd - && git worktree remove --force /tmp/integ && git branch -D _integration_check
@@ -337,16 +337,20 @@ commits onto the new base instead, and prove the result:
 git diff <backup-ref> HEAD    # must be empty — same tree, new history
 ```
 
-## Step 7 — Regenerate both manifests and commit them
+## Step 7 — Regenerate the api manifest (woodrow's is generated, not committed)
 
 ```sh
-cd /Users/jake/code/api     && pnpm run generate:server-consumed-flags
-cd /Users/jake/code/woodrow && pnpm run client-flags:generate
+cd /Users/jake/code/api && pnpm run generate:server-consumed-flags
 ```
 
 api's pre-commit hook runs the generator and stages it, but **the manifest only
 rewrites when the key set changes** — which a flag deletion does, so it must be
 in the commit or `pnpm run lint:invariants` fails CI.
+
+woodrow's `app/features/internal/client-consumed-flags.generated.json` is
+gitignored since woodrow #1996: dev, build, vitest and `pnpm run typecheck`
+generate it, so there is nothing to commit. Run `pnpm run client-flags:generate`
+only to read the current key set.
 
 ## Step 8 — Verify
 
@@ -429,13 +433,12 @@ calling the set done:
 - **Trial-merge and run every pair that touches a shared test file** (see "Two
   PRs that merge cleanly can still break each other"). Skipping this is how a
   set of individually-green PRs reds `main`.
-- **The generated manifests conflict on every merge after the first**, because
-  each branch regenerated them from its own key set. Resolution is always
-  *regenerate* (`pnpm run client-flags:generate` /
-  `pnpm run generate:server-consumed-flags`), never hand-merge or trust a
-  `rerere` auto-resolution — and `git rerere` will silently reuse a stale one, so
-  re-run the generator and re-`git add` even when the file no longer shows
-  markers.
+- **api's generated manifest conflicts on every merge after the first**, because
+  each branch regenerated it from its own key set. Resolution is always
+  *regenerate* (`pnpm run generate:server-consumed-flags`), never hand-merge or
+  trust a `rerere` auto-resolution — and `git rerere` will silently reuse a stale
+  one, so re-run the generator and re-`git add` even when the file no longer
+  shows markers. woodrow's manifest is untracked now and cannot conflict.
 - **A stacked PR needs a rebase, not a merge, once its base squash-merges.**
   Squashing rewrites the base's commits, so merging `main` in afterwards replays
   them against their own squashed form. Say this in the stacked PR's description
