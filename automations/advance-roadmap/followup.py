@@ -618,6 +618,8 @@ def recover_tickets():
                                    and bool(status_map))
         # Repo identity: metadata block or the single repo/* label — never title/description prose.
         repo = meta.get("repo") or followticket.repo_label(issue)
+        if not repo:
+            continue
         # Group open findings by recorded owner so each stage only gets its own work.
         groups = {}  # key -> {"fids": [...], "owner": {...}}
         if partial:
@@ -782,6 +784,8 @@ def _issue_repo(issue):
 
 def require_ticket_repo(ident, want_repo, issues=None):
     """Shared write-path guard: return the open issue after enforcing repo match, or raise."""
+    if not want_repo:
+        raise followticket.LinearError(f"stage has no repo; refusing ticket write to {ident}")
     pool = list(issues) if issues is not None else None
     if pool is None:
         pool = followticket.fetch_open()
@@ -792,7 +796,7 @@ def require_ticket_repo(ident, want_repo, issues=None):
     if not target:
         raise followticket.LinearError(f"{ident} not in open issues; refusing ticket write")
     ticket_repo = _issue_repo(target)
-    if want_repo and ticket_repo != want_repo:
+    if ticket_repo != want_repo:
         raise followticket.LinearError(
             f"{ident} repo {ticket_repo!r} != stage repo {want_repo!r}; refusing ticket write")
     return target
@@ -945,7 +949,6 @@ def rewrite_ticket_description(st, ident, findings, quota=None, next_step="", va
         merged, status, owners = ticket_description_payload(
             st, findings, ident, issues=live, finding_status=finding_status,
             finding_owners=finding_owners)
-        # Stamp before render so the published metadata.updated_at matches local ticket_meta_at.
         st["ticket_meta_at"] = time.time()
         body = followticket.description(st, merged, quota, next_step, validation=validation,
                                         finding_status=status, finding_owners=owners)
@@ -1026,7 +1029,6 @@ def sync_deferral_tickets(st, findings, quota, next_step, note, issues=None):
                     followticket.comment(
                         ident, "advance-roadmap follow-up deferred again for quota.\n\n" + body)
                 if remaining:
-                    # Record the create immediately so a failed post-create fetch cannot duplicate it.
                     ident = followticket.create(st, remaining, quota, next_step)
                     st.setdefault("owned_tickets", []).append(ident)
                     for f in remaining:
@@ -1522,7 +1524,7 @@ def ticket_close_verdict(ident, current=None, issues=None):
             ticket_repo = meta.get("repo") or followticket.repo_label(issue)
             break
     want_repo = (current or {}).get("repo")
-    if want_repo and ticket_repo != want_repo:
+    if not want_repo or ticket_repo != want_repo:
         return "incomplete"
     for fid in tracked:
         owner_key = (owners.get(fid) or {}).get("key") if isinstance(owners.get(fid), dict) else None
