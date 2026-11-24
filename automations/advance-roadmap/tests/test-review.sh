@@ -129,6 +129,13 @@ print -r -- "echoed prompt: VERDICT: clean      (no findings)"
 [ "\$mode" = limit ] && { print "You've hit your usage limit. Resets 5pm."; exit 1; }
 [ "\$mode" = capacity ] && { print "ERROR: Selected model is at capacity. Please try a different model."; exit 1; }
 [ "\$mode" = http503 ] && { print "stream error: unexpected status 503 Service Unavailable"; exit 1; }
+# Nonzero exit with a clean verdict in the final answer — must NOT be recorded as clean.
+[ "\$mode" = crash-clean ] && {
+  body="reviewer=\$name
+VERDICT: clean"
+  if [ -n "\$last" ]; then print -r -- "\$body" > "\$last"; else print -r -- "\$body"; fi
+  exit 1
+}
 # Zero-exit JSON with is_error:true — only detectable via --result-json (not transcript alone).
 [ "\$mode" = json-limit ] && {
   python3 -c 'import json; print(json.dumps({"type":"result","subtype":"success","is_error":True,"result":"You'\''ve hit your usage limit. Resets 5pm.","session_id":"json-limit-session"}))'
@@ -227,8 +234,11 @@ check "excluded prior builder is skipped" "$(field reviewer)" claude
 rc=0; review_excl cursor 1 "codex claude" FAKE_CODEX=clean FAKE_CLAUDE=clean >/dev/null || rc=$?
 check "all eligible reviewers excluded → unavailable" "$rc" 3
 check "all-excluded logs unavailable" "$(field verdict)" unavailable
-# cursor-cycle path also goes through run_reviewer — exclusion must refuse Cursor itself.
-# Force the legacy path by rewriting the strategy after the script's cursor-then-codex→cross-provider
-# conversion isn't reachable from CLI; instead invoke with an excluded primary via cross-provider
-# where every candidate is excluded (covered above). Owner is run_reviewer(); both paths call it.
+# Failed invocation with VERDICT: clean in the transcript is not mergeable.
+review cursor 1 FAKE_CODEX=crash-clean FAKE_CLAUDE=clean >/dev/null
+check "failed Codex with clean text fails over to Claude" "$(field reviewer)" claude
+check "failover after crash is clean" "$(field verdict)" clean
+rc=0; review cursor 1 FAKE_CODEX=crash-clean FAKE_CLAUDE=crash-clean >/dev/null || rc=$?
+check "all reviewers crashed → unavailable" "$rc" 3
+check "crash-all logs unavailable not clean" "$(field verdict)" unavailable
 echo "all passed"

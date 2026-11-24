@@ -298,11 +298,19 @@ run_required_review() {
     echo "VERDICT: unavailable"
     return 3
   fi
-  if review_failed "$rc" && rg -q -i "$CAPACITY" "$out" "$out.json" 2>/dev/null; then
-    record_review "$who" unavailable "$phase"
-    echo "REVIEW REQUIRED: $who's model is at capacity; do not merge until this review stage succeeds."
-    echo "VERDICT: unavailable"
-    return 3
+  # Invariant — a failed invocation never yields a mergeable verdict (even if VERDICT: clean
+  # appears in the transcript). Owner: review_failed check before recording verdict.
+  if review_failed "$rc"; then
+    if rg -q -i "$CAPACITY" "$out" "$out.json" 2>/dev/null; then
+      record_review "$who" unavailable "$phase"
+      echo "REVIEW REQUIRED: $who's model is at capacity; do not merge until this review stage succeeds."
+      echo "VERDICT: unavailable"
+      return 3
+    fi
+    record_review "$who" error "$phase"
+    echo "REVIEW REQUIRED: $who exited with a failure; do not trust its verdict text."
+    echo "VERDICT: error"
+    return 1
   fi
   # Codex echoes the prompt (which quotes both verdict lines), so trust the last one.
   verdict="$(verdict_of "$who")"
@@ -351,9 +359,15 @@ run_cross_provider_review() {
       python3 "$USAGE_PY" --root "$ROOT" record-limit --provider "$who" --text "$text" >/dev/null 2>&1 || true
       continue
     fi
-    if review_failed "$rc" && rg -q -i "$CAPACITY" "$out" "$out.json" 2>/dev/null; then
-      echo "(skipping reviewer $who — its model is at capacity)"
-      capacity_list="$capacity_list $who"
+    # Invariant — failed invocation never yields a mergeable verdict (owner: this check
+    # before accepting verdict_of; same rule as run_required_review).
+    if review_failed "$rc"; then
+      if rg -q -i "$CAPACITY" "$out" "$out.json" 2>/dev/null; then
+        echo "(skipping reviewer $who — its model is at capacity)"
+        capacity_list="$capacity_list $who"
+      else
+        echo "(skipping reviewer $who — invocation failed rc=$rc; ignoring verdict text)"
+      fi
       continue
     fi
     used="$who"
