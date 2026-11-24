@@ -80,9 +80,18 @@ def materialize_corpus_sandbox(st, files):
     sandbox.mkdir(parents=True)
     stamps = corpus_stamps(st)
     mapping = {}
+    used_names = set()
     for i, src in enumerate(files):
         src = Path(src).resolve()
-        dest = (sandbox / f"{i:03d}-{src.name}").resolve()
+        # Keep runs.jsonl's basename so evidence_holds' streaming/stamp path still applies.
+        if src.name == "runs.jsonl":
+            dest = (sandbox / "runs.jsonl").resolve()
+        else:
+            name = f"{i:03d}-{src.name}"
+            while name in used_names:
+                name = f"{i:03d}-{len(used_names)}-{src.name}"
+            dest = (sandbox / name).resolve()
+            used_names.add(name)
         if src.name == "runs.jsonl" and stamps:
             _copy_runs_jsonl_for_stamps(src, dest, stamps)
         else:
@@ -256,10 +265,14 @@ def accept_findings(st, findings, files, doc, mapping=None, provider=None):
             raw_ev = remapped
         else:
             raw_ev = check_ev
-        f = followscan.finding(
-            st["stage"], st["repo"], kind, title, key,
-            [followscan.evidence(e["source"], e["quote"]) for e in raw_ev],
-            fix)
+        try:
+            ev_objs = [followscan.evidence(e["source"], e["quote"]) for e in raw_ev]
+        except (OSError, TypeError, ValueError):
+            # evidence_holds is whitespace-normalized; evidence() requires an exact span.
+            rejected.append(followscan.non_finding(
+                title, "rejected: its evidence is not in the corpus", raw_ev))
+            continue
+        f = followscan.finding(st["stage"], st["repo"], kind, title, key, ev_objs, fix)
         if f["id"] not in known:
             kept.append(f)
             known.add(f["id"])

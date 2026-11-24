@@ -2564,11 +2564,30 @@ class FollowupTest(unittest.TestCase):
         st = {"key": "sandbox-test", "children": [stamp], "stage": "tooling-hardening"}
         (self.root / "followups" / st["key"]).mkdir(parents=True)
         sandbox, mapping = followanalyst.materialize_corpus_sandbox(st, [self.root / "runs.jsonl"])
-        sand_runs = next(Path(p) for p in mapping if Path(p).name.endswith("runs.jsonl"))
+        sand_runs = next(Path(p) for p in mapping if Path(p).name == "runs.jsonl")
+        self.assertEqual(sand_runs.name, "runs.jsonl")
         text = sand_runs.read_text()
         self.assertIn(stamp, text)
         self.assertNotIn("unrelated historical quote for another stage", text)
         self.assertNotIn(other, text)
+
+    def test_analyst_rejects_when_evidence_builder_raises(self):
+        # evidence_holds normalizes whitespace; evidence() needs an exact file substring.
+        stamp = "20261013-103004"
+        (self.root / "runs" / stamp).mkdir(parents=True)
+        (self.root / "runs.jsonl").write_text(json.dumps(json.loads((FIXTURES / "runs-row.json").read_text())) + "\n")
+        # Quote matches after whitespace fold but not as an exact contiguous span in the file.
+        folded = "the   orchestrator    hit its session limit before triage"
+        bad = {"title": "whitespace fold only", "kind": "analyst",
+               "evidence": [{"source": str(self.root / "runs.jsonl"), "quote": folded}]}
+        (self.root / "stub-analyst.txt").write_text(
+            "```FOLLOWUP_FINDINGS_JSON\n" + json.dumps({"findings": [bad]}) + "\n```\n")
+        p = self.run_followup("scan", "--stage", "tooling", "--origin", "batch-2026-10-13", "--stamp", stamp,
+                              env={"ADVANCE_ROADMAP_FOLLOWUP_ANALYST": "1"})
+        doc = json.loads(p.stdout)
+        self.assertNotIn("whitespace fold only", [f["title"] for f in doc["findings"]])
+        self.assertTrue(any(n["title"] == "whitespace fold only" and "rejected" in n["why"]
+                            for n in doc["non_findings"]))
 
 
 if __name__ == "__main__":
