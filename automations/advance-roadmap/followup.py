@@ -1002,13 +1002,19 @@ def sync_deferral_tickets(st, findings, quota, next_step, note, issues=None):
             # Same stop: the ticket already says so (unless it is new to this stage).
             ticketed = {k: v for k, v in ticketed.items() if k in attached}
         owned = set(st.setdefault("owned_tickets", []))
+        commented = set(st.setdefault("deferral_commented", []))
         try:
             st["ticket_meta_at"] = time.time()
             for ident, fs in ticketed.items():
                 # Always rewrite metadata (owned or attached) so recovery sees every finding ID.
                 body = rewrite_ticket_description(
                     st, ident, fs, quota=quota, next_step=next_step, issues=issues)
-                followticket.comment(ident, "advance-roadmap follow-up deferred again for quota.\n\n" + body)
+                ctag = f"{ident}:{note}"
+                if ctag not in commented:
+                    followticket.comment(
+                        ident, "advance-roadmap follow-up deferred again for quota.\n\n" + body)
+                    commented.add(ctag)
+                    st["deferral_commented"] = sorted(commented)
             fresh = [f for f in findings if not f.get("ticket")]
             if fresh:
                 # Recheck live Linear immediately before create — another machine may have filed.
@@ -1385,24 +1391,11 @@ def note_partial_progress(st, ident, status_map, issues=None, already_commented=
     Comment and rewrite are tracked apart via already_commented / on_commented so a failed
     rewrite retry does not re-post the comment.
     """
-    remaining = sorted(fid for fid, s in status_map.items() if s != "fixed")
-    fixed_ids = sorted(fid for fid, s in status_map.items() if s == "fixed")
-    body = (f"advance-roadmap follow-up `{st['key']}` verified partial progress on `{ident}`: "
-            f"fixed {', '.join(f'`{i}`' for i in fixed_ids) or '(none)'}; "
-            f"still open {', '.join(f'`{i}`' for i in remaining)}. "
-            f"PR {st.get('pr_url')}, merge `{st.get('merge_commit')}`; "
-            f"{followticket.render_validation(st.get('validation'))}. "
-            "Ticket stays open until every tracked finding_id is verified fixed.")
     by_id = {}
     for ost in [st] + all_stages():
         for f in ost.get("findings") or []:
             if f.get("id") in status_map:
                 by_id.setdefault(f["id"], dict(f))
-    findings = []
-    for fid, status in status_map.items():
-        row = by_id.get(fid) or {"id": fid, "title": fid, "kind": "ticket", "fix": f"see {ident}",
-                                 "evidence": []}
-        findings.append({**row, "status": status, "ticket": ident})
     # Prefer a live Linear snapshot; fall back to fetch so we never rewrite from stale ticket_body alone.
     if issues is None:
         try:
@@ -1422,11 +1415,20 @@ def note_partial_progress(st, ident, status_map, issues=None, already_commented=
     for fid, prior in live_status.items():
         if prior == "fixed":
             status_map[fid] = "fixed"
-    for f in findings:
-        if live_status.get(f["id"]) == "fixed":
-            f["status"] = "fixed"
+    findings = []
+    for fid, status in status_map.items():
+        row = by_id.get(fid) or {"id": fid, "title": fid, "kind": "ticket", "fix": f"see {ident}",
+                                 "evidence": []}
+        findings.append({**row, "status": status, "ticket": ident})
     remaining = sorted(fid for fid, s in status_map.items() if s != "fixed")
     fixed_ids = sorted(fid for fid, s in status_map.items() if s == "fixed")
+    # Comment text must use the reconciled status map (after live fixed merge).
+    body = (f"advance-roadmap follow-up `{st['key']}` verified partial progress on `{ident}`: "
+            f"fixed {', '.join(f'`{i}`' for i in fixed_ids) or '(none)'}; "
+            f"still open {', '.join(f'`{i}`' for i in remaining)}. "
+            f"PR {st.get('pr_url')}, merge `{st.get('merge_commit')}`; "
+            f"{followticket.render_validation(st.get('validation'))}. "
+            "Ticket stays open until every tracked finding_id is verified fixed.")
     owners = finding_owners_for_partial(st, status_map, prev_meta)
     if not already_commented:
         require_ticket_repo(ident, st.get("repo"), issues=issues)
