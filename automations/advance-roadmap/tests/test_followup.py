@@ -536,6 +536,37 @@ class FollowupTest(unittest.TestCase):
         self.assertEqual(st_b.get("pr_url"), "https://example/pr/2")
         self.assertEqual(st_b.get("builder_provider"), "codex")
 
+    def test_recovery_skips_ticket_when_every_finding_is_fixed(self):
+        ticket = self.meta_ticket("DEV-501", {
+            "key": "cleanup-done", "stage": "project-cleanup",
+            "finding_ids": ["aaaaaaaaaaaa"],
+            "finding_status": {"aaaaaaaaaaaa": "fixed"},
+        })
+        self.set("stub-linear.json", {"pages": [[ticket]]})
+        self.run_followup("drain", "--stage", "cleanup")
+        self.assertFalse((self.root / "followups" / "cleanup-done" / "state.json").exists())
+
+    def test_dedupe_does_not_steal_owner_on_description_rewrite(self):
+        """A duplicate attach must keep the original stage as finding_owners key."""
+        import followup as fu
+        fu.ROOT = self.root
+        fu.STATE = self.root / "followups"
+        os.environ["ADVANCE_ROADMAP_ROOT"] = str(self.root)
+        os.environ["ADVANCE_ROADMAP_LINEAR_BIN"] = self.env["ADVANCE_ROADMAP_LINEAR_BIN"]
+        fid = "aaaaaaaaaaaa"
+        prior = self.meta_ticket("DEV-777", {
+            "key": "cleanup-other", "stage": "project-cleanup", "finding_ids": [fid],
+            "finding_owners": {fid: {"key": "cleanup-other", "builder_provider": "codex"}},
+        })
+        self.set("stub-linear.json", {"pages": [[prior]]})
+        st = {"key": "cleanup-mine", "stage": "project-cleanup", "repo": "demo",
+              "findings": [{"id": fid, "title": "x", "kind": "t", "fix": "f", "status": "duplicate",
+                            "duplicate_of": "cleanup-other", "ticket": "DEV-777", "evidence": []}],
+              "builder_provider": "cursor"}
+        body = fu.rewrite_ticket_description(st, "DEV-777", st["findings"], issues=[prior])
+        meta = followticket.parse_meta(body)
+        self.assertEqual((meta.get("finding_owners") or {}).get(fid, {}).get("key"), "cleanup-other")
+
     def test_open_findings_park_for_repair_not_done(self):
         """A scanned stage with open findings stays deferred so slice 3b can resume repair."""
         self.shipped_item("20261014-050000")

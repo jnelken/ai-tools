@@ -574,18 +574,21 @@ def recover_tickets():
         return None
     open_ids = {i.get("identifier") for i in issues}
     with TicketIndex() as index:
-        index.entries = {k: e for k, e in index.entries.items()
-                         if e.get("ticket") in open_ids or (e.get("at") or 0) >= fetched_at}
+        # Mutate the shared dict in place — replacing index.entries would orphan the lock's copy.
+        keep = {k: e for k, e in list(index.entries.items())
+                if e.get("ticket") in open_ids or (e.get("at") or 0) >= fetched_at}
+        index.entries.clear()
+        index.entries.update(keep)
     for issue, meta in followticket.followup_tickets(issues):
         ident = issue.get("identifier")
         status_map = meta.get("finding_status") or {}
         owners = meta.get("finding_owners") or {}
         all_ids = list(meta.get("finding_ids") or status_map)
         open_fids = [fid for fid in all_ids if status_map.get(fid, "open") != "fixed"]
-        partial = bool(owners) or (any(status_map.get(fid) == "fixed" for fid in all_ids)
-                                   and bool(open_fids) and bool(status_map))
-        if partial and not open_fids:
+        if not open_fids:
             continue  # every tracked finding is already fixed; nothing to rebuild
+        partial = bool(owners) or (any(status_map.get(fid) == "fixed" for fid in all_ids)
+                                   and bool(status_map))
         # Repo identity: metadata block or the single repo/* label — never title/description prose.
         repo = meta.get("repo") or followticket.repo_label(issue)
         # Group open findings by recorded owner so each stage only gets its own work.
@@ -775,9 +778,15 @@ def ticket_description_payload(st, findings, ident, issues=None, finding_status=
     for f in by_id.values():
         status.setdefault(f["id"], f.get("status") or "open")
     for f in findings:
-        if f.get("id"):
-            owners.setdefault(f["id"], stage_owner_snapshot(st))
-            status[f["id"]] = f.get("status") or status.get(f["id"]) or "open"
+        fid = f.get("id")
+        if not fid:
+            continue
+        # Duplicates stay under the ticket's existing owner — never steal for this stage.
+        if f.get("status") == "duplicate" or f.get("duplicate_of"):
+            status.setdefault(fid, f.get("status") or "open")
+            continue
+        owners.setdefault(fid, stage_owner_snapshot(st))
+        status[fid] = f.get("status") or status.get(fid) or "open"
     return list(by_id.values()), status, owners
 
 
