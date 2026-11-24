@@ -2482,6 +2482,21 @@ class FollowupTest(unittest.TestCase):
         cwd = calls[0].get("cwd") or ""
         self.assertIn("corpus-sandbox", cwd)
 
+    def test_analyst_malformed_findings_collection_preserves_deterministic(self):
+        stamp = "20261013-103004"
+        run = self.root / "runs" / stamp
+        run.mkdir(parents=True)
+        (run / "orchestrator-result.json").write_text((FIXTURES / "orchestrator-result.json").read_text())
+        (self.root / "runs.jsonl").write_text(json.dumps(json.loads((FIXTURES / "runs-row.json").read_text())) + "\n")
+        (self.root / "stub-analyst.txt").write_text(
+            "```FOLLOWUP_FINDINGS_JSON\n" + json.dumps({"findings": {"title": "bad"}}) + "\n```\n")
+        p = self.run_followup("scan", "--stage", "tooling", "--origin", "batch-2026-10-13", "--stamp", stamp,
+                              env={"ADVANCE_ROADMAP_FOLLOWUP_ANALYST": "1"})
+        doc = json.loads(p.stdout)
+        self.assertEqual(doc["analyst"], "codex: malformed findings block")
+        self.assertTrue(doc["findings"])  # deterministic findings remain
+        self.assertNotIn(self.ANALYST_FINDING["title"], [f["title"] for f in doc["findings"]])
+
 
 if __name__ == "__main__":
     unittest.main()

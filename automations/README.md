@@ -268,10 +268,11 @@ merge at the reviewed HEAD, deploy verification (fail-closed; a skipped deploy i
 ai-tools install via the deploy clone's `install.sh`. `ADVANCE_ROADMAP_FOLLOWUP_REPAIR=1` enables
 the loop; without it, open findings stay parked. Quota stops call `defer()` (ticket create/update).
 Slice 3c adds an optional read-only **model analyst** ([`lib/followanalyst.py`](advance-roadmap/lib/followanalyst.py))
-over each stage's bounded corpus: Codex then Claude, usage-gated, process-group deadlines. Findings
-are accepted only from the provider's final answer and only when every cited quote verifies in an
-allowed corpus file; rejected or unavailable analyst output never drops deterministic findings.
-`ADVANCE_ROADMAP_FOLLOWUP_ANALYST=0` disables it.
+over each stage's bounded corpus: Codex then Claude, usage-gated, process-group deadlines. The
+invoke cwd is a stage-local sandbox of corpus copies (prompt paths never name the originals; Claude
+is Read-only) — not an OS filesystem jail. Findings are accepted only from a successful final
+answer and only when every cited quote verifies in an allowed corpus file; rejected or unavailable
+analyst output never drops deterministic findings. `ADVANCE_ROADMAP_FOLLOWUP_ANALYST=0` disables it.
 
 | Stage | Trigger | Corpus |
 | --- | --- | --- |

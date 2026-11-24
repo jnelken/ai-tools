@@ -48,7 +48,7 @@ def corpus_stamps(st):
 def materialize_corpus_sandbox(st, files):
     """Copy only the corpus into a stage-local sandbox. Returns (sandbox_dir, sandbox→original map).
 
-    Invariant owner for bounded-corpus FS access: run_analyst always uses this sandbox as cwd / -C.
+    Owner helper for the bounded-corpus policy in run_analyst: prompt paths and cwd/-C target.
     """
     sandbox = followrepair.stage_dir(st["key"]) / "corpus-sandbox"
     if sandbox.exists():
@@ -151,19 +151,34 @@ def analyze(st, findings, files):
         doc = {}
     st["analyst"] = f"{provider}: {'answered' if m else 'no findings block'}"
     return accept_findings(
-        st, findings, sandbox_files, doc if isinstance(doc, dict) else {}, mapping=mapping)
+        st, findings, sandbox_files, doc if isinstance(doc, dict) else {}, mapping=mapping,
+        provider=provider)
 
 
-def accept_findings(st, findings, files, doc, mapping=None):
+def accept_findings(st, findings, files, doc, mapping=None, provider=None):
     """Keep analyst findings whose every quote verifies in the corpus; reject the rest.
 
     When mapping is set (sandbox → original), evidence sources are remapped to originals after
-    verification against the sandbox copies.
+    verification against the sandbox copies. Malformed collection types abort analyst output
+    without raising, preserving deterministic findings.
     """
+    if not isinstance(doc, dict):
+        if provider:
+            st["analyst"] = f"{provider}: malformed findings block"
+        return [], []
+    raw_findings, raw_non = doc.get("findings"), doc.get("non_findings")
+    if raw_findings is None:
+        raw_findings = []
+    if raw_non is None:
+        raw_non = []
+    if not isinstance(raw_findings, list) or not isinstance(raw_non, list):
+        if provider:
+            st["analyst"] = f"{provider}: malformed findings block"
+        return [], []
     known = {f["id"] for f in findings}
     stamps = corpus_stamps(st)
     kept, rejected = [], []
-    for raw in doc.get("findings") or []:
+    for raw in raw_findings:
         if not isinstance(raw, dict) or not raw.get("title"):
             continue
         raw_ev = raw.get("evidence") or []
@@ -201,7 +216,7 @@ def accept_findings(st, findings, files, doc, mapping=None):
         if f["id"] not in known:
             kept.append(f)
             known.add(f["id"])
-    for raw in doc.get("non_findings") or []:
+    for raw in raw_non:
         if isinstance(raw, dict) and raw.get("title"):
             rejected.append(followscan.non_finding(raw["title"], raw.get("why") or "", []))
     return kept, rejected
@@ -214,8 +229,10 @@ def run_analyst(st, provider, prompt, sandbox):
     use usage.live_limit_banner — exit status and provider error records, never a quoted banner alone.
     Process-group deadlines via procrun so a timeout never leaves descendants alive.
 
-    Invariant (owner: run_analyst cwd/-C): both provider invokes use the corpus sandbox only —
-    never the repo root — so filesystem access is limited to the selected corpus copies.
+    Bounded-corpus policy (owner: run_analyst): both invokes use cwd/-C on a stage-local sandbox
+    that contains only corpus copies; Claude is limited to the Read tool. This is not an OS-level
+    filesystem jail — absolute-path reads outside the sandbox are not kernel-blocked. The prompt
+    must list only sandbox paths (never the original corpus locations).
     """
     d = followrepair.stage_dir(st["key"])
     d.mkdir(parents=True, exist_ok=True)
