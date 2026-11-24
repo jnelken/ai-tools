@@ -711,6 +711,15 @@ def dedupe(st, issues):
                 + followticket.render_findings([f]))
         try:
             followticket.comment(issue["identifier"], body)
+            # Merge this finding into the ticket description so recovery can see it across machines.
+            merged, status, owners = ticket_description_payload(
+                st, [f], issue["identifier"], issues=issues)
+            desc = followticket.description(st, merged, st.get("quota"),
+                                            next_step=f"see evidence on {issue['identifier']}",
+                                            finding_status=status, finding_owners=owners)
+            followticket.update_description(issue["identifier"], desc)
+            # Keep the drain's snapshot current for later merges in this pass.
+            issue["description"] = desc
             posted.add(tag)
         except followticket.LinearError as e:
             report(st, "linear", f"could not add evidence to {issue['identifier']}: {e}")
@@ -971,8 +980,12 @@ def finding_owners_for_partial(st, status_map, prev_meta=None):
     return owners
 
 
-def note_partial_progress(st, ident, status_map):
-    """Comment partial progress and rewrite metadata; never mark Done while findings remain open."""
+def note_partial_progress(st, ident, status_map, issues=None):
+    """Comment partial progress and rewrite metadata; never mark Done while findings remain open.
+
+    Description rewrite goes through ticket_description_payload so Linear's current IDs/owners
+    are preserved (same owner as sync_deferral_tickets / dedupe attach).
+    """
     remaining = sorted(fid for fid, s in status_map.items() if s != "fixed")
     fixed_ids = sorted(fid for fid, s in status_map.items() if s == "fixed")
     body = (f"advance-roadmap follow-up `{st['key']}` verified partial progress on `{ident}`: "
@@ -982,26 +995,43 @@ def note_partial_progress(st, ident, status_map):
             f"{followticket.render_validation(st.get('validation'))}. "
             "Ticket stays open until every tracked finding_id is verified fixed.")
     by_id = {}
-    prev_meta = None
     for ost in [st] + all_stages():
         for f in ost.get("findings") or []:
             if f.get("id") in status_map:
                 by_id.setdefault(f["id"], dict(f))
-        if not prev_meta:
-            prev_meta = followticket.parse_meta(ost.get("ticket_body") or "")
     findings = []
     for fid, status in status_map.items():
         row = by_id.get(fid) or {"id": fid, "title": fid, "kind": "ticket", "fix": f"see {ident}",
                                  "evidence": []}
         findings.append({**row, "status": status, "ticket": ident})
+    # Prefer a live Linear snapshot; fall back to fetch so we never rewrite from stale ticket_body alone.
+    if issues is None:
+        try:
+            issues = followticket.fetch_open()
+        except followticket.LinearError:
+            issues = None
+    prev_meta = None
+    for issue in issues or []:
+        if issue.get("identifier") == ident:
+            prev_meta = followticket.parse_meta(issue.get("description") or "")
+            break
+    if prev_meta is None:
+        prev_meta = followticket.parse_meta(st.get("ticket_body") or "")
     owners = finding_owners_for_partial(st, status_map, prev_meta)
+    merged, status, owners = ticket_description_payload(
+        st, findings, ident, issues=issues, finding_status=status_map, finding_owners=owners)
     st["ticket_meta_at"] = time.time()
     desc = followticket.description(
-        st, findings, st.get("quota"),
+        st, merged, st.get("quota"),
         next_step=f"repair remaining finding(s): {', '.join(remaining)}" if remaining else "close when ready",
-        validation=st.get("validation"), finding_status=status_map, finding_owners=owners)
+        validation=st.get("validation"), finding_status=status, finding_owners=owners)
     followticket.comment(ident, body)
     followticket.update_description(ident, desc)
+    if issues is not None:
+        for issue in issues:
+            if issue.get("identifier") == ident:
+                issue["description"] = desc
+                break
     log(f"{st['key']}: partial progress on {ident} (fixed {len(fixed_ids)}/{len(status_map)})")
 
 
@@ -1029,7 +1059,7 @@ def finish(st, findings):
     close_tickets(st, issues=None)  # ticket_ready_to_close still reads ticket_body / index
 
 
-def apply_partial_progress(st, findings=None):
+def apply_partial_progress(st, findings=None, issues=None):
     """Persist partial-progress comments/metadata; retried by later drains like pending_close."""
     if os.environ.get("ADVANCE_ROADMAP_FOLLOWUP_LINEAR", "1") != "1":
         st["pending_partial"] = []
@@ -1039,7 +1069,7 @@ def apply_partial_progress(st, findings=None):
             continue
         ident = entry["ticket"]
         try:
-            note_partial_progress(st, ident, entry.get("status") or {})
+            note_partial_progress(st, ident, entry.get("status") or {}, issues=issues)
             entry["done"] = True
         except followticket.LinearError as e:
             report(st, "linear", f"could not record partial progress on {ident}: {e}",
@@ -1149,7 +1179,7 @@ def retry_closes(issues=None):
         try:
             st = load(snapshot["key"]) or snapshot
             if st.get("pending_partial"):
-                apply_partial_progress(st)
+                apply_partial_progress(st, issues=issues)
                 save(st)
             if st.get("pending_close"):
                 closed |= close_tickets(st, issues=issues)
