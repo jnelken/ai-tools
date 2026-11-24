@@ -1956,6 +1956,27 @@ class FollowupTest(unittest.TestCase):
         self.assertEqual(st["status"], "done", self.report())
         self.assertEqual(st["validation"]["deploy"], "success")
 
+    def test_deploy_prefers_updated_at_over_created_at(self):
+        """updated_at wins even when an older failure was created later than a success."""
+        self.shipped_item("20261014-050000")
+        self.run_followup("hook", "item-done", "--stamp", "20261014-050000")
+        self.set("stub-gh.json", {
+            "checks": "pass", "deploy": "success",
+            "statuses": [
+                # Success was updated most recently; its created_at is older.
+                {"context": "Vercel", "state": "success",
+                 "created_at": "2026-10-14T09:00:00Z", "updated_at": "2026-10-14T11:00:00Z"},
+                # Failure created later but updated earlier — must not win.
+                {"context": "Vercel", "state": "failure",
+                 "created_at": "2026-10-14T10:30:00Z", "updated_at": "2026-10-14T10:30:00Z"},
+            ],
+            "check_runs": [],
+        })
+        self.run_followup("drain", env=self.repair_env())
+        st = self.state("cleanup-20261014-050000")
+        self.assertEqual(st["status"], "done", self.report())
+        self.assertEqual(st["validation"]["deploy"], "success")
+
     def test_nonzero_builder_exit_is_rejected_despite_pr_result(self):
         """Exit nonzero with a blocked-branch-left result must not proceed to review/merge."""
         self.shipped_item("20261014-050000")

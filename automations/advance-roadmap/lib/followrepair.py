@@ -715,7 +715,10 @@ DEPLOY_NAME = re.compile(r"vercel|netlify|deploy", re.I)
 
 
 def _latest_deploy_rows(rows, name_key, time_keys):
-    """Keep only the newest row per deploy-looking name (context or check-run name)."""
+    """Keep only the newest row per deploy-looking name (context or check-run name).
+
+    time_keys are preferred in order (e.g. updated_at before created_at) — never let a
+    later fallback key overwrite an earlier non-empty stamp."""
     best = {}
     for r in rows:
         name = r.get(name_key) or ""
@@ -723,7 +726,9 @@ def _latest_deploy_rows(rows, name_key, time_keys):
             continue
         stamp = ""
         for k in time_keys:
-            stamp = r.get(k) or stamp
+            if r.get(k):
+                stamp = r[k]
+                break
         prev = best.get(name)
         if prev is None or stamp >= prev[0]:
             best[name] = (stamp, r)
