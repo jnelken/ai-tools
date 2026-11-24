@@ -812,15 +812,9 @@ def sync_deferral_tickets(st, findings, quota, next_step, note, issues=None):
         try:
             st["ticket_meta_at"] = time.time()
             for ident, fs in ticketed.items():
-                if ident in owned:
-                    # Recovery reads the description — rewrite through the single owner.
-                    body = rewrite_ticket_description(
-                        st, ident, fs, quota=quota, next_step=next_step, issues=issues)
-                else:
-                    merged, status, owners = ticket_description_payload(
-                        st, fs, ident, issues=issues)
-                    body = followticket.description(st, merged, quota, next_step,
-                                                    finding_status=status, finding_owners=owners)
+                # Always rewrite metadata (owned or attached) so recovery sees every finding ID.
+                body = rewrite_ticket_description(
+                    st, ident, fs, quota=quota, next_step=next_step, issues=issues)
                 followticket.comment(ident, "advance-roadmap follow-up deferred again for quota.\n\n" + body)
             fresh = [f for f in findings if not f.get("ticket")]
             if fresh:
