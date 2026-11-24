@@ -444,7 +444,10 @@ def inline_corpus(files, max_bytes=CORPUS_PROMPT_MAX_BYTES, stamps=None):
         overhead = len(header.encode("utf-8")) + len(footer.encode("utf-8"))
         room = max_bytes - used - overhead
         if room <= 0:
-            parts.append(f"### {path}\n(truncated: corpus budget exhausted)\n")
+            # Never push past the advertised UTF-8 cap; omit the notice when it would not fit.
+            notice = f"### {path}\n(truncated: corpus budget exhausted)\n"
+            if used + len(notice.encode("utf-8")) <= max_bytes:
+                parts.append(notice)
             break
         try:
             # Pass room so stamp-filtered runs.jsonl stops collecting once the budget fills.

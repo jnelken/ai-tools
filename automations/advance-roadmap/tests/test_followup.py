@@ -2628,32 +2628,53 @@ class FollowupTest(unittest.TestCase):
         self.assertFalse(fu.awaits_repair(st))
 
     def test_repair_resume_with_only_analyst_rows_left_does_not_rebuild(self):
-        """Mid-flight review resume must not feed analyst titles to the builder when det rows are done."""
+        """Mid-flight review resume must finish review/land without feeding analyst titles to the builder."""
         import followup as fu
-        fu.ROOT = self.root
-        fu.STATE = self.root / "followups"
-        os.environ["ADVANCE_ROADMAP_ROOT"] = str(self.root)
-        key = "tooling-analyst-resume"
-        d = self.root / "followups" / key
-        d.mkdir(parents=True)
-        det = {"id": "bbbbbbbbbbbb", "title": "deterministic", "status": "duplicate",
-               "kind": "misfiring-automation", "repo": "ai-tools", "source": "scan"}
+        self.shipped_item("20261014-050000")
+        self.run_followup("hook", "item-done", "--stamp", "20261014-050000")
+        self.run_followup("drain")  # scan without repair so findings exist
+        key = "cleanup-20261014-050000"
+        st = self.state(key)
+        self.assertTrue(st["findings"])
+        det = {**st["findings"][0], "status": "duplicate", "source": "scan"}
         analyst = {"id": "aaaaaaaaaaaa", "title": self.ANALYST_FINDING["title"], "status": "open",
-                   "source": "analyst", "kind": "analyst", "repo": "ai-tools"}
-        st = {"key": key, "stage": "tooling-hardening", "repo": "ai-tools", "status": "ready",
-              "findings": [det, analyst], "non_findings": [], "scanned": True,
-              "next": {"step": "review", "round": 1}, "branch": "roadmap/x",
-              "builder_provider": "cursor", "attempts": 0, "owned_tickets": []}
-        (d / "state.json").write_text(json.dumps(st))
-        # Force the resume path: repair on, no Linear, lock held elsewhere so we observe todo filter
-        # via repair_todo / the empty-todo report rather than launching a builder.
+                   "source": "analyst", "kind": "analyst", "repo": st["repo"]}
+        st.update(
+            status="ready",
+            next={"step": "review", "round": 1},
+            branch="roadmap/followup-cleanup-20261014-050000",
+            pr_url="https://github.com/jnelken/demo/pull/7",
+            findings=[det, analyst],
+            builder_provider="cursor",
+            validation={"reviews": []},
+            sessions=[],
+            scanned=True,
+        )
+        (self.root / "followups" / key / "state.json").write_text(json.dumps(st))
         self.assertEqual(fu.repair_todo(st["findings"]), [])
-        # Simulate the process() resume branch decision.
-        fs = st["findings"]
-        todo = fu.repair_todo(fs)
-        self.assertEqual(todo, [])
-        non_analyst = [f for f in fs if f.get("source") != "analyst" and f.get("status") != "duplicate"]
-        self.assertEqual(non_analyst, [])
+        # process() path via drain: preserve review/land (no builder brief with analyst titles).
+        self.set("stub-review.json", {"verdicts": ["clean"]})
+        self.run_followup("drain", env=self.repair_env())
+        st = self.state(key)
+        self.assertEqual(self.calls("worker"), [])  # never feed analyst titles to the builder
+        self.assertNotIn("repair-empty", [r.get("kind") for r in self.report()])
+        self.assertNotEqual(st["status"], "done", st)  # never silent-done while PR mid-flight
+        self.assertEqual((st.get("next") or {}).get("step"), "review", st)
+        # Entered the repair review path (feasibility snapshot), not the empty-todo exit.
+        self.assertTrue(any(s.get("step") == "review" for s in st.get("usage_snapshots") or []), st)
+
+    def test_inline_corpus_truncation_notice_stays_within_byte_cap(self):
+        import followanalyst
+        a = self.root / "a.txt"
+        b = self.root / "b.txt"
+        a.write_text("A" * 80)
+        b.write_text("B" * 80)
+        # Cap that fits file a (with header/footer) but leaves no room for file b's body.
+        out, _ = followanalyst.inline_corpus([a, b], max_bytes=100)
+        self.assertLessEqual(len(out.encode("utf-8")), 100)
+        self.assertIn("A", out)
+        # Either omit b entirely or include a notice that still fits — never exceed the cap.
+        self.assertNotIn("B" * 10, out)
 
     def test_analyst_runs_inside_corpus_sandbox(self):
         stamp = "20261013-103004"
