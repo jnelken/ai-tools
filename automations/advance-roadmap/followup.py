@@ -682,11 +682,17 @@ def recover_tickets():
                     if f["id"] in (meta.get("finding_ids") or []) and f.get("ticket") != ident:
                         f["ticket"] = ident
                         changed = True
-                # Restore only this owner's open findings (never a sibling's).
-                known = {f["id"] for f in st.get("findings") or []}
-                added = False
+                # Restore only this owner's open findings (never a sibling's). Reopen locals that
+                # Linear still marks open so a Done stage with a stale "fixed" row resumes.
+                known = {f["id"]: f for f in st.get("findings") or []}
+                needs_work = False
                 for fid in todo_ids:
                     if fid in known:
+                        if known[fid].get("status") in ("fixed", "duplicate", DONE):
+                            known[fid]["status"] = "deferred"
+                            known[fid]["ticket"] = ident
+                            needs_work = True
+                            changed = True
                         continue
                     st.setdefault("findings", []).append({
                         "id": fid, "stage": st.get("stage") or stage_name, "repo": st.get("repo") or repo,
@@ -694,10 +700,9 @@ def recover_tickets():
                         "status": "deferred", "ticket": ident,
                         "evidence": [{"source": ident, "quote": issue.get("title")}],
                     })
-                    known.add(fid)
-                    added = True
+                    needs_work = True
                     changed = True
-                if added and st.get("status") in (DONE, BLOCKED) and st.get("status") != RUNNING:
+                if needs_work and st.get("status") in (DONE, BLOCKED) and st.get("status") != RUNNING:
                     st.update(status="deferred", next={"step": "build", "round": 1}, scanned=True)
                     changed = True
                 if changed:
@@ -964,15 +969,18 @@ def stage_repair_verified(ost):
 
 
 def finding_verified_fixed(fid, current=None, owner_key=None):
-    """A finding is fixed only after its owner (or the completing stage) verified repair end-to-end."""
-    allowed = {k for k in (owner_key, (current or {}).get("key")) if k}
+    """A finding is fixed only after end-to-end repair verification.
+
+    When metadata records an owner, only that owner's stage counts — the completing stage
+    cannot approve another stage's finding.
+    """
     seen = set()
     for ost in ([current] if current else []) + all_stages():
         key = ost.get("key")
         if key in seen:
             continue
         seen.add(key)
-        if allowed and key not in allowed:
+        if owner_key is not None and key != owner_key:
             continue
         if not stage_repair_verified(ost):
             continue
