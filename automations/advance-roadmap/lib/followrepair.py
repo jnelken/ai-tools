@@ -413,14 +413,17 @@ def _interpret_builder_artifacts(st, branch, rnd, rc, status_path, result_path):
 
 
 def _adopt_finished_build(st, branch, rnd):
-    """Reuse the newest *unconsumed* finished build-r{rnd}-* dir (timeout/reap recovery)."""
+    """Reuse the newest *unconsumed* finished build-r{rnd}-* dir (timeout/reap recovery).
+
+    Quota / missing-CLI builders finish with worker-status.json and no result file; adopt those
+    too so a killed drain still records the deferral instead of re-dispatching."""
     dirs = sorted(stage_dir(st["key"]).glob(f"build-r{rnd}-a*"),
                   key=lambda path: path.stat().st_mtime, reverse=True)
     for bdir in dirs:
         if (bdir / "consumed").exists():
             continue
         exit_f, result, status = bdir / "worker.exit", bdir / "worker-result.json", bdir / "worker-status.json"
-        if not exit_f.exists() or not result.exists():
+        if not exit_f.exists() or not (status.exists() or result.exists()):
             continue
         try:
             rc = int(exit_f.read_text().strip())
@@ -744,6 +747,9 @@ def verify_deploy(slug, sha, repo_dir):
 
     `none` needs DEPLOY_NONE_AFTER_S of successful, empty API answers in a repo with no deploy
     config; a failed API call restarts that clock, and ending on one is `unverified`."""
+    # WORKER.md Step 7b: no deploy-looking signal within DEPLOY_NONE_AFTER_S and no
+    # vercel/netlify config → deploy: none. Affirmative "no deploy" evidence beyond that
+    # is not required; empty APIs in a configured repo stay pending/timeout instead.
     has_config = any((repo_dir / n).exists() for n in ("vercel.json", ".vercel", "netlify.toml"))
     start = time.time()
     absent_since = None

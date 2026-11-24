@@ -1730,6 +1730,30 @@ class FollowupTest(unittest.TestCase):
         self.assertEqual(self.calls("jlin"), [])
         self.assertIn("missing", self.report()[-1]["reason"])
 
+    def test_quota_status_without_result_is_adopted_after_drain_dies(self):
+        """A finished quota builder may leave only worker-status.json; adopt it, don't re-dispatch."""
+        self.shipped_item("20261014-050000")
+        self.run_followup("hook", "item-done", "--stamp", "20261014-050000")
+        key = "cleanup-20261014-050000"
+        st = self.state(key)
+        st.update(status="running", next={"step": "build", "round": 1}, attempts=1)
+        (self.root / "followups" / key / "state.json").write_text(json.dumps(st))
+        bdir = self.root / "followups" / key / "build-r1-a1"
+        bdir.mkdir(parents=True)
+        (bdir / "worker.exit").write_text("3\n")
+        (bdir / "worker-status.json").write_text(json.dumps({
+            "used": None, "limited": [{"provider": "cursor", "state": "limited"}],
+            "quota": {"role": "worker", "provider": "cursor", "reset_epoch": time.time() + 3600,
+                      "reset_at": "2026-10-14T12:00:00", "cause": "You've hit your usage limit"}}))
+        # No worker-result.json — the quota path does not write one.
+        self.assertFalse((bdir / "worker-result.json").exists())
+        self.run_followup("drain", env=self.repair_env())
+        st = self.state(key)
+        self.assertEqual(st["status"], "deferred", self.report())
+        self.assertEqual(st["quota"]["provider"], "cursor")
+        self.assertEqual(self.calls("worker"), [])  # adopted; never re-dispatched
+        self.assertTrue((bdir / "consumed").exists())
+
     def test_a_builder_that_outlives_its_timeout_blocks_every_retry_until_it_exits(self):
         self.shipped_item("20261014-050000")
         self.run_followup("hook", "item-done", "--stamp", "20261014-050000")
