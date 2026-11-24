@@ -256,6 +256,33 @@ plus notes), written only through [`lib/runmemory.py`](advance-roadmap/lib/runme
 directory and rewrites atomically so concurrent runs can't lose each other's rows. `has-stamp` is what
 Step 0 uses to tell a finished run from a killed one.
 
+### Follow-ups (deterministic report-only — DEV-232 Phase B slice 2)
+
+[`followup.py`](advance-roadmap/followup.py) reports what a finished run's records prove went wrong
+(deterministic recognition tests in [`lib/followscan.py`](advance-roadmap/lib/followscan.py); no
+model). It does **not** repair, open PRs, merge, install, or write Linear — those arrive in slice 3.
+
+| Stage | Trigger | Corpus |
+| --- | --- | --- |
+| **project-cleanup** | item `shipped` / `shipped-deploy-failed`, repo quiescent | run dir + review markers in the repo |
+| **tooling-hardening** | batch / lone run / conductor session, after every child + cleanup finishes | those runs' rows, orch results, review logs, worker output, verdicts, follow-up blockers |
+
+Non-shipped outcomes are never cleanup triggers. Scans are pure reads of the original files
+(stamp-scoped validation for `runs.jsonl`). Tooling waits indefinitely; `status` shows age + reason.
+
+**Hooks.** `daily_batch.py` queues cleanup on ship, drains per repo once its threads stop, then
+queues/drains the batch tooling pass (isolated: raise/hang/kill cannot change batch outcomes).
+`run.sh` EXIT trap does the same for a lone chain. Conductor: see its SKILL.md. Idempotent hooks,
+kernel stage claims, interrupted `running` stages resume. `ADVANCE_ROADMAP_FOLLOWUPS=0` disables.
+
+```sh
+F=~/.claude/automations/advance-roadmap/followup.py
+python3 $F status [--origin batch-2026-10-14] [--json]
+python3 $F drain [--repo R] [--wait-s 600]
+```
+
+Tests: `tests/test_followup.py` (Oct 13 replay in `tests/fixtures/oct13`).
+
 ### Run record and failure alert
 
 Every run — shipped, blocked, skipped, crashed — appends exactly one row to `runs.jsonl`. `run.sh`
@@ -364,7 +391,7 @@ provider with no reading at all is available with gate state `unknown` until it 
 The same gate applies to **every role**: the planner (`run.sh`, `planapproval.py`), the worker
 (`worker.sh` checks each provider before trying it, an explicit `--providers` list included, and
 exits 3 when none remain) and the reviewer (`review.sh`). Check one by hand with
-`usage.py gate --role orchestrator|worker|reviewer --provider P` (exit 0 available, 3 gated; any other code is a usage.py failure, which never blocks).
+`usage.py gate --role orchestrator|worker|reviewer|approver --provider P` (exit 0 available, 3 gated; any other code is a usage.py failure, which never blocks).
 
 | Provider | Source (in order) | Gate |
 | --- | --- | --- |

@@ -1371,6 +1371,142 @@ raise SystemExit(daily_batch.main())
         self.assertFalse(self.state()['summary_posted'])
         self.assertEqual(self.state()['phase'], 'done')
 
+    def fake_followup(self):
+        (self.root / 'followup.py').write_text(
+            "import json, os, sys, time\n"
+            "root, a = os.environ['ADVANCE_ROADMAP_ROOT'], sys.argv[1:]\n"
+            "def note(kind):\n"
+            "    with open(root + '/followup-calls.jsonl', 'a') as f:\n"
+            "        f.write(json.dumps({'kind': kind, 'args': a, 'time': time.time(),\n"
+            "                            'lane': os.environ.get('ADVANCE_ROADMAP_LANE')}) + '\\n')\n"
+            "note('start')\n"
+            "if a[0] == 'drain':\n"
+            "    time.sleep(.2)\n"
+            "    note('end')\n"
+            "if a[0] == 'status' and '--json' in a:\n"
+            "    print(json.dumps([{'key': 'cleanup-x', 'status': 'done', 'findings': 1, 'open_findings': 1}]))\n"
+            "elif a[0] == 'status':\n"
+            "    print('Follow-ups: 1 follow-up(s) reported (1 finding(s), 1 open).')\n")
+
+    def followup_calls(self):
+        path = self.root / 'followup-calls.jsonl'
+        return [json.loads(l) for l in path.read_text().splitlines()] if path.exists() else []
+
+    def test_follow_ups_wait_for_every_sibling_then_tooling_runs_last(self):
+        self.fake_followup()
+        events = self.threaded(FAKE_VERDICT='serialize')
+        calls = self.followup_calls()
+        origin = f"batch-{self.state()['date']}"
+        done = [c for c in calls if c['args'][:2] == ['hook', 'item-done'] and c['kind'] == 'start']
+        self.assertEqual(sorted(c['args'][3] for c in done), sorted(i['stamp'] for i in self.state()['queue']))
+        self.assertTrue(all(c['args'][c['args'].index('--origin') + 1] == origin and c['lane'] is None
+                            for c in calls if c['args'][0] == 'hook'))
+        [cleanup] = [c for c in calls if c['args'][:3] == ['drain', '--repo', 'a'] and c['kind'] == 'start']
+        # Thread 1 shipped first, but its repo's cleanup waits for thread 2 (serialized after it).
+        self.assertGreaterEqual(cleanup['time'], max(e['time'] for e in events if e['kind'] == 'work-end'))
+        cleanup_end = next(c['time'] for c in calls if c['args'][:3] == ['drain', '--repo', 'a'] and c['kind'] == 'end')
+        [run_end] = [c for c in calls if c['args'][:2] == ['hook', 'run-end']]
+        self.assertGreaterEqual(run_end['time'], cleanup_end)
+        self.assertEqual(run_end['args'].count('--stamp'), 2)
+        [final] = [c for c in calls if c['args'][:2] == ['drain', '--origin'] and c['kind'] == 'start']
+        self.assertGreater(final['time'], run_end['time'])
+        state = self.state()
+        self.assertEqual(state['phase'], 'done')
+        self.assertEqual(state['followups'], [{'key': 'cleanup-x', 'status': 'done', 'findings': 1, 'open_findings': 1}])
+        self.assertEqual(state['followups_line'], 'Follow-ups: 1 follow-up(s) reported (1 finding(s), 1 open).')
+
+    def test_follow_ups_off_runs_no_hooks(self):
+        self.fake_followup()
+        self.env['ADVANCE_ROADMAP_FOLLOWUPS'] = '0'
+        self.repo('a')
+        self.run_batch()
+        self.assertEqual(self.followup_calls(), [])
+        self.assertNotIn('followups', self.state())
+
+    def test_unshipped_items_queue_no_cleanup(self):
+        self.fake_followup()
+        self.env['FAKE_FAILED_REPO'] = 'a'
+        self.repo('a')
+        self.run_batch()
+        calls = self.followup_calls()
+        self.assertFalse([c for c in calls if c['args'][:2] == ['hook', 'item-done']])
+        self.assertFalse([c for c in calls if '--repo' in c['args']])
+        self.assertTrue([c for c in calls if c['args'][:2] == ['hook', 'run-end']])
+
+    def test_hung_cleanup_deadline_frees_lane_for_one_lane_batch(self):
+        """Hung cleanup is reaped mid-loop so a one-lane batch still reaches finish_followups."""
+        (self.root / 'followup.py').write_text(
+            "import json,os,pathlib,sys,time\n"
+            "r,a=os.environ['ADVANCE_ROADMAP_ROOT'],sys.argv[1:]\n"
+            "open(r+'/followup-calls.jsonl','a').write(json.dumps({'args':a})+'\\n')\n"
+            "if a[0]=='drain' and '--repo' in a:\n"
+            " repo=a[a.index('--repo')+1]; d=pathlib.Path(r)/'followups'/f'cleanup-{repo}'\n"
+            " d.mkdir(parents=True); (d/'state.json').write_text(json.dumps(\n"
+            "  {'key':f'cleanup-{repo}','stage':'project-cleanup','repo':repo,"
+            "'status':'running','blockers':[]}))\n"
+            " time.sleep(120)\n"
+            "if a[0]=='status' and '--json' in a: print('[]')\n"
+            "elif a[0]=='status': print('Follow-ups: none.')\n")
+        self.env['ADVANCE_ROADMAP_FOLLOWUP_TIMEOUT_S'] = '0.4'
+        for name in 'ab':
+            self.repo(name)
+        self.run_batch(lanes=1)
+        state = self.state()
+        self.assertEqual(state['phase'], 'done')
+        self.assertEqual(sorted((i['repo'], i['outcome']) for i in state['queue']),
+                         [('a', 'shipped'), ('b', 'shipped')])
+        st = json.loads((self.root / 'followups/cleanup-a/state.json').read_text())
+        self.assertEqual((st['status'], st['blockers'][-1]['kind']), ('retryable', 'timeout'))
+
+    def test_cleanup_launch_error_preserves_batch_outcome(self):
+        """Log-open/launch errors stay local; batch still finishes shipped."""
+        self.fake_followup()
+        self.repo('a')
+        (self.root / 'logs').mkdir(exist_ok=True)
+        # Match Batch.origin (= batch-<slot>) so open(..., "a") raises IsADirectoryError.
+        slot = daily_batch.scheduled_slot(datetime.now()).strftime("%Y-%m-%d-%H%M")
+        (self.root / 'logs' / f'followup-batch-{slot}.log').mkdir()
+        self.run_batch()
+        state = self.state()
+        self.assertEqual((state['phase'], [i['outcome'] for i in state['queue']],
+                          state['queue'][0].get('followup')),
+                         ('done', ['shipped'], 'launch-failed'))
+        self.assertIn('cleanup-launch', (self.root / 'followups/report.jsonl').read_text())
+
+    def test_reap_group_sigkills_survivors_after_leader_exits(self):
+        """Leader exit alone must not release the claim while a descendant ignores SIGTERM."""
+        import time
+        child_pid = self.root / 'orphan.pid'
+        child_script = self.root / 'orphan.py'
+        child_script.write_text(
+            "import os, signal, time\n"
+            "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+            f"open({str(child_pid)!r}, 'w').write(str(os.getpid()))\n"
+            "time.sleep(120)\n"
+        )
+        leader = subprocess.Popen(
+            [sys.executable, '-c',
+             "import subprocess, sys, time\n"
+             f"subprocess.Popen([sys.executable, {str(child_script)!r}])\n"
+             "time.sleep(120)\n"],
+            start_new_session=True)
+        deadline = time.time() + 3
+        while time.time() < deadline and not child_pid.exists():
+            time.sleep(0.05)
+        self.assertTrue(child_pid.exists(), 'orphan child never started')
+        pid = int(child_pid.read_text())
+        # Mimic the old bug surface: leader dies on SIGTERM within grace; child survives SIGTERM.
+        daily_batch._reap_group(leader, grace=0.3)
+        self.assertIsNotNone(leader.poll())
+        for _ in range(40):
+            try:
+                os.kill(pid, 0)
+            except OSError:
+                break
+            time.sleep(0.05)
+        else:
+            self.fail(f'orphan pid {pid} still alive after _reap_group')
+        self.assertFalse(daily_batch._group_alive(leader.pid))
 
     def test_dashboard_schedule_preserves_history_and_uses_two_current_slots(self):
         with patch.dict(os.environ, self.env):

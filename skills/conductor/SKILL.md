@@ -86,6 +86,7 @@ don't poll):
   --result-file "<dir>/worker-result.json" --status-file "<dir>/worker-status.json"
 ```
 
+Name `<dir>` for the run's stamp (`<scratch>/<stamp>/`); section 4's follow-ups find the run by it.
 `--providers cursor` pins the builder to Cursor. If Cursor is over its usage gate (95% of its
 pool), limited or missing, `worker.sh` exits `3` and says why in the status file's `limited` /
 `missing` lists; **ask the user** before failing over (`--providers "codex claude"`) —
@@ -119,6 +120,21 @@ with no logged review is flagged). Then tell the user plainly:
 
 On `failed`, `limit_hit` or an incomplete result, report what the log shows and ask how to proceed;
 never retry silently in a loop. Don't clean up the builder's branch.
+
+## 4. Follow-ups (end of the session — deterministic report-only)
+
+Same commands as the batch (`F=~/.claude/automations/advance-roadmap/followup.py`). Slice 2 is
+**report-only** (recognition tests, no model/repair/PRs/Linear).
+
+1. After each `shipped` / `shipped-deploy-failed` item:
+   `python3 $F hook item-done --stamp <stamp> --run-dir <dir> --origin conductor-<session stamp>`.
+2. When every builder has exited, queue tooling over each run dir (named for its stamp):
+   `python3 $F hook run-end --origin conductor-<session stamp> --run-dir <dir> [--run-dir …]`.
+   A conductor run counts finished once `worker-result.json` exists (no `runs.jsonl` row).
+3. `python3 $F drain --origin conductor-<session stamp> --wait-s 600` then
+   `python3 $F status --origin conductor-<session stamp>` (waiting stages show age + reason).
+
+Hooks are idempotent. Drain makes no model calls in slice 2.
 
 ## What this skill does not do
 
