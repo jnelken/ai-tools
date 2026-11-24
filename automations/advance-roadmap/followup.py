@@ -1094,17 +1094,34 @@ DEPLOY_OK = frozenset({"success", "none"})
 
 
 def stage_repair_verified(ost):
-    """True when a stage's repair landed with checks, a clean review, merge and deploy verified.
+    """True when a stage's repair landed with checks, a clean final review, merge and deploy.
 
-    Invariant: deploy success is only validation.deploy in {success, none}. A skipped, pending,
-    failed, error or unverified deploy never closes a ticket.
+    Invariant owner for the close gate (finish / retry_closes / recovery → ticket_close_verdict →
+    finding_verified_fixed → here):
+      - deploy success is only validation.deploy in {success, none}
+      - the final review for the merged revision must be clean (not merely some earlier clean)
+    A skipped/pending/failed deploy or a later findings review never closes a ticket.
     """
     v = ost.get("validation") or {}
     if not (ost.get("merge_commit") or ost.get("merged")):
         return False
     if v.get("checks") not in ("passed", "none"):
         return False
-    if not any(r.get("verdict") == "clean" for r in (v.get("reviews") or [])):
+    reviews = list(v.get("reviews") or [])
+    if not reviews:
+        return False
+    # Final review = highest round when present, else last entry (chronological append order).
+    def _round(r):
+        try:
+            return int(r.get("round"))
+        except (TypeError, ValueError):
+            return None
+    numbered = [( _round(r), i, r) for i, r in enumerate(reviews)]
+    if any(n is not None for n, _, _ in numbered):
+        final = max(numbered, key=lambda t: (-1 if t[0] is None else t[0], t[1]))[2]
+    else:
+        final = reviews[-1]
+    if final.get("verdict") != "clean":
         return False
     return v.get("deploy") in DEPLOY_OK
 

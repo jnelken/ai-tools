@@ -472,19 +472,36 @@ class FollowupTest(unittest.TestCase):
                                            "repo": "mailcruxh"}, repo="mailcruxh")
         self.assertIsNone(followticket.match([cross], finding))
 
-    def test_skipped_deploy_is_never_success(self):
-        """Invariant: validation.deploy must be success|none; skipped/error/pending never close."""
+    def test_stage_repair_verified_close_gate(self):
+        """Invariant owner: deploy in {success,none} and the final review verdict must be clean."""
         import followup as fu
-        for bad in ("skipped", "error", "pending", "failure", "unverified", "timeout"):
-            st = {"merge_commit": "abc", "validation": {
-                "checks": "passed", "reviews": [{"verdict": "clean"}], "deploy": bad}}
-            self.assertFalse(fu.stage_repair_verified(st), bad)
-        self.assertTrue(fu.stage_repair_verified({
-            "merge_commit": "abc", "validation": {
-                "checks": "passed", "reviews": [{"verdict": "clean"}], "deploy": "success"}}))
-        self.assertTrue(fu.stage_repair_verified({
-            "merged": True, "validation": {
-                "checks": "none", "reviews": [{"verdict": "clean"}], "deploy": "none"}}))
+        cases = [
+            ("deploy skipped", {"merge_commit": "abc", "validation": {
+                "checks": "passed", "reviews": [{"verdict": "clean", "round": 1}], "deploy": "skipped"}}, False),
+            ("deploy error", {"merge_commit": "abc", "validation": {
+                "checks": "passed", "reviews": [{"verdict": "clean"}], "deploy": "error"}}, False),
+            ("deploy pending", {"merge_commit": "abc", "validation": {
+                "checks": "passed", "reviews": [{"verdict": "clean"}], "deploy": "pending"}}, False),
+            ("deploy success", {"merge_commit": "abc", "validation": {
+                "checks": "passed", "reviews": [{"verdict": "clean"}], "deploy": "success"}}, True),
+            ("deploy none", {"merged": True, "validation": {
+                "checks": "none", "reviews": [{"verdict": "clean"}], "deploy": "none"}}, True),
+            ("clean then findings", {"merge_commit": "abc", "validation": {
+                "checks": "passed",
+                "reviews": [{"verdict": "clean", "round": 1}, {"verdict": "findings", "round": 2}],
+                "deploy": "success"}}, False),
+            ("findings then clean", {"merge_commit": "abc", "validation": {
+                "checks": "passed",
+                "reviews": [{"verdict": "findings", "round": 1}, {"verdict": "clean", "round": 2}],
+                "deploy": "success"}}, True),
+            ("clean then findings no rounds", {"merge_commit": "abc", "validation": {
+                "checks": "passed",
+                "reviews": [{"verdict": "clean"}, {"verdict": "findings"}],
+                "deploy": "success"}}, False),
+        ]
+        for name, st, want in cases:
+            with self.subTest(name):
+                self.assertEqual(fu.stage_repair_verified(st), want)
 
     def test_recovery_resumes_open_findings_at_build_not_under_a_sibling_pr(self):
         """A fresh machine reading partial-progress metadata must not review the completed PR."""
