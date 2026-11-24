@@ -41,6 +41,15 @@ CLAUDE_DENY_TOOLS = (
     "Read,Edit,Write,NotebookEdit,Bash,MultiEdit,Glob,Grep,"
     "WebFetch,WebSearch,Task,Agent,SendMessage,ListMcpResources,ReadMcpResource"
 )
+# Codex has no --tools "" equivalent; disable the features that expose shell/FS/browser tools.
+# (sandbox_permissions is unrecognized by current Codex — do not rely on it.)
+CODEX_DISABLE_FEATURES = (
+    "shell_tool",
+    "unified_exec",
+    "browser_use",
+    "computer_use",
+    "apps",
+)
 
 
 def enabled():
@@ -334,13 +343,14 @@ def run_analyst(st, provider, prompt, sandbox):
     tokens = [sys.executable, str(Path(__file__).resolve().parent / "tokens.py")]
     provider_result = None
     if provider == "codex":
-        # Workspace-scoped read-only invoke; corpus copies live only under sandbox/corpus/.
-        p = procrun.run(
-            [CODEX, "exec", "-o", str(final), "-s", "read-only", "-C", str(sandbox),
-             "--skip-git-repo-check",
-             "-c", "sandbox_permissions=[]",
-             prompt],
-            timeout=ANALYST_TIMEOUT_S, text=True, cwd=str(sandbox))
+        # Owner of Codex FS isolation: disable shell/exec/browser tools and pin -C to the
+        # labeled corpus sandbox. Opaque labels + no shell tools → no host-path reads.
+        argv = [CODEX, "exec", "-o", str(final), "-s", "read-only", "-C", str(sandbox),
+                "--skip-git-repo-check"]
+        for feat in CODEX_DISABLE_FEATURES:
+            argv.extend(["--disable", feat])
+        argv.append(prompt)
+        p = procrun.run(argv, timeout=ANALYST_TIMEOUT_S, text=True, cwd=str(sandbox))
         raw.write_text((p.stdout or "") + (p.stderr or ""))
         procrun.run(
             [*tokens, "codex", str(raw), "--role", "analyst",
@@ -348,7 +358,7 @@ def run_analyst(st, provider, prompt, sandbox):
             timeout=TOKENS_TIMEOUT_S, text=True)
         transcript = raw.read_text(errors="replace")
     else:
-        # No built-in tools / MCP — answer only from the inlined corpus in the prompt.
+        # Owner of Claude FS isolation: no file-read tools / MCP — answer from the paste only.
         p = procrun.run(
             [CLAUDE, "-p", prompt, "--permission-mode", "plan",
              "--tools", "",

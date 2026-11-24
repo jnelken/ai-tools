@@ -290,7 +290,8 @@ def jlin(args):
 
 
 def codex(args):
-    note("codex", args=args[:2], cwd=os.getcwd())
+    # Record full argv so tests can assert analyst isolation flags (--disable shell_tool, …).
+    note("codex", args=list(args), cwd=os.getcwd())
     try:
         print((ROOT / "stub-codex-transcript.txt").read_text())
     except OSError:

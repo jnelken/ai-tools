@@ -269,13 +269,14 @@ ai-tools install via the deploy clone's `install.sh`. `ADVANCE_ROADMAP_FOLLOWUP_
 the loop; without it, open findings stay parked. Quota stops call `defer()` (ticket create/update).
 Slice 3c adds an optional read-only **model analyst** ([`lib/followanalyst.py`](advance-roadmap/lib/followanalyst.py))
 over each stage's bounded corpus: Codex then Claude, usage-gated, process-group deadlines. The
-corpus is inlined into the prompt (UTF-8 byte-capped; `runs.jsonl` stamp-filtered); invoke cwd is an
-empty stage-local directory so corpus files are not on disk for the model; Claude is invoked with
+corpus is inlined into the prompt under opaque `corpus/NNN-…` labels (UTF-8 byte-capped;
+`runs.jsonl` stamp-filtered; oversized rows skipped before parse) and mirrored into a stage-local
+sandbox that contains only those labeled files. `run_analyst` owns provider isolation: Codex runs
+read-only in that sandbox with shell/exec/browser/apps features disabled; Claude is invoked with
 `--tools ""`, `--strict-mcp-config`, and an expanded denylist (no Read/Bash/WebFetch/Task/MCP).
-Absolute-path reads outside cwd are not OS-blocked. Findings are accepted only from a
-successful final answer and only when every cited quote verifies in an allowed corpus file; rejected
-or unavailable analyst output never drops deterministic findings.
-`ADVANCE_ROADMAP_FOLLOWUP_ANALYST=0` disables it.
+Findings are accepted only from a successful final answer and only when every cited quote verifies
+in an allowed corpus file (labels remapped to real paths for verification); rejected or unavailable
+analyst output never drops deterministic findings. `ADVANCE_ROADMAP_FOLLOWUP_ANALYST=0` disables it.
 
 | Stage | Trigger | Corpus |
 | --- | --- | --- |

@@ -2714,6 +2714,11 @@ class FollowupTest(unittest.TestCase):
         self.assertTrue(calls)
         cwd = calls[0].get("cwd") or ""
         self.assertIn("corpus-sandbox", cwd)
+        # Owner policy: Codex FS tools disabled (shell/exec/browser/apps).
+        args = calls[0].get("args") or []
+        for feat in ("shell_tool", "unified_exec", "browser_use", "computer_use", "apps"):
+            self.assertIn(feat, args, calls[0])
+            self.assertEqual(args[args.index(feat) - 1], "--disable", calls[0])
 
     def test_analyst_malformed_findings_collection_preserves_deterministic(self):
         stamp = "20261013-103004"
