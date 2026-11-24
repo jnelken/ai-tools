@@ -82,61 +82,61 @@ def analyze(st, findings, files):
         return [], []
     files = [Path(f).resolve() for f in files]
     prompt = analyst_prompt(st, findings, files)
-    # Invariant (owner: analyze gate check): every path to run_analyst must see an
-    # available gate; an unreadable gate (None) is unavailable — fail closed.
-    # Dry-run owner: gate_one(..., readonly=True) — load saved state, never refresh/save.
-    limited, errored = [], []
-    provider = None
-    answer = ""
-    for provider in PROVIDERS:
-        gate = followrepair.gate_one("analyst", provider, readonly=bool(st.get("dry_run")))
-        st.setdefault("usage_snapshots", []).append({
-            "at": followrepair.now_iso(), "role": "analyst", "provider": provider, "gate": gate})
-        if gate is None or not gate.get("available"):
-            continue
-        try:
-            transcript, answer, exit_code, provider_result = run_analyst(
-                st, provider, prompt, sandbox)
-        except (OSError, subprocess.TimeoutExpired) as e:
-            # Launch/timeout on one provider must not skip an available fallback.
-            errored.append(provider)
-            st.setdefault("analyst_errors", []).append(
-                {"provider": provider, "at": followrepair.now_iso(), "error": f"{type(e).__name__}: {e}"})
-            continue
-        # Echoed banners in a successful final answer are not a live limit (shared live-limit rule).
-        banner = usagelib.live_limit_banner(
-            transcript, exit_code=exit_code, final_answer=answer, provider_result=provider_result)
-        if banner:
-            record_analyst_limit(st, provider, banner)
-            limited.append(provider)
-            continue
-        # Require a successful invoke before parsing findings (no leftover -o on a failed exit).
-        if exit_code != 0 or usagelib.provider_is_error(provider_result):
-            errored.append(provider)
-            continue
-        break
-    else:
-        if limited and not errored:
-            st["analyst"] = (
-                f"skipped: {' and '.join(limited)} hit "
-                f"{'their limits' if len(limited) > 1 else 'its limit'}")
-        elif errored:
-            bits = []
-            if limited:
-                bits.append(f"{' and '.join(limited)} hit limit")
-            bits.append(f"{' and '.join(errored)} failed")
-            st["analyst"] = "failed: " + "; ".join(bits)
+    try:
+        # Invariant (owner: analyze gate check): every path to run_analyst must see an
+        # available gate; an unreadable gate (None) is unavailable — fail closed.
+        # Dry-run owner: gate_one(..., readonly=True) — load saved state, never refresh/save.
+        limited, errored = [], []
+        provider = None
+        answer = ""
+        for provider in PROVIDERS:
+            gate = followrepair.gate_one("analyst", provider, readonly=bool(st.get("dry_run")))
+            st.setdefault("usage_snapshots", []).append({
+                "at": followrepair.now_iso(), "role": "analyst", "provider": provider, "gate": gate})
+            if gate is None or not gate.get("available"):
+                continue
+            try:
+                transcript, answer, exit_code, provider_result = run_analyst(
+                    st, provider, prompt, sandbox)
+            except (OSError, subprocess.TimeoutExpired) as e:
+                # Launch/timeout on one provider must not skip an available fallback.
+                errored.append(provider)
+                st.setdefault("analyst_errors", []).append(
+                    {"provider": provider, "at": followrepair.now_iso(), "error": f"{type(e).__name__}: {e}"})
+                continue
+            # Echoed banners in a successful final answer are not a live limit (shared live-limit rule).
+            banner = usagelib.live_limit_banner(
+                transcript, exit_code=exit_code, final_answer=answer, provider_result=provider_result)
+            if banner:
+                record_analyst_limit(st, provider, banner)
+                limited.append(provider)
+                continue
+            # Require a successful invoke before parsing findings (no leftover -o on a failed exit).
+            if exit_code != 0 or usagelib.provider_is_error(provider_result):
+                errored.append(provider)
+                continue
+            break
         else:
-            st["analyst"] = "skipped: no analyst under its usage gate"
-        return [], []
-    # Findings come only from the final answer: the transcript echoes the prompt's example fence.
-    m = re.findall(r"```" + ANALYST_FENCE + r"\s*\n(.*?)\n```", answer or "", re.S)
-    try:
-        doc = json.loads(m[-1]) if m else {}
-    except ValueError:
-        doc = {}
-    st["analyst"] = f"{provider}: {'answered' if m else 'no findings block'}"
-    try:
+            if limited and not errored:
+                st["analyst"] = (
+                    f"skipped: {' and '.join(limited)} hit "
+                    f"{'their limits' if len(limited) > 1 else 'its limit'}")
+            elif errored:
+                bits = []
+                if limited:
+                    bits.append(f"{' and '.join(limited)} hit limit")
+                bits.append(f"{' and '.join(errored)} failed")
+                st["analyst"] = "failed: " + "; ".join(bits)
+            else:
+                st["analyst"] = "skipped: no analyst under its usage gate"
+            return [], []
+        # Findings come only from the final answer: the transcript echoes the prompt's example fence.
+        m = re.findall(r"```" + ANALYST_FENCE + r"\s*\n(.*?)\n```", answer or "", re.S)
+        try:
+            doc = json.loads(m[-1]) if m else {}
+        except ValueError:
+            doc = {}
+        st["analyst"] = f"{provider}: {'answered' if m else 'no findings block'}"
         return accept_findings(
             st, findings, files, doc if isinstance(doc, dict) else {}, provider=provider)
     finally:
