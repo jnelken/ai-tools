@@ -2497,6 +2497,42 @@ class FollowupTest(unittest.TestCase):
         self.assertTrue(doc["findings"])  # deterministic findings remain
         self.assertNotIn(self.ANALYST_FINDING["title"], [f["title"] for f in doc["findings"]])
 
+    def test_analyst_rejects_non_string_evidence_source_without_raising(self):
+        stamp = "20261013-103004"
+        (self.root / "runs" / stamp).mkdir(parents=True)
+        (self.root / "runs.jsonl").write_text(json.dumps(json.loads((FIXTURES / "runs-row.json").read_text())) + "\n")
+        bad = {"title": "typed wrong", "kind": "analyst",
+               "evidence": [{"source": 12345, "quote": "the orchestrator hit its session limit before triage"}]}
+        (self.root / "stub-analyst.txt").write_text(
+            "```FOLLOWUP_FINDINGS_JSON\n" + json.dumps({"findings": [bad]}) + "\n```\n")
+        p = self.run_followup("scan", "--stage", "tooling", "--origin", "batch-2026-10-13", "--stamp", stamp,
+                              env={"ADVANCE_ROADMAP_FOLLOWUP_ANALYST": "1"})
+        doc = json.loads(p.stdout)
+        self.assertEqual(doc["analyst"], "codex: answered")
+        self.assertNotIn("typed wrong", [f["title"] for f in doc["findings"]])
+        self.assertTrue(any(n["title"] == "typed wrong" and "rejected" in n["why"] for n in doc["non_findings"]))
+
+    def test_analyst_sandbox_runs_jsonl_keeps_only_stage_stamps(self):
+        import followanalyst
+        import followrepair
+        stamp = "20261013-103004"
+        other = "20261012-999999"
+        row = json.loads((FIXTURES / "runs-row.json").read_text())
+        (self.root / "runs.jsonl").write_text(
+            json.dumps({**row, "stamp": other, "detail": "unrelated historical quote for another stage"}) + "\n"
+            + json.dumps(row) + "\n")
+        os.environ["ADVANCE_ROADMAP_ROOT"] = str(self.root)
+        followrepair.ROOT = self.root
+        followrepair.STATE = self.root / "followups"
+        st = {"key": "sandbox-test", "children": [stamp], "stage": "tooling-hardening"}
+        (self.root / "followups" / st["key"]).mkdir(parents=True)
+        sandbox, mapping = followanalyst.materialize_corpus_sandbox(st, [self.root / "runs.jsonl"])
+        sand_runs = next(Path(p) for p in mapping if Path(p).name.endswith("runs.jsonl"))
+        text = sand_runs.read_text()
+        self.assertIn(stamp, text)
+        self.assertNotIn("unrelated historical quote for another stage", text)
+        self.assertNotIn(other, text)
+
 
 if __name__ == "__main__":
     unittest.main()

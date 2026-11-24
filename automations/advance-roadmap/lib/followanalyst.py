@@ -45,20 +45,48 @@ def corpus_stamps(st):
     return list(children) if children else None
 
 
+def _resolve_source(source):
+    """Resolved path string, or None when the value is not a usable path string."""
+    if not isinstance(source, str) or not source.strip():
+        return None
+    try:
+        return str(Path(source).resolve())
+    except (OSError, TypeError, ValueError):
+        return None
+
+
+def _copy_runs_jsonl_for_stamps(src, dest, stamps):
+    """Write only runs.jsonl rows whose stamp is in the stage's set."""
+    wanted = set(stamps)
+    lines = []
+    for line in followscan.iter_jsonl_lines(src):
+        try:
+            if json.loads(line).get("stamp") in wanted:
+                lines.append(line if line.endswith("\n") else line + "\n")
+        except ValueError:
+            continue
+    dest.write_text("".join(lines))
+
+
 def materialize_corpus_sandbox(st, files):
     """Copy only the corpus into a stage-local sandbox. Returns (sandbox_dir, sandbox→original map).
 
     Owner helper for the bounded-corpus policy in run_analyst: prompt paths and cwd/-C target.
+    For runs.jsonl, copy only rows for this stage's stamps so unrelated runs never enter the sandbox.
     """
     sandbox = followrepair.stage_dir(st["key"]) / "corpus-sandbox"
     if sandbox.exists():
         shutil.rmtree(sandbox)
     sandbox.mkdir(parents=True)
+    stamps = corpus_stamps(st)
     mapping = {}
     for i, src in enumerate(files):
         src = Path(src).resolve()
         dest = (sandbox / f"{i:03d}-{src.name}").resolve()
-        shutil.copy2(src, dest)
+        if src.name == "runs.jsonl" and stamps:
+            _copy_runs_jsonl_for_stamps(src, dest, stamps)
+        else:
+            shutil.copy2(src, dest)
         mapping[str(dest)] = src
     return sandbox, mapping
 
@@ -68,9 +96,8 @@ def to_sandbox_evidence(raw_ev, mapping):
     reverse = {str(orig.resolve()): sand for sand, orig in mapping.items()}
     out = []
     for e in raw_ev:
-        try:
-            src = str(Path(e.get("source") or "").resolve())
-        except OSError:
+        src = _resolve_source(e.get("source"))
+        if src is None:
             return None
         if src in mapping:
             out.append({**e, "source": src})
@@ -85,7 +112,9 @@ def to_original_evidence(raw_ev, mapping):
     """Rewrite sandbox evidence sources to the original corpus paths."""
     out = []
     for e in raw_ev:
-        src = str(Path(e.get("source") or "").resolve())
+        src = _resolve_source(e.get("source"))
+        if src is None:
+            return None
         original = mapping.get(src)
         if original is None:
             return None
@@ -204,6 +233,12 @@ def accept_findings(st, findings, files, doc, mapping=None, provider=None):
             if remapped is None:
                 rejected.append(followscan.non_finding(
                     raw["title"], "rejected: its evidence is not in the corpus", check_ev))
+                continue
+            # Re-check on originals so runs.jsonl stamp scope still applies after remap.
+            originals = list(mapping.values())
+            if not all(followscan.evidence_holds(e, originals, stamps) for e in remapped):
+                rejected.append(followscan.non_finding(
+                    raw["title"], "rejected: its evidence is not in the corpus", remapped))
                 continue
             raw_ev = remapped
         else:
