@@ -468,7 +468,8 @@ def inline_corpus(files, max_bytes=CORPUS_PROMPT_MAX_BYTES, stamps=None):
         pasted[str(path)] = body
         parts.append(f"{header}{body}{footer}")
         used += len(parts[-1].encode("utf-8"))
-    return "\n".join(parts), pasted
+    # Parts already end in a newline; do not insert an uncounted separator between files.
+    return "".join(parts), pasted
 
 
 def quote_in_paste(quote, body):

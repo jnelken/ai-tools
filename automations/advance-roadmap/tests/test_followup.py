@@ -2676,6 +2676,32 @@ class FollowupTest(unittest.TestCase):
         # Either omit b entirely or include a notice that still fits — never exceed the cap.
         self.assertNotIn("B" * 10, out)
 
+    def test_inline_corpus_multi_file_join_stays_within_byte_cap(self):
+        """Adjacent file sections must not insert an uncounted newline past the budget."""
+        import followanalyst
+        files = []
+        for name, ch in (("a.txt", "A"), ("b.txt", "B")):
+            p = self.root / name
+            p.write_text(ch * 20)
+            files.append(p)
+        # Budget large enough for both bodies+headers if join is "".join, but an extra
+        # separator newline between parts would push a naive "\\n".join over the edge.
+        header_a = f"### {files[0].resolve()}\n```\n"
+        footer = "\n```\n"
+        body_a = "A" * 20
+        body_b = "B" * 20
+        header_b = f"### {files[1].resolve()}\n```\n"
+        exact = (
+            len((header_a + body_a + footer).encode("utf-8"))
+            + len((header_b + body_b + footer).encode("utf-8"))
+        )
+        out, _ = followanalyst.inline_corpus(files, max_bytes=exact)
+        self.assertLessEqual(len(out.encode("utf-8")), exact)
+        self.assertIn("A", out)
+        self.assertIn("B", out)
+        # One extra separator would exceed exact; prove we did not insert it.
+        self.assertEqual(len(out.encode("utf-8")), exact)
+
     def test_analyst_runs_inside_corpus_sandbox(self):
         stamp = "20261013-103004"
         (self.root / "runs" / stamp).mkdir(parents=True)
