@@ -2571,6 +2571,28 @@ class FollowupTest(unittest.TestCase):
         self.assertNotIn("unrelated historical quote for another stage", text)
         self.assertNotIn(other, text)
 
+    def test_analyst_sandbox_prepare_failure_preserves_deterministic(self):
+        import followanalyst
+        stamp = "20261013-103004"
+        run = self.root / "runs" / stamp
+        run.mkdir(parents=True)
+        (run / "orchestrator-result.json").write_text((FIXTURES / "orchestrator-result.json").read_text())
+        (self.root / "runs.jsonl").write_text(json.dumps(json.loads((FIXTURES / "runs-row.json").read_text())) + "\n")
+        with mock.patch.object(followanalyst, "materialize_corpus_sandbox",
+                               side_effect=OSError("disk full")):
+            # In-process: patch is visible to followup.scan → analyze.
+            import followup as fu
+            os.environ["ADVANCE_ROADMAP_ROOT"] = str(self.root)
+            os.environ["ADVANCE_ROADMAP_FOLLOWUP_ANALYST"] = "1"
+            fu.ROOT = self.root
+            fu.STATE = self.root / "followups"
+            st = {"key": "scan-prep-fail", "stage": "tooling-hardening", "children": [stamp],
+                  "origin": "batch-x", "repo": "ai-tools", "usage_snapshots": []}
+            (self.root / "followups" / st["key"]).mkdir(parents=True)
+            fu.scan(st)
+        self.assertTrue(str(st.get("analyst") or "").startswith("failed: sandbox prepare"))
+        self.assertTrue(st.get("findings"))
+
     def test_analyst_rejects_when_evidence_builder_raises(self):
         # evidence_holds normalizes whitespace; evidence() needs an exact file substring.
         stamp = "20261013-103004"

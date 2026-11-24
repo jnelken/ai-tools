@@ -139,7 +139,12 @@ def analyze(st, findings, files):
     """
     if not enabled() or not files:
         return [], []
-    sandbox, mapping = materialize_corpus_sandbox(st, files)
+    try:
+        sandbox, mapping = materialize_corpus_sandbox(st, files)
+    except (OSError, ValueError, TypeError) as e:
+        # Optional analyst must never abort deterministic scan/recording.
+        st["analyst"] = f"failed: sandbox prepare: {e}"
+        return [], []
     sandbox_files = [Path(p) for p in mapping]
     prompt = analyst_prompt(st, findings, sandbox_files)
     # Invariant (owner: analyze gate check): every path to run_analyst must see an
