@@ -260,10 +260,12 @@ Step 0 uses to tell a finished run from a killed one.
 
 [`followup.py`](advance-roadmap/followup.py) reports what a finished run's records prove went wrong
 (deterministic recognition tests in [`lib/followscan.py`](advance-roadmap/lib/followscan.py); no
-model). Slice 3a adds Linear ticket recovery, dedupe, deferral and close via
-[`lib/followticket.py`](advance-roadmap/lib/followticket.py) (CLI only, never MCP). It does **not**
-repair, open PRs, merge, install, or run the analyst — those are slices 3b/3c.
-`ADVANCE_ROADMAP_FOLLOWUP_REPAIR=1` is reserved for 3b; until then recovered ticket work stays parked.
+model). Slice 3a adds Linear ticket **recovery, dedupe, deferral helpers and close** via
+[`lib/followticket.py`](advance-roadmap/lib/followticket.py) (CLI only, never MCP). New tickets are
+filed by `defer()` when repair hits a usage gate — that path lands with slice 3b; this slice parks
+open findings for repair without creating tickets on every scan. It does **not** repair, open PRs,
+merge, install, or run the analyst — those are slices 3b/3c. `ADVANCE_ROADMAP_FOLLOWUP_REPAIR=1` is
+reserved for 3b; until then recovered/parked ticket work stays ineligible.
 
 | Stage | Trigger | Corpus |
 | --- | --- | --- |

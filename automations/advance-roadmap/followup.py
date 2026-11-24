@@ -711,15 +711,9 @@ def dedupe(st, issues):
                 + followticket.render_findings([f]))
         try:
             followticket.comment(issue["identifier"], body)
-            # Merge this finding into the ticket description so recovery can see it across machines.
-            merged, status, owners = ticket_description_payload(
-                st, [f], issue["identifier"], issues=issues)
-            desc = followticket.description(st, merged, st.get("quota"),
-                                            next_step=f"see evidence on {issue['identifier']}",
-                                            finding_status=status, finding_owners=owners)
-            followticket.update_description(issue["identifier"], desc)
-            # Keep the drain's snapshot current for later merges in this pass.
-            issue["description"] = desc
+            rewrite_ticket_description(
+                st, issue["identifier"], [f], quota=st.get("quota"),
+                next_step=f"see evidence on {issue['identifier']}", issues=issues)
             posted.add(tag)
         except followticket.LinearError as e:
             report(st, "linear", f"could not add evidence to {issue['identifier']}: {e}")
@@ -739,11 +733,7 @@ def deferral_note(st, quota, step):
 
 
 def ticket_description_payload(st, findings, ident, issues=None, finding_status=None, finding_owners=None):
-    """Invariant owner for description writes: preserve every finding ID the ticket already tracks.
-
-    Paths: create (no prior meta → findings only), sync_deferral_tickets (merge), note_partial_progress
-    (passes explicit status/owners). Never replace a shared ticket's metadata with only this stage's rows.
-    """
+    """Merge findings with a ticket's current metadata: preserve every ID already tracked."""
     by_id = {f["id"]: dict(f) for f in findings if f.get("id")}
     status = dict(finding_status or {})
     owners = {fid: followticket.owner_fields(o) for fid, o in (finding_owners or {}).items()
@@ -767,12 +757,36 @@ def ticket_description_payload(st, findings, ident, issues=None, finding_status=
                 owners[fid] = followticket.owner_fields(prior_owners[fid])
     for f in by_id.values():
         status.setdefault(f["id"], f.get("status") or "open")
-    # This stage owns the findings it is deferring / progressing.
     for f in findings:
         if f.get("id"):
             owners.setdefault(f["id"], stage_owner_snapshot(st))
             status[f["id"]] = f.get("status") or status.get(f["id"]) or "open"
     return list(by_id.values()), status, owners
+
+
+def rewrite_ticket_description(st, ident, findings, quota=None, next_step="", validation=None,
+                               finding_status=None, finding_owners=None, issues=None):
+    """Invariant owner for every Linear description rewrite (dedupe, deferral, partial progress).
+
+    Fetches/uses a current open-issue snapshot, merges via ticket_description_payload, then writes.
+    create() starts a new ticket and does not go through here. Callers pass issues when they already
+    hold a drain snapshot; otherwise this fetches. Raises LinearError on read/write failure.
+    """
+    live = issues
+    if live is None:
+        live = followticket.fetch_open()
+    merged, status, owners = ticket_description_payload(
+        st, findings, ident, issues=live, finding_status=finding_status, finding_owners=finding_owners)
+    body = followticket.description(st, merged, quota, next_step, validation=validation,
+                                    finding_status=status, finding_owners=owners)
+    followticket.update_description(ident, body)
+    for issue in live:
+        if issue.get("identifier") == ident:
+            issue["description"] = body
+            break
+    st["ticket_body"] = body[:6000]
+    st["ticket_meta_at"] = time.time()
+    return body
 
 
 def sync_deferral_tickets(st, findings, quota, next_step, note, issues=None):
@@ -798,13 +812,15 @@ def sync_deferral_tickets(st, findings, quota, next_step, note, issues=None):
         try:
             st["ticket_meta_at"] = time.time()
             for ident, fs in ticketed.items():
-                merged, status, owners = ticket_description_payload(st, fs, ident, issues=issues)
-                body = followticket.description(st, merged, quota, next_step,
-                                                finding_status=status, finding_owners=owners)
                 if ident in owned:
-                    # Recovery on another machine reads the description — carry this deferral's
-                    # builder, branch and PR, not the first deferral's.
-                    followticket.update_description(ident, body)
+                    # Recovery reads the description — rewrite through the single owner.
+                    body = rewrite_ticket_description(
+                        st, ident, fs, quota=quota, next_step=next_step, issues=issues)
+                else:
+                    merged, status, owners = ticket_description_payload(
+                        st, fs, ident, issues=issues)
+                    body = followticket.description(st, merged, quota, next_step,
+                                                    finding_status=status, finding_owners=owners)
                 followticket.comment(ident, "advance-roadmap follow-up deferred again for quota.\n\n" + body)
             fresh = [f for f in findings if not f.get("ticket")]
             if fresh:
@@ -1018,20 +1034,13 @@ def note_partial_progress(st, ident, status_map, issues=None):
     if prev_meta is None:
         prev_meta = followticket.parse_meta(st.get("ticket_body") or "")
     owners = finding_owners_for_partial(st, status_map, prev_meta)
-    merged, status, owners = ticket_description_payload(
-        st, findings, ident, issues=issues, finding_status=status_map, finding_owners=owners)
-    st["ticket_meta_at"] = time.time()
-    desc = followticket.description(
-        st, merged, st.get("quota"),
-        next_step=f"repair remaining finding(s): {', '.join(remaining)}" if remaining else "close when ready",
-        validation=st.get("validation"), finding_status=status, finding_owners=owners)
     followticket.comment(ident, body)
-    followticket.update_description(ident, desc)
-    if issues is not None:
-        for issue in issues:
-            if issue.get("identifier") == ident:
-                issue["description"] = desc
-                break
+    rewrite_ticket_description(
+        st, ident, findings, quota=st.get("quota"),
+        next_step=(f"repair remaining finding(s): {', '.join(remaining)}"
+                   if remaining else "close when ready"),
+        validation=st.get("validation"), finding_status=status_map, finding_owners=owners,
+        issues=issues)
     log(f"{st['key']}: partial progress on {ident} (fixed {len(fixed_ids)}/{len(status_map)})")
 
 
@@ -1244,9 +1253,10 @@ def process(st, issues=None):
     quiet = st.get("non_findings") or []
     todo = [f for f in fs if f.get("status") in ("open", "deferred")]
     open_n = sum(1 for f in fs if f.get("status") == "open")
-    # Slice 3a: no repair. Open findings must stay resumable for 3b — never mark DONE over them.
+    # Slice 3a: recovery/dedupe/close + deferral helpers. Ticket *creation* via defer() is for
+    # quota stops during repair (slice 3b) — this drain parks open findings without filing new ones.
     if repair_enabled() and (todo or awaits_repair(st)):
-        # Slice 3b wires repair(st, ...) here.
+        # Slice 3b wires repair(st, ...) → defer()/finish() here.
         report(st, "repair-unwired", "ADVANCE_ROADMAP_FOLLOWUP_REPAIR=1 but repair is not in this slice")
         cas_status(st, RUNNING, BLOCKED)
         return
