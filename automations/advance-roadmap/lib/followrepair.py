@@ -339,8 +339,28 @@ def child_env(st, extra=None):
     return env
 
 
-def _consume_builder_artifacts(st, branch, rnd, rc, status_path, result_path):
-    """Interpret one finished builder's status/result files into a repair kind."""
+def _mark_build_consumed(bdir):
+    """Prevent a later drain from re-adopting this build dir on a retryable failure."""
+    try:
+        (bdir / "consumed").write_text(now_iso() + "\n")
+    except OSError:
+        pass
+
+
+def _consume_builder_artifacts(st, branch, rnd, rc, status_path, result_path, bdir=None):
+    """Interpret one finished builder's status/result files into a repair kind.
+
+    Always marks the build dir consumed so a retryable failure re-dispatches worker.sh
+    instead of looping on the same artifacts (and re-filing the same deferral).
+    """
+    try:
+        return _interpret_builder_artifacts(st, branch, rnd, rc, status_path, result_path)
+    finally:
+        if bdir is not None:
+            _mark_build_consumed(bdir)
+
+
+def _interpret_builder_artifacts(st, branch, rnd, rc, status_path, result_path):
     stat, res = read_json(status_path) or {}, read_json(result_path) or {}
     if stat.get("used"):
         st["builder_provider"] = stat["used"]
@@ -377,10 +397,12 @@ def _consume_builder_artifacts(st, branch, rnd, rc, status_path, result_path):
 
 
 def _adopt_finished_build(st, branch, rnd):
-    """Reuse the newest finished build-r{rnd}-* dir instead of re-dispatching worker.sh."""
+    """Reuse the newest *unconsumed* finished build-r{rnd}-* dir (timeout/reap recovery)."""
     dirs = sorted(stage_dir(st["key"]).glob(f"build-r{rnd}-a*"),
                   key=lambda path: path.stat().st_mtime, reverse=True)
     for bdir in dirs:
+        if (bdir / "consumed").exists():
+            continue
         exit_f, result, status = bdir / "worker.exit", bdir / "worker-result.json", bdir / "worker-status.json"
         if not exit_f.exists() or not result.exists():
             continue
@@ -388,7 +410,7 @@ def _adopt_finished_build(st, branch, rnd):
             rc = int(exit_f.read_text().strip())
         except ValueError:
             rc = 1
-        return _consume_builder_artifacts(st, branch, rnd, rc, status, result)
+        return _consume_builder_artifacts(st, branch, rnd, rc, status, result, bdir=bdir)
     return None
 
 
@@ -415,7 +437,7 @@ def run_builder(st, repo_dir, findings, rnd, chain, review_text):
         rc, why = run_in_worktree(st, ensure_worktree(st, repo_dir, branch), bdir, cmd)
     if why:
         return "failed", why
-    return _consume_builder_artifacts(st, branch, rnd, rc, status, result)
+    return _consume_builder_artifacts(st, branch, rnd, rc, status, result, bdir=bdir)
 
 
 def write_launcher(st, bdir, cmd, extra_env=None):

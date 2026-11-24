@@ -1874,6 +1874,20 @@ class FollowupTest(unittest.TestCase):
         self.assertEqual(self.calls("review"), [])
         self.assertFalse(any(c["args"][:2] == ["pr", "merge"] for c in self.calls("gh")))
 
+    def test_failed_builder_validation_redispatches_on_retry(self):
+        self.shipped_item("20261014-050000")
+        self.run_followup("hook", "item-done", "--stamp", "20261014-050000")
+        self.set("stub-worker.json", {"mode": "ok", "validation": "failed"})
+        self.run_followup("drain", env=self.repair_env())
+        st = self.state("cleanup-20261014-050000")
+        self.assertEqual(st["status"], "pending")
+        self.assertEqual(len(self.calls("worker")), 1)
+        self.assertTrue(list((self.root / "followups" / st["key"]).glob("build-*/consumed")))
+        self.set("stub-worker.json", {"mode": "ok"})
+        self.run_followup("drain", env=self.repair_env())
+        self.assertEqual(len(self.calls("worker")), 2)
+        self.assertEqual(self.state("cleanup-20261014-050000")["status"], "done", self.report())
+
     def test_skipped_deploy_check_is_not_success(self):
         self.shipped_item("20261014-050000")
         self.run_followup("hook", "item-done", "--stamp", "20261014-050000")
