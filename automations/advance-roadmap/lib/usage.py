@@ -1041,9 +1041,26 @@ def cmd_gate(args: argparse.Namespace) -> None:
 
     Default refreshes probes then saves. --readonly loads the saved file only (no refresh/save) —
     used by follow-up dry-run scans so `followup.py scan` does not mutate shared usage state.
+    Readonly fails closed when the saved file is missing or invalid (never invents empty_state).
     """
     root = Path(args.root)
-    state = load(root) if getattr(args, "readonly", False) else refresh(root)
+    if getattr(args, "readonly", False):
+        path = usage_path(root)
+        if not path.is_file():
+            gate = {"available": False, "state": "n/a",
+                    "reason": "no saved usage state for readonly gate", "reset_epoch": None}
+            print(json.dumps({"provider": args.provider, "role": args.role, **gate, "reset_at": None}))
+            sys.exit(GATED_EXIT)
+        try:
+            json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            gate = {"available": False, "state": "n/a",
+                    "reason": "saved usage state unreadable for readonly gate", "reset_epoch": None}
+            print(json.dumps({"provider": args.provider, "role": args.role, **gate, "reset_at": None}))
+            sys.exit(GATED_EXIT)
+        state = load(root)
+    else:
+        state = refresh(root)
     gate = provider_gate(state, args.provider, args.role)
     print(json.dumps({"provider": args.provider, "role": args.role, **gate,
                       "reset_at": epoch_to_iso(gate.get("reset_epoch"))}))

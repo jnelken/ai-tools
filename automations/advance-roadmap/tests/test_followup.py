@@ -2412,6 +2412,23 @@ class FollowupTest(unittest.TestCase):
         self.assertEqual(path.read_bytes(), before)
         self.assertEqual(path.stat().st_mtime_ns, mtime)
 
+    def test_readonly_gate_fails_closed_without_saved_usage(self):
+        import followrepair
+        import usage as usagelib
+        real_usage = ADV / "lib" / "usage.py"
+        (self.root / "lib" / "usage.py").write_text(real_usage.read_text())
+        followrepair.ROOT = self.root
+        path = usagelib.usage_path(self.root)
+        path.unlink(missing_ok=True)
+        gate = followrepair.gate_one("analyst", "codex", readonly=True)
+        self.assertIsNotNone(gate)
+        self.assertFalse(gate["available"])
+        # Malformed file also fails closed.
+        path.write_text("{not-json")
+        gate = followrepair.gate_one("analyst", "claude", readonly=True)
+        self.assertIsNotNone(gate)
+        self.assertFalse(gate["available"])
+
     def test_analyst_ignores_an_echoed_limit_banner_when_its_final_answer_succeeded(self):
         # Codex stdout quotes a prior corpus log's banner; -o still has a real findings fence.
         (self.root / "stub-codex-transcript.txt").write_text(
