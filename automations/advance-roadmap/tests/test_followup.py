@@ -473,31 +473,46 @@ class FollowupTest(unittest.TestCase):
         self.assertIsNone(followticket.match([cross], finding))
 
     def test_stage_repair_verified_close_gate(self):
-        """Invariant owner: deploy in {success,none} and the final review verdict must be clean."""
+        """Invariant owner: deploy ok, final review clean, and that review's SHA matches merge_commit."""
         import followup as fu
+        sha = "abc1234deadbeef"
+        clean = {"verdict": "clean", "head": sha}
         cases = [
-            ("deploy skipped", {"merge_commit": "abc", "validation": {
-                "checks": "passed", "reviews": [{"verdict": "clean", "round": 1}], "deploy": "skipped"}}, False),
-            ("deploy error", {"merge_commit": "abc", "validation": {
-                "checks": "passed", "reviews": [{"verdict": "clean"}], "deploy": "error"}}, False),
-            ("deploy pending", {"merge_commit": "abc", "validation": {
-                "checks": "passed", "reviews": [{"verdict": "clean"}], "deploy": "pending"}}, False),
-            ("deploy success", {"merge_commit": "abc", "validation": {
-                "checks": "passed", "reviews": [{"verdict": "clean"}], "deploy": "success"}}, True),
-            ("deploy none", {"merged": True, "validation": {
-                "checks": "none", "reviews": [{"verdict": "clean"}], "deploy": "none"}}, True),
-            ("clean then findings", {"merge_commit": "abc", "validation": {
+            ("deploy skipped", {"merge_commit": sha, "validation": {
+                "checks": "passed", "reviews": [{**clean, "round": 1}], "deploy": "skipped"}}, False),
+            ("deploy error", {"merge_commit": sha, "validation": {
+                "checks": "passed", "reviews": [clean], "deploy": "error"}}, False),
+            ("deploy pending", {"merge_commit": sha, "validation": {
+                "checks": "passed", "reviews": [clean], "deploy": "pending"}}, False),
+            ("deploy success", {"merge_commit": sha, "validation": {
+                "checks": "passed", "reviews": [clean], "deploy": "success"}}, True),
+            ("deploy none", {"merge_commit": sha, "validation": {
+                "checks": "none", "reviews": [clean], "deploy": "none"}}, True),
+            ("merged flag alone", {"merged": True, "validation": {
+                "checks": "none", "reviews": [clean], "deploy": "none"}}, False),
+            ("clean then findings", {"merge_commit": sha, "validation": {
                 "checks": "passed",
-                "reviews": [{"verdict": "clean", "round": 1}, {"verdict": "findings", "round": 2}],
+                "reviews": [{**clean, "round": 1}, {"verdict": "findings", "round": 2, "head": sha}],
                 "deploy": "success"}}, False),
-            ("findings then clean", {"merge_commit": "abc", "validation": {
+            ("findings then clean", {"merge_commit": sha, "validation": {
                 "checks": "passed",
-                "reviews": [{"verdict": "findings", "round": 1}, {"verdict": "clean", "round": 2}],
+                "reviews": [{"verdict": "findings", "round": 1, "head": "old"},
+                            {**clean, "round": 2}],
                 "deploy": "success"}}, True),
-            ("clean then findings no rounds", {"merge_commit": "abc", "validation": {
+            ("clean then findings no rounds", {"merge_commit": sha, "validation": {
                 "checks": "passed",
-                "reviews": [{"verdict": "clean"}, {"verdict": "findings"}],
+                "reviews": [clean, {"verdict": "findings", "head": sha}],
                 "deploy": "success"}}, False),
+            ("clean on other sha", {"merge_commit": sha, "validation": {
+                "checks": "passed",
+                "reviews": [{"verdict": "clean", "head": "0000000ffffffff"}],
+                "deploy": "success"}}, False),
+            ("clean missing sha", {"merge_commit": sha, "validation": {
+                "checks": "passed", "reviews": [{"verdict": "clean"}], "deploy": "success"}}, False),
+            ("abbrev sha match", {"merge_commit": sha, "validation": {
+                "checks": "passed",
+                "reviews": [{"verdict": "clean", "head": sha[:7]}],
+                "deploy": "success"}}, True),
         ]
         for name, st, want in cases:
             with self.subTest(name):
@@ -788,7 +803,7 @@ class FollowupTest(unittest.TestCase):
         self.set("stub-linear.json", {"pages": [[ticket]]})
         st_b = fu.load(key_b)
         st_b.update(merge_commit="deadbeef", pr_url="https://example/pr/1",
-                    validation={"checks": "passed", "reviews": [{"verdict": "clean", "round": 1}],
+                    validation={"checks": "passed", "reviews": [{"verdict": "clean", "round": 1, "head": "deadbeef"}],
                                 "deploy": "success"},
                     ticket_body=ticket["description"])
         fu.finish(st_b, st_b["findings"])
@@ -823,8 +838,8 @@ class FollowupTest(unittest.TestCase):
         d = self.root / "followups" / key
         d.mkdir(parents=True)
         st = {"key": key, "stage": "project-cleanup", "repo": "demo", "status": "done",
-              "merge_commit": "abc", "pr_url": "https://example/pr/1",
-              "validation": {"checks": "passed", "reviews": [{"verdict": "clean"}], "deploy": "success"},
+              "merge_commit": "abc1234", "pr_url": "https://example/pr/1",
+              "validation": {"checks": "passed", "reviews": [{"verdict": "clean", "head": "abc1234"}], "deploy": "success"},
               "close_note": "Fixed by advance-roadmap follow-up `cleanup-20261014-050000`: deploy success.",
               "findings": [{"id": fid, "status": "fixed", "ticket": "DEV-501", "title": "x",
                             "kind": "t", "fix": "f", "evidence": []}],
@@ -862,8 +877,8 @@ class FollowupTest(unittest.TestCase):
         d.mkdir(parents=True)
         (d / "state.json").write_text(json.dumps({
             "key": key, "stage": "project-cleanup", "repo": "demo", "status": "done",
-            "merge_commit": "abc",
-            "validation": {"checks": "passed", "reviews": [{"verdict": "clean"}], "deploy": "success"},
+            "merge_commit": "abc1234",
+            "validation": {"checks": "passed", "reviews": [{"verdict": "clean", "head": "abc1234"}], "deploy": "success"},
             "findings": [
                 {"id": fid_ok, "status": "fixed", "ticket": "DEV-501", "title": "a", "kind": "t",
                  "fix": "f", "evidence": []},
@@ -899,8 +914,8 @@ class FollowupTest(unittest.TestCase):
         d.mkdir(parents=True)
         (d / "state.json").write_text(json.dumps({
             "key": key, "stage": "project-cleanup", "repo": "demo", "status": "done",
-            "merge_commit": "abc",
-            "validation": {"checks": "passed", "reviews": [{"verdict": "clean"}], "deploy": "success"},
+            "merge_commit": "abc1234",
+            "validation": {"checks": "passed", "reviews": [{"verdict": "clean", "head": "abc1234"}], "deploy": "success"},
             "findings": [{"id": fid, "status": "fixed", "ticket": "DEV-501", "title": "a", "kind": "t",
                           "fix": "f", "evidence": []}],
             "pending_close": [{"ticket": "DEV-501", "commented": True}], "blockers": [],
@@ -947,8 +962,8 @@ class FollowupTest(unittest.TestCase):
         d.mkdir(parents=True)
         (d / "state.json").write_text(json.dumps({
             "key": key, "stage": "project-cleanup", "repo": "demo", "status": "done",
-            "merge_commit": "abc", "owned_tickets": ["DEV-501"],
-            "validation": {"checks": "passed", "reviews": [{"verdict": "clean"}], "deploy": "success"},
+            "merge_commit": "abc1234", "owned_tickets": ["DEV-501"],
+            "validation": {"checks": "passed", "reviews": [{"verdict": "clean", "head": "abc1234"}], "deploy": "success"},
             "findings": [{"id": fid, "status": "fixed", "ticket": "DEV-501", "title": "x",
                           "kind": "t", "fix": "f", "evidence": []}],
             "blockers": [], "scanned": True,
@@ -983,8 +998,8 @@ class FollowupTest(unittest.TestCase):
         d.mkdir(parents=True)
         (d / "state.json").write_text(json.dumps({
             "key": key, "stage": "project-cleanup", "repo": "demo", "status": "done",
-            "merge_commit": "abc",
-            "validation": {"checks": "passed", "reviews": [{"verdict": "clean"}], "deploy": "success"},
+            "merge_commit": "abc1234",
+            "validation": {"checks": "passed", "reviews": [{"verdict": "clean", "head": "abc1234"}], "deploy": "success"},
             "findings": [{"id": fid, "status": "fixed", "ticket": "DEV-501", "title": "x",
                           "kind": "t", "fix": "f", "evidence": []}],
             "pending_close": [{"ticket": "DEV-501", "commented": True}], "blockers": [],

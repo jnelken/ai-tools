@@ -1093,6 +1093,14 @@ def retry_ticket_syncs(issues=None):
 DEPLOY_OK = frozenset({"success", "none"})
 
 
+def _sha_match(a, b):
+    """True when two git SHAs name the same commit (full or abbreviated, case-insensitive)."""
+    if not a or not b:
+        return False
+    a, b = str(a).lower(), str(b).lower()
+    return a == b or (len(a) >= 7 and len(b) >= 7 and (a.startswith(b) or b.startswith(a)))
+
+
 def stage_repair_verified(ost):
     """True when a stage's repair landed with checks, a clean final review, merge and deploy.
 
@@ -1100,10 +1108,12 @@ def stage_repair_verified(ost):
     finding_verified_fixed → here):
       - deploy success is only validation.deploy in {success, none}
       - the final review for the merged revision must be clean (not merely some earlier clean)
-    A skipped/pending/failed deploy or a later findings review never closes a ticket.
+      - that review's recorded SHA (head/sha) must match merge_commit
+    A skipped/pending/failed deploy, a later findings review, or an unreviewed merge never closes.
     """
     v = ost.get("validation") or {}
-    if not (ost.get("merge_commit") or ost.get("merged")):
+    merged = ost.get("merge_commit")
+    if not merged:
         return False
     if v.get("checks") not in ("passed", "none"):
         return False
@@ -1116,12 +1126,15 @@ def stage_repair_verified(ost):
             return int(r.get("round"))
         except (TypeError, ValueError):
             return None
-    numbered = [( _round(r), i, r) for i, r in enumerate(reviews)]
+    numbered = [(_round(r), i, r) for i, r in enumerate(reviews)]
     if any(n is not None for n, _, _ in numbered):
         final = max(numbered, key=lambda t: (-1 if t[0] is None else t[0], t[1]))[2]
     else:
         final = reviews[-1]
     if final.get("verdict") != "clean":
+        return False
+    review_sha = final.get("head") or final.get("sha") or final.get("reviewed_sha")
+    if not _sha_match(merged, review_sha):
         return False
     return v.get("deploy") in DEPLOY_OK
 
