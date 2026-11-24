@@ -838,9 +838,10 @@ def dedupe(st, issues):
         owner = (owned or {}).get("key") or meta.get("key")
         other = owner and owner != st["key"] and load(owner)
         if owner and owner != st["key"]:
+            # Stay "duplicate" (not "fixed") until evidence sync finishes so retries remain eligible.
             f.update(status="duplicate", duplicate_of=owner)
             if other and finding_verified_fixed(f["id"], current=other, owner_key=owner):
-                f["status"] = "fixed"
+                f["owner_verified"] = True
         tag = f"{issue['identifier']}:{f['id']}:{st['key']}"
         if tag in posted:
             continue
