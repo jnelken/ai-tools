@@ -2588,38 +2588,42 @@ class FollowupTest(unittest.TestCase):
         self.assertTrue(doc["analyst"].startswith("failed:"), doc["analyst"])
         self.assertNotIn(self.ANALYST_FINDING["title"], titles)
 
-    def test_analyst_sandbox_runs_jsonl_keeps_only_stage_stamps(self):
+    def test_analyst_inline_runs_jsonl_keeps_only_stage_stamps(self):
         import followanalyst
-        import followrepair
         stamp = "20261013-103004"
         other = "20261012-999999"
         row = json.loads((FIXTURES / "runs-row.json").read_text())
         (self.root / "runs.jsonl").write_text(
             json.dumps({**row, "stamp": other, "detail": "unrelated historical quote for another stage"}) + "\n"
             + json.dumps(row) + "\n")
-        os.environ["ADVANCE_ROADMAP_ROOT"] = str(self.root)
-        followrepair.ROOT = self.root
-        followrepair.STATE = self.root / "followups"
-        st = {"key": "sandbox-test", "children": [stamp], "stage": "tooling-hardening"}
-        (self.root / "followups" / st["key"]).mkdir(parents=True)
-        sandbox, mapping = followanalyst.materialize_corpus_sandbox(st, [self.root / "runs.jsonl"])
-        sand_runs = next(Path(p) for p in mapping if Path(p).name == "runs.jsonl")
-        self.assertEqual(sand_runs.name, "runs.jsonl")
-        text = sand_runs.read_text()
+        text = followanalyst.inline_corpus([self.root / "runs.jsonl"], stamps=[stamp])
         self.assertIn(stamp, text)
         self.assertNotIn("unrelated historical quote for another stage", text)
         self.assertNotIn(other, text)
+
+    def test_analyst_cwd_sandbox_has_no_corpus_files(self):
+        import followanalyst
+        import followrepair
+        os.environ["ADVANCE_ROADMAP_ROOT"] = str(self.root)
+        followrepair.ROOT = self.root
+        followrepair.STATE = self.root / "followups"
+        st = {"key": "empty-cwd", "children": ["20261013-103004"]}
+        (self.root / "followups" / st["key"]).mkdir(parents=True)
+        (self.root / "runs.jsonl").write_text("{}\n")
+        sandbox = followanalyst.empty_analyst_cwd(st)
+        self.assertTrue(sandbox.is_dir())
+        self.assertEqual(list(sandbox.iterdir()), [])
 
     def test_inline_corpus_truncates_by_utf8_bytes(self):
         import followanalyst
         path = self.root / "wide.txt"
         # 3-byte UTF-8 chars: 100 chars = 300 bytes.
         path.write_text("€" * 100)
-        out = followanalyst.inline_corpus([path], max_bytes=50)
-        self.assertLessEqual(len(out.encode("utf-8")), 50 + 80)  # header/footer overhead capped separately
-        # Body itself must respect the byte budget inside the fence.
+        out = followanalyst.inline_corpus([path], max_bytes=120)
+        self.assertLessEqual(len(out.encode("utf-8")), 120)
         self.assertIn("€", out)
-        self.assertTrue(len(path.read_text().encode("utf-8")) > 50)
+        self.assertIn("truncated", out)
+        self.assertTrue(len(path.read_text().encode("utf-8")) > 120)
 
     def test_analyst_sandbox_prepare_failure_preserves_deterministic(self):
         import followanalyst
@@ -2628,7 +2632,7 @@ class FollowupTest(unittest.TestCase):
         run.mkdir(parents=True)
         (run / "orchestrator-result.json").write_text((FIXTURES / "orchestrator-result.json").read_text())
         (self.root / "runs.jsonl").write_text(json.dumps(json.loads((FIXTURES / "runs-row.json").read_text())) + "\n")
-        with mock.patch.object(followanalyst, "materialize_corpus_sandbox",
+        with mock.patch.object(followanalyst, "empty_analyst_cwd",
                                side_effect=OSError("disk full")):
             # In-process: patch is visible to followup.scan → analyze.
             import followup as fu

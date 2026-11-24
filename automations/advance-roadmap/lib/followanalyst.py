@@ -57,80 +57,13 @@ def _resolve_source(source):
         return None
 
 
-def _copy_runs_jsonl_for_stamps(src, dest, stamps):
-    """Write only runs.jsonl rows whose stamp is in the stage's set."""
-    wanted = set(stamps)
-    lines = []
-    for line in followscan.iter_jsonl_lines(src):
-        try:
-            if json.loads(line).get("stamp") in wanted:
-                lines.append(line if line.endswith("\n") else line + "\n")
-        except ValueError:
-            continue
-    dest.write_text("".join(lines))
-
-
-def materialize_corpus_sandbox(st, files):
-    """Copy only the corpus into a stage-local sandbox. Returns (sandbox_dir, sandbox→original map).
-
-    Owner helper for the bounded-corpus policy in run_analyst: prompt paths and cwd/-C target.
-    For runs.jsonl, copy only rows for this stage's stamps so unrelated runs never enter the sandbox.
-    """
+def empty_analyst_cwd(st):
+    """Empty stage-local cwd for provider invokes — no corpus files on disk for the model to read."""
     sandbox = followrepair.stage_dir(st["key"]) / "corpus-sandbox"
     if sandbox.exists():
         shutil.rmtree(sandbox)
     sandbox.mkdir(parents=True)
-    stamps = corpus_stamps(st)
-    mapping = {}
-    used_names = set()
-    for i, src in enumerate(files):
-        src = Path(src).resolve()
-        # Keep runs.jsonl's basename so evidence_holds' streaming/stamp path still applies.
-        if src.name == "runs.jsonl":
-            dest = (sandbox / "runs.jsonl").resolve()
-        else:
-            name = f"{i:03d}-{src.name}"
-            while name in used_names:
-                name = f"{i:03d}-{len(used_names)}-{src.name}"
-            dest = (sandbox / name).resolve()
-            used_names.add(name)
-        if src.name == "runs.jsonl" and stamps:
-            _copy_runs_jsonl_for_stamps(src, dest, stamps)
-        else:
-            shutil.copy2(src, dest)
-        mapping[str(dest)] = src
-    return sandbox, mapping
-
-
-def to_sandbox_evidence(raw_ev, mapping):
-    """Map evidence sources onto sandbox copies (accepts sandbox or original paths)."""
-    reverse = {str(orig.resolve()): sand for sand, orig in mapping.items()}
-    out = []
-    for e in raw_ev:
-        src = _resolve_source(e.get("source"))
-        if src is None:
-            return None
-        if src in mapping:
-            out.append({**e, "source": src})
-        elif src in reverse:
-            out.append({**e, "source": reverse[src]})
-        else:
-            return None
-    return out
-
-
-def to_original_evidence(raw_ev, mapping):
-    """Rewrite sandbox evidence sources to the original corpus paths."""
-    out = []
-    for e in raw_ev:
-        src = _resolve_source(e.get("source"))
-        if src is None:
-            return None
-        original = mapping.get(src)
-        if original is None:
-            return None
-        out.append({**e, "source": str(original)})
-    return out
+    return sandbox
 
 
 def analyze(st, findings, files):
@@ -142,13 +75,13 @@ def analyze(st, findings, files):
     if not enabled() or not files:
         return [], []
     try:
-        sandbox, mapping = materialize_corpus_sandbox(st, files)
+        sandbox = empty_analyst_cwd(st)
     except (OSError, ValueError, TypeError) as e:
         # Optional analyst must never abort deterministic scan/recording.
         st["analyst"] = f"failed: sandbox prepare: {e}"
         return [], []
-    sandbox_files = [Path(p) for p in mapping]
-    prompt = analyst_prompt(st, findings, sandbox_files)
+    files = [Path(f).resolve() for f in files]
+    prompt = analyst_prompt(st, findings, files)
     # Invariant (owner: analyze gate check): every path to run_analyst must see an
     # available gate; an unreadable gate (None) is unavailable — fail closed.
     # Dry-run owner: gate_one(..., readonly=True) — load saved state, never refresh/save.
@@ -204,16 +137,13 @@ def analyze(st, findings, files):
         doc = {}
     st["analyst"] = f"{provider}: {'answered' if m else 'no findings block'}"
     return accept_findings(
-        st, findings, sandbox_files, doc if isinstance(doc, dict) else {}, mapping=mapping,
-        provider=provider)
+        st, findings, files, doc if isinstance(doc, dict) else {}, provider=provider)
 
 
-def accept_findings(st, findings, files, doc, mapping=None, provider=None):
+def accept_findings(st, findings, files, doc, provider=None):
     """Keep analyst findings whose every quote verifies in the corpus; reject the rest.
 
-    When mapping is set (sandbox → original), evidence sources are remapped to originals after
-    verification against the sandbox copies. Malformed collection types abort analyst output
-    without raising, preserving deterministic findings.
+    Malformed collection types abort analyst output without raising, preserving deterministic findings.
     """
     if not isinstance(doc, dict):
         if provider:
@@ -247,32 +177,14 @@ def accept_findings(st, findings, files, doc, mapping=None, provider=None):
                 title, "rejected: its evidence is not in the corpus",
                 [e for e in raw_ev if isinstance(e, dict)] if isinstance(raw_ev, list) else []))
             continue
-        check_ev = raw_ev
-        if mapping is not None:
-            check_ev = to_sandbox_evidence(raw_ev, mapping)
-            if check_ev is None:
-                rejected.append(followscan.non_finding(
-                    title, "rejected: its evidence is not in the corpus", raw_ev))
-                continue
-        if not all(followscan.evidence_holds(e, files, stamps) for e in check_ev):
+        if any(_resolve_source(e.get("source")) is None for e in raw_ev):
             rejected.append(followscan.non_finding(
-                title, "rejected: its evidence is not in the corpus", check_ev))
+                title, "rejected: its evidence is not in the corpus", raw_ev))
             continue
-        if mapping is not None:
-            remapped = to_original_evidence(check_ev, mapping)
-            if remapped is None:
-                rejected.append(followscan.non_finding(
-                    title, "rejected: its evidence is not in the corpus", check_ev))
-                continue
-            # Re-check on originals so runs.jsonl stamp scope still applies after remap.
-            originals = list(mapping.values())
-            if not all(followscan.evidence_holds(e, originals, stamps) for e in remapped):
-                rejected.append(followscan.non_finding(
-                    title, "rejected: its evidence is not in the corpus", remapped))
-                continue
-            raw_ev = remapped
-        else:
-            raw_ev = check_ev
+        if not all(followscan.evidence_holds(e, files, stamps) for e in raw_ev):
+            rejected.append(followscan.non_finding(
+                title, "rejected: its evidence is not in the corpus", raw_ev))
+            continue
         try:
             ev_objs = [followscan.evidence(e["source"], e["quote"]) for e in raw_ev]
         except (OSError, TypeError, ValueError):
@@ -298,9 +210,9 @@ def run_analyst(st, provider, prompt, sandbox):
     use usage.live_limit_banner — exit status and provider error records, never a quoted banner alone.
     Process-group deadlines via procrun so a timeout never leaves descendants alive.
 
-    Bounded-corpus policy (owner: analyze → inline_corpus + run_analyst): the prompt carries the
-    corpus paste; providers are invoked without file-read tools. Sandbox cwd/-C is defense in depth
-    only — not an OS filesystem jail.
+    Bounded-corpus policy (owner: analyze → inline_corpus + empty cwd): the prompt carries the
+    corpus paste; the invoke cwd is an empty directory (no corpus files on disk for the model).
+    Claude is granted no file-read tools. Absolute-path reads outside cwd are not OS-blocked.
     """
     d = followrepair.stage_dir(st["key"])
     d.mkdir(parents=True, exist_ok=True)
@@ -400,9 +312,25 @@ def _utf8_budget_slice(text, max_bytes):
     return ""
 
 
-def inline_corpus(files, max_bytes=CORPUS_PROMPT_MAX_BYTES):
+def _file_text_for_prompt(path, stamps):
+    """File text for the prompt; runs.jsonl is stamp-filtered when stamps are known."""
+    path = Path(path)
+    if path.name == "runs.jsonl" and stamps:
+        lines = []
+        wanted = set(stamps)
+        for line in followscan.iter_jsonl_lines(path):
+            try:
+                if json.loads(line).get("stamp") in wanted:
+                    lines.append(line if line.endswith("\n") else line + "\n")
+            except ValueError:
+                continue
+        return "".join(lines)
+    return path.read_text(errors="replace")
+
+
+def inline_corpus(files, max_bytes=CORPUS_PROMPT_MAX_BYTES, stamps=None):
     """Paste corpus file contents into the prompt. Owner of bounded-corpus network policy:
-    providers receive only this paste — no file-read tools are granted.
+    providers receive only this paste — cwd has no corpus files.
 
     Budget is measured in UTF-8 bytes (not Python char length).
     """
@@ -410,7 +338,7 @@ def inline_corpus(files, max_bytes=CORPUS_PROMPT_MAX_BYTES):
     for path in files:
         path = Path(path)
         try:
-            text = path.read_text(errors="replace")
+            text = _file_text_for_prompt(path, stamps)
         except OSError as e:
             note = f"### {path}\n(unreadable: {e})\n"
             used += len(note.encode("utf-8"))
@@ -439,7 +367,7 @@ def analyst_prompt(st, findings, files):
     scope = (f"Only project-specific bugs in {st.get('repo')} count here."
              if cleanup else
              "Only orchestration, routing, skills, hooks and reporting count here.")
-    corpus = inline_corpus(files)
+    corpus = inline_corpus(files, stamps=corpus_stamps(st))
     return f"""You are the read-only analyst for advance-roadmap's {stage} follow-up ({st.get('key')}).
 Do not open, search, or read any files on disk. The entire allowed corpus is pasted below.
 Cite evidence only with a source path from that paste and a verbatim quote from it.
