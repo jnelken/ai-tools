@@ -646,6 +646,25 @@ def recover_tickets():
                 if f["id"] in (meta.get("finding_ids") or []) and f.get("ticket") != ident:
                     f["ticket"] = ident
                     changed = True
+            # Restore open findings the ticket gained on another machine (same shape as missing-stage rebuild).
+            open_fids = [fid for fid in all_ids if status_map.get(fid, "open") != "fixed"]
+            known = {f["id"] for f in st.get("findings") or []}
+            added = False
+            for fid in open_fids:
+                if fid in known:
+                    continue
+                st.setdefault("findings", []).append({
+                    "id": fid, "stage": st.get("stage") or STAGES["cleanup"], "repo": st.get("repo"),
+                    "kind": "ticket", "title": issue.get("title"), "fix": f"see {ident}",
+                    "status": "deferred", "ticket": ident,
+                    "evidence": [{"source": ident, "quote": issue.get("title")}],
+                })
+                known.add(fid)
+                added = True
+                changed = True
+            if added and st.get("status") in (DONE, BLOCKED) and st.get("status") != RUNNING:
+                st.update(status="deferred", next={"step": "build", "round": 1}, scanned=True)
+                changed = True
             if changed:
                 save(st)
         finally:
@@ -974,42 +993,57 @@ def apply_partial_progress(st, findings=None):
     st["pending_partial"] = [e for e in st.get("pending_partial") or [] if not e.get("done")]
 
 
-def meta_finding_ids(ident, issues=None):
-    """Finding IDs from the ticket's Linear metadata block (authoritative across machines)."""
-    ids = set()
-    for issue in issues or []:
+def load_ticket_meta_ids(ident, issues=None):
+    """(ok, ids) from the ticket's Linear metadata block.
+
+    ok is True only after a successful read of that ticket's metadata. A missing snapshot, a failed
+    fetch, or an issue without the follow-up block is not ok — callers must retain pending_close.
+    """
+    if issues is None:
+        if os.environ.get("ADVANCE_ROADMAP_FOLLOWUP_LINEAR", "1") != "1":
+            return False, set()
+        try:
+            issues = followticket.fetch_open()
+        except followticket.LinearError:
+            return False, set()
+    for issue in issues:
         if issue.get("identifier") != ident:
             continue
         meta = followticket.parse_meta(issue.get("description") or "")
-        if meta:
-            ids.update(meta.get("finding_ids") or [])
-            ids.update((meta.get("finding_status") or {}).keys())
-        break
-    return ids
+        if not meta:
+            return False, set()
+        ids = set(meta.get("finding_ids") or []) | set((meta.get("finding_status") or {}).keys())
+        return True, ids
+    return False, set()  # not in the open-issue snapshot
+
+
+def ticket_close_verdict(ident, current=None, issues=None):
+    """Invariant owner: 'ready' | 'incomplete' | 'unread' immediately before mark_done.
+
+    Every path that calls mark_done (finish → close_tickets, drain → retry_closes → close_tickets)
+    must go through this. 'unread' means Linear metadata could not be read — retain pending_close.
+    """
+    ok, meta_ids = load_ticket_meta_ids(ident, issues)
+    if not ok:
+        return "unread"
+    tracked = ticket_tracked_ids(ident, current=current, extras=meta_ids)
+    if not tracked:
+        return "incomplete"
+    if all(finding_verified_fixed(fid, current=current) for fid in tracked):
+        return "ready"
+    return "incomplete"
 
 
 def ticket_ready_to_close(ident, current=None, issues=None):
-    """Invariant owner: Done requires every tracked finding verified fixed (checks/review/deploy).
-
-    Every path that calls mark_done (finish → close_tickets, drain → retry_closes → close_tickets)
-    must go through this check immediately before the Linear state write. The check always
-    includes finding IDs from the ticket's Linear metadata, not only local state/index.
-    """
-    extras = meta_finding_ids(ident, issues)
-    if current and current.get("ticket_body"):
-        meta = followticket.parse_meta(current.get("ticket_body") or "")
-        if meta:
-            extras.update(meta.get("finding_ids") or [])
-            extras.update((meta.get("finding_status") or {}).keys())
-    tracked = ticket_tracked_ids(ident, current=current, extras=extras)
-    return bool(tracked) and all(finding_verified_fixed(fid, current=current) for fid in tracked)
+    """True only when Linear metadata was read and every tracked finding is verified fixed."""
+    return ticket_close_verdict(ident, current=current, issues=issues) == "ready"
 
 
 def close_tickets(st, issues=None):
     """Persisted in pending_close so a Linear failure is retried by every later drain.
 
     The closing comment and the move to Done are tracked apart, so a retry never posts twice.
-    Revalidates the full tracked finding set (including Linear metadata IDs) before mark_done.
+    Requires a successful Linear metadata read before mark_done; unread keeps the pending entry.
     """
     closed = set()
     dropped = set()
@@ -1017,7 +1051,13 @@ def close_tickets(st, issues=None):
         return closed
     for entry in st.get("pending_close") or []:
         ident = entry["ticket"]
-        if not ticket_ready_to_close(ident, current=st, issues=issues):
+        verdict = ticket_close_verdict(ident, current=st, issues=issues)
+        if verdict == "unread":
+            report(st, "close-unread",
+                   f"could not read Linear metadata for {ident}; retaining pending_close",
+                   "the next drain retries after a successful ticket fetch")
+            continue  # retain
+        if verdict != "ready":
             report(st, "close-recheck",
                    f"refusing to Done {ident}: not every tracked finding is verified fixed",
                    "partial progress or a sibling still owns open work")
@@ -1045,12 +1085,7 @@ def close_tickets(st, issues=None):
 def retry_closes(issues=None):
     """Close tickets an earlier drain verified but could not close in Linear."""
     closed = set()
-    if issues is None and os.environ.get("ADVANCE_ROADMAP_FOLLOWUP_LINEAR", "1") == "1":
-        try:
-            issues = followticket.fetch_open()
-        except followticket.LinearError as e:
-            report(None, "linear", f"could not refresh tickets before close retry: {e}")
-            issues = []
+    # None means "fetch inside close_tickets / load_ticket_meta_ids"; never substitute [].
     for snapshot in all_stages():
         if not snapshot.get("pending_close") and not snapshot.get("pending_partial"):
             continue
@@ -1157,11 +1192,12 @@ def drain(repo=None, origin=None, stage=None, wait_s=0.0):
     """
     STATE.mkdir(parents=True, exist_ok=True)
     recover_interrupted(repo=repo, origin=origin)
-    issues = recover_tickets()
-    if issues is None:
-        issues = []
+    issues = recover_tickets()  # None = Linear read failed; [] = no open issues
+    # Pass the real snapshot (including None) into close retries — never substitute [].
     retry_closes(issues=issues)
     retry_deferral_syncs()
+    if issues is None:
+        issues = []
     deadline = time.time() + wait_s
     while True:
         waiting, progressed = [], False

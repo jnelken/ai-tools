@@ -736,6 +736,59 @@ class FollowupTest(unittest.TestCase):
                 if c.get("cmd") == "issue update DEV-501" and "Done" in (c.get("args") or [])]
         self.assertEqual(done, [])
 
+    def test_close_retains_pending_when_linear_metadata_unread(self):
+        """Invariant: no Done write without a successful Linear metadata read."""
+        import followup as fu
+        fu.ROOT = self.root
+        fu.STATE = self.root / "followups"
+        os.environ["ADVANCE_ROADMAP_ROOT"] = str(self.root)
+        os.environ["ADVANCE_ROADMAP_LINEAR_BIN"] = self.env["ADVANCE_ROADMAP_LINEAR_BIN"]
+        key = "cleanup-unread"
+        fid = "aaaaaaaaaaaa"
+        d = self.root / "followups" / key
+        d.mkdir(parents=True)
+        (d / "state.json").write_text(json.dumps({
+            "key": key, "stage": "project-cleanup", "repo": "demo", "status": "done",
+            "merge_commit": "abc",
+            "validation": {"checks": "passed", "reviews": [{"verdict": "clean"}], "deploy": "success"},
+            "findings": [{"id": fid, "status": "fixed", "ticket": "DEV-501", "title": "a", "kind": "t",
+                          "fix": "f", "evidence": []}],
+            "pending_close": [{"ticket": "DEV-501", "commented": True}], "blockers": [],
+        }))
+        # Empty pages: ticket not in snapshot → unread, retain pending_close.
+        self.set("stub-linear.json", {"pages": [[]]})
+        fu.retry_closes(issues=[])
+        st = self.state(key)
+        self.assertEqual(st["pending_close"], [{"ticket": "DEV-501", "commented": True}])
+        self.assertTrue(any(r.get("kind") == "close-unread" for r in self.report()), self.report())
+        self.assertFalse(any(c.get("cmd") == "issue update DEV-501" for c in self.calls("linear")))
+
+    def test_recovery_adds_open_findings_to_existing_stage(self):
+        """An existing stage must restore open finding IDs the ticket gained elsewhere."""
+        key = "cleanup-20261014-050000"
+        fid_local, fid_remote = "aaaaaaaaaaaa", "bbbbbbbbbbbb"
+        d = self.root / "followups" / key
+        d.mkdir(parents=True)
+        (d / "state.json").write_text(json.dumps({
+            "key": key, "stage": "project-cleanup", "repo": "demo", "status": "done",
+            "owned_tickets": ["DEV-501"], "findings": [
+                {"id": fid_local, "status": "fixed", "ticket": "DEV-501", "title": "local",
+                 "kind": "t", "fix": "f", "evidence": []}],
+            "blockers": [], "scanned": True,
+        }))
+        ticket = self.meta_ticket("DEV-501", {
+            "key": key, "stage": "project-cleanup",
+            "finding_ids": [fid_local, fid_remote],
+            "finding_status": {fid_local: "fixed", fid_remote: "open"},
+            "updated_at": time.time(),
+        })
+        self.set("stub-linear.json", {"pages": [[ticket]]})
+        self.run_followup("drain", "--stage", "cleanup")
+        st = self.state(key)
+        self.assertEqual({f["id"] for f in st["findings"]}, {fid_local, fid_remote})
+        self.assertEqual(st["status"], "deferred")
+        self.assertEqual((st.get("next") or {}).get("step"), "build")
+
 
 if __name__ == "__main__":
     unittest.main()
