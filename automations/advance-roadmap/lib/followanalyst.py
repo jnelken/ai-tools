@@ -384,25 +384,52 @@ def record_analyst_limit(st, provider, text):
         pass
 
 
+def _utf8_budget_slice(text, max_bytes):
+    """Longest prefix of text whose UTF-8 encoding is ≤ max_bytes."""
+    if max_bytes <= 0:
+        return ""
+    raw = text.encode("utf-8")
+    if len(raw) <= max_bytes:
+        return text
+    clipped = raw[:max_bytes]
+    while clipped:
+        try:
+            return clipped.decode("utf-8")
+        except UnicodeDecodeError:
+            clipped = clipped[:-1]
+    return ""
+
+
 def inline_corpus(files, max_bytes=CORPUS_PROMPT_MAX_BYTES):
     """Paste corpus file contents into the prompt. Owner of bounded-corpus network policy:
-    providers receive only this paste — no file-read tools are granted."""
+    providers receive only this paste — no file-read tools are granted.
+
+    Budget is measured in UTF-8 bytes (not Python char length).
+    """
     parts, used = [], 0
     for path in files:
         path = Path(path)
         try:
             text = path.read_text(errors="replace")
         except OSError as e:
-            parts.append(f"### {path}\n(unreadable: {e})\n")
+            note = f"### {path}\n(unreadable: {e})\n"
+            used += len(note.encode("utf-8"))
+            parts.append(note)
             continue
-        header = f"### {path}\n"
-        room = max_bytes - used - len(header) - 8
+        header = f"### {path}\n```\n"
+        footer = "\n```\n"
+        overhead = len(header.encode("utf-8")) + len(footer.encode("utf-8"))
+        room = max_bytes - used - overhead
         if room <= 0:
             parts.append(f"### {path}\n(truncated: corpus budget exhausted)\n")
             break
-        body = text if len(text) <= room else text[:room] + "\n…(truncated)\n"
-        parts.append(f"{header}```\n{body}\n```\n")
-        used += len(header) + len(body)
+        body = _utf8_budget_slice(text, room)
+        if len(body.encode("utf-8")) < len(text.encode("utf-8")):
+            # Leave room for an ASCII truncation marker inside the budget.
+            marker = "\n…(truncated)"
+            body = _utf8_budget_slice(text, max(0, room - len(marker.encode("utf-8")))) + marker
+        parts.append(f"{header}{body}{footer}")
+        used += len(parts[-1].encode("utf-8"))
     return "\n".join(parts)
 
 

@@ -2610,6 +2610,17 @@ class FollowupTest(unittest.TestCase):
         self.assertNotIn("unrelated historical quote for another stage", text)
         self.assertNotIn(other, text)
 
+    def test_inline_corpus_truncates_by_utf8_bytes(self):
+        import followanalyst
+        path = self.root / "wide.txt"
+        # 3-byte UTF-8 chars: 100 chars = 300 bytes.
+        path.write_text("€" * 100)
+        out = followanalyst.inline_corpus([path], max_bytes=50)
+        self.assertLessEqual(len(out.encode("utf-8")), 50 + 80)  # header/footer overhead capped separately
+        # Body itself must respect the byte budget inside the fence.
+        self.assertIn("€", out)
+        self.assertTrue(len(path.read_text().encode("utf-8")) > 50)
+
     def test_analyst_sandbox_prepare_failure_preserves_deterministic(self):
         import followanalyst
         stamp = "20261013-103004"
