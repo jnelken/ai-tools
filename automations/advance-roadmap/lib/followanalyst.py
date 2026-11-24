@@ -319,12 +319,16 @@ def run_analyst(st, provider, prompt, sandbox):
         transcript = followscan.read_text(raw) or raw_json.read_text(errors="replace")
         try:
             for line in raw_json.read_text(errors="replace").splitlines():
-                if line.startswith("{"):
+                if not line.startswith("{"):
+                    continue
+                try:
                     obj = json.loads(line)
-                    if isinstance(obj, dict) and "result" in obj:
-                        provider_result = obj
-                        break
-        except (OSError, ValueError):
+                except ValueError:
+                    continue  # skip malformed lines; keep scanning for a result object
+                if isinstance(obj, dict) and "result" in obj:
+                    provider_result = obj
+                    break
+        except OSError:
             provider_result = None
     sid = (followscan.read_text(session) or "").strip()
     if sid:

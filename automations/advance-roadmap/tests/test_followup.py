@@ -2541,6 +2541,14 @@ class FollowupTest(unittest.TestCase):
         self.assertTrue(all(isinstance(f["title"], str) for f in doc["findings"]))
         self.assertTrue(all(isinstance(n["title"], str) for n in doc["non_findings"]))
 
+    def test_analyst_claude_skips_garbage_json_and_honors_is_error(self):
+        (self.root / "stub-codex-limit").write_text("")
+        (self.root / "stub-claude-prefix-garbage").write_text("")
+        (self.root / "stub-claude-is-error").write_text("")
+        doc, titles = self.analyst_scan("stub-claude-analyst.txt", answer=True)
+        self.assertTrue(doc["analyst"].startswith("failed:"), doc["analyst"])
+        self.assertNotIn(self.ANALYST_FINDING["title"], titles)
+
     def test_analyst_sandbox_runs_jsonl_keeps_only_stage_stamps(self):
         import followanalyst
         import followrepair

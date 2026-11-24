@@ -309,8 +309,13 @@ def codex(args):
 
 def claude(args):
     note("claude", args=args[:1])
-    print(json.dumps({"type": "result", "result": (ROOT / "stub-claude-analyst.txt").read_text(),
-                      "session_id": "claude-analyst-session"}))
+    if (ROOT / "stub-claude-prefix-garbage").exists():
+        print("{not-json")
+    result = (ROOT / "stub-claude-analyst.txt").read_text()
+    payload = {"type": "result", "result": result, "session_id": "claude-analyst-session"}
+    if (ROOT / "stub-claude-is-error").exists():
+        payload["is_error"] = True
+    print(json.dumps(payload))
 
 
 if __name__ == "__main__":
