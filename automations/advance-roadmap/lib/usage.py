@@ -1058,8 +1058,15 @@ def cmd_gate(args: argparse.Namespace) -> None:
             saved_providers = raw.get("providers")
             if not isinstance(saved_providers, dict) or args.provider not in saved_providers:
                 raise ValueError("saved usage state has no entry for provider")
+            # Fail closed on null/{} — load() would merge those into default "unknown"/available.
+            entry = saved_providers[args.provider]
+            if not isinstance(entry, dict) or not entry:
+                raise ValueError("saved provider entry must be a non-empty object")
             state = load(root)
             if not isinstance(state.get("providers"), dict):
+                raise ValueError("usage state missing providers")
+            loaded = state["providers"].get(args.provider)
+            if not isinstance(loaded, dict):
                 raise ValueError("usage state missing providers")
         except (OSError, UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError, KeyError):
             gate = {"available": False, "state": "n/a",

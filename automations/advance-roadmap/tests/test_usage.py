@@ -992,6 +992,17 @@ class CliTests(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertEqual(json.loads(result.stdout), {"codex": None, "cursor": None})
 
+    def test_readonly_gate_rejects_null_or_empty_provider_entry(self):
+        """Readonly must fail closed; load() would otherwise invent default-available state."""
+        path = usage.usage_path(self.root)
+        for bad in (None, {}):
+            path.write_text(json.dumps({"providers": {"codex": bad, "claude": {"five_hour": {}}}}) + "\n")
+            result = self.run_usage("gate", "--role", "analyst", "--provider", "codex", "--readonly")
+            self.assertEqual(result.returncode, usage.GATED_EXIT, result.stdout + result.stderr)
+            out = json.loads(result.stdout)
+            self.assertFalse(out["available"])
+            self.assertEqual(out["state"], "n/a")
+
 
 if __name__ == "__main__":
     unittest.main()
