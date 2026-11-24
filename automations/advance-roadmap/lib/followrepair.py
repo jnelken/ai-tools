@@ -937,7 +937,11 @@ def install_ai_tools(merge_commit):
     script = AI_TOOLS_HOME / "install.sh"
     if not script.exists():
         return "no deploy clone"
-    p = subprocess.run([str(script)], capture_output=True, text=True, timeout=600, stdin=subprocess.DEVNULL)
+    try:
+        p = subprocess.run([str(script)], capture_output=True, text=True, timeout=600,
+                           stdin=subprocess.DEVNULL)
+    except subprocess.TimeoutExpired:
+        return "install.sh timed out"
     if p.returncode != 0:
         return f"install.sh exit {p.returncode}"
     clone = str(AI_TOOLS_HOME)

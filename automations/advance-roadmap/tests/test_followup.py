@@ -2019,6 +2019,20 @@ class FollowupTest(unittest.TestCase):
         self.assertFalse(any(c["args"][:2] == ["pr", "merge"] for c in self.calls("gh")))
         self.assertIn("review", self.report()[-1]["kind"])
 
+    def test_successful_build_persists_review_step_immediately(self):
+        """After build ok, next=review is on disk before review runs (crash recovery)."""
+        self.shipped_item("20261014-050000")
+        self.run_followup("hook", "item-done", "--stamp", "20261014-050000")
+        self.set("stub-review.json", {"verdicts": ["clean"], "unavailable": True})
+        self.run_followup("drain", env=self.repair_env())
+        st = self.state("cleanup-20261014-050000")
+        self.assertEqual(st["next"]["step"], "review")
+        self.assertEqual(len(self.calls("worker")), 1)
+        # A second drain must not re-dispatch the builder — review step was persisted.
+        self.run_followup("drain", env=self.repair_env())
+        self.assertEqual(len(self.calls("worker")), 1)
+        self.assertEqual(self.state("cleanup-20261014-050000")["next"]["step"], "review")
+
     def test_unreadable_pr_head_does_not_clear_reviewed_sha(self):
         self.shipped_item("20261014-050000")
         self.run_followup("hook", "item-done", "--stamp", "20261014-050000")

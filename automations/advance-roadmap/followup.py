@@ -1905,6 +1905,10 @@ def repair(st, repo_dir, todo, issues=None):
             if kind != "ok":
                 return block(st, "builder", detail, retry=True)
             nxt = {"step": "review", "round": rnd}
+            # Persist before the next loop save so a killed drain cannot re-enter build
+            # against already-consumed builder artifacts.
+            st["next"] = nxt
+            save(st)
         elif step == "review":
             if st.get("builder_provider") not in followrepair.REVIEWERS:
                 return block(
@@ -2010,7 +2014,11 @@ def drain(repo=None, origin=None, stage=None, wait_s=0.0):
                 except Exception as e:  # one broken stage must never stop the rest
                     report(st, "crash", f"{type(e).__name__}: {e}")
                     # CAS: only demote if we still own the running transition.
-                    dest = RETRYABLE if st.get("attempts", 0) < MAX_ATTEMPTS else BLOCKED
+                    # A merged stage must stay retryable until deploy/install finish
+                    # (same rule as block()'s merged bypass of the attempt cap).
+                    live = load(st["key"]) or st
+                    dest = (RETRYABLE if (live.get("attempts", 0) < MAX_ATTEMPTS or live.get("merged"))
+                            else BLOCKED)
                     cas_status(st, RUNNING, dest)
                 # Repair may release back to waiting (repo lock / live builder) mid-claim.
                 live = load(st["key"]) or st
