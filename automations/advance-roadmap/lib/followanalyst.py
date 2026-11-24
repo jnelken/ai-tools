@@ -53,6 +53,8 @@ def analyze(st, findings, files):
     if not enabled() or not files:
         return [], []
     prompt = analyst_prompt(st, findings, files)
+    # Invariant (owner: analyze gate check): every path to run_analyst must see an
+    # available gate; an unreadable gate (None) is unavailable — fail closed.
     limited = []
     provider = None
     answer = ""
@@ -60,7 +62,7 @@ def analyze(st, findings, files):
         gate = followrepair.gate_one("analyst", provider)
         st.setdefault("usage_snapshots", []).append({
             "at": followrepair.now_iso(), "role": "analyst", "provider": provider, "gate": gate})
-        if gate is not None and not gate.get("available"):
+        if gate is None or not gate.get("available"):
             continue
         try:
             transcript, answer, exit_code, provider_result = run_analyst(st, provider, prompt)
@@ -99,15 +101,19 @@ def accept_findings(st, findings, files, doc):
     for raw in doc.get("findings") or []:
         if not isinstance(raw, dict) or not raw.get("title"):
             continue
-        ev = [e for e in raw.get("evidence") or [] if isinstance(e, dict)]
-        if not ev or not all(followscan.evidence_holds(e, files, stamps) for e in ev):
+        raw_ev = raw.get("evidence") or []
+        # Every evidence entry must be a dict that verifies — drop the whole finding otherwise.
+        if (not isinstance(raw_ev, list) or not raw_ev
+                or not all(isinstance(e, dict) for e in raw_ev)
+                or not all(followscan.evidence_holds(e, files, stamps) for e in raw_ev)):
             rejected.append(followscan.non_finding(
-                raw["title"], "rejected: its evidence is not in the corpus", ev))
+                raw["title"], "rejected: its evidence is not in the corpus",
+                [e for e in raw_ev if isinstance(e, dict)] if isinstance(raw_ev, list) else []))
             continue
         f = followscan.finding(
             st["stage"], st["repo"], str(raw.get("kind") or "analyst"), raw["title"],
             raw.get("key") or raw["title"],
-            [followscan.evidence(e["source"], e["quote"]) for e in ev],
+            [followscan.evidence(e["source"], e["quote"]) for e in raw_ev],
             raw.get("fix") or "")
         if f["id"] not in known:
             kept.append(f)

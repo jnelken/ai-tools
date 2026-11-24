@@ -1,4 +1,5 @@
 """followup.py report + tickets + repair + analyst (DEV-242). Temp ADVANCE_ROADMAP_ROOT; one test per behavior."""
+import argparse
 import fcntl
 import json
 import os
@@ -2406,6 +2407,60 @@ class FollowupTest(unittest.TestCase):
         self.assertIn("skipped:", doc["analyst"])
         self.assertNotIn(self.ANALYST_FINDING["title"], [f["title"] for f in doc["findings"]])
         self.assertEqual(self.calls("codex"), [])
+
+    def test_analyst_skips_when_usage_gate_is_unreadable(self):
+        # Invariant owner: analyze() treats gate_one None as unavailable (fail closed).
+        self.set("stub-usage.json", {"fail": True})
+        stamp = "20261013-103004"
+        (self.root / "runs" / stamp).mkdir(parents=True)
+        (self.root / "runs.jsonl").write_text(json.dumps(json.loads((FIXTURES / "runs-row.json").read_text())) + "\n")
+        (self.root / "stub-analyst.txt").write_text(self.analyst_fence())
+        p = self.run_followup("scan", "--stage", "tooling", "--origin", "batch-2026-10-13", "--stamp", stamp,
+                              env={"ADVANCE_ROADMAP_FOLLOWUP_ANALYST": "1"})
+        doc = json.loads(p.stdout)
+        self.assertIn("skipped:", doc["analyst"])
+        self.assertEqual(self.calls("codex"), [])
+
+    def test_analyst_rejects_finding_with_any_malformed_evidence_entry(self):
+        stamp = "20261013-103004"
+        (self.root / "runs" / stamp).mkdir(parents=True)
+        (self.root / "runs.jsonl").write_text(json.dumps(json.loads((FIXTURES / "runs-row.json").read_text())) + "\n")
+        mixed = {"title": self.ANALYST_FINDING["title"], "kind": self.ANALYST_FINDING["kind"],
+                 "evidence": [{"source": str(self.root / "runs.jsonl"),
+                               "quote": self.ANALYST_FINDING["quote"]},
+                              "not-a-dict"]}
+        (self.root / "stub-analyst.txt").write_text(
+            "```FOLLOWUP_FINDINGS_JSON\n" + json.dumps({"findings": [mixed]}) + "\n```\n")
+        p = self.run_followup("scan", "--stage", "tooling", "--origin", "batch-2026-10-13", "--stamp", stamp,
+                              env={"ADVANCE_ROADMAP_FOLLOWUP_ANALYST": "1"})
+        doc = json.loads(p.stdout)
+        self.assertNotIn(self.ANALYST_FINDING["title"], [f["title"] for f in doc["findings"]])
+        self.assertTrue(any(n["title"] == self.ANALYST_FINDING["title"] and "rejected" in n["why"]
+                            for n in doc["non_findings"]))
+
+    def test_scan_dry_runs_use_distinct_stage_dirs(self):
+        import followup as fu
+        stamp = "20261013-103004"
+        (self.root / "runs" / stamp).mkdir(parents=True)
+        (self.root / "runs.jsonl").write_text(json.dumps(json.loads((FIXTURES / "runs-row.json").read_text())) + "\n")
+        os.environ["ADVANCE_ROADMAP_ROOT"] = str(self.root)
+        os.environ["ADVANCE_ROADMAP_FOLLOWUP_ANALYST"] = "0"
+        fu.ROOT = self.root
+        fu.STATE = self.root / "followups"
+        keys = []
+        real_stage_dir = fu.stage_dir
+
+        def spy(key):
+            keys.append(key)
+            return real_stage_dir(key)
+
+        args = argparse.Namespace(stage="tooling", stamp=[stamp], origin="batch-x")
+        with mock.patch.object(fu, "stage_dir", side_effect=spy):
+            with mock.patch.object(fu.time, "time_ns", side_effect=[111, 222]):
+                with mock.patch.object(fu.os, "getpid", return_value=7):
+                    fu.cmd_scan(args)
+                    fu.cmd_scan(args)
+        self.assertEqual(sorted(set(keys)), ["scan-batch-x-7-111", "scan-batch-x-7-222"])
 
 
 if __name__ == "__main__":

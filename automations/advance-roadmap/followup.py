@@ -2100,14 +2100,16 @@ def summary_line(rows):
 
 def cmd_scan(a):
     """Dry run: findings and non-findings a stage would act on. No durable state, repairs or tickets."""
+    # Unique per invocation so concurrent dry runs never share / delete each other's dir.
+    uniq = f"{os.getpid()}-{time.time_ns()}"
     if a.stage == "cleanup":
-        key = f"scan-{a.stamp[0]}"
+        key = f"scan-{a.stamp[0]}-{uniq}"
         require_id(key, "key")
         st = {"key": key, "stage": STAGES["cleanup"], "stamp": a.stamp[0], "usage_snapshots": [],
               "repo": (read_json(ROOT / "runs" / a.stamp[0] / "worker-result.json") or {}).get("repo")}
     else:
         require_id(a.origin, "origin")
-        key = f"scan-{a.origin}"
+        key = f"scan-{a.origin}-{uniq}"
         require_id(key, "key")
         st = {"key": key, "stage": STAGES["tooling"], "children": a.stamp, "origin": a.origin,
               "repo": followscan.TOOLING_REPO, "usage_snapshots": []}
