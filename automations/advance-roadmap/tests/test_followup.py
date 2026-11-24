@@ -349,6 +349,17 @@ class FollowupTest(unittest.TestCase):
         findings, _ = followscan.tooling_scan(self.root, [stamp])
         self.assertTrue([f for f in findings if "without a completed review" in f.get("title", "")])
 
+    def test_drain_origin_skips_unrelated_stages(self):
+        """--origin only processes that origin's stages; siblings stay queued."""
+        self.shipped_item("20261014-mine")
+        self.shipped_item("20261014-theirs")
+        self.run_followup("hook", "item-done", "--stamp", "20261014-mine", "--origin", "batch-mine")
+        self.run_followup("hook", "item-done", "--stamp", "20261014-theirs", "--origin", "batch-theirs")
+        self.run_followup("drain", "--stage", "cleanup", "--origin", "batch-mine")
+        self.assertEqual(self.state("cleanup-20261014-mine")["status"], "done")
+        self.assertEqual(self.state("cleanup-20261014-theirs")["status"], "queued")
+        self.assertEqual(self.state("cleanup-20261014-mine").get("drained_by"), "batch-mine")
+
     def test_timeout_mark_is_claim_reload_recheck_save(self):
         """Timeout recovery owns stage writes via claim → reload → recheck → CAS."""
         import followup as fu

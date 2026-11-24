@@ -525,7 +525,10 @@ def order(st):
 
 
 def drain(repo=None, origin=None, stage=None, wait_s=0.0):
-    """Drain ready stages. Every status transition is claim → reload → eligibility → act → save."""
+    """Drain ready stages. Every status transition is claim → reload → eligibility → act → save.
+
+    When --origin is set, only that origin's stages are processed (never siblings' stages).
+    """
     STATE.mkdir(parents=True, exist_ok=True)
     recover_interrupted()
     deadline = time.time() + wait_s
@@ -534,6 +537,8 @@ def drain(repo=None, origin=None, stage=None, wait_s=0.0):
         for st in sorted(all_stages(), key=order):
             if repo and st.get("repo") != repo or stage and st["stage"] != STAGES[stage]:
                 continue
+            if origin and st.get("origin") != origin:
+                continue
             if not eligible(st):
                 continue
             c = claim_stage(st["key"])
@@ -541,6 +546,9 @@ def drain(repo=None, origin=None, stage=None, wait_s=0.0):
                 continue   # another drain holds this stage
             try:
                 st = load(st["key"]) or st
+                # Recheck origin under the claim — a concurrent rewrite must not leak in.
+                if origin and st.get("origin") != origin:
+                    continue
                 if not eligible(st):
                     continue
                 try:
