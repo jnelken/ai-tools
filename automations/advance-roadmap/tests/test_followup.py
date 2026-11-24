@@ -607,8 +607,10 @@ class FollowupTest(unittest.TestCase):
         self.assertEqual(self.calls("jlin")[0]["repo"], "demo")
         # Second deferral (new builder) must rewrite the description; failure must not advance note.
         st["builder_provider"] = "codex"
+        # Prior description must carry finding IDs so the rewrite merge has something to preserve.
+        prior_body = followticket.description(st, findings, quota, "resume")
         self.set("stub-linear.json", {"pages": [[{
-            "identifier": "DEV-900", "title": "t", "description": "",
+            "identifier": "DEV-900", "title": "t", "description": prior_body,
             "labels": {"nodes": [{"name": "demo", "parent": {"name": "repo"}}]}}]],
             "fail": ["issue update DEV-900"]})
         (self.root / "stub-calls.jsonl").unlink(missing_ok=True)
@@ -617,11 +619,12 @@ class FollowupTest(unittest.TestCase):
         self.assertTrue(st.get("pending_deferral_sync"), st)
         self.assertEqual(st.get("last_deferral"), first_note)
         self.set("stub-linear.json", {"pages": [[{
-            "identifier": "DEV-900", "title": "t", "description": "",
+            "identifier": "DEV-900", "title": "t", "description": prior_body,
             "labels": {"nodes": [{"name": "demo", "parent": {"name": "repo"}}]}}]]})
         self.assertTrue(fu.sync_deferral_tickets(
             st, findings, quota2, fu.next_step_text(st, "builder round 1"),
-            fu.deferral_note(st, quota2, "builder round 1")))
+            fu.deferral_note(st, quota2, "builder round 1"), issues=[{
+                "identifier": "DEV-900", "description": prior_body}]))
         self.assertIsNone(st.get("pending_deferral_sync"))
         self.assertNotEqual(st.get("last_deferral"), first_note)
         self.assertIn("codex", st["last_deferral"])
@@ -629,6 +632,45 @@ class FollowupTest(unittest.TestCase):
                    if c.get("cmd") == "issue update DEV-900" and "--description-file" in (c.get("args") or [])]
         self.assertTrue(updates)
         self.assertEqual(followticket.parse_meta(updates[-1]["body"])["builder_provider"], "codex")
+
+    def test_deferral_description_preserves_sibling_finding_ids(self):
+        """Invariant: rewriting a shared ticket's description must keep the sibling's finding IDs."""
+        import followup as fu
+        fu.ROOT = self.root
+        fu.STATE = self.root / "followups"
+        os.environ["ADVANCE_ROADMAP_ROOT"] = str(self.root)
+        os.environ["ADVANCE_ROADMAP_LINEAR_BIN"] = self.env["ADVANCE_ROADMAP_LINEAR_BIN"]
+        key_a, key_b = "cleanup-a", "cleanup-b"
+        fid_a, fid_b = "aaaaaaaaaaaa", "bbbbbbbbbbbb"
+        prior = self.meta_ticket("DEV-900", {
+            "key": key_a, "stage": "project-cleanup",
+            "finding_ids": [fid_a, fid_b],
+            "finding_status": {fid_a: "open", fid_b: "open"},
+            "finding_owners": {
+                fid_a: {"key": key_a}, fid_b: {"key": key_b, "branch": None, "pr_url": None},
+            },
+        })
+        d = self.root / "followups" / key_a
+        d.mkdir(parents=True)
+        findings = [{"id": fid_a, "title": "stage a finding", "kind": "t", "fix": "f",
+                     "status": "open", "repo": "demo", "stage": "project-cleanup", "ticket": "DEV-900",
+                     "evidence": []}]
+        st = {"key": key_a, "stage": "project-cleanup", "repo": "demo", "status": "running",
+              "findings": findings, "owned_tickets": ["DEV-900"], "builder_provider": "cursor",
+              "ticket_body": prior["description"]}
+        (d / "state.json").write_text(json.dumps(st))
+        self.set("stub-linear.json", {"pages": [[prior]]})
+        quota = {"provider": "cursor", "cause": "over its gate", "reset_at": "soon",
+                 "reset_epoch": time.time() + 60}
+        self.assertTrue(fu.sync_deferral_tickets(
+            st, findings, quota, "resume", "note-1", issues=[prior]))
+        updates = [c for c in self.calls("linear")
+                   if c.get("cmd") == "issue update DEV-900" and "--description-file" in (c.get("args") or [])]
+        self.assertTrue(updates)
+        meta = followticket.parse_meta(updates[-1]["body"])
+        self.assertEqual(set(meta["finding_ids"]), {fid_a, fid_b})
+        self.assertEqual(meta["finding_status"][fid_b], "open")
+        self.assertEqual((meta.get("finding_owners") or {}).get(fid_b, {}).get("key"), key_b)
 
     def test_finish_closes_a_ticket_only_when_every_tracked_finding_is_fixed(self):
         """A stage that verifies one finding must not Done a multi-finding ticket (ownership preserved)."""

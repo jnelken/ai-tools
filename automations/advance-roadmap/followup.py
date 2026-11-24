@@ -729,6 +729,43 @@ def deferral_note(st, quota, step):
             f"|{st.get('branch')}|{st.get('pr_url')}")
 
 
+def ticket_description_payload(st, findings, ident, issues=None, finding_status=None, finding_owners=None):
+    """Invariant owner for description writes: preserve every finding ID the ticket already tracks.
+
+    Paths: create (no prior meta → findings only), sync_deferral_tickets (merge), note_partial_progress
+    (passes explicit status/owners). Never replace a shared ticket's metadata with only this stage's rows.
+    """
+    by_id = {f["id"]: dict(f) for f in findings if f.get("id")}
+    status = dict(finding_status or {})
+    owners = {fid: followticket.owner_fields(o) for fid, o in (finding_owners or {}).items()
+              if followticket.owner_fields(o)}
+    meta = None
+    for issue in issues or []:
+        if issue.get("identifier") == ident:
+            meta = followticket.parse_meta(issue.get("description") or "")
+            break
+    if meta is None and st.get("ticket_body"):
+        meta = followticket.parse_meta(st.get("ticket_body") or "")
+    if meta:
+        prior_status = dict(meta.get("finding_status") or {})
+        prior_owners = meta.get("finding_owners") or {}
+        for fid in list(meta.get("finding_ids") or []) + list(prior_status):
+            status.setdefault(fid, prior_status.get(fid, "open"))
+            if fid not in by_id:
+                by_id[fid] = {"id": fid, "title": fid, "kind": "ticket", "fix": f"see {ident}",
+                              "status": status.get(fid, "open"), "ticket": ident, "evidence": []}
+            if fid not in owners and isinstance(prior_owners.get(fid), dict):
+                owners[fid] = followticket.owner_fields(prior_owners[fid])
+    for f in by_id.values():
+        status.setdefault(f["id"], f.get("status") or "open")
+    # This stage owns the findings it is deferring / progressing.
+    for f in findings:
+        if f.get("id"):
+            owners.setdefault(f["id"], stage_owner_snapshot(st))
+            status[f["id"]] = f.get("status") or status.get(f["id"]) or "open"
+    return list(by_id.values()), status, owners
+
+
 def sync_deferral_tickets(st, findings, quota, next_step, note, issues=None):
     """Create/update Linear tickets for a deferral. Sets last_deferral only after sync succeeds.
 
@@ -752,7 +789,9 @@ def sync_deferral_tickets(st, findings, quota, next_step, note, issues=None):
         try:
             st["ticket_meta_at"] = time.time()
             for ident, fs in ticketed.items():
-                body = followticket.description(st, fs, quota, next_step)
+                merged, status, owners = ticket_description_payload(st, fs, ident, issues=issues)
+                body = followticket.description(st, merged, quota, next_step,
+                                                finding_status=status, finding_owners=owners)
                 if ident in owned:
                     # Recovery on another machine reads the description — carry this deferral's
                     # builder, branch and PR, not the first deferral's.
