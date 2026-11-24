@@ -1,13 +1,15 @@
-"""followup.py report + tickets (DEV-242 slice 3a). Temp ADVANCE_ROADMAP_ROOT; one test per behavior."""
+"""followup.py report + tickets + repair (DEV-242 slice 3b). Temp ADVANCE_ROADMAP_ROOT; one test per behavior."""
 import fcntl
 import json
 import os
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 from unittest.mock import patch
 
 HERE = Path(__file__).resolve().parent
@@ -21,6 +23,15 @@ sys.path.insert(0, str(ADV / "lib"))
 import followscan  # noqa: E402
 import followticket  # noqa: E402
 import daily_batch  # noqa: E402
+import supervisor  # noqa: E402
+
+
+def pid_alive(pid):
+    try:
+        os.kill(pid, 0)
+        return True
+    except OSError:
+        return False
 
 
 class FollowupTest(unittest.TestCase):
@@ -30,12 +41,18 @@ class FollowupTest(unittest.TestCase):
         self.root, self.code = t / "root", t / "code"
         (self.root / "lib").mkdir(parents=True)
         self.code.mkdir()
+        # SUPERSET_*: a run from a workspace terminal must never aim a stub builder at that workspace.
         self.env = {**{k: v for k, v in os.environ.items()
                        if not k.startswith(("ADVANCE_ROADMAP_", "GIT_", "SUPERSET_"))},
                     "ADVANCE_ROADMAP_ROOT": str(self.root), "PERSONAL_CODE_DIR": str(self.code),
                     "ADVANCE_ROADMAP_SUPERSET": "0",
                     "ADVANCE_ROADMAP_FOLLOWUP_INSTALL": "0", "ADVANCE_ROADMAP_FOLLOWUP_POLL_S": "0.2",
                     "ADVANCE_ROADMAP_FOLLOWUP_WORKTREES": str(t / "worktrees"),
+                    "ADVANCE_ROADMAP_FOLLOWUP_DEPLOY_NONE_S": "0",
+                    "ADVANCE_ROADMAP_FOLLOWUP_DEPLOY_TIMEOUT_S": "2",
+                    "ADVANCE_ROADMAP_FOLLOWUP_CHECKS_TIMEOUT_S": "2",
+                    "ADVANCE_ROADMAP_WORKER_POLL_S": "0.1",
+                    "ADVANCE_ROADMAP_GH_BIN": self.wrapper(t, "gh"),
                     "ADVANCE_ROADMAP_LINEAR_BIN": self.wrapper(t, "linear"),
                     "ADVANCE_ROADMAP_JLIN": str(self.py_wrapper(t, "jlin")),
                     "AI_TOOLS_HOME": str(t / "no-ai-tools"),
@@ -45,7 +62,14 @@ class FollowupTest(unittest.TestCase):
         (self.root / "lib" / "usage.py").write_text(
             f"import runpy, sys\nsys.argv = [{str(STUBS)!r}, 'usage', *sys.argv[1:]]\n"
             f"runpy.run_path({str(STUBS)!r}, run_name='__main__')\n")
+        for name, tool in (("worker.sh", "worker"), ("review.sh", "review")):
+            (self.root / name).write_text(f'#!/bin/sh\nexec {sys.executable} {STUBS} {tool} "$@"\n')
+            (self.root / name).chmod(0o755)
         self.make_repo("demo")
+
+    def repair_env(self, **extra):
+        """Env that unparks the repair loop (slice 3b)."""
+        return {"ADVANCE_ROADMAP_FOLLOWUP_REPAIR": "1", **extra}
 
     def wrapper(self, t, tool):
         path = t / "bin" / tool
@@ -1375,6 +1399,422 @@ class FollowupTest(unittest.TestCase):
         self.assertTrue(comments)
         self.assertIn(tag, st.get("evidence_posted") or [])
         self.assertFalse(st.get("pending_evidence_sync"))
+
+    # ── repair lifecycle (ADVANCE_ROADMAP_FOLLOWUP_REPAIR=1) ──
+
+    def test_a_clean_review_with_passing_checks_merges_and_records_the_repair(self):
+        self.shipped_item("20261014-050000")
+        self.run_followup("hook", "item-done", "--stamp", "20261014-050000")
+        self.run_followup("drain", env=self.repair_env())
+        st = self.state("cleanup-20261014-050000")
+        self.assertEqual(st["status"], "done", self.report())
+        self.assertEqual([f["status"] for f in st["findings"]], ["fixed"])
+        self.assertEqual(st["findings"][0]["kind"], "unresolved-review")
+        self.assertEqual(st["pr_url"], "https://github.com/jnelken/demo/pull/7")
+        self.assertEqual(st["validation"]["checks"], "passed")
+        self.assertEqual(st["validation"]["deploy"], "success")
+        self.assertEqual({(s["role"], s["session_id"]) for s in st["sessions"]},
+                         {("builder", "cursor-sess-0"), ("reviewer", "codex-sess-1")})
+        [w] = self.calls("worker")
+        self.assertEqual(w["followup_env"], "1")
+        self.assertIn("Never use `git stash`", w["brief"])
+        self.assertIn("do NOT merge", w["brief"])
+        self.assertTrue(any(c["args"][:2] == ["pr", "merge"] for c in self.calls("gh")))
+        self.assertTrue(st["usage_snapshots"])
+
+    def test_findings_get_another_round_and_three_unclean_rounds_never_merge(self):
+        self.shipped_item("20261014-050000")
+        self.run_followup("hook", "item-done", "--stamp", "20261014-050000")
+        self.set("stub-review.json", {"verdicts": ["findings", "findings", "findings"]})
+        self.run_followup("drain", env=self.repair_env())
+        st = self.state("cleanup-20261014-050000")
+        self.assertEqual(st["status"], "blocked")
+        self.assertEqual(len(self.calls("worker")), 3)
+        self.assertIn("VERDICT: findings", self.calls("worker")[1]["brief"])
+        self.assertFalse(any(c["args"][:2] == ["pr", "merge"] for c in self.calls("gh")))
+        self.assertEqual(self.calls("jlin"), [])
+        self.assertTrue(any(r["kind"] == "review" for r in self.report()))
+
+    def test_failed_checks_or_a_red_deploy_never_complete_the_ticket(self):
+        self.shipped_item("20261014-050000")
+        stamp_meta = {"key": "cleanup-20261014-050000", "stage": "project-cleanup", "finding_ids": []}
+        self.run_followup("hook", "item-done", "--stamp", "20261014-050000")
+        fid = None
+        for checks, deploy in (("fail", "success"), ("pass", "failure")):
+            self.set("stub-gh.json", {"checks": checks, "deploy": deploy})
+            if fid:
+                self.set("stub-linear.json", {"pages": [[self.meta_ticket(
+                    "DEV-501", {**stamp_meta, "finding_ids": [fid]})]]})
+            self.run_followup("drain", env=self.repair_env())
+            st = self.state("cleanup-20261014-050000")
+            fid = st["findings"][0]["id"]
+            self.assertEqual(st["status"], "blocked")
+            # Evidence/description rewrites may update the ticket; never close it as Done.
+            self.assertFalse(any(
+                c["cmd"].startswith("issue update") and "--state" in (c.get("args") or [])
+                and any(a in ("Done", "Canceled") for a in (c.get("args") or []))
+                for c in self.calls("linear")))
+            st.update(status="pending")
+            (self.root / "followups" / st["key"] / "state.json").write_text(json.dumps(st))
+        self.assertEqual(st["validation"]["deploy"], "failed")
+        progress = [c for c in self.calls("linear")
+                    if c["cmd"].startswith("issue comment") and c["issue"] == "DEV-501"]
+        self.assertTrue(any("deploy is failed" in c["body"] for c in progress), progress)
+
+    def test_an_interrupted_stage_resumes_where_it_stopped(self):
+        self.shipped_item("20261014-050000")
+        self.run_followup("hook", "item-done", "--stamp", "20261014-050000")
+        self.set("stub-review.json", {"verdicts": ["clean"], "unavailable": True})
+        self.set("stub-usage.json", {})
+        self.run_followup("drain", env=self.repair_env())
+        st = self.state("cleanup-20261014-050000")
+        self.assertEqual(st["next"]["step"], "review")
+        st["status"] = "running"
+        (self.root / "followups" / st["key"] / "state.json").write_text(json.dumps(st))
+        self.set("stub-review.json", {"verdicts": ["clean"]})
+        self.run_followup("drain", env=self.repair_env())
+        st = self.state("cleanup-20261014-050000")
+        self.assertEqual(st["status"], "done")
+        self.assertEqual(len(self.calls("worker")), 1)
+        self.assertTrue(any(b["kind"] == "interrupted" for b in st["blockers"]))
+
+    def test_an_interrupted_stage_whose_builder_is_still_running_is_left_alone(self):
+        self.shipped_item("20261014-050000")
+        self.run_followup("hook", "item-done", "--stamp", "20261014-050000")
+        st = self.state("cleanup-20261014-050000")
+        st.update(status="running", next={"step": "build", "round": 1})
+        (self.root / "followups" / st["key"] / "state.json").write_text(json.dumps(st))
+        build = self.root / "followups" / st["key"] / "build-r1-a1"
+        build.mkdir()
+        (build / "worker.pid").write_text(str(os.getpid()))
+        self.run_followup("drain", env=self.repair_env())
+        self.assertEqual(self.state(st["key"])["status"], "running")
+        self.assertEqual(self.calls("worker"), [])
+        (build / "worker.exit").write_text("0")
+        self.run_followup("drain", env=self.repair_env())
+        self.assertEqual(self.state(st["key"])["status"], "done")
+
+    def test_a_pr_head_that_moved_after_the_review_is_re_reviewed_never_merged(self):
+        self.shipped_item("20261014-050000")
+        self.run_followup("hook", "item-done", "--stamp", "20261014-050000")
+        self.set("stub-gh.json", {"checks": "pass", "deploy": "success", "head": "0" * 40})
+        self.run_followup("drain", env=self.repair_env())
+        st = self.state("cleanup-20261014-050000")
+        self.assertEqual((st["status"], st["next"]["step"]), ("pending", "review"))
+        self.assertIn("is not the reviewed commit", self.report()[-1]["reason"])
+        self.assertFalse(any(c["args"][:2] == ["pr", "merge"] for c in self.calls("gh")))
+        self.set("stub-gh.json", {"checks": "pass", "deploy": "success"})
+        self.run_followup("drain", env=self.repair_env())
+        st = self.state("cleanup-20261014-050000")
+        self.assertEqual(st["status"], "done", self.report())
+        [merge] = [c["args"] for c in self.calls("gh") if c["args"][:2] == ["pr", "merge"]]
+        head = (self.root / "stub-pr-head.txt").read_text().strip()
+        self.assertEqual(merge[merge.index("--match-head-commit") + 1], head)
+        self.assertEqual(len(self.calls("review")), 2)
+
+    def test_a_deploy_api_error_is_never_read_as_no_deploy(self):
+        self.shipped_item("20261014-050000")
+        self.run_followup("hook", "item-done", "--stamp", "20261014-050000")
+        self.set("stub-gh.json", {"checks": "pass", "deploy": "error"})
+        self.run_followup("drain", env=self.repair_env())
+        st = self.state("cleanup-20261014-050000")
+        self.assertEqual((st["status"], st["validation"]["deploy"]), ("pending", "unverified"))
+        self.assertEqual(st["findings"][0]["status"], "open")
+        self.set("stub-gh.json", {"checks": "pass", "deploy": "none"})
+        self.run_followup("drain", env=self.repair_env())
+        st = self.state("cleanup-20261014-050000")
+        self.assertEqual((st["status"], st["validation"]["deploy"]), ("done", "none"))
+        self.assertEqual(len([c for c in self.calls("gh") if c["args"][:2] == ["pr", "merge"]]), 1)
+
+    def ai_tools_deploy_clone(self):
+        self.make_repo("ai-tools")
+        self.shipped_item("20261014-050000", repo="ai-tools")
+        self.run_followup("hook", "item-done", "--stamp", "20261014-050000")
+        self.set("stub-gh.json", {"checks": "pass", "deploy": "success", "merge_commit": "head"})
+        home = Path(self.tmp.name) / "ai-home"
+        subprocess.run(["git", "clone", "-q",
+                        str(Path(self.tmp.name) / "remotes" / "ai-tools.git"), str(home)],
+                       check=True, env=self.env)
+        return home, {"AI_TOOLS_HOME": str(home), "ADVANCE_ROADMAP_FOLLOWUP_INSTALL": "1"}
+
+    def install_script(self, home, body):
+        script = home / "install.sh"
+        script.write_text(f"#!/bin/sh\necho run >> {Path(self.tmp.name) / 'install-ran'}\n{body}\n")
+        script.chmod(0o755)
+
+    def test_an_ai_tools_repair_is_not_done_until_this_machine_installs_it(self):
+        home, env = self.ai_tools_deploy_clone()
+        self.install_script(home, "exit 1")
+        self.run_followup("drain", env=self.repair_env(**env))
+        st = self.state("cleanup-20261014-050000")
+        self.assertEqual(st["status"], "pending")
+        self.assertEqual((st["validation"]["deploy"], st["validation"]["install"]),
+                         ("success", "install.sh exit 1"))
+        self.assertIn("install failed", self.report()[-1]["reason"])
+        branch = "roadmap/followup-cleanup-20261014-050000"
+        self.install_script(home, f"git -C {home} fetch -q origin {branch} && "
+                                  f"git -C {home} merge -q --ff-only FETCH_HEAD")
+        self.run_followup("drain", env=self.repair_env(**env))
+        st = self.state("cleanup-20261014-050000")
+        self.assertEqual((st["status"], st["validation"]["install"]), ("done", "installed"))
+        self.assertEqual(len([c for c in self.calls("gh") if c["args"][:2] == ["pr", "merge"]]), 1)
+        self.assertEqual((Path(self.tmp.name) / "install-ran").read_text().count("run"), 2)
+
+    def test_an_install_that_exits_0_without_updating_the_deploy_clone_is_not_installed(self):
+        home, env = self.ai_tools_deploy_clone()
+        self.install_script(home, "echo 'deploy clone is dirty; skipping update' >&2\nexit 0")
+        before = self.git(home, "rev-parse", "HEAD")
+        self.run_followup("drain", env=self.repair_env(**env))
+        st = self.state("cleanup-20261014-050000")
+        self.assertEqual(st["status"], "pending")
+        self.assertIn("does not contain", st["validation"]["install"])
+        self.assertIn("install failed", self.report()[-1]["reason"])
+        self.assertEqual(self.git(home, "rev-parse", "HEAD"), before)
+        self.assertEqual(st["findings"][0]["status"], "open")
+
+    def test_repairs_in_one_repo_are_serialized(self):
+        for stamp in ("20261014-050000", "20261014-060000"):
+            self.shipped_item(stamp)
+            self.run_followup("hook", "item-done", "--stamp", stamp)
+        self.set("stub-worker.json", {"mode": "ok", "sleep": 1.5})
+        threads = [threading.Thread(
+            target=self.run_followup, args=("drain", "--wait-s", "60"),
+            kwargs={"env": self.repair_env()}) for _ in range(2)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        spans = sorted((c["start"], c["end"]) for c in self.calls("worker"))
+        self.assertEqual(len(spans), 2)
+        self.assertLessEqual(spans[0][1], spans[1][0])
+        self.assertEqual({self.state(k)["status"] for k in (
+            "cleanup-20261014-050000", "cleanup-20261014-060000")}, {"done"})
+
+    def test_quota_during_the_repair_defers_with_a_ticket(self):
+        self.shipped_item("20261014-050000")
+        self.run_followup("hook", "item-done", "--stamp", "20261014-050000")
+        self.set("stub-worker.json", {"mode": "quota"})
+        self.run_followup("drain", env=self.repair_env())
+        st = self.state("cleanup-20261014-050000")
+        self.assertEqual(st["status"], "deferred")
+        [t] = self.calls("jlin")
+        self.assertEqual((t["repo"], t["state"]), ("demo", "backlog"))
+        self.assertIn("resets 2026-10-14T12:00:00", t["description"])
+        self.assertIn("Next step: `python3 ~/.claude/automations/advance-roadmap/followup.py drain --repo demo`",
+                      t["description"])
+        self.assertIn('"finding_ids": ["' + st["findings"][0]["id"], t["description"])
+        self.assertEqual(st["findings"][0]["ticket"], "DEV-900")
+        self.assertEqual(self.calls("review"), [])
+
+    def test_quota_during_the_review_defers_with_the_branch_and_pr(self):
+        self.shipped_item("20261014-050000")
+        self.run_followup("hook", "item-done", "--stamp", "20261014-050000")
+        out = {"reviewer": {"codex": "over", "cursor": "over", "claude": "over"},
+               "reset_at": "2026-10-14T15:00:00", "reset_epoch": time.time() + 7200}
+        self.set("stub-worker.json", {"mode": "ok", "after_usage": out})
+        self.run_followup("drain", env=self.repair_env())
+        st = self.state("cleanup-20261014-050000")
+        self.assertEqual((st["status"], st["next"]["step"]), ("deferred", "review"))
+        [t] = self.calls("jlin")
+        self.assertIn("pull/7", t["description"])
+        self.assertIn(st["branch"], t["description"])
+        self.assertIn("resets 2026-10-14T15:00:00", t["description"])
+        self.assertIn("it resumes at review round 1", t["description"])
+        self.assertIn('"builder_provider": "cursor"', t["description"])
+        self.assertEqual(self.calls("review"), [])
+        self.run_followup("drain", env=self.repair_env())
+        self.assertEqual(len(self.calls("jlin")), 1)
+
+    def test_a_builder_with_no_free_reviewer_is_not_started(self):
+        self.shipped_item("20261014-050000")
+        self.run_followup("hook", "item-done", "--stamp", "20261014-050000")
+        self.set("stub-usage.json", {"reviewer": {"codex": "over", "claude": "limited", "cursor": "ok"},
+                                     "reset_at": "2026-10-14T13:00:00", "reset_epoch": time.time() + 600})
+        self.set("stub-worker.json", {"mode": "ok"})
+        self.run_followup("drain", env=self.repair_env())
+        st = self.state("cleanup-20261014-050000")
+        [w] = self.calls("worker")
+        self.assertEqual(w["providers"], "codex claude")
+        self.assertEqual(st["status"], "done")
+
+    def test_an_unavailable_review_is_not_quota_when_only_the_builder_is_out(self):
+        self.shipped_item("20261014-050000")
+        self.run_followup("hook", "item-done", "--stamp", "20261014-050000")
+        self.set("stub-usage.json", {"reviewer": {"cursor": "over"}, "reset_at": "2026-10-14T13:00:00",
+                                     "reset_epoch": time.time() + 600})
+        self.set("stub-review.json", {"verdicts": ["clean"], "unavailable": True})
+        self.run_followup("drain", env=self.repair_env())
+        st = self.state("cleanup-20261014-050000")
+        self.assertEqual(st["builder_provider"], "cursor")
+        self.assertEqual((st["status"], st["next"]["step"]), ("pending", "review"))
+        self.assertEqual(self.calls("jlin"), [])
+        self.assertIsNone(st.get("quota"))
+        self.assertEqual(self.report()[-1]["kind"], "review-unavailable")
+        self.set("stub-usage.json", {"reviewer": {"cursor": "over", "claude": "limited"},
+                                     "reset_at": "2026-10-14T13:00:00", "reset_epoch": time.time() + 600})
+        self.run_followup("drain", env=self.repair_env())
+        st = self.state("cleanup-20261014-050000")
+        self.assertEqual((st["status"], st["quota"]["provider"]), ("deferred", "claude"))
+        self.assertEqual(len(self.calls("jlin")), 1)
+        self.assertNotIn("cursor", st["quota"]["cause"])
+
+    def test_a_review_round_limit_defers_even_when_the_shared_quota_record_fails(self):
+        self.shipped_item("20261014-050000")
+        self.run_followup("hook", "item-done", "--stamp", "20261014-050000")
+        reset = time.time() + 900
+        self.set("stub-usage.json", {"quota_record_fails": True})
+        self.set("stub-review.json", {"verdicts": ["clean"], "unavailable": True, "limited": [
+            {"provider": "codex", "cause": "You've hit your usage limit", "reset_epoch": reset,
+             "reset_at": "2026-10-14T13:15:00"},
+            {"provider": "cursor", "cause": "excluded: the builder", "reset_epoch": reset - 600}]})
+        self.run_followup("drain", env=self.repair_env())
+        st = self.state("cleanup-20261014-050000")
+        self.assertEqual(st["builder_provider"], "cursor")
+        self.assertEqual((st["status"], st["quota"]["provider"]), ("deferred", "codex"))
+        self.assertEqual(st["quota"]["reset_at"], "2026-10-14T13:15:00")
+        self.assertNotIn("cursor", st["quota"]["cause"])
+
+    def test_worker_exit_3_with_every_cli_missing_is_a_local_blocker_not_quota(self):
+        self.shipped_item("20261014-050000")
+        self.run_followup("hook", "item-done", "--stamp", "20261014-050000")
+        self.set("stub-worker.json", {"mode": "missing"})
+        self.run_followup("drain", env=self.repair_env())
+        st = self.state("cleanup-20261014-050000")
+        self.assertEqual(st["status"], "pending")
+        self.assertEqual(self.calls("jlin"), [])
+        self.assertIn("missing", self.report()[-1]["reason"])
+
+    def test_a_builder_that_outlives_its_timeout_blocks_every_retry_until_it_exits(self):
+        self.shipped_item("20261014-050000")
+        self.run_followup("hook", "item-done", "--stamp", "20261014-050000")
+        self.py_wrapper(Path(self.tmp.name), "workspaces").rename(self.root / "lib" / "workspaces.py")
+        self.set("stub-worker.json", {"mode": "ok", "sleep": 4})
+        env = self.repair_env(ADVANCE_ROADMAP_SUPERSET="1", ADVANCE_ROADMAP_WORKER_TIMEOUT_MIN="0.02",
+                              ADVANCE_ROADMAP_WORKER_POLL_S="0.1")
+        self.run_followup("drain", env=env)
+        key = "cleanup-20261014-050000"
+        self.assertEqual(self.state(key)["status"], "pending")
+        self.assertIn("still running", self.report()[-1]["reason"])
+        registry = self.root / "inflight" / "demo" / f"followup-{key}.pid"
+        self.assertTrue(registry.exists())
+        out = self.run_followup("drain", env=env).stdout
+        self.assertIn("still running", out)
+        self.assertEqual(len(self.calls("workspaces")), 1)
+        deadline = time.time() + 30
+        while not list((self.root / "followups" / key).glob("build-*/worker.exit")) and time.time() < deadline:
+            time.sleep(0.2)
+        self.set("stub-worker.json", {"mode": "ok"})
+        self.run_followup("drain", env=env)
+        self.assertEqual(self.state(key)["status"], "done", self.report())
+        self.assertEqual(len(self.calls("workspaces")), 2)
+        self.assertFalse(registry.exists())
+
+    def start_plain_build_then_kill_the_drain(self, key, sleep):
+        self.set("stub-worker.json", {"mode": "ok", "sleep": sleep})
+        drain = subprocess.Popen(
+            [sys.executable, str(FOLLOWUP), "drain"], stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL, env={**self.env, **self.repair_env()})
+        deadline = time.time() + 30
+        while not list((self.root / "followups" / key).glob("build-*/worker.pid")) and time.time() < deadline:
+            time.sleep(0.1)
+        drain.kill()
+        drain.wait()
+        [bdir] = (self.root / "followups" / key).glob("build-*")
+        return bdir
+
+    def test_a_plain_worktree_builder_is_registered_and_never_doubled_after_its_drain_dies(self):
+        self.shipped_item("20261014-050000")
+        self.run_followup("hook", "item-done", "--stamp", "20261014-050000")
+        key = "cleanup-20261014-050000"
+        bdir = self.start_plain_build_then_kill_the_drain(key, 3)
+        registry = self.root / "inflight" / "demo" / f"followup-{key}.pid"
+        self.assertTrue(registry.exists())
+        os.kill(int(registry.read_text().strip()), 0)
+        self.assertIn("demo", supervisor.inflight_repos(self.root))
+        self.run_followup("drain", env=self.repair_env())
+        self.assertEqual(self.state(key)["status"], "running")
+        self.assertEqual(len(list((self.root / "followups" / key).glob("build-*"))), 1)
+        deadline = time.time() + 30
+        while not (bdir / "worker.exit").exists() and time.time() < deadline:
+            time.sleep(0.1)
+        self.assertFalse(registry.exists())
+        self.set("stub-worker.json", {"mode": "ok"})
+        self.run_followup("drain", env=self.repair_env())
+        self.assertEqual(self.state(key)["status"], "done", self.report())
+
+    def test_a_dead_launchers_builder_group_is_reaped_before_recovery(self):
+        self.shipped_item("20261014-050000")
+        self.run_followup("hook", "item-done", "--stamp", "20261014-050000")
+        key = "cleanup-20261014-050000"
+        bdir = self.start_plain_build_then_kill_the_drain(key, 60)
+        launcher = int((bdir / "worker.pid").read_text().strip())
+        pgid = int((bdir / "worker.pgid").read_text().strip())
+        self.assertEqual(pgid, launcher)
+        os.kill(launcher, 9)
+        deadline = time.time() + 10
+        while pid_alive(launcher) and time.time() < deadline:
+            time.sleep(0.1)
+        os.killpg(pgid, 0)
+        self.set("stub-worker.json", {"mode": "ok"})
+        out = self.run_followup("drain", env=self.repair_env()).stdout
+        self.assertIn("reaped the builder", out)
+        with self.assertRaises(ProcessLookupError):
+            os.killpg(pgid, 0)
+        st = self.state(key)
+        self.assertEqual(st["status"], "done", self.report())
+        self.assertTrue(any(b["kind"] == "interrupted" for b in st["blockers"]))
+        self.assertFalse((self.root / "inflight" / "demo" / f"followup-{key}.pid").exists())
+        self.assertEqual(len(self.calls("worker")), 1)
+
+    def test_a_drain_from_a_workspace_terminal_never_builds_in_that_workspace(self):
+        self.py_wrapper(Path(self.tmp.name), "workspaces").rename(self.root / "lib" / "workspaces.py")
+        decoy = Path(self.tmp.name) / "decoy"
+        subprocess.run(["git", "init", "-q", str(decoy)], check=True, env=self.env)
+        for superset, stamp in (("1", "20261014-050000"), ("0", "20261014-060000")):
+            with self.subTest(superset=superset):
+                self.shipped_item(stamp)
+                self.run_followup("hook", "item-done", "--stamp", stamp)
+                self.run_followup("drain", env=self.repair_env(
+                    ADVANCE_ROADMAP_SUPERSET=superset, SUPERSET_WORKSPACE_PATH=str(decoy)))
+                key = f"cleanup-{stamp}"
+                self.assertEqual(self.state(key)["status"], "done", self.report())
+                self.assertEqual(list(decoy.glob("fix-*.txt")), [])
+                [launcher] = (self.root / "followups" / key).glob("build-*/worker-launch.zsh")
+                self.assertNotIn(str(decoy), launcher.read_text())
+
+    def test_fixture_and_builder_commits_ignore_the_users_commit_signing(self):
+        with tempfile.TemporaryDirectory() as d:
+            hostile = Path(d) / "gitconfig"
+            hostile.write_text("[commit]\n\tgpgsign = true\n[tag]\n\tgpgsign = true\n"
+                               "[gpg]\n\tformat = ssh\n[user]\n\tsigningkey = /nonexistent/key.pub\n")
+            with mock.patch.dict(os.environ, {"GIT_CONFIG_GLOBAL": str(hostile)}):
+                self.tearDown()
+                self.setUp()
+                self.shipped_item("20261014-050000")
+                self.run_followup("hook", "item-done", "--stamp", "20261014-050000")
+                self.run_followup("drain", env=self.repair_env())
+        self.assertEqual(len(self.calls("worker")), 1)
+        self.assertEqual(self.state("cleanup-20261014-050000")["status"], "done")
+
+    def test_a_recovered_pr_with_no_recorded_builder_is_never_reviewed(self):
+        self.shipped_item("20261014-050000")
+        self.run_followup("hook", "item-done", "--stamp", "20261014-050000")
+        # Scan once without repair so findings exist, then resume at review with no builder.
+        self.run_followup("drain")
+        st = self.state("cleanup-20261014-050000")
+        self.assertTrue(st["findings"])
+        st.update(status="pending", next={"step": "review", "round": 1},
+                  branch="roadmap/followup-cleanup-20261014-050000",
+                  pr_url="https://github.com/jnelken/demo/pull/7",
+                  findings=[{**st["findings"][0], "status": "open"}],
+                  validation={"reviews": []}, sessions=[], scanned=True)
+        st.pop("builder_provider", None)
+        (self.root / "followups" / st["key"] / "state.json").write_text(json.dumps(st))
+        self.run_followup("drain", env=self.repair_env())
+        st = self.state(st["key"])
+        self.assertEqual(st["status"], "blocked")
+        self.assertEqual(self.calls("review"), [])
+        self.assertEqual(self.report()[-1]["kind"], "unknown-builder")
 
 
 if __name__ == "__main__":
