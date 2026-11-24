@@ -2892,6 +2892,25 @@ class FollowupTest(unittest.TestCase):
         self.assertTrue(pasted)
         self.assertIn("corpus/001-wide.txt", pasted)
 
+    def test_inline_corpus_unreadable_note_is_opaque_and_budgeted(self):
+        import followanalyst
+        from unittest import mock
+        missing = self.root / "gone.txt"
+        missing.write_text("x")
+        real = followanalyst._file_text_for_prompt
+
+        def boom(path, stamps, max_bytes=None):
+            raise OSError(f"Permission denied: {path.resolve()}")
+
+        with mock.patch.object(followanalyst, "_file_text_for_prompt", side_effect=boom):
+            out, pasted, _ = followanalyst.inline_corpus([missing], max_bytes=200)
+        self.assertLessEqual(len(out.encode("utf-8")), 200)
+        self.assertIn("corpus/001-gone.txt", out)
+        self.assertIn("(unreadable)", out)
+        self.assertNotIn(str(missing.resolve()), out)
+        self.assertNotIn("Permission denied", out)
+        self.assertEqual(pasted, {})
+
     def test_analyst_sandbox_prepare_failure_preserves_deterministic(self):
         import followanalyst
         stamp = "20261013-103004"

@@ -541,10 +541,14 @@ def inline_corpus(files, max_bytes=CORPUS_PROMPT_MAX_BYTES, stamps=None):
         try:
             # Pass room so stamp-filtered runs.jsonl stops collecting once the budget fills.
             text = _file_text_for_prompt(path, stamps, max_bytes=room)
-        except OSError as e:
-            note = f"### {label}\n(unreadable: {e})\n"
-            used += len(note.encode("utf-8"))
+        except OSError:
+            # Opaque fixed note only — never paste OSError text (can embed host paths).
+            note = f"### {label}\n(unreadable)\n"
+            n = len(note.encode("utf-8"))
+            if used + n > max_bytes:
+                break
             parts.append(note)
+            used += n
             continue
         marker = "\n…(truncated)"
         marker_n = len(marker.encode("utf-8"))
