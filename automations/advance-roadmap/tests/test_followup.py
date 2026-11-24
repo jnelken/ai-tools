@@ -518,6 +518,30 @@ class FollowupTest(unittest.TestCase):
             with self.subTest(name):
                 self.assertEqual(fu.stage_repair_verified(st), want)
 
+    def test_recovery_updates_existing_stage_next_step_when_pr_arrives(self):
+        """Newer Linear metadata with a PR must move an existing stage from build to review."""
+        key, fid = "cleanup-20261014-050000", "aaaaaaaaaaaa"
+        d = self.root / "followups" / key
+        d.mkdir(parents=True)
+        (d / "state.json").write_text(json.dumps({
+            "key": key, "stage": "project-cleanup", "repo": "demo", "status": "deferred",
+            "next": {"step": "build", "round": 1}, "owned_tickets": ["DEV-501"],
+            "findings": [{"id": fid, "status": "deferred", "ticket": "DEV-501", "title": "x",
+                          "kind": "t", "fix": "f", "evidence": []}],
+            "ticket_meta_at": 1, "blockers": [], "scanned": True,
+        }))
+        ticket = self.meta_ticket("DEV-501", {
+            "key": key, "stage": "project-cleanup", "finding_ids": [fid],
+            "finding_status": {fid: "open"},
+            "branch": "roadmap/x", "pr_url": "https://example/pr/9",
+            "updated_at": 99.0,
+        })
+        self.set("stub-linear.json", {"pages": [[ticket]]})
+        self.run_followup("drain", "--stage", "cleanup")
+        st = self.state(key)
+        self.assertEqual(st.get("pr_url"), "https://example/pr/9")
+        self.assertEqual((st.get("next") or {}).get("step"), "review")
+
     def test_recovery_resumes_open_findings_at_build_not_under_a_sibling_pr(self):
         """A fresh machine reading partial-progress metadata must not review the completed PR."""
         key_a, key_b = "cleanup-20261014-050000", "cleanup-20261014-060000"

@@ -705,6 +705,9 @@ def recover_tickets():
                     if src_branch != st.get("branch") or src_pr != st.get("pr_url"):
                         st["branch"] = src_branch
                         st["pr_url"] = src_pr
+                        nxt = dict(st.get("next") or {})
+                        nxt["step"] = "review" if src_pr else "build"
+                        st["next"] = nxt
                         changed = True
                     st["ticket_meta_at"] = meta["updated_at"]
                     if issue.get("description"):
