@@ -754,7 +754,9 @@ def deploy_state(slug, sha):
             for r in _latest_deploy_rows(rows, "context", ("updated_at", "created_at")):
                 states.append({"success": "success", "pending": "pending"}.get(r.get("state"), "failure"))
         else:
-            for r in _latest_deploy_rows(rows, "name", ("completed_at", "started_at")):
+            # Identify the latest attempt by start/create time (not completed_at), then
+            # evaluate that attempt — an older success must not beat a newer in-progress run.
+            for r in _latest_deploy_rows(rows, "name", ("started_at", "created_at")):
                 if r.get("status") != "completed":
                     states.append("pending")
                 else:
@@ -777,15 +779,25 @@ def deploy_state(slug, sha):
     return "success"
 
 
+def deploy_config_at(repo_dir, sha):
+    """Whether the merge commit (preferred) or working tree declares a Vercel/Netlify deploy."""
+    if sha:
+        for name in ("vercel.json", "netlify.toml", ".vercel"):
+            if git("-C", str(repo_dir), "cat-file", "-e", f"{sha}:{name}").returncode == 0:
+                return True
+        return False
+    return any((repo_dir / n).exists() for n in ("vercel.json", ".vercel", "netlify.toml"))
+
+
 def verify_deploy(slug, sha, repo_dir):
     """Step 7b's watch, without fixing forward: success | none | failed | timeout | unverified.
 
     `none` needs DEPLOY_NONE_AFTER_S of successful, empty API answers in a repo with no deploy
     config; a failed API call restarts that clock, and ending on one is `unverified`."""
     # WORKER.md Step 7b: no deploy-looking signal within DEPLOY_NONE_AFTER_S and no
-    # vercel/netlify config → deploy: none. Affirmative "no deploy" evidence beyond that
-    # is not required; empty APIs in a configured repo stay pending/timeout instead.
-    has_config = any((repo_dir / n).exists() for n in ("vercel.json", ".vercel", "netlify.toml"))
+    # vercel/netlify config at the merge commit → deploy: none. Inspect the commit, not a
+    # possibly-stale root checkout (sync_root_checkout may no-op when dirty).
+    has_config = deploy_config_at(repo_dir, sha)
     start = time.time()
     absent_since = None
     while True:

@@ -1978,6 +1978,39 @@ class FollowupTest(unittest.TestCase):
         self.assertEqual(st["status"], "done", self.report())
         self.assertEqual(st["validation"]["deploy"], "success")
 
+    def test_in_progress_check_run_beats_older_completed_success(self):
+        """A newer started check run must win over an older completed success."""
+        self.shipped_item("20261014-050000")
+        self.run_followup("hook", "item-done", "--stamp", "20261014-050000")
+        self.set("stub-gh.json", {
+            "checks": "pass", "deploy": "success",
+            "statuses": [],
+            "check_runs": [
+                {"name": "Vercel", "status": "completed", "conclusion": "success",
+                 "started_at": "2026-10-14T10:00:00Z", "completed_at": "2026-10-14T10:05:00Z"},
+                {"name": "Vercel", "status": "in_progress",
+                 "started_at": "2026-10-14T10:10:00Z"},
+            ],
+        })
+        self.run_followup("drain", env=self.repair_env(ADVANCE_ROADMAP_FOLLOWUP_DEPLOY_TIMEOUT_S="0.5"))
+        st = self.state("cleanup-20261014-050000")
+        self.assertNotEqual(st.get("validation", {}).get("deploy"), "success")
+        self.assertNotEqual(st["status"], "done")
+
+    def test_deploy_config_read_from_merge_commit_not_dirty_tree(self):
+        """A vercel.json added by the PR must prevent deploy:none even if root checkout lacks it."""
+        self.shipped_item("20261014-050000")
+        self.run_followup("hook", "item-done", "--stamp", "20261014-050000")
+        # Builder commits vercel.json on the follow-up branch; root checkout stays without it.
+        self.set("stub-worker.json", {"mode": "ok", "extra_files": {"vercel.json": "{}\n"}})
+        self.set("stub-gh.json", {"checks": "pass", "deploy": "none", "merge_commit": "head"})
+        self.run_followup("drain", env=self.repair_env(ADVANCE_ROADMAP_FOLLOWUP_DEPLOY_NONE_S="0",
+                                                       ADVANCE_ROADMAP_FOLLOWUP_DEPLOY_TIMEOUT_S="0.5"))
+        st = self.state("cleanup-20261014-050000")
+        # Has config at merge commit → empty APIs are timeout/unverified, never "none".
+        self.assertNotEqual(st.get("validation", {}).get("deploy"), "none")
+        self.assertNotEqual(st["status"], "done")
+
     def test_nonzero_builder_exit_is_rejected_despite_pr_result(self):
         """Exit nonzero with a blocked-branch-left result must not proceed to review/merge."""
         self.shipped_item("20261014-050000")

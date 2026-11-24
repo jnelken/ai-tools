@@ -101,6 +101,10 @@ def worker(args):
             sys.exit(f"stub worker: refusing to commit outside the test's temp dir: {wt}")
         n = len(list(Path(wt).glob("fix-*.txt")))
         Path(wt, f"fix-{n}.txt").write_text(orch["worker_brief"][:200])
+        for rel, body in (w.get("extra_files") or {}).items():
+            path = Path(wt) / rel
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(body)
         git(wt, "add", "-A")
         git(wt, "commit", "-qm", f"follow-up fix {n}")
         git(wt, "push", "-q", "-u", "origin", orch["branch"])
