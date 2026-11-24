@@ -453,19 +453,18 @@ class FollowupTest(unittest.TestCase):
 
     def test_repo_is_only_from_repo_label_never_prose(self):
         """Invariant: repo identity is the repo/* label (or metadata.repo), never title/body prose."""
-        prose = self.legacy_ticket(
-            "DEV-1", "Follow-up for mailcruxh deploy",
-            "Repo: mailcruxh\nFix the mailcruxh red deploy.", repo=None)
-        self.assertIsNone(followticket.repo_label(prose))
-        labeled = self.legacy_ticket("DEV-2", "Follow-up for mailcruxh", "see mailcruxh", repo="demo")
+        title = "reject an empty listing before saving the catalog"
+        finding = {"id": "aaaaaaaaaaaa", "title": title, "repo": "demo"}
+        unlabeled = self.legacy_ticket(
+            "DEV-1", title, f"Repo: mailcruxh\nSeen before: {title}", repo=None)
+        self.assertIsNone(followticket.repo_label(unlabeled))
+        # Legacy title match reaches the text path but must refuse an unlabeled issue.
+        self.assertIsNone(followticket.match([unlabeled], finding))
+        wrong_repo = self.legacy_ticket("DEV-2", title, title, repo="mailcruxh")
+        self.assertIsNone(followticket.match([wrong_repo], finding))
+        labeled = self.legacy_ticket("DEV-3", title, f"Seen before: {title}", repo="demo")
         self.assertEqual(followticket.repo_label(labeled), "demo")
-        finding = {"id": "aaaaaaaaaaaa", "title": "mailcruxh deploy failed", "repo": "mailcruxh"}
-        # Legacy text match must not cross repos when the ticket's only signal is prose.
-        self.assertIsNone(followticket.match([prose], finding))
-        # Same finding text on a demo-labeled ticket stays in demo — never inferred as mailcruxh.
-        hit = followticket.match(
-            [self.legacy_ticket("DEV-3", finding["title"], finding["title"], repo="demo")], finding)
-        self.assertIsNone(hit)  # finding.repo is mailcruxh; ticket label is demo
+        self.assertEqual(followticket.match([labeled], finding)["identifier"], "DEV-3")
 
     def test_skipped_deploy_is_never_success(self):
         """Invariant: validation.deploy must be success|none; skipped/error/pending never close."""
@@ -664,6 +663,8 @@ class FollowupTest(unittest.TestCase):
                             "kind": "t", "fix": "f", "evidence": []}],
               "pending_close": [{"ticket": "DEV-501", "commented": False}], "blockers": []}
         (d / "state.json").write_text(json.dumps(st))
+        (self.root / "followups" / "tickets.json").write_text(json.dumps({
+            fid: {"ticket": "DEV-501", "key": key, "at": time.time()}}))
         ticket = self.meta_ticket("DEV-501", {"key": key, "stage": "project-cleanup", "finding_ids": [fid]})
         self.set("stub-linear.json", {"pages": [[ticket]], "fail": ["issue update DEV-501"]})
         fu.retry_closes()
@@ -680,6 +681,43 @@ class FollowupTest(unittest.TestCase):
         closing = [c for c in self.calls("linear") if str(c.get("cmd", "")).startswith("issue comment")
                    and c.get("issue") == "DEV-501" and "Fixed by" in (c.get("body") or "")]
         self.assertEqual(len(closing), 0)  # commented=True already; retry only moves to Done
+
+    def test_close_tickets_rechecks_before_done_on_retry(self):
+        """Invariant: close_tickets refuses Done when a tracked finding is no longer verified."""
+        import followup as fu
+        fu.ROOT = self.root
+        fu.STATE = self.root / "followups"
+        os.environ["ADVANCE_ROADMAP_ROOT"] = str(self.root)
+        os.environ["ADVANCE_ROADMAP_LINEAR_BIN"] = self.env["ADVANCE_ROADMAP_LINEAR_BIN"]
+        key = "cleanup-recheck"
+        fid_ok, fid_open = "aaaaaaaaaaaa", "bbbbbbbbbbbb"
+        d = self.root / "followups" / key
+        d.mkdir(parents=True)
+        (d / "state.json").write_text(json.dumps({
+            "key": key, "stage": "project-cleanup", "repo": "demo", "status": "done",
+            "merge_commit": "abc",
+            "validation": {"checks": "passed", "reviews": [{"verdict": "clean"}], "deploy": "success"},
+            "findings": [
+                {"id": fid_ok, "status": "fixed", "ticket": "DEV-501", "title": "a", "kind": "t",
+                 "fix": "f", "evidence": []},
+                {"id": fid_open, "status": "open", "ticket": "DEV-501", "title": "b", "kind": "t",
+                 "fix": "f", "evidence": []},
+            ],
+            "pending_close": [{"ticket": "DEV-501", "commented": True}], "blockers": [],
+        }))
+        (self.root / "followups" / "tickets.json").write_text(json.dumps({
+            fid_ok: {"ticket": "DEV-501", "key": key, "at": time.time()},
+            fid_open: {"ticket": "DEV-501", "key": key, "at": time.time()},
+        }))
+        self.set("stub-linear.json", {"pages": [[self.meta_ticket(
+            "DEV-501", {"key": key, "finding_ids": [fid_ok, fid_open]})]]})
+        fu.retry_closes()
+        st = self.state(key)
+        self.assertEqual(st["pending_close"], [])  # dropped after failed recheck
+        self.assertTrue(any(r.get("kind") == "close-recheck" for r in self.report()), self.report())
+        done = [c for c in self.calls("linear")
+                if c.get("cmd") == "issue update DEV-501" and "Done" in (c.get("args") or [])]
+        self.assertEqual(done, [])
 
 
 if __name__ == "__main__":

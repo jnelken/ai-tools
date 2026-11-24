@@ -118,7 +118,11 @@ def followup_tickets(issues):
 
 def match(issues, finding):
     """The open ticket already tracking this finding, or None: by finding id in a metadata block
-    first, else (older tickets with no block) by the finding's title text in the same repo."""
+    first, else (older tickets with no block) by the finding's title text in the same repo.
+
+    Legacy title match requires the ticket's single repo/* label to equal the finding's repo —
+    never attach via an unlabeled issue or cross-repo prose.
+    """
     for issue in issues:
         meta = parse_meta(issue.get("description"))
         if meta and finding["id"] in (meta.get("finding_ids") or []):
@@ -126,8 +130,13 @@ def match(issues, finding):
     title = norm(finding["title"])
     if len(title) < 12:
         return None
+    want = finding.get("repo")
+    if not want:
+        return None
     for issue in issues:
-        if parse_meta(issue.get("description")) or repo_label(issue) not in (None, finding.get("repo")):
+        if parse_meta(issue.get("description")):
+            continue
+        if repo_label(issue) != want:
             continue
         if title in norm(f"{issue.get('title')} {issue.get('description')}"):
             return issue

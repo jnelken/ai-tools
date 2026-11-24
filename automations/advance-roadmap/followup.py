@@ -964,16 +964,34 @@ def apply_partial_progress(st, findings=None):
     st["pending_partial"] = [e for e in st.get("pending_partial") or [] if not e.get("done")]
 
 
+def ticket_ready_to_close(ident, current=None):
+    """Invariant owner: Done requires every tracked finding verified fixed (checks/review/deploy).
+
+    Every path that calls mark_done (finish → close_tickets, drain → retry_closes → close_tickets)
+    must go through this check immediately before the Linear state write.
+    """
+    tracked = ticket_tracked_ids(ident, current=current)
+    return bool(tracked) and all(finding_verified_fixed(fid, current=current) for fid in tracked)
+
+
 def close_tickets(st):
     """Persisted in pending_close so a Linear failure is retried by every later drain.
 
     The closing comment and the move to Done are tracked apart, so a retry never posts twice.
+    Revalidates the full tracked finding set immediately before mark_done (see ticket_ready_to_close).
     """
     closed = set()
+    dropped = set()
     if os.environ.get("ADVANCE_ROADMAP_FOLLOWUP_LINEAR", "1") != "1":
         return closed
     for entry in st.get("pending_close") or []:
         ident = entry["ticket"]
+        if not ticket_ready_to_close(ident, current=st):
+            report(st, "close-recheck",
+                   f"refusing to Done {ident}: not every tracked finding is verified fixed",
+                   "partial progress or a sibling still owns open work")
+            dropped.add(ident)
+            continue
         try:
             if not entry.get("commented"):
                 followticket.comment(ident, st.get("close_note")
@@ -985,7 +1003,8 @@ def close_tickets(st):
         except followticket.LinearError as e:
             report(st, "linear", f"merged and deployed, but could not close {ident}: {e}",
                    "the next drain retries closing it")
-    st["pending_close"] = [e for e in st.get("pending_close") or [] if e["ticket"] not in closed]
+    st["pending_close"] = [e for e in st.get("pending_close") or []
+                           if e["ticket"] not in closed and e["ticket"] not in dropped]
     if closed:
         with TicketIndex() as index:
             index.drop_tickets(closed)
