@@ -143,6 +143,12 @@ class RoutingTests(unittest.TestCase):
         usage.recompute_flags(self.state)
         return self.state["providers"]
 
+    def test_analyst_role_is_codex_then_claude_never_cursor(self):
+        self.assertEqual(usage.ROLE_PROVIDERS["analyst"], ("codex", "claude"))
+        self.assertNotIn("cursor", usage.ROLE_PROVIDERS["analyst"])
+        gate = usage.provider_gate(self.state, "cursor", "analyst")
+        self.assertEqual(gate["state"], "n/a")
+
     def test_codex_under_thresholds_is_available(self):
         usage.apply_codex(self.state, probed(usage.parse_codex_rate_limits(app_server_result()), "app_server"))
         self.assertTrue(self.flags()["codex"]["available_for_orchestrator"])
@@ -985,6 +991,17 @@ class CliTests(unittest.TestCase):
         result = self.run_usage("probe")
         self.assertEqual(result.returncode, 1)
         self.assertEqual(json.loads(result.stdout), {"codex": None, "cursor": None})
+
+    def test_readonly_gate_rejects_null_or_empty_provider_entry(self):
+        """Readonly must fail closed; load() would otherwise invent default-available state."""
+        path = usage.usage_path(self.root)
+        for bad in (None, {}):
+            path.write_text(json.dumps({"providers": {"codex": bad, "claude": {"five_hour": {}}}}) + "\n")
+            result = self.run_usage("gate", "--role", "analyst", "--provider", "codex", "--readonly")
+            self.assertEqual(result.returncode, usage.GATED_EXIT, result.stdout + result.stderr)
+            out = json.loads(result.stdout)
+            self.assertFalse(out["available"])
+            self.assertEqual(out["state"], "n/a")
 
 
 if __name__ == "__main__":

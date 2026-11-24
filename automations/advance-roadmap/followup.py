@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""advance-roadmap follow-up runner — report + tickets + repair (DEV-242 slice 3b).
+"""advance-roadmap follow-up runner — report + tickets + repair + analyst (DEV-242).
 
 After work ships, scan logs for proven problems and record findings. Slice 3a added Linear ticket
 recovery, dedupe, deferral and close (lib/followticket.py). Slice 3b connects repair: a delegated
 builder, independent cross-provider review, PR checks, merge, deploy verification and ticket
-finish/deferral (lib/followrepair.py). No model analyst yet (slice 3c). Stages under
-$ROOT/followups/<key>/:
+finish/deferral (lib/followrepair.py). Slice 3c adds an optional read-only model analyst
+(lib/followanalyst.py) over each stage's bounded corpus. Stages under $ROOT/followups/<key>/:
 
   project-cleanup    one per shipped item once the repo is quiescent
   tooling-hardening  one per batch/run/conductor session once children + cleanups finish
@@ -13,17 +13,20 @@ $ROOT/followups/<key>/:
   followup.py hook item-done --stamp S [--run-dir D] [--origin O]
   followup.py hook run-end --origin O [--stamp S ...] [--run-dir D ...]
   followup.py drain [--repo R] [--origin O] [--wait-s N]
+  followup.py scan --stage cleanup|tooling (--stamp S | --origin O --stamp S ...)
   followup.py status [--origin O] [--json]
 
 ADVANCE_ROADMAP_FOLLOWUP=1 suppresses nested follow-ups.
 ADVANCE_ROADMAP_FOLLOWUP_LINEAR=0 disables Linear reads/writes.
 ADVANCE_ROADMAP_FOLLOWUP_REPAIR=1 enables the repair loop (builder → review → land).
+ADVANCE_ROADMAP_FOLLOWUP_ANALYST=0 disables the optional model analyst (on by default).
 """
 import argparse
 import fcntl
 import json
 import os
 import re
+import shutil
 import signal
 import sys
 import time
@@ -33,6 +36,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 sys.path.insert(0, str(HERE / "lib"))
+import followanalyst  # noqa: E402
 import followrepair  # noqa: E402
 import followscan  # noqa: E402
 import followticket  # noqa: E402
@@ -460,6 +464,15 @@ def repair_enabled():
     return os.environ.get("ADVANCE_ROADMAP_FOLLOWUP_REPAIR", "0") == "1"
 
 
+def repair_todo(findings):
+    """Open/deferred findings eligible for autonomous repair (owner of analyst exclusion).
+
+    Invariant: model-analyst findings (source=analyst) are ticket/report only — never builder input.
+    """
+    return [f for f in findings or []
+            if f.get("status") in ("open", "deferred") and f.get("source") != "analyst"]
+
+
 def awaits_repair(st):
     """True when the stage holds unfinished ticket work that only the repair loop can advance."""
     step = (st.get("next") or {}).get("step")
@@ -468,8 +481,7 @@ def awaits_repair(st):
     if st.get("recovered_from") and st.get("status") == "deferred":
         return True
     if st.get("branch") or st.get("pr_url"):
-        todo = [f for f in st.get("findings") or [] if f.get("status") in ("open", "deferred")]
-        return bool(todo)
+        return bool(repair_todo(st.get("findings")))
     return False
 
 
@@ -1763,7 +1775,7 @@ def retry_closes(issues=None):
 # ── ANALYZE (deterministic recognition tests only — no model) ────────────────
 
 def scan(st):
-    """Recognize findings (pure reads; no excerpts)."""
+    """Recognize findings (deterministic reads), then optional analyst over the same corpus."""
     if st["stage"] == STAGES["cleanup"]:
         if st.get("run_dir"):
             run_dir = Path(st["run_dir"])
@@ -1780,8 +1792,13 @@ def scan(st):
         cleanups = [s for s in all_stages() if s.get("stamp") in children]
         findings, quiet = followscan.tooling_scan(ROOT, children, cleanups, st.get("run_dirs"))
         files = followscan.corpus_files(ROOT, children, st.get("run_dirs"), stages=cleanups)
-    st["findings"] = findings
-    st["non_findings"] = quiet
+    try:
+        more, rejected = followanalyst.analyze(st, findings, files)
+    except Exception as e:  # optional analyst must never abort deterministic findings
+        st["analyst"] = f"failed: {type(e).__name__}: {e}"
+        more, rejected = [], []
+    st["findings"] = findings + more
+    st["non_findings"] = quiet + rejected
     st["corpus"] = [str(p) for p in files]
     st["scanned"] = True
     return st
@@ -1828,18 +1845,19 @@ def process(st, issues=None):
         save(st)
     fs = st.get("findings") or []
     quiet = st.get("non_findings") or []
-    todo = [f for f in fs if f.get("status") in ("open", "deferred")]
+    todo = repair_todo(fs)
     open_n = sum(1 for f in fs if f.get("status") == "open")
     if repair_enabled() and (todo or awaits_repair(st)):
         step = (st.get("next") or {}).get("step")
         if not todo and awaits_repair(st):
             # Resume mid-flight without re-owning another stage's duplicates.
-            owned = [f for f in fs if f.get("status") in ("open", "deferred")]
+            owned = repair_todo(fs)
             if owned:
                 todo = owned
             elif step in ("land", "review"):
-                # Findings already fixed/duplicate; finish land/review without a builder brief.
-                todo = [f for f in fs if f.get("status") != "duplicate"] or list(fs)
+                # Finish land/review with an empty builder brief. Never re-admit analyst rows
+                # (repair_todo is the owner) and never mark done while a branch/PR is mid-flight.
+                todo = []
             else:
                 report(st, "repair-empty", "no owned open findings left to repair")
                 cas_status(st, RUNNING, DONE, next=None, reported_at=now_iso())
@@ -1940,6 +1958,14 @@ def repair(st, repo_dir, todo, issues=None):
                 return block(st, "review", f"review.sh failed: {text}")
             if verdict == "clean":
                 nxt = {"step": "land", "round": rnd}
+            elif not todo:
+                # No repair-eligible finding left (e.g. only analyst rows). Do not rebuild with
+                # an empty brief — builder_request indexes findings[0]. Leave PR for a human.
+                return block(
+                    st, "review",
+                    f"the review reports findings but no repair-eligible finding remains to rebuild; "
+                    f"branch {st.get('branch')} and PR {st.get('pr_url')} are left for a human",
+                    retry=False)
             elif rnd < MAX_ROUNDS:
                 nxt = {"step": "build", "round": rnd + 1, "review_text": text}
             else:
@@ -2093,6 +2119,34 @@ def summary_line(rows):
 
 # ── CLI ──────────────────────────────────────────────────────────────────────
 
+def cmd_scan(a):
+    """Dry run: findings and non-findings a stage would act on. No durable state, repairs or tickets."""
+    # Unique per invocation so concurrent dry runs never share / delete each other's dir.
+    uniq = f"{os.getpid()}-{time.time_ns()}"
+    if a.stage == "cleanup":
+        if len(a.stamp) != 1:
+            raise SystemExit("scan --stage cleanup takes exactly one --stamp")
+        key = f"scan-{a.stamp[0]}-{uniq}"
+        require_id(key, "key")
+        st = {"key": key, "stage": STAGES["cleanup"], "stamp": a.stamp[0], "usage_snapshots": [],
+              "dry_run": True,
+              "repo": (read_json(ROOT / "runs" / a.stamp[0] / "worker-result.json") or {}).get("repo")}
+    else:
+        require_id(a.origin, "origin")
+        key = f"scan-{a.origin}-{uniq}"
+        require_id(key, "key")
+        st = {"key": key, "stage": STAGES["tooling"], "children": a.stamp, "origin": a.origin,
+              "repo": followscan.TOOLING_REPO, "usage_snapshots": [], "dry_run": True}
+    stage_dir(st["key"]).mkdir(parents=True, exist_ok=True)
+    try:
+        scan(st)
+    finally:
+        shutil.rmtree(stage_dir(st["key"]), ignore_errors=True)
+    print(json.dumps({"findings": st.get("findings") or [], "non_findings": st.get("non_findings") or [],
+                      "analyst": st.get("analyst")}, indent=1))
+    return 0
+
+
 def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -2107,6 +2161,10 @@ def main(argv=None):
     d.add_argument("--origin")
     d.add_argument("--stage", choices=sorted(STAGES))
     d.add_argument("--wait-s", type=float, default=0.0, help="wait this long for repos/children to finish")
+    s = sub.add_parser("scan", help="dry-run recognition (+ optional analyst); no durable state")
+    s.add_argument("--stage", choices=sorted(STAGES), required=True)
+    s.add_argument("--stamp", action="append", default=[])
+    s.add_argument("--origin", default="dry-run")
     t = sub.add_parser("status")
     t.add_argument("--origin")
     t.add_argument("--json", action="store_true")
@@ -2135,6 +2193,19 @@ def main(argv=None):
             p.error(str(e))
         signal.signal(signal.SIGTERM, lambda *_: sys.exit(143))
         return drain(a.repo, a.origin, a.stage, a.wait_s)
+    if a.cmd == "scan":
+        if not a.stamp:
+            p.error("scan needs --stamp")
+        if a.stage == "cleanup" and len(a.stamp) != 1:
+            p.error("scan --stage cleanup takes exactly one --stamp")
+        try:
+            for stamp in a.stamp:
+                require_id(stamp, "stamp")
+            if a.stage != "cleanup":
+                require_id(a.origin, "origin")
+        except ValueError as e:
+            p.error(str(e))
+        return cmd_scan(a)
     try:
         if a.origin:
             require_id(a.origin, "origin")

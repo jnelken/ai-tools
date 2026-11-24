@@ -1,7 +1,7 @@
 """Process-group runner: start_new_session, timeout, reap the whole tree before returning.
 
 daily_batch launches follow-up drains/hooks through `run` so a timeout never leaves descendants
-alive after the parent returns. Slice 3's model analyst will share the same helpers.
+alive after the parent returns. The model analyst (followanalyst.py) shares the same helpers.
 """
 import os
 import signal

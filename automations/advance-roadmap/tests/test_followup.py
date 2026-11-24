@@ -1,4 +1,5 @@
-"""followup.py report + tickets + repair (DEV-242 slice 3b). Temp ADVANCE_ROADMAP_ROOT; one test per behavior."""
+"""followup.py report + tickets + repair + analyst (DEV-242). Temp ADVANCE_ROADMAP_ROOT; one test per behavior."""
+import argparse
 import fcntl
 import json
 import os
@@ -46,6 +47,8 @@ class FollowupTest(unittest.TestCase):
                        if not k.startswith(("ADVANCE_ROADMAP_", "GIT_", "SUPERSET_"))},
                     "ADVANCE_ROADMAP_ROOT": str(self.root), "PERSONAL_CODE_DIR": str(self.code),
                     "ADVANCE_ROADMAP_SUPERSET": "0",
+                    # Deterministic suite: analyst off unless a test opts in with stubs.
+                    "ADVANCE_ROADMAP_FOLLOWUP_ANALYST": "0",
                     "ADVANCE_ROADMAP_FOLLOWUP_INSTALL": "0", "ADVANCE_ROADMAP_FOLLOWUP_POLL_S": "0.2",
                     "ADVANCE_ROADMAP_FOLLOWUP_WORKTREES": str(t / "worktrees"),
                     "ADVANCE_ROADMAP_FOLLOWUP_DEPLOY_NONE_S": "0",
@@ -54,6 +57,8 @@ class FollowupTest(unittest.TestCase):
                     "ADVANCE_ROADMAP_WORKER_POLL_S": "0.1",
                     "ADVANCE_ROADMAP_GH_BIN": self.wrapper(t, "gh"),
                     "ADVANCE_ROADMAP_LINEAR_BIN": self.wrapper(t, "linear"),
+                    "ADVANCE_ROADMAP_CODEX_BIN": self.wrapper(t, "codex"),
+                    "ADVANCE_ROADMAP_CLAUDE_BIN": self.wrapper(t, "claude"),
                     "ADVANCE_ROADMAP_JLIN": str(self.py_wrapper(t, "jlin")),
                     "AI_TOOLS_HOME": str(t / "no-ai-tools"),
                     "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_NOSYSTEM": "1",
@@ -2292,6 +2297,713 @@ class FollowupTest(unittest.TestCase):
         self.assertEqual(st["status"], "pending", self.report())
         self.assertEqual(len(self.calls("review")), before)  # never reached review.sh again
         self.assertIn("ff-merge", self.report()[-1]["reason"])
+
+    # ── tooling analysis (slice 3c) ──
+
+    def test_tooling_dry_run_on_the_oct13_evidence_keeps_only_quoted_analyst_findings(self):
+        stamp = "20261013-103004"
+        run = self.root / "runs" / stamp
+        run.mkdir(parents=True)
+        (run / "orchestrator-result.json").write_text((FIXTURES / "orchestrator-result.json").read_text())
+        (self.root / "runs.jsonl").write_text(json.dumps(json.loads((FIXTURES / "runs-row.json").read_text())) + "\n")
+        (self.root / "batch-verdicts").mkdir()
+        (self.root / "batch-verdicts" / "apt-sqft.json").write_text(
+            (FIXTURES / "batch-verdict-apt-sqft.json").read_text())
+        good = {"title": "Bookkeeping summary blames the orchestrator limit", "kind": "misleading-surface",
+                "fix": "Name the quota in the alert",
+                "evidence": [{"source": "corpus/001-runs.jsonl",
+                              "quote": "the orchestrator hit its session limit before triage"}]}
+        bad = {"title": "Invented friction",
+               "evidence": [{"source": "corpus/002-orchestrator-result.json",
+                             "quote": "this text is nowhere in the corpus"}]}
+        (self.root / "stub-analyst.txt").write_text(
+            "thinking...\n```FOLLOWUP_FINDINGS_JSON\n" + json.dumps({"findings": [good, bad], "non_findings": [
+                {"title": "planner retried", "why": "by design"}]}) + "\n```\n")
+        p = self.run_followup("scan", "--stage", "tooling", "--origin", "batch-2026-10-13", "--stamp", stamp,
+                              env={"ADVANCE_ROADMAP_FOLLOWUP_ANALYST": "1"})
+        doc = json.loads(p.stdout)
+        kinds = {f["kind"] for f in doc["findings"]}
+        self.assertIn("misfiring-automation", kinds)   # worker after a failed plan
+        self.assertIn("misleading-surface", kinds)     # quota recorded as error; the analyst's finding
+        self.assertIn("wrong-knowledge", kinds)        # contaminated no-work verdict
+        titles = [f["title"] for f in doc["findings"]]
+        self.assertIn(good["title"], titles)
+        self.assertNotIn(bad["title"], titles)
+        self.assertTrue(any(n["title"] == bad["title"] and "rejected" in n["why"] for n in doc["non_findings"]))
+        self.assertTrue(all(f["repo"] == "ai-tools" and f["evidence"] for f in doc["findings"]))
+        self.assertEqual(doc["analyst"], "codex: answered")
+        self.assertEqual(self.calls("worker"), [])
+        self.assertFalse((self.root / "followups" / "tooling-batch-2026-10-13").exists())
+
+    ANALYST_FINDING = {"title": "Bookkeeping summary blames the orchestrator limit", "kind": "misleading-surface",
+                       "quote": "the orchestrator hit its session limit before triage"}
+
+    def analyst_scan(self, answer_file, answer):
+        """A tooling dry run whose analyst answers with a valid, quoted findings fence when `answer`."""
+        stamp = "20261013-103004"
+        (self.root / "runs" / stamp).mkdir(parents=True)
+        (self.root / "runs.jsonl").write_text(json.dumps(json.loads((FIXTURES / "runs-row.json").read_text())) + "\n")
+        (self.root / answer_file).write_text(self.analyst_fence() if answer else "I found nothing worth reporting.\n")
+        p = self.run_followup("scan", "--stage", "tooling", "--origin", "batch-2026-10-13", "--stamp", stamp,
+                              env={"ADVANCE_ROADMAP_FOLLOWUP_ANALYST": "1"})
+        doc = json.loads(p.stdout)
+        return doc, [f["title"] for f in doc["findings"]]
+
+    def analyst_fence(self, source="corpus/001-runs.jsonl"):
+        f = self.ANALYST_FINDING
+        good = {"title": f["title"], "kind": f["kind"],
+                "evidence": [{"source": source, "quote": f["quote"]}]}
+        return "```FOLLOWUP_FINDINGS_JSON\n" + json.dumps({"findings": [good]}) + "\n```\n"
+
+    def test_analyst_findings_come_only_from_its_final_answer(self):
+        # Codex's stdout carries a valid, quoted findings fence; its final answer (-o) has none.
+        (self.root / "stub-codex-transcript.txt").write_text(self.analyst_fence())
+        doc, titles = self.analyst_scan("stub-analyst.txt", answer=False)
+        self.assertEqual(doc["analyst"], "codex: no findings block")
+        self.assertNotIn(self.ANALYST_FINDING["title"], titles)
+
+    def test_a_limited_analyst_saves_its_limit_first_then_fails_over(self):
+        # Dry-run scan: parse-limit + stage-local hit only (no shared usage record-limit).
+        (self.root / "stub-codex-limit").write_text("")
+        self.set("stub-usage.json", {"record_limit_fails": True})
+        doc, titles = self.analyst_scan("stub-claude-analyst.txt", answer=True)
+        self.assertEqual(doc["analyst"], "claude: answered")
+        self.assertIn(self.ANALYST_FINDING["title"], titles)
+        cmds = [c.get("cmd") for c in self.calls("usage")]
+        self.assertIn("parse-limit", cmds)
+        self.assertEqual(self.calls("usage-record-limit"), [])
+
+    def test_drain_analyst_limit_records_shared_usage(self):
+        # Non-dry-run path still gates the provider for everyone else.
+        import followanalyst
+        import followrepair
+        os.environ["ADVANCE_ROADMAP_ROOT"] = str(self.root)
+        followrepair.ROOT = self.root
+        followrepair.STATE = self.root / "followups"
+        (self.root / "lib").mkdir(exist_ok=True)
+        st = {"key": "cleanup-limit", "dry_run": False}
+        (self.root / "followups" / st["key"]).mkdir(parents=True)
+        followanalyst.record_analyst_limit(st, "codex", "You've hit your usage limit.")
+        self.assertEqual([(c["provider"], c["scope"]) for c in self.calls("usage-record-limit")],
+                         [("codex", "analyst")])
+
+    def test_dry_run_gate_does_not_mutate_shared_usage_file(self):
+        import followanalyst
+        import followrepair
+        import usage as usagelib
+        # Point followrepair.usage at the real usage.py (not the stub) so --readonly is exercised.
+        real_usage = ADV / "lib" / "usage.py"
+        (self.root / "lib" / "usage.py").write_text(real_usage.read_text())
+        os.environ["ADVANCE_ROADMAP_ROOT"] = str(self.root)
+        followrepair.ROOT = self.root
+        followrepair.STATE = self.root / "followups"
+        usagelib.save(self.root, usagelib.empty_state())
+        path = usagelib.usage_path(self.root)
+        before = path.read_bytes()
+        mtime = path.stat().st_mtime_ns
+        with mock.patch.object(followanalyst, "run_analyst",
+                               return_value=("ok", self.analyst_fence(), 0, None)):
+            st = {"key": "dry-gate", "dry_run": True, "stage": "tooling-hardening",
+                  "repo": "ai-tools", "children": ["20261013-103004"], "usage_snapshots": []}
+            (self.root / "followups" / st["key"]).mkdir(parents=True)
+            (self.root / "runs.jsonl").write_text(
+                json.dumps(json.loads((FIXTURES / "runs-row.json").read_text())) + "\n")
+            followanalyst.analyze(st, [], [self.root / "runs.jsonl"])
+        self.assertEqual(path.read_bytes(), before)
+        self.assertEqual(path.stat().st_mtime_ns, mtime)
+
+    def test_readonly_gate_fails_closed_without_saved_usage(self):
+        import followrepair
+        import usage as usagelib
+        real_usage = ADV / "lib" / "usage.py"
+        (self.root / "lib" / "usage.py").write_text(real_usage.read_text())
+        followrepair.ROOT = self.root
+        path = usagelib.usage_path(self.root)
+        path.unlink(missing_ok=True)
+        gate = followrepair.gate_one("analyst", "codex", readonly=True)
+        self.assertIsNotNone(gate)
+        self.assertFalse(gate["available"])
+        # Malformed file also fails closed.
+        path.write_text("{not-json")
+        gate = followrepair.gate_one("analyst", "claude", readonly=True)
+        self.assertIsNotNone(gate)
+        self.assertFalse(gate["available"])
+
+    def test_analyst_ignores_an_echoed_limit_banner_when_its_final_answer_succeeded(self):
+        # Codex stdout quotes a prior corpus log's banner; -o still has a real findings fence.
+        # Owner of the echoed-banner rule is live_limit_banner's success test (exit 0 + final answer).
+        (self.root / "stub-codex-transcript.txt").write_text(
+            "reading runs.jsonl\nYou've hit your usage limit. Upgrade to Pro or try again at 7:00 PM.\n")
+        doc, titles = self.analyst_scan("stub-analyst.txt", answer=True)
+        self.assertEqual(doc["analyst"], "codex: answered")
+        self.assertIn(self.ANALYST_FINDING["title"], titles)
+        self.assertEqual(self.calls("usage-record-limit"), [])
+
+    def test_analyst_empty_final_answer_does_not_treat_corpus_banner_as_a_limit(self):
+        # exit 0 + empty -o + banner only inside echoed paste must not gate (owner: paste scrub).
+        stamp = "20261013-103004"
+        (self.root / "runs" / stamp).mkdir(parents=True)
+        banner = "You've hit your usage limit. Upgrade to Pro or try again at 7:00 PM."
+        row = {**json.loads((FIXTURES / "runs-row.json").read_text()), "note": banner}
+        body = json.dumps(row) + "\n"
+        (self.root / "runs.jsonl").write_text(body)
+        # Transcript echoes a fragment line (banner alone) plus reasoning — not only the whole body.
+        (self.root / "stub-codex-transcript.txt").write_text(
+            "reasoning over corpus\n" + banner + "\n" + body)
+        (self.root / "stub-analyst.txt").write_text("")
+        p = self.run_followup("scan", "--stage", "tooling", "--origin", "batch-2026-10-13", "--stamp", stamp,
+                              env={"ADVANCE_ROADMAP_FOLLOWUP_ANALYST": "1"})
+        doc = json.loads(p.stdout)
+        self.assertEqual(doc["analyst"], "codex: no findings block")
+        self.assertEqual(self.calls("usage-record-limit"), [])
+        self.assertNotIn("parse-limit", [c.get("cmd") for c in self.calls("usage")])
+
+    def test_analyst_still_records_a_live_limit_when_the_corpus_quotes_the_same_banner(self):
+        # Corpus paste often quotes prior limit text; a real failed limit must still gate.
+        stamp = "20261013-103004"
+        (self.root / "runs" / stamp).mkdir(parents=True)
+        banner = "You've hit your usage limit. Upgrade to Pro or try again at 7:00 PM."
+        (self.root / "runs.jsonl").write_text(
+            json.dumps({**json.loads((FIXTURES / "runs-row.json").read_text()),
+                        "note": banner}) + "\n")
+        (self.root / "stub-codex-limit").write_text("")
+        (self.root / "stub-claude-analyst.txt").write_text(self.analyst_fence())
+        p = self.run_followup("scan", "--stage", "tooling", "--origin", "batch-2026-10-13", "--stamp", stamp,
+                              env={"ADVANCE_ROADMAP_FOLLOWUP_ANALYST": "1"})
+        doc = json.loads(p.stdout)
+        self.assertEqual(doc["analyst"], "claude: answered")
+        self.assertIn(self.ANALYST_FINDING["title"], [f["title"] for f in doc["findings"]])
+        self.assertIn("parse-limit", [c.get("cmd") for c in self.calls("usage")])
+
+    def test_analyst_sanitizes_model_supplied_non_findings(self):
+        stamp = "20261013-103004"
+        (self.root / "runs" / stamp).mkdir(parents=True)
+        (self.root / "runs.jsonl").write_text(json.dumps(json.loads((FIXTURES / "runs-row.json").read_text())) + "\n")
+        dirty = {"title": "ok <script>alert(1)</script> title", "why": "because " + ("x" * 500)}
+        (self.root / "stub-analyst.txt").write_text(
+            "```FOLLOWUP_FINDINGS_JSON\n" + json.dumps({"findings": [], "non_findings": [dirty]}) + "\n```\n")
+        p = self.run_followup("scan", "--stage", "tooling", "--origin", "batch-2026-10-13", "--stamp", stamp,
+                              env={"ADVANCE_ROADMAP_FOLLOWUP_ANALYST": "1"})
+        doc = json.loads(p.stdout)
+        nf = next(n for n in doc["non_findings"] if "ok" in n["title"] and "title" in n["title"])
+        self.assertNotIn("<script>", nf["title"])
+        self.assertLessEqual(len(nf["why"]), 400)
+
+    def test_analyst_disabled_preserves_deterministic_findings_only(self):
+        stamp = "20261013-103004"
+        run = self.root / "runs" / stamp
+        run.mkdir(parents=True)
+        (run / "orchestrator-result.json").write_text((FIXTURES / "orchestrator-result.json").read_text())
+        (self.root / "runs.jsonl").write_text(json.dumps(json.loads((FIXTURES / "runs-row.json").read_text())) + "\n")
+        (self.root / "stub-analyst.txt").write_text(self.analyst_fence())
+        p = self.run_followup("scan", "--stage", "tooling", "--origin", "batch-2026-10-13", "--stamp", stamp)
+        doc = json.loads(p.stdout)
+        self.assertIsNone(doc.get("analyst"))
+        self.assertNotIn(self.ANALYST_FINDING["title"], [f["title"] for f in doc["findings"]])
+        self.assertEqual(self.calls("codex"), [])
+
+    def test_analyst_skips_when_both_providers_are_gated(self):
+        self.set("stub-usage.json", {"analyst": {"codex": "over", "claude": "over"}})
+        stamp = "20261013-103004"
+        (self.root / "runs" / stamp).mkdir(parents=True)
+        (self.root / "runs.jsonl").write_text(json.dumps(json.loads((FIXTURES / "runs-row.json").read_text())) + "\n")
+        (self.root / "stub-analyst.txt").write_text(self.analyst_fence())
+        p = self.run_followup("scan", "--stage", "tooling", "--origin", "batch-2026-10-13", "--stamp", stamp,
+                              env={"ADVANCE_ROADMAP_FOLLOWUP_ANALYST": "1"})
+        doc = json.loads(p.stdout)
+        self.assertIn("skipped:", doc["analyst"])
+        self.assertNotIn(self.ANALYST_FINDING["title"], [f["title"] for f in doc["findings"]])
+        self.assertEqual(self.calls("codex"), [])
+
+    def test_analyst_skips_when_usage_gate_is_unreadable(self):
+        # Invariant owner: analyze() treats gate_one None as unavailable (fail closed).
+        self.set("stub-usage.json", {"fail": True})
+        stamp = "20261013-103004"
+        (self.root / "runs" / stamp).mkdir(parents=True)
+        (self.root / "runs.jsonl").write_text(json.dumps(json.loads((FIXTURES / "runs-row.json").read_text())) + "\n")
+        (self.root / "stub-analyst.txt").write_text(self.analyst_fence())
+        p = self.run_followup("scan", "--stage", "tooling", "--origin", "batch-2026-10-13", "--stamp", stamp,
+                              env={"ADVANCE_ROADMAP_FOLLOWUP_ANALYST": "1"})
+        doc = json.loads(p.stdout)
+        self.assertIn("skipped:", doc["analyst"])
+        self.assertEqual(self.calls("codex"), [])
+
+    def test_analyst_rejects_finding_with_any_malformed_evidence_entry(self):
+        stamp = "20261013-103004"
+        (self.root / "runs" / stamp).mkdir(parents=True)
+        (self.root / "runs.jsonl").write_text(json.dumps(json.loads((FIXTURES / "runs-row.json").read_text())) + "\n")
+        mixed = {"title": self.ANALYST_FINDING["title"], "kind": self.ANALYST_FINDING["kind"],
+                 "evidence": [{"source": "corpus/001-runs.jsonl",
+                               "quote": self.ANALYST_FINDING["quote"]},
+                              "not-a-dict"]}
+        (self.root / "stub-analyst.txt").write_text(
+            "```FOLLOWUP_FINDINGS_JSON\n" + json.dumps({"findings": [mixed]}) + "\n```\n")
+        p = self.run_followup("scan", "--stage", "tooling", "--origin", "batch-2026-10-13", "--stamp", stamp,
+                              env={"ADVANCE_ROADMAP_FOLLOWUP_ANALYST": "1"})
+        doc = json.loads(p.stdout)
+        self.assertNotIn(self.ANALYST_FINDING["title"], [f["title"] for f in doc["findings"]])
+        self.assertTrue(any(n["title"] == self.ANALYST_FINDING["title"] and "rejected" in n["why"]
+                            for n in doc["non_findings"]))
+
+    def test_scan_dry_runs_use_distinct_stage_dirs(self):
+        import followup as fu
+        stamp = "20261013-103004"
+        (self.root / "runs" / stamp).mkdir(parents=True)
+        (self.root / "runs.jsonl").write_text(json.dumps(json.loads((FIXTURES / "runs-row.json").read_text())) + "\n")
+        os.environ["ADVANCE_ROADMAP_ROOT"] = str(self.root)
+        os.environ["ADVANCE_ROADMAP_FOLLOWUP_ANALYST"] = "0"
+        fu.ROOT = self.root
+        fu.STATE = self.root / "followups"
+        keys = []
+        real_stage_dir = fu.stage_dir
+
+        def spy(key):
+            keys.append(key)
+            return real_stage_dir(key)
+
+        args = argparse.Namespace(stage="tooling", stamp=[stamp], origin="batch-x")
+        with mock.patch.object(fu, "stage_dir", side_effect=spy):
+            with mock.patch.object(fu.time, "time_ns", side_effect=[111, 222]):
+                with mock.patch.object(fu.os, "getpid", return_value=7):
+                    fu.cmd_scan(args)
+                    fu.cmd_scan(args)
+        self.assertEqual(sorted(set(keys)), ["scan-batch-x-7-111", "scan-batch-x-7-222"])
+
+    def test_cleanup_scan_dry_run_reads_repo_from_worker_result(self):
+        stamp = "20261014-050000"
+        self.shipped_item(stamp)
+        p = self.run_followup("scan", "--stage", "cleanup", "--stamp", stamp,
+                              env={"ADVANCE_ROADMAP_FOLLOWUP_ANALYST": "0"})
+        doc = json.loads(p.stdout)
+        self.assertTrue(doc["findings"])
+        wr = json.loads((self.root / "runs" / stamp / "worker-result.json").read_text())
+        self.assertEqual(wr["repo"], "demo")
+        # Findings cite the cleanup repo from worker-result.
+        self.assertTrue(any(f.get("repo") == "demo" for f in doc["findings"]))
+
+    def test_cleanup_scan_rejects_multiple_stamps(self):
+        p = self.run_followup("scan", "--stage", "cleanup", "--stamp", "a", "--stamp", "b",
+                              check=False, env={"ADVANCE_ROADMAP_FOLLOWUP_ANALYST": "0"})
+        self.assertNotEqual(p.returncode, 0)
+        self.assertIn("exactly one --stamp", (p.stderr or "") + (p.stdout or ""))
+
+    def test_analyst_ignores_final_answer_when_provider_exits_nonzero(self):
+        (self.root / "stub-codex-fail").write_text("")
+        (self.root / "stub-claude-analyst.txt").write_text("I found nothing worth reporting.\n")
+        doc, titles = self.analyst_scan("stub-analyst.txt", answer=True)
+        # Codex exited non-zero (ignored its -o fence); Claude answered with no fence.
+        self.assertEqual(doc["analyst"], "claude: no findings block")
+        self.assertNotIn(self.ANALYST_FINDING["title"], titles)
+
+    def test_drain_records_verified_analyst_finding(self):
+        """Non-dry-run path: analyst finding persists on the stage after drain."""
+        stamp = "20261013-103004"
+        run = self.root / "runs" / stamp
+        run.mkdir(parents=True)
+        (run / "orchestrator-result.json").write_text((FIXTURES / "orchestrator-result.json").read_text())
+        (run / "worker-result.json").write_text(json.dumps({
+            "outcome": "failed", "repo": "ai-tools", "summary": "x"}))
+        (self.root / "runs.jsonl").write_text(json.dumps(json.loads((FIXTURES / "runs-row.json").read_text())) + "\n")
+        (self.root / "stub-analyst.txt").write_text(self.analyst_fence())
+        self.run_followup("hook", "run-end", "--origin", "batch-analyst", "--stamp", stamp)
+        self.run_followup("drain", "--stage", "tooling", "--origin", "batch-analyst",
+                          env={"ADVANCE_ROADMAP_FOLLOWUP_ANALYST": "1",
+                               "ADVANCE_ROADMAP_FOLLOWUP_LINEAR": "0"})
+        st = self.state("tooling-batch-analyst")
+        self.assertEqual(st["analyst"], "codex: answered")
+        self.assertIn(self.ANALYST_FINDING["title"], [f["title"] for f in st["findings"]])
+        self.assertTrue(any(f.get("source") == "analyst" and f["title"] == self.ANALYST_FINDING["title"]
+                            for f in st["findings"]))
+        self.assertNotIn("_analyst_paste", st)
+
+    def test_analyst_findings_are_excluded_from_autonomous_repair(self):
+        import followup as fu
+        analyst = {"id": "aaaaaaaaaaaa", "title": self.ANALYST_FINDING["title"], "status": "open",
+                   "source": "analyst", "kind": "analyst", "repo": "ai-tools"}
+        det = {"id": "bbbbbbbbbbbb", "title": "deterministic", "status": "open",
+               "kind": "misfiring-automation", "repo": "ai-tools"}
+        self.assertEqual(fu.repair_todo([analyst]), [])
+        self.assertEqual(fu.repair_todo([analyst, det]), [det])
+        st = {"findings": [analyst], "branch": "roadmap/x", "status": "deferred"}
+        self.assertFalse(fu.awaits_repair(st))
+
+    def test_repair_resume_with_only_analyst_rows_left_does_not_rebuild(self):
+        """Mid-flight review resume must finish review/land without feeding analyst titles to the builder."""
+        import followup as fu
+        self.shipped_item("20261014-050000")
+        self.run_followup("hook", "item-done", "--stamp", "20261014-050000")
+        self.run_followup("drain")  # scan without repair so findings exist
+        key = "cleanup-20261014-050000"
+        st = self.state(key)
+        self.assertTrue(st["findings"])
+        det = {**st["findings"][0], "status": "duplicate", "source": "scan"}
+        analyst = {"id": "aaaaaaaaaaaa", "title": self.ANALYST_FINDING["title"], "status": "open",
+                   "source": "analyst", "kind": "analyst", "repo": st["repo"]}
+        st.update(
+            status="ready",
+            next={"step": "review", "round": 1},
+            branch="roadmap/followup-cleanup-20261014-050000",
+            pr_url="https://github.com/jnelken/demo/pull/7",
+            findings=[det, analyst],
+            builder_provider="cursor",
+            validation={"reviews": []},
+            sessions=[],
+            scanned=True,
+        )
+        (self.root / "followups" / key / "state.json").write_text(json.dumps(st))
+        self.assertEqual(fu.repair_todo(st["findings"]), [])
+        # process() path via drain: preserve review/land (no builder brief with analyst titles).
+        self.set("stub-review.json", {"verdicts": ["clean"]})
+        self.run_followup("drain", env=self.repair_env())
+        st = self.state(key)
+        self.assertEqual(self.calls("worker"), [])  # never feed analyst titles to the builder
+        self.assertNotIn("repair-empty", [r.get("kind") for r in self.report()])
+        self.assertNotEqual(st["status"], "done", st)  # never silent-done while PR mid-flight
+        self.assertEqual((st.get("next") or {}).get("step"), "review", st)
+        # Entered the repair review path (feasibility snapshot), not the empty-todo exit.
+        self.assertTrue(any(s.get("step") == "review" for s in st.get("usage_snapshots") or []), st)
+
+    def test_review_findings_with_empty_todo_do_not_rebuild(self):
+        """Non-clean review + no repair-eligible findings must not call builder_request on []."""
+        import followup as fu
+        self.shipped_item("20261014-050000")
+        self.run_followup("hook", "item-done", "--stamp", "20261014-050000")
+        self.run_followup("drain")
+        key = "cleanup-20261014-050000"
+        st = self.state(key)
+        det = {**st["findings"][0], "status": "duplicate", "source": "scan"}
+        analyst = {"id": "aaaaaaaaaaaa", "title": self.ANALYST_FINDING["title"], "status": "open",
+                   "source": "analyst", "kind": "analyst", "repo": st["repo"]}
+        # Create the follow-up branch so review.sh can check out (stub still returns findings).
+        repo = self.code / "demo"
+        self.git(repo, "checkout", "-q", "-b", "roadmap/followup-cleanup-20261014-050000")
+        self.git(repo, "commit", "--allow-empty", "-qm", "follow-up")
+        self.git(repo, "push", "-q", "-u", "origin", "HEAD")
+        self.git(repo, "checkout", "-q", "main")
+        st.update(
+            status="ready",
+            next={"step": "review", "round": 1},
+            branch="roadmap/followup-cleanup-20261014-050000",
+            pr_url="https://github.com/jnelken/demo/pull/7",
+            findings=[det, analyst],
+            builder_provider="cursor",
+            validation={"reviews": []},
+            sessions=[],
+            scanned=True,
+        )
+        (self.root / "followups" / key / "state.json").write_text(json.dumps(st))
+        self.assertEqual(fu.repair_todo(st["findings"]), [])
+        self.set("stub-review.json", {"verdicts": ["findings"]})
+        self.run_followup("drain", env=self.repair_env())
+        st = self.state(key)
+        self.assertEqual(self.calls("worker"), [])
+        self.assertEqual(st["status"], "blocked", st)
+        self.assertTrue(any(b.get("kind") == "review" for b in st.get("blockers") or []), st)
+
+    def test_inline_corpus_truncation_notice_stays_within_byte_cap(self):
+        import followanalyst
+        a = self.root / "a.txt"
+        b = self.root / "b.txt"
+        a.write_text("A" * 80)
+        b.write_text("B" * 80)
+        # Cap that fits file a (with header/footer) but leaves no room for file b's body.
+        out, _, _ = followanalyst.inline_corpus([a, b], max_bytes=100)
+        self.assertLessEqual(len(out.encode("utf-8")), 100)
+        self.assertIn("A", out)
+        # Either omit b entirely or include a notice that still fits — never exceed the cap.
+        self.assertNotIn("B" * 10, out)
+        self.assertNotIn(str(a.resolve()), out)
+
+    def test_inline_corpus_multi_file_join_stays_within_byte_cap(self):
+        """Adjacent file sections must not insert an uncounted newline past the budget."""
+        import followanalyst
+        files = []
+        for name, ch in (("a.txt", "A"), ("b.txt", "B")):
+            p = self.root / name
+            p.write_text(ch * 20)
+            files.append(p)
+        # Budget large enough for both bodies+headers if join is "".join, but an extra
+        # separator newline between parts would push a naive "\\n".join over the edge.
+        header_a = "### corpus/001-a.txt\n```\n"
+        footer = "\n```\n"
+        body_a = "A" * 20
+        body_b = "B" * 20
+        header_b = "### corpus/002-b.txt\n```\n"
+        exact = (
+            len((header_a + body_a + footer).encode("utf-8"))
+            + len((header_b + body_b + footer).encode("utf-8"))
+        )
+        out, _, _ = followanalyst.inline_corpus(files, max_bytes=exact)
+        self.assertLessEqual(len(out.encode("utf-8")), exact)
+        self.assertIn("A", out)
+        self.assertIn("B", out)
+        # One extra separator would exceed exact; prove we did not insert it.
+        self.assertEqual(len(out.encode("utf-8")), exact)
+
+    def test_analyst_runs_inside_corpus_sandbox(self):
+        stamp = "20261013-103004"
+        (self.root / "runs" / stamp).mkdir(parents=True)
+        (self.root / "runs.jsonl").write_text(json.dumps(json.loads((FIXTURES / "runs-row.json").read_text())) + "\n")
+        (self.root / "stub-analyst.txt").write_text(self.analyst_fence())
+        self.run_followup("scan", "--stage", "tooling", "--origin", "batch-2026-10-13", "--stamp", stamp,
+                          env={"ADVANCE_ROADMAP_FOLLOWUP_ANALYST": "1"})
+        calls = self.calls("codex")
+        self.assertTrue(calls)
+        cwd = calls[0].get("cwd") or ""
+        self.assertIn("corpus-sandbox", cwd)
+        # Owner policy: Codex FS tools disabled (shell/exec/browser/apps).
+        args = calls[0].get("args") or []
+        for feat in ("shell_tool", "unified_exec", "browser_use", "computer_use", "apps"):
+            self.assertIn(feat, args, calls[0])
+            self.assertEqual(args[args.index(feat) - 1], "--disable", calls[0])
+
+    def test_analyst_malformed_findings_collection_preserves_deterministic(self):
+        stamp = "20261013-103004"
+        run = self.root / "runs" / stamp
+        run.mkdir(parents=True)
+        (run / "orchestrator-result.json").write_text((FIXTURES / "orchestrator-result.json").read_text())
+        (self.root / "runs.jsonl").write_text(json.dumps(json.loads((FIXTURES / "runs-row.json").read_text())) + "\n")
+        (self.root / "stub-analyst.txt").write_text(
+            "```FOLLOWUP_FINDINGS_JSON\n" + json.dumps({"findings": {"title": "bad"}}) + "\n```\n")
+        p = self.run_followup("scan", "--stage", "tooling", "--origin", "batch-2026-10-13", "--stamp", stamp,
+                              env={"ADVANCE_ROADMAP_FOLLOWUP_ANALYST": "1"})
+        doc = json.loads(p.stdout)
+        self.assertEqual(doc["analyst"], "codex: malformed findings block")
+        self.assertTrue(doc["findings"])  # deterministic findings remain
+        self.assertNotIn(self.ANALYST_FINDING["title"], [f["title"] for f in doc["findings"]])
+
+    def test_analyst_falls_over_when_codex_fails_to_launch(self):
+        stamp = "20261013-103004"
+        (self.root / "runs" / stamp).mkdir(parents=True)
+        (self.root / "runs.jsonl").write_text(json.dumps(json.loads((FIXTURES / "runs-row.json").read_text())) + "\n")
+        (self.root / "stub-claude-analyst.txt").write_text(self.analyst_fence())
+        # Point Codex at a missing binary so run_analyst raises OSError; Claude should still answer.
+        p = self.run_followup(
+            "scan", "--stage", "tooling", "--origin", "batch-2026-10-13", "--stamp", stamp,
+            env={"ADVANCE_ROADMAP_FOLLOWUP_ANALYST": "1",
+                 "ADVANCE_ROADMAP_CODEX_BIN": str(self.root / "missing-codex-bin")})
+        doc = json.loads(p.stdout)
+        self.assertEqual(doc["analyst"], "claude: answered")
+        self.assertIn(self.ANALYST_FINDING["title"], [f["title"] for f in doc["findings"]])
+
+    def test_analyst_rejects_non_string_evidence_source_without_raising(self):
+        stamp = "20261013-103004"
+        (self.root / "runs" / stamp).mkdir(parents=True)
+        (self.root / "runs.jsonl").write_text(json.dumps(json.loads((FIXTURES / "runs-row.json").read_text())) + "\n")
+        bad = {"title": "typed wrong", "kind": "analyst",
+               "evidence": [{"source": 12345, "quote": "the orchestrator hit its session limit before triage"}]}
+        (self.root / "stub-analyst.txt").write_text(
+            "```FOLLOWUP_FINDINGS_JSON\n" + json.dumps({"findings": [bad]}) + "\n```\n")
+        p = self.run_followup("scan", "--stage", "tooling", "--origin", "batch-2026-10-13", "--stamp", stamp,
+                              env={"ADVANCE_ROADMAP_FOLLOWUP_ANALYST": "1"})
+        doc = json.loads(p.stdout)
+        self.assertEqual(doc["analyst"], "codex: answered")
+        self.assertNotIn("typed wrong", [f["title"] for f in doc["findings"]])
+        self.assertTrue(any(n["title"] == "typed wrong" and "rejected" in n["why"] for n in doc["non_findings"]))
+
+    def test_analyst_ignores_non_string_title(self):
+        stamp = "20261013-103004"
+        (self.root / "runs" / stamp).mkdir(parents=True)
+        (self.root / "runs.jsonl").write_text(json.dumps(json.loads((FIXTURES / "runs-row.json").read_text())) + "\n")
+        bad = {"title": 99, "kind": "analyst",
+               "evidence": [{"source": "corpus/001-runs.jsonl",
+                             "quote": "the orchestrator hit its session limit before triage"}]}
+        (self.root / "stub-analyst.txt").write_text(
+            "```FOLLOWUP_FINDINGS_JSON\n" + json.dumps({"findings": [bad]}) + "\n```\n")
+        p = self.run_followup("scan", "--stage", "tooling", "--origin", "batch-2026-10-13", "--stamp", stamp,
+                              env={"ADVANCE_ROADMAP_FOLLOWUP_ANALYST": "1"})
+        doc = json.loads(p.stdout)
+        self.assertTrue(all(isinstance(f["title"], str) for f in doc["findings"]))
+        self.assertTrue(all(isinstance(n["title"], str) for n in doc["non_findings"]))
+
+    def test_analyst_claude_skips_garbage_json_and_honors_is_error(self):
+        (self.root / "stub-codex-limit").write_text("")
+        (self.root / "stub-claude-prefix-garbage").write_text("")
+        (self.root / "stub-claude-is-error").write_text("")
+        doc, titles = self.analyst_scan("stub-claude-analyst.txt", answer=True)
+        self.assertTrue(doc["analyst"].startswith("failed:"), doc["analyst"])
+        self.assertNotIn(self.ANALYST_FINDING["title"], titles)
+
+    def test_analyst_inline_runs_jsonl_keeps_only_stage_stamps(self):
+        import followanalyst
+        stamp = "20261013-103004"
+        other = "20261012-999999"
+        row = json.loads((FIXTURES / "runs-row.json").read_text())
+        (self.root / "runs.jsonl").write_text(
+            json.dumps({**row, "stamp": other, "detail": "unrelated historical quote for another stage"}) + "\n"
+            + json.dumps(row) + "\n")
+        text, pasted, label_map = followanalyst.inline_corpus(
+            [self.root / "runs.jsonl"], stamps=[stamp])
+        self.assertIn(stamp, text)
+        self.assertNotIn("unrelated historical quote for another stage", text)
+        self.assertNotIn(other, text)
+        self.assertIn("corpus/001-runs.jsonl", pasted)
+        self.assertNotIn(str((self.root / "runs.jsonl").resolve()), text)
+        self.assertEqual(label_map["corpus/001-runs.jsonl"],
+                         str((self.root / "runs.jsonl").resolve()))
+
+    def test_readonly_gate_rejects_wrong_shaped_usage_json(self):
+        import followrepair
+        import usage as usagelib
+        real_usage = ADV / "lib" / "usage.py"
+        (self.root / "lib" / "usage.py").write_text(real_usage.read_text())
+        followrepair.ROOT = self.root
+        usagelib.usage_path(self.root).write_text("[]\n")
+        gate = followrepair.gate_one("analyst", "codex", readonly=True)
+        self.assertIsNotNone(gate)
+        self.assertFalse(gate["available"])
+        usagelib.usage_path(self.root).write_text(json.dumps({"providers": {}}) + "\n")
+        gate = followrepair.gate_one("analyst", "codex", readonly=True)
+        self.assertFalse(gate["available"])
+
+    def test_inline_runs_jsonl_skips_non_object_lines(self):
+        import followanalyst
+        stamp = "20261013-103004"
+        row = json.loads((FIXTURES / "runs-row.json").read_text())
+        (self.root / "runs.jsonl").write_text(
+            "[1,2,3]\n" + json.dumps(row) + "\n")
+        text, _, _ = followanalyst.inline_corpus([self.root / "runs.jsonl"], stamps=[stamp])
+        self.assertIn(stamp, text)
+
+    def test_inline_runs_jsonl_stops_collecting_at_byte_budget(self):
+        """Matching stamp rows must not accumulate unbounded memory before the paste cap."""
+        import followanalyst
+        stamp = "20261013-103004"
+        other = "20261012-999999"
+        # Many large matching rows plus a late unique marker that must be omitted once budget fills.
+        chunks = [
+            json.dumps({"stamp": other, "payload": "ignored-" + ("y" * 5000)}) + "\n",
+        ]
+        for i in range(40):
+            chunks.append(json.dumps({"stamp": stamp, "i": i, "payload": "x" * 2000}) + "\n")
+        chunks.append(json.dumps({"stamp": stamp, "marker": "AFTER_BUDGET_UNIQUE_TOKEN"}) + "\n")
+        path = self.root / "runs.jsonl"
+        path.write_text("".join(chunks))
+        budget = 5000
+        raw = followanalyst._file_text_for_prompt(path, [stamp], max_bytes=budget)
+        self.assertLessEqual(len(raw.encode("utf-8")), budget)
+        self.assertGreater(len(raw), 0)
+        self.assertNotIn("AFTER_BUDGET_UNIQUE_TOKEN", raw)
+        self.assertNotIn("ignored-", raw)
+        text, _, _ = followanalyst.inline_corpus([path], stamps=[stamp], max_bytes=budget)
+        self.assertLessEqual(len(text.encode("utf-8")), budget)
+        self.assertNotIn("AFTER_BUDGET_UNIQUE_TOKEN", text)
+
+    def test_inline_runs_jsonl_skips_oversized_line_before_parse(self):
+        import followanalyst
+        stamp = "20261013-103004"
+        path = self.root / "runs.jsonl"
+        # One huge non-matching line, then a small matching row — huge line must be skipped, not parsed.
+        path.write_bytes(b'{"stamp":"other","payload":"' + (b"Z" * 20000) + b'"}\n'
+                         + json.dumps({"stamp": stamp, "ok": True}).encode() + b"\n")
+        raw = followanalyst._file_text_for_prompt(path, [stamp], max_bytes=500)
+        self.assertIn(stamp, raw)
+        self.assertNotIn("ZZZZ", raw)
+
+    def test_analyst_sandbox_contains_only_labeled_corpus(self):
+        import followanalyst
+        import followrepair
+        os.environ["ADVANCE_ROADMAP_ROOT"] = str(self.root)
+        followrepair.ROOT = self.root
+        followrepair.STATE = self.root / "followups"
+        st = {"key": "labeled-cwd", "children": ["20261013-103004"]}
+        (self.root / "followups" / st["key"]).mkdir(parents=True)
+        pasted = {"corpus/001-runs.jsonl": '{"stamp":"x"}\n'}
+        sandbox = followanalyst.prepare_analyst_sandbox(st, pasted)
+        self.assertTrue(sandbox.is_dir())
+        self.assertEqual(sorted(p.name for p in sandbox.iterdir()), ["corpus"])
+        self.assertEqual((sandbox / "corpus/001-runs.jsonl").read_text(), '{"stamp":"x"}\n')
+        # Only opaque labels under the sandbox — no host-path-shaped entries.
+        rel = sorted(str(p.relative_to(sandbox)) for p in sandbox.rglob("*") if p.is_file())
+        self.assertEqual(rel, ["corpus/001-runs.jsonl"])
+
+    def test_inline_corpus_truncates_by_utf8_bytes(self):
+        import followanalyst
+        path = self.root / "wide.txt"
+        # 3-byte UTF-8 chars: 100 chars = 300 bytes.
+        path.write_text("€" * 100)
+        out, pasted, _ = followanalyst.inline_corpus([path], max_bytes=120)
+        self.assertLessEqual(len(out.encode("utf-8")), 120)
+        self.assertIn("€", out)
+        self.assertTrue(len(path.read_text().encode("utf-8")) > 120)
+        self.assertTrue(pasted)
+        self.assertIn("corpus/001-wide.txt", pasted)
+
+    def test_inline_corpus_unreadable_note_is_opaque_and_budgeted(self):
+        import followanalyst
+        from unittest import mock
+        missing = self.root / "gone.txt"
+        missing.write_text("x")
+        real = followanalyst._file_text_for_prompt
+
+        def boom(path, stamps, max_bytes=None):
+            raise OSError(f"Permission denied: {path.resolve()}")
+
+        with mock.patch.object(followanalyst, "_file_text_for_prompt", side_effect=boom):
+            out, pasted, _ = followanalyst.inline_corpus([missing], max_bytes=200)
+        self.assertLessEqual(len(out.encode("utf-8")), 200)
+        self.assertIn("corpus/001-gone.txt", out)
+        self.assertIn("(unreadable)", out)
+        self.assertNotIn(str(missing.resolve()), out)
+        self.assertNotIn("Permission denied", out)
+        self.assertEqual(pasted, {})
+
+    def test_analyst_sandbox_prepare_failure_preserves_deterministic(self):
+        import followanalyst
+        stamp = "20261013-103004"
+        run = self.root / "runs" / stamp
+        run.mkdir(parents=True)
+        (run / "orchestrator-result.json").write_text((FIXTURES / "orchestrator-result.json").read_text())
+        (self.root / "runs.jsonl").write_text(json.dumps(json.loads((FIXTURES / "runs-row.json").read_text())) + "\n")
+        with mock.patch.object(followanalyst, "prepare_analyst_sandbox",
+                               side_effect=OSError("disk full")), \
+                mock.patch.dict(os.environ, {"ADVANCE_ROADMAP_ROOT": str(self.root),
+                                             "ADVANCE_ROADMAP_FOLLOWUP_ANALYST": "1"}):
+            # In-process: patch is visible to followup.scan → analyze.
+            import followup as fu
+            fu.ROOT = self.root
+            fu.STATE = self.root / "followups"
+            st = {"key": "scan-prep-fail", "stage": "tooling-hardening", "children": [stamp],
+                  "origin": "batch-x", "repo": "ai-tools", "usage_snapshots": []}
+            (self.root / "followups" / st["key"]).mkdir(parents=True)
+            fu.scan(st)
+        self.assertTrue(str(st.get("analyst") or "").startswith("failed: sandbox prepare"))
+        self.assertTrue(st.get("findings"))
+
+    def test_analyst_rejects_when_evidence_builder_raises(self):
+        # evidence_holds normalizes whitespace; evidence() needs an exact file substring.
+        stamp = "20261013-103004"
+        (self.root / "runs" / stamp).mkdir(parents=True)
+        (self.root / "runs.jsonl").write_text(json.dumps(json.loads((FIXTURES / "runs-row.json").read_text())) + "\n")
+        # Quote matches after whitespace fold but not as an exact contiguous span in the file.
+        folded = "the   orchestrator    hit its session limit before triage"
+        bad = {"title": "whitespace fold only", "kind": "analyst",
+               "evidence": [{"source": "corpus/001-runs.jsonl", "quote": folded}]}
+        (self.root / "stub-analyst.txt").write_text(
+            "```FOLLOWUP_FINDINGS_JSON\n" + json.dumps({"findings": [bad]}) + "\n```\n")
+        p = self.run_followup("scan", "--stage", "tooling", "--origin", "batch-2026-10-13", "--stamp", stamp,
+                              env={"ADVANCE_ROADMAP_FOLLOWUP_ANALYST": "1"})
+        doc = json.loads(p.stdout)
+        self.assertNotIn("whitespace fold only", [f["title"] for f in doc["findings"]])
+        self.assertTrue(any(n["title"] == "whitespace fold only" and "rejected" in n["why"]
+                            for n in doc["non_findings"]))
+
+    def test_analyst_rejects_absolute_host_path_evidence(self):
+        """Opaque-label policy: host absolute paths are not accepted as evidence sources."""
+        stamp = "20261013-103004"
+        (self.root / "runs" / stamp).mkdir(parents=True)
+        (self.root / "runs.jsonl").write_text(json.dumps(json.loads((FIXTURES / "runs-row.json").read_text())) + "\n")
+        bad = {"title": self.ANALYST_FINDING["title"], "kind": self.ANALYST_FINDING["kind"],
+               "evidence": [{"source": str(self.root / "runs.jsonl"),
+                             "quote": self.ANALYST_FINDING["quote"]}]}
+        (self.root / "stub-analyst.txt").write_text(
+            "```FOLLOWUP_FINDINGS_JSON\n" + json.dumps({"findings": [bad]}) + "\n```\n")
+        p = self.run_followup("scan", "--stage", "tooling", "--origin", "batch-2026-10-13", "--stamp", stamp,
+                              env={"ADVANCE_ROADMAP_FOLLOWUP_ANALYST": "1"})
+        doc = json.loads(p.stdout)
+        self.assertNotIn(self.ANALYST_FINDING["title"], [f["title"] for f in doc["findings"]])
+        self.assertTrue(any(n["title"] == self.ANALYST_FINDING["title"] and "rejected" in n["why"]
+                            for n in doc["non_findings"]))
 
 
 if __name__ == "__main__":

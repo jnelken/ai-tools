@@ -82,7 +82,7 @@ def _pct_env(name: str, default: float) -> float:
 
 
 # One gate per provider, applied to every role that calls a model (planner, worker, reviewer,
-# plan approver): stop routing to a provider well before its hard limit, not at it.
+# plan approver, follow-up analyst): stop routing to a provider well before its hard limit, not at it.
 MAX_FIVE_HOUR_PCT = _pct_env("ADVANCE_ROADMAP_MAX_FIVE_HOUR_PCT", 70)
 MAX_SEVEN_DAY_PCT = _pct_env("ADVANCE_ROADMAP_MAX_WEEKLY_PCT", 90)
 # Cursor's dashboard pool is monthly; use it through 100%, while observed CLI limits
@@ -102,6 +102,8 @@ ROLE_PROVIDERS = {
     "approver": ("codex", "claude"),
     "worker": ("cursor", "codex", "claude"),
     "reviewer": ("codex", "cursor", "claude"),
+    # followup.py's read-only corpus analysis: a planner-like call, never Cursor.
+    "analyst": ("codex", "claude"),
 }
 # Cursor can implement but never reviews roadmap changes.
 ROUTED_PROVIDERS = {"worker": ("cursor", "codex", "claude"), "reviewer": ("codex", "claude")}
@@ -1034,9 +1036,46 @@ def cmd_pick_orchestrators(args: argparse.Namespace) -> None:
 
 
 def cmd_gate(args: argparse.Namespace) -> None:
-    """Refresh, then exit 0 when the provider may take this role now and GATED_EXIT when it is
-    over its gate or limited. Prints the gate as one JSON line (state, reason, reset)."""
-    gate = provider_gate(refresh(Path(args.root)), args.provider, args.role)
+    """Exit 0 when the provider may take this role now and GATED_EXIT when it is over its gate
+    or limited. Prints the gate as one JSON line (state, reason, reset).
+
+    Default refreshes probes then saves. --readonly loads the saved file only (no refresh/save) —
+    used by follow-up dry-run scans so `followup.py scan` does not mutate shared usage state.
+    Readonly fails closed when the saved file is missing or invalid (never invents empty_state).
+    """
+    root = Path(args.root)
+    if getattr(args, "readonly", False):
+        path = usage_path(root)
+        if not path.is_file():
+            gate = {"available": False, "state": "n/a",
+                    "reason": "no saved usage state for readonly gate", "reset_epoch": None}
+            print(json.dumps({"provider": args.provider, "role": args.role, **gate, "reset_at": None}))
+            sys.exit(GATED_EXIT)
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(raw, dict):
+                raise ValueError("usage state must be an object")
+            saved_providers = raw.get("providers")
+            if not isinstance(saved_providers, dict) or args.provider not in saved_providers:
+                raise ValueError("saved usage state has no entry for provider")
+            # Fail closed on null/{} — load() would merge those into default "unknown"/available.
+            entry = saved_providers[args.provider]
+            if not isinstance(entry, dict) or not entry:
+                raise ValueError("saved provider entry must be a non-empty object")
+            state = load(root)
+            if not isinstance(state.get("providers"), dict):
+                raise ValueError("usage state missing providers")
+            loaded = state["providers"].get(args.provider)
+            if not isinstance(loaded, dict):
+                raise ValueError("usage state missing providers")
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError, KeyError):
+            gate = {"available": False, "state": "n/a",
+                    "reason": "saved usage state unreadable for readonly gate", "reset_epoch": None}
+            print(json.dumps({"provider": args.provider, "role": args.role, **gate, "reset_at": None}))
+            sys.exit(GATED_EXIT)
+    else:
+        state = refresh(root)
+    gate = provider_gate(state, args.provider, args.role)
     print(json.dumps({"provider": args.provider, "role": args.role, **gate,
                       "reset_at": epoch_to_iso(gate.get("reset_epoch"))}))
     sys.exit(0 if gate["available"] else GATED_EXIT)
@@ -1269,6 +1308,8 @@ def main() -> None:
     p = sub.add_parser("gate")
     p.add_argument("--role", required=True, choices=sorted(ROLE_PROVIDERS))
     p.add_argument("--provider", required=True, choices=["claude", "codex", "cursor"])
+    p.add_argument("--readonly", action="store_true",
+                   help="load saved usage only; do not refresh probes or save")
     p.set_defaults(func=cmd_gate)
 
     p = sub.add_parser("gates")
