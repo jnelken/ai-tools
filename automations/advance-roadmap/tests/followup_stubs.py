@@ -125,7 +125,7 @@ def review(args):
     r = cfg("stub-review.json", {"verdicts": ["clean"]})
     rnd = int(opt(args, "--round", "1"))
     note("review", round=rnd, repo=opt(args, "--repo"), worker=opt(args, "--worker"),
-         exclude=opt(args, "--exclude-reviewers"))
+         exclude=opt(args, "--exclude-reviewers"), strategy=opt(args, "--strategy"))
     if r.get("after_usage") is not None:
         (ROOT / "stub-usage.json").write_text(json.dumps(r["after_usage"]))
     if r.get("unavailable"):

@@ -39,8 +39,8 @@ GH = os.environ.get("ADVANCE_ROADMAP_GH_BIN", "gh")
 AI_TOOLS_HOME = Path(os.environ.get("AI_TOOLS_HOME", str(Path.home() / ".ai-tools")))
 # Must match review.sh cross_provider_reviewers (Cursor is disabled for roadmap reviews).
 # Invariant — a reviewer must never be a prior builder on this stage.
-# Owner of the invoke: review.sh (--exclude-reviewers). Admission gate: feasibility() +
-# eligible_reviewers(); run_review() must pass prior_builders(st) into review.sh.
+# Owner of the invoke: review.sh run_reviewer() (--exclude-reviewers). Admission:
+# feasibility() + eligible_reviewers(); run_review() must pass prior_builders(st).
 REVIEWERS = {"cursor": ("codex", "claude"), "codex": ("claude",), "claude": ("codex",)}
 OUT = ("over", "limited")
 # Batch-budget / incremental vars inherited from a parent run.sh must not reach the child.
@@ -625,11 +625,18 @@ def run_review(st, repo_dir, rnd):
     wt = worktree_of(repo_dir, branch_for(st)) or ensure_worktree(st, repo_dir, branch_for(st))
     log_path = stage_dir(st["key"]) / "reviews.jsonl"
     before = len(followscan.read_jsonl(log_path))
-    git("-C", str(wt), "fetch", "--quiet", "origin")
-    git("-C", str(wt), "merge", "--ff-only", "--quiet", f"origin/{branch_for(st)}")
+    branch = branch_for(st)
+    fetch = git("-C", str(wt), "fetch", "--quiet", "origin")
+    if fetch.returncode != 0:
+        return "error", (f"could not fetch origin for {branch}: "
+                         f"{(fetch.stderr or fetch.stdout).strip()[:300]}")
+    merge = git("-C", str(wt), "merge", "--ff-only", "--quiet", f"origin/{branch}")
+    if merge.returncode != 0:
+        return "error", (f"could not ff-merge origin/{branch} into the review checkout: "
+                         f"{(merge.stderr or merge.stdout).strip()[:300]}")
     sha = git("-C", str(wt), "rev-parse", "HEAD").stdout.strip()
     cmd = ["/bin/zsh", str(ROOT / "review.sh"), "--repo", str(wt), "--worker", st["builder_provider"],
-           "--round", str(rnd), "--log", str(log_path)]
+           "--round", str(rnd), "--log", str(log_path), "--strategy", "cross-provider"]
     excluded = sorted(prior_builders(st))
     if excluded:
         cmd.extend(["--exclude-reviewers", " ".join(excluded)])

@@ -221,10 +221,14 @@ check "continuous reviews still obey the live gate" "$rc" 3
 capture="$TMP/reviewer-prompt"
 review codex 1 CAPTURE_PROMPT="$capture" FAKE_CLAUDE=clean >/dev/null
 grep -Fq 'Classify each finding as an instance' "$capture" || { echo "FAIL: missing invariant classification"; exit 1; }
-# Prior-builder exclusion (review.sh is the owner): never invoke an excluded provider.
+# Prior-builder exclusion (run_reviewer is the owner): never invoke an excluded provider.
 review_excl cursor 1 "codex" FAKE_CODEX=clean FAKE_CLAUDE=clean >/dev/null
 check "excluded prior builder is skipped" "$(field reviewer)" claude
 rc=0; review_excl cursor 1 "codex claude" FAKE_CODEX=clean FAKE_CLAUDE=clean >/dev/null || rc=$?
 check "all eligible reviewers excluded → unavailable" "$rc" 3
 check "all-excluded logs unavailable" "$(field verdict)" unavailable
+# cursor-cycle path also goes through run_reviewer — exclusion must refuse Cursor itself.
+# Force the legacy path by rewriting the strategy after the script's cursor-then-codex→cross-provider
+# conversion isn't reachable from CLI; instead invoke with an excluded primary via cross-provider
+# where every candidate is excluded (covered above). Owner is run_reviewer(); both paths call it.
 echo "all passed"

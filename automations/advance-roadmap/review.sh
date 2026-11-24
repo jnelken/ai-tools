@@ -8,8 +8,8 @@
 #   (--base defaults to origin's default branch: origin/main, or origin/master where that's it)
 #
 # Invariant — a reviewer must never be a provider that built an earlier round on the
-# same stage. Owner: this script (skip --exclude-reviewers at selection). followrepair.run_review
-# passes prior builders; feasibility() is only the admission gate for the same set.
+# same stage. Owner: run_reviewer() (refuses --exclude-reviewers before any provider
+# invoke). followrepair.run_review passes prior builders; feasibility() is admission only.
 #
 # Reviewers are read-only. Provider fallback depends on the selected strategy.
 # Findings go to stdout, ending in one line:
@@ -144,6 +144,12 @@ Diff:
 $DIFF"
 
 run_reviewer() {
+  # Owner of prior-builder exclusion: every invoke path goes through here.
+  if (( ${exclude_reviewers[(Ie)$1]} )); then
+    echo "(skipping reviewer $1 — excluded: prior builder on this stage)"
+    echo "reviewer $1 excluded: prior builder on this stage" > "$2"
+    return 127
+  fi
   if [ "${ADVANCE_ROADMAP_CONTINUOUS:-0}" != 1 ] && [ -n "${ADVANCE_ROADMAP_BUDGET_REVIEWERS:-}" ] && [[ " $ADVANCE_ROADMAP_BUDGET_REVIEWERS " != *" $1 "* ]]; then
     echo "reviewer $1 has no batch budget reservation" > "$2"; return 127
   fi
@@ -320,11 +326,6 @@ run_cross_provider_review() {
   local used="" verdict="unavailable" who rc text gate hits="" hit
   gated_list="" capacity_list=""   # read by record_review: reviewers skipped over their gate / at capacity
   for who in "${cross_provider_reviewers[@]}"; do
-    # Owner of prior-builder exclusion: skip here, do not invoke.
-    if (( ${exclude_reviewers[(Ie)$who]} )); then
-      echo "(skipping reviewer $who — excluded: prior builder on this stage)"
-      continue
-    fi
     if [ "${ADVANCE_ROADMAP_CONTINUOUS:-0}" != 1 ] && [ -n "${ADVANCE_ROADMAP_BUDGET_REVIEWERS:-}" ] && [[ " $ADVANCE_ROADMAP_BUDGET_REVIEWERS " != *" $who "* ]]; then
       gated_list="$gated_list $who"
       continue

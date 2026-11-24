@@ -2002,6 +2002,35 @@ class FollowupTest(unittest.TestCase):
         self.assertIn("cursor", reviews[0].get("exclude") or "")
         # Round 2: both builders (same provider in the stub) stay excluded.
         self.assertIn("cursor", reviews[1].get("exclude") or "")
+        self.assertEqual(reviews[0].get("strategy"), "cross-provider")
+
+    def test_run_review_fails_closed_when_ff_merge_fails(self):
+        """A divergent review checkout must not invoke review.sh on a stale tip."""
+        self.shipped_item("20261014-050000")
+        self.run_followup("hook", "item-done", "--stamp", "20261014-050000")
+        self.set("stub-review.json", {"verdicts": ["clean"], "unavailable": True})
+        self.run_followup("drain", env=self.repair_env())
+        st = self.state("cleanup-20261014-050000")
+        self.assertEqual(st["next"]["step"], "review")
+        # Divergent tips: origin and the review checkout each have a unique commit.
+        wt = Path(self.env["ADVANCE_ROADMAP_FOLLOWUP_WORKTREES"]) / st["key"]
+        self.assertTrue(wt.is_dir(), f"expected follow-up worktree at {wt}")
+        base = self.git(wt, "rev-parse", "HEAD")
+        (wt / "origin-only.txt").write_text("origin\n")
+        self.git(wt, "add", "-A")
+        self.git(wt, "commit", "-qm", "origin-only")
+        self.git(wt, "push", "-q", "origin", st["branch"])
+        self.git(wt, "reset", "--hard", "-q", base)
+        (wt / "stale-local.txt").write_text("local\n")
+        self.git(wt, "add", "-A")
+        self.git(wt, "commit", "-qm", "local-only")
+        self.set("stub-review.json", {"verdicts": ["clean"]})
+        before = len(self.calls("review"))
+        self.run_followup("drain", env=self.repair_env())
+        st = self.state("cleanup-20261014-050000")
+        self.assertEqual(st["status"], "pending", self.report())
+        self.assertEqual(len(self.calls("review")), before)  # never reached review.sh again
+        self.assertIn("ff-merge", self.report()[-1]["reason"])
 
 
 if __name__ == "__main__":
