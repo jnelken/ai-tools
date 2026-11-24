@@ -754,7 +754,8 @@ def recover_tickets():
                     else:
                         pending = st.setdefault("pending_partial", [])
                         if not any(e.get("ticket") == ident and not e.get("done") for e in pending):
-                            pending.append({"ticket": ident, "status": status_map, "done": False})
+                            pending.append({"ticket": ident, "status": status_map, "done": False,
+                                            "commented": False})
                         apply_partial_progress(st, issues=issues)
                         changed = True
                 if needs_work and st.get("status") in (DONE, BLOCKED) and st.get("status") != RUNNING:
@@ -865,6 +866,10 @@ def ticket_description_payload(st, findings, ident, issues=None, finding_status=
         prior_owners = meta.get("finding_owners") or {}
         ticket_key = meta.get("key")
         already_on_ticket = set(meta.get("finding_ids") or []) | set(prior_status)
+        # Invariant (description-write owner): never demote a finding Linear already marks fixed.
+        for fid, prior in prior_status.items():
+            if prior == "fixed":
+                status[fid] = "fixed"
         for fid in already_on_ticket:
             status.setdefault(fid, prior_status.get(fid, "open"))
             if fid not in by_id:
@@ -1270,11 +1275,13 @@ def finding_owners_for_partial(st, status_map, prev_meta=None):
     return owners
 
 
-def note_partial_progress(st, ident, status_map, issues=None):
+def note_partial_progress(st, ident, status_map, issues=None, already_commented=False, on_commented=None):
     """Comment partial progress and rewrite metadata; never mark Done while findings remain open.
 
     Description rewrite goes through ticket_description_payload so Linear's current IDs/owners
-    are preserved (same owner as sync_deferral_tickets / dedupe attach).
+    and any already-fixed statuses are preserved (same owner as sync_deferral_tickets / dedupe).
+    Comment and rewrite are tracked apart via already_commented / on_commented so a failed
+    rewrite retry does not re-post the comment.
     """
     remaining = sorted(fid for fid, s in status_map.items() if s != "fixed")
     fixed_ids = sorted(fid for fid, s in status_map.items() if s == "fixed")
@@ -1307,8 +1314,22 @@ def note_partial_progress(st, ident, status_map, issues=None):
             break
     if prev_meta is None:
         prev_meta = followticket.parse_meta(st.get("ticket_body") or "")
+    # Never demote a finding another machine already marked fixed in Linear.
+    live_status = (prev_meta or {}).get("finding_status") or {}
+    status_map = dict(status_map)
+    for fid, prior in live_status.items():
+        if prior == "fixed":
+            status_map[fid] = "fixed"
+    for f in findings:
+        if live_status.get(f["id"]) == "fixed":
+            f["status"] = "fixed"
+    remaining = sorted(fid for fid, s in status_map.items() if s != "fixed")
+    fixed_ids = sorted(fid for fid, s in status_map.items() if s == "fixed")
     owners = finding_owners_for_partial(st, status_map, prev_meta)
-    followticket.comment(ident, body)
+    if not already_commented:
+        followticket.comment(ident, body)
+        if on_commented:
+            on_commented()
     rewrite_ticket_description(
         st, ident, findings, quota=st.get("quota"),
         next_step=(f"repair remaining finding(s): {', '.join(remaining)}"
@@ -1336,7 +1357,8 @@ def finish(st, findings):
         else:
             partial.append((ident, status_map))
     st["pending_close"] = [{"ticket": ident, "commented": False} for ident in close]
-    st["pending_partial"] = [{"ticket": ident, "status": status_map, "done": False}
+    st["pending_partial"] = [{"ticket": ident, "status": status_map, "done": False,
+                              "commented": False}
                              for ident, status_map in partial]
     apply_partial_progress(st, findings)
     close_tickets(st, issues=None)  # ticket_ready_to_close still reads ticket_body / index
@@ -1346,7 +1368,8 @@ def apply_partial_progress(st, findings=None, issues=None):
     """Persist partial-progress comments/metadata; retried by later drains like pending_close.
 
     Each attempt recomputes status from live Linear metadata and verified stage state so a retry
-    cannot rewrite a finding from fixed back to open after another stage completed it.
+    cannot rewrite a finding from fixed back to open after another stage completed it. Comment
+    completion is stored on the pending entry so a failed rewrite does not re-comment.
     """
     if os.environ.get("ADVANCE_ROADMAP_FOLLOWUP_LINEAR", "1") != "1":
         st["pending_partial"] = []
@@ -1363,12 +1386,30 @@ def apply_partial_progress(st, findings=None, issues=None):
                        "the next drain retries after a successful ticket fetch")
                 continue
             tracked = ticket_tracked_ids(ident, current=st, extras=meta_ids)
+            live_status = {}
+            for issue in issues or []:
+                if issue.get("identifier") == ident:
+                    live_status = (followticket.parse_meta(issue.get("description") or "")
+                                   or {}).get("finding_status") or {}
+                    break
             # No owner_key here: a completing stage may verify a finding it just fixed before
-            # finding_owners is rewritten. Close still enforces recorded owners.
-            status_map = {fid: ("fixed" if finding_verified_fixed(fid, current=st) else "open")
-                          for fid in tracked}
+            # finding_owners is rewritten. Close still enforces recorded owners. Never demote
+            # a finding Linear already marks fixed (description-write invariant).
+            status_map = {}
+            for fid in tracked:
+                if live_status.get(fid) == "fixed" or finding_verified_fixed(fid, current=st):
+                    status_map[fid] = "fixed"
+                else:
+                    status_map[fid] = "open"
             entry["status"] = status_map
-            note_partial_progress(st, ident, status_map, issues=issues)
+
+            def _mark_commented():
+                entry["commented"] = True
+
+            note_partial_progress(
+                st, ident, status_map, issues=issues,
+                already_commented=bool(entry.get("commented")),
+                on_commented=_mark_commented)
             entry["done"] = True
         except followticket.LinearError as e:
             report(st, "linear", f"could not record partial progress on {ident}: {e}",

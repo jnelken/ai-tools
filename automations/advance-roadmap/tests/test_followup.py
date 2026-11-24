@@ -1145,6 +1145,62 @@ class FollowupTest(unittest.TestCase):
         self.assertFalse(st.get("pending_ticket_sync"))
         self.assertEqual(st["findings"][0].get("ticket"), "DEV-777")
 
+    def test_partial_progress_preserves_live_fixed_and_skips_recomment(self):
+        """Retry must not demote Linear-fixed findings or re-post the partial-progress comment."""
+        import followup as fu
+        fu.ROOT = self.root
+        fu.STATE = self.root / "followups"
+        os.environ["ADVANCE_ROADMAP_ROOT"] = str(self.root)
+        os.environ["ADVANCE_ROADMAP_LINEAR_BIN"] = self.env["ADVANCE_ROADMAP_LINEAR_BIN"]
+        key = "cleanup-partial-retry"
+        fid_local, fid_remote = "aaaaaaaaaaaa", "bbbbbbbbbbbb"
+        d = self.root / "followups" / key
+        d.mkdir(parents=True)
+        sha = "abc1234"
+        (d / "state.json").write_text(json.dumps({
+            "key": key, "stage": "project-cleanup", "repo": "demo", "status": "done",
+            "merge_commit": sha,
+            "validation": {"checks": "passed",
+                           "reviews": [{"verdict": "clean", "head": sha, "round": 1}],
+                           "deploy": "success"},
+            "findings": [{"id": fid_local, "status": "fixed", "ticket": "DEV-501", "title": "a",
+                          "kind": "t", "fix": "f", "evidence": []}],
+            "pending_partial": [{"ticket": "DEV-501", "status": {fid_local: "fixed", fid_remote: "open"},
+                                 "done": False, "commented": False}],
+            "blockers": [],
+        }))
+        (self.root / "followups" / "tickets.json").write_text(json.dumps({
+            fid_local: {"ticket": "DEV-501", "key": key, "at": time.time()},
+            fid_remote: {"ticket": "DEV-501", "key": "cleanup-other", "at": time.time()},
+        }))
+        # Live Linear already has fid_remote fixed by another machine; local still says open.
+        ticket = self.meta_ticket("DEV-501", {
+            "key": key, "finding_ids": [fid_local, fid_remote],
+            "finding_status": {fid_local: "open", fid_remote: "fixed"},
+        })
+        self.set("stub-linear.json", {"pages": [[ticket]], "fail": ["issue update DEV-501"]})
+        st = fu.load(key)
+        fu.apply_partial_progress(st, issues=[ticket])
+        self.assertTrue(st["pending_partial"][0].get("commented"))
+        self.assertFalse(st["pending_partial"][0].get("done"))
+        (self.root / "stub-calls.jsonl").unlink(missing_ok=True)
+        # Refresh live ticket status after failed rewrite attempt.
+        ticket = self.meta_ticket("DEV-501", {
+            "key": key, "finding_ids": [fid_local, fid_remote],
+            "finding_status": {fid_local: "open", fid_remote: "fixed"},
+        })
+        self.set("stub-linear.json", {"pages": [[ticket]]})
+        fu.apply_partial_progress(st, issues=[ticket])
+        comments = [c for c in self.calls("linear") if str(c.get("cmd", "")).startswith("issue comment")
+                    and c.get("issue") == "DEV-501"]
+        self.assertEqual(comments, [], "retry must not re-comment")
+        updates = [c for c in self.calls("linear") if c.get("cmd") == "issue update DEV-501"
+                   and "--description-file" in (c.get("args") or [])]
+        self.assertTrue(updates)
+        meta = followticket.parse_meta(updates[-1]["body"])
+        self.assertEqual(meta["finding_status"][fid_remote], "fixed")
+        self.assertEqual(st.get("pending_partial"), [])
+
     def test_dedupe_rejects_cross_repo_ticket_attachment(self):
         """A finding's stored ticket id must not rewrite an issue from another repo."""
         import followup as fu
