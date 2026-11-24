@@ -25,7 +25,8 @@ import procrun  # noqa: E402
 import usage as usagelib  # noqa: E402
 
 ANALYST_FENCE = "FOLLOWUP_FINDINGS_JSON"
-ANALYST_TIMEOUT_S = float(os.environ.get("ADVANCE_ROADMAP_FOLLOWUP_ANALYST_TIMEOUT_S", "1800"))
+ANALYST_TIMEOUT_S = float(os.environ.get("ADVANCE_ROADMAP_FOLLOWUP_ANALYST_TIMEOUT_S", "300"))
+TITLE_SAFE = re.compile(r"[^\w\s.,;:!?()\[\]/'\"%\-]+", re.UNICODE)
 TOKENS_TIMEOUT_S = 60
 # Cap inlined corpus bytes so the prompt stays bounded (injection surface is the paste, not FS).
 CORPUS_PROMPT_MAX_BYTES = int(os.environ.get("ADVANCE_ROADMAP_FOLLOWUP_ANALYST_CORPUS_BYTES", "200000"))
@@ -82,13 +83,17 @@ def analyze(st, findings, files):
     """
     if not enabled() or not files:
         return [], []
+    # Stage state.json can contain prior analyst prose — never cite it as evidence.
+    files = [Path(f).resolve() for f in files if Path(f).name != "state.json"]
+    if not files:
+        st["analyst"] = "skipped: no citable corpus files"
+        return [], []
     try:
         sandbox = empty_analyst_cwd(st)
     except (OSError, ValueError, TypeError) as e:
         # Optional analyst must never abort deterministic scan/recording.
         st["analyst"] = f"failed: sandbox prepare: {e}"
         return [], []
-    files = [Path(f).resolve() for f in files]
     prompt = analyst_prompt(st, findings, files)
     try:
         # Invariant (owner: analyze gate check): every path to run_analyst must see an
@@ -113,8 +118,11 @@ def analyze(st, findings, files):
                     {"provider": provider, "at": followrepair.now_iso(), "error": f"{type(e).__name__}: {e}"})
                 continue
             # Echoed banners in a successful final answer are not a live limit (shared live-limit rule).
+            # Corpus paste often quotes prior limit text — those must not gate providers.
             banner = usagelib.live_limit_banner(
                 transcript, exit_code=exit_code, final_answer=answer, provider_result=provider_result)
+            if banner and _banner_from_paste(st, banner):
+                banner = None
             if banner:
                 record_analyst_limit(st, provider, banner)
                 limited.append(provider)
@@ -181,8 +189,10 @@ def accept_findings(st, findings, files, doc, provider=None):
         # Free text is capped; kind is allowlisted; key is derived from verified evidence.
         kind_raw = raw.get("kind") if isinstance(raw.get("kind"), str) else ""
         kind = kind_raw if kind_raw in ALLOWED_KINDS else "analyst"
-        title = title.strip()[:200]
-        fix = (raw.get("fix") if isinstance(raw.get("fix"), str) else "")[:400]
+        title = TITLE_SAFE.sub("", title.strip())[:200].strip()
+        if not title:
+            continue
+        fix = TITLE_SAFE.sub("", (raw.get("fix") if isinstance(raw.get("fix"), str) else ""))[:400].strip()
         raw_ev = raw.get("evidence") or []
         # Every evidence entry must be a dict that verifies — drop the whole finding otherwise.
         if not isinstance(raw_ev, list) or not raw_ev or not all(isinstance(e, dict) for e in raw_ev):
@@ -281,19 +291,7 @@ def run_analyst(st, provider, prompt, sandbox):
              "--log", str(d / "model-usage.jsonl"), "--session-out", str(session)],
             timeout=TOKENS_TIMEOUT_S, text=True)
         transcript = followscan.read_text(raw) or raw_json.read_text(errors="replace")
-        try:
-            for line in raw_json.read_text(errors="replace").splitlines():
-                if not line.startswith("{"):
-                    continue
-                try:
-                    obj = json.loads(line)
-                except ValueError:
-                    continue  # skip malformed lines; keep scanning for a result object
-                if isinstance(obj, dict) and "result" in obj:
-                    provider_result = obj
-                    break
-        except OSError:
-            provider_result = None
+        provider_result = usagelib.load_provider_result(raw_json)
     sid = (followscan.read_text(session) or "").strip()
     if sid:
         st.setdefault("sessions", []).append(
@@ -400,6 +398,13 @@ def quote_in_paste(quote, body):
     """True when the quote appears in the pasted body (whitespace-normalized)."""
     q = " ".join(str(quote or "").split())
     return bool(q) and q in " ".join(str(body or "").split())
+
+
+def _banner_from_paste(st, banner):
+    """True when the limit banner text also appears in the inlined corpus paste."""
+    paste = st.get("_analyst_paste") or {}
+    blob = "\n".join(paste.values())
+    return bool(banner) and banner.strip() in blob
 
 
 def analyst_prompt(st, findings, files):

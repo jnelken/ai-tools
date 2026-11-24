@@ -2692,11 +2692,11 @@ class FollowupTest(unittest.TestCase):
         (run / "orchestrator-result.json").write_text((FIXTURES / "orchestrator-result.json").read_text())
         (self.root / "runs.jsonl").write_text(json.dumps(json.loads((FIXTURES / "runs-row.json").read_text())) + "\n")
         with mock.patch.object(followanalyst, "empty_analyst_cwd",
-                               side_effect=OSError("disk full")):
+                               side_effect=OSError("disk full")), \
+                mock.patch.dict(os.environ, {"ADVANCE_ROADMAP_ROOT": str(self.root),
+                                             "ADVANCE_ROADMAP_FOLLOWUP_ANALYST": "1"}):
             # In-process: patch is visible to followup.scan → analyze.
             import followup as fu
-            os.environ["ADVANCE_ROADMAP_ROOT"] = str(self.root)
-            os.environ["ADVANCE_ROADMAP_FOLLOWUP_ANALYST"] = "1"
             fu.ROOT = self.root
             fu.STATE = self.root / "followups"
             st = {"key": "scan-prep-fail", "stage": "tooling-hardening", "children": [stamp],
