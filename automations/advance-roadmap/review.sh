@@ -4,7 +4,12 @@
 #
 #   review.sh --repo PATH --worker cursor|codex|claude --round N --log FILE
 #       [--base REF] [--strategy cursor-then-codex|cross-provider]
+#       [--exclude-reviewers "codex claude"]
 #   (--base defaults to origin's default branch: origin/main, or origin/master where that's it)
+#
+# Invariant — a reviewer must never be a provider that built an earlier round on the
+# same stage. Owner: this script (skip --exclude-reviewers at selection). followrepair.run_review
+# passes prior builders; feasibility() is only the admission gate for the same set.
 #
 # Reviewers are read-only. Provider fallback depends on the selected strategy.
 # Findings go to stdout, ending in one line:
@@ -38,7 +43,7 @@ REVIEW_EFFORT="${ADVANCE_ROADMAP_REVIEW_EFFORT:-low}"
 
 export PATH="/opt/homebrew/bin:/opt/homebrew/opt/node@22/bin:/usr/bin:/bin:/usr/sbin:/sbin:/Users/jake/.local/bin"
 
-REPO="" WORKER="" ROUND="" LOG="" BASE=""
+REPO="" WORKER="" ROUND="" LOG="" BASE="" EXCLUDE_REVIEWERS=""
 CONFIGURED_REVIEW_STRATEGY="${ADVANCE_ROADMAP_REVIEW_STRATEGY:-cursor-then-codex}"
 REVIEW_STRATEGY="$CONFIGURED_REVIEW_STRATEGY"
 while [ $# -gt 0 ]; do
@@ -49,9 +54,12 @@ while [ $# -gt 0 ]; do
     --log) LOG="$2"; shift 2 ;;
     --base) BASE="$2"; shift 2 ;;
     --strategy) REVIEW_STRATEGY="$2"; shift 2 ;;
+    --exclude-reviewers) EXCLUDE_REVIEWERS="$2"; shift 2 ;;
     *) echo "unknown arg: $1" >&2; exit 2 ;;
   esac
 done
+# Space-separated providers that must not be invoked (prior builders on a follow-up stage).
+exclude_reviewers=( ${=EXCLUDE_REVIEWERS} )
 # A worktree (Superset workspace) has a .git file, not a directory.
 [ -n "$REPO" ] && [ -e "$REPO/.git" ] || { echo "FATAL: --repo must be a git checkout" >&2; exit 2; }
 [ -n "$ROUND" ] && [ -n "$LOG" ] || { echo "FATAL: --round and --log required" >&2; exit 2; }
@@ -312,6 +320,11 @@ run_cross_provider_review() {
   local used="" verdict="unavailable" who rc text gate hits="" hit
   gated_list="" capacity_list=""   # read by record_review: reviewers skipped over their gate / at capacity
   for who in "${cross_provider_reviewers[@]}"; do
+    # Owner of prior-builder exclusion: skip here, do not invoke.
+    if (( ${exclude_reviewers[(Ie)$who]} )); then
+      echo "(skipping reviewer $who — excluded: prior builder on this stage)"
+      continue
+    fi
     if [ "${ADVANCE_ROADMAP_CONTINUOUS:-0}" != 1 ] && [ -n "${ADVANCE_ROADMAP_BUDGET_REVIEWERS:-}" ] && [[ " $ADVANCE_ROADMAP_BUDGET_REVIEWERS " != *" $who "* ]]; then
       gated_list="$gated_list $who"
       continue

@@ -38,7 +38,9 @@ DEPLOY_NONE_AFTER_S = float(os.environ.get("ADVANCE_ROADMAP_FOLLOWUP_DEPLOY_NONE
 GH = os.environ.get("ADVANCE_ROADMAP_GH_BIN", "gh")
 AI_TOOLS_HOME = Path(os.environ.get("AI_TOOLS_HOME", str(Path.home() / ".ai-tools")))
 # Must match review.sh cross_provider_reviewers (Cursor is disabled for roadmap reviews).
-# Owner of "who may review whom": this map — feasibility() is the only gate that starts a builder.
+# Invariant — a reviewer must never be a prior builder on this stage.
+# Owner of the invoke: review.sh (--exclude-reviewers). Admission gate: feasibility() +
+# eligible_reviewers(); run_review() must pass prior_builders(st) into review.sh.
 REVIEWERS = {"cursor": ("codex", "claude"), "codex": ("claude",), "claude": ("codex",)}
 OUT = ("over", "limited")
 # Batch-budget / incremental vars inherited from a parent run.sh must not reach the child.
@@ -130,11 +132,21 @@ def prior_builders(st):
             if s.get("role") == "builder" and s.get("provider")}
 
 
+def eligible_reviewers(builder, excluded=()):
+    """Reviewers review.sh may invoke for this builder, minus excluded prior builders.
+
+    Policy twin of review.sh's --exclude-reviewers skip; keep the two in sync.
+    """
+    skip = set(excluded or ())
+    return tuple(r for r in REVIEWERS.get(builder, ()) if r not in skip)
+
+
 def feasibility(st, step, builder=None):
     """Who may take the next step: ("ok", chain) | ("quota", quota_record) | ("unknown", reason).
 
     A builder is only usable when a reviewer review.sh would pick for it is under its gate too —
-    and that reviewer must not be any prior builder on this stage."""
+    and that reviewer must not be any prior builder on this stage. Admission only: review.sh
+    enforces the same exclusion at invoke via --exclude-reviewers from run_review()."""
     gw, gr = gates("worker"), gates("reviewer")
     st["usage_snapshots"] = (st.get("usage_snapshots") or [])[-9:] + [
         {"at": now_iso(), "step": step, "worker": gw, "reviewer": gr}]
@@ -145,7 +157,7 @@ def feasibility(st, step, builder=None):
     if step == "build":
         free_builders = [g["provider"] for g in gw if g.get("available")]
         chain = [p for p in free_builders
-                 if (free_reviewers - {p}).intersection(REVIEWERS.get(p, ()))]
+                 if (free_reviewers - {p}).intersection(eligible_reviewers(p, excluded))]
         if chain:
             return "ok", chain
         if not free_builders:
@@ -154,9 +166,9 @@ def feasibility(st, step, builder=None):
                 if q and q.get("provider"):
                     return "quota", q
             return "unknown", "no worker is available and none reports a usage gate"
-        eligible = {r for p in free_builders for r in REVIEWERS.get(p, ())} - excluded
+        eligible = {r for p in free_builders for r in eligible_reviewers(p, excluded)}
     else:
-        eligible = set(REVIEWERS.get(builder, ())) - excluded
+        eligible = set(eligible_reviewers(builder, excluded))
         if free_reviewers.intersection(eligible):
             return "ok", [builder]
     q = reviewer_quota(eligible)
@@ -603,15 +615,21 @@ def pid_alive(pid):
 
 def run_review(st, repo_dir, rnd):
     """(verdict, text) from review.sh on the follow-up branch's checkout. The builder's provider
-    must be known (the caller checks): it is what makes review.sh pick a different one."""
+    must be known (the caller checks): it is what makes review.sh pick a different one.
+
+    Passes prior builders as --exclude-reviewers so review.sh (owner) never invokes one."""
     wt = worktree_of(repo_dir, branch_for(st)) or ensure_worktree(st, repo_dir, branch_for(st))
     log_path = stage_dir(st["key"]) / "reviews.jsonl"
     before = len(followscan.read_jsonl(log_path))
     git("-C", str(wt), "fetch", "--quiet", "origin")
     git("-C", str(wt), "merge", "--ff-only", "--quiet", f"origin/{branch_for(st)}")
     sha = git("-C", str(wt), "rev-parse", "HEAD").stdout.strip()
-    p = subprocess.run(["/bin/zsh", str(ROOT / "review.sh"), "--repo", str(wt), "--worker", st["builder_provider"],
-                        "--round", str(rnd), "--log", str(log_path)], capture_output=True, text=True,
+    cmd = ["/bin/zsh", str(ROOT / "review.sh"), "--repo", str(wt), "--worker", st["builder_provider"],
+           "--round", str(rnd), "--log", str(log_path)]
+    excluded = sorted(prior_builders(st))
+    if excluded:
+        cmd.extend(["--exclude-reviewers", " ".join(excluded)])
+    p = subprocess.run(cmd, capture_output=True, text=True,
                        env=child_env(st), timeout=3600, stdin=subprocess.DEVNULL)
     rows = followscan.read_jsonl(log_path)[before:]
     row = rows[-1] if rows else {}

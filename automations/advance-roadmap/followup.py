@@ -1920,8 +1920,10 @@ def repair(st, repo_dir, todo, issues=None):
             if verdict == "unavailable":
                 reviews = (st.get("validation") or {}).get("reviews") or []
                 limited = reviews[-1].get("limited") if reviews else None
-                q = followrepair.reviewer_quota(
-                    followrepair.REVIEWERS[st["builder_provider"]], limited)
+                # Same exclusion review.sh applied: a prior builder's gate is irrelevant.
+                eligible = followrepair.eligible_reviewers(
+                    st["builder_provider"], followrepair.prior_builders(st))
+                q = followrepair.reviewer_quota(eligible, limited)
                 if q:
                     return defer(st, todo, q, f"review round {rnd}", issues)
                 return block(st, "review-unavailable",

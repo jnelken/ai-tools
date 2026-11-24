@@ -1939,6 +1939,39 @@ class FollowupTest(unittest.TestCase):
         self.assertEqual(st["status"], "done", self.report())
         self.assertTrue(st.get("merged"))
 
+    def test_eligible_reviewers_excludes_prior_builders(self):
+        """Owner-policy table: eligible_reviewers never returns a prior builder."""
+        import followrepair
+        cases = [
+            # (builder, excluded, expected)
+            ("cursor", (), ("codex", "claude")),
+            ("cursor", {"codex"}, ("claude",)),
+            ("cursor", {"codex", "claude"}, ()),
+            ("cursor", {"cursor"}, ("codex", "claude")),  # current worker isn't in REVIEWERS[self]
+            ("codex", {"claude"}, ()),
+            ("claude", {"codex"}, ()),
+            ("claude", (), ("codex",)),
+            ("unknown", {"codex"}, ()),
+        ]
+        for builder, excluded, want in cases:
+            with self.subTest(builder=builder, excluded=excluded):
+                self.assertEqual(followrepair.eligible_reviewers(builder, excluded), want)
+
+    def test_run_review_passes_prior_builders_as_exclude(self):
+        """Entry-point delegation: run_review must pass --exclude-reviewers to review.sh."""
+        self.shipped_item("20261014-050000")
+        self.run_followup("hook", "item-done", "--stamp", "20261014-050000")
+        self.set("stub-review.json", {"verdicts": ["findings", "clean"]})
+        self.run_followup("drain", env=self.repair_env())
+        st = self.state("cleanup-20261014-050000")
+        self.assertEqual(st["status"], "done", self.report())
+        reviews = self.calls("review")
+        self.assertEqual(len(reviews), 2)
+        # Round 1: the cursor builder is already recorded before review runs.
+        self.assertIn("cursor", reviews[0].get("exclude") or "")
+        # Round 2: both builders (same provider in the stub) stay excluded.
+        self.assertIn("cursor", reviews[1].get("exclude") or "")
+
 
 if __name__ == "__main__":
     unittest.main()
