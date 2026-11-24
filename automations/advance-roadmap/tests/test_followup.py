@@ -2663,6 +2663,43 @@ class FollowupTest(unittest.TestCase):
         # Entered the repair review path (feasibility snapshot), not the empty-todo exit.
         self.assertTrue(any(s.get("step") == "review" for s in st.get("usage_snapshots") or []), st)
 
+    def test_review_findings_with_empty_todo_do_not_rebuild(self):
+        """Non-clean review + no repair-eligible findings must not call builder_request on []."""
+        import followup as fu
+        self.shipped_item("20261014-050000")
+        self.run_followup("hook", "item-done", "--stamp", "20261014-050000")
+        self.run_followup("drain")
+        key = "cleanup-20261014-050000"
+        st = self.state(key)
+        det = {**st["findings"][0], "status": "duplicate", "source": "scan"}
+        analyst = {"id": "aaaaaaaaaaaa", "title": self.ANALYST_FINDING["title"], "status": "open",
+                   "source": "analyst", "kind": "analyst", "repo": st["repo"]}
+        # Create the follow-up branch so review.sh can check out (stub still returns findings).
+        repo = self.code / "demo"
+        self.git(repo, "checkout", "-q", "-b", "roadmap/followup-cleanup-20261014-050000")
+        self.git(repo, "commit", "--allow-empty", "-qm", "follow-up")
+        self.git(repo, "push", "-q", "-u", "origin", "HEAD")
+        self.git(repo, "checkout", "-q", "main")
+        st.update(
+            status="ready",
+            next={"step": "review", "round": 1},
+            branch="roadmap/followup-cleanup-20261014-050000",
+            pr_url="https://github.com/jnelken/demo/pull/7",
+            findings=[det, analyst],
+            builder_provider="cursor",
+            validation={"reviews": []},
+            sessions=[],
+            scanned=True,
+        )
+        (self.root / "followups" / key / "state.json").write_text(json.dumps(st))
+        self.assertEqual(fu.repair_todo(st["findings"]), [])
+        self.set("stub-review.json", {"verdicts": ["findings"]})
+        self.run_followup("drain", env=self.repair_env())
+        st = self.state(key)
+        self.assertEqual(self.calls("worker"), [])
+        self.assertEqual(st["status"], "blocked", st)
+        self.assertTrue(any(b.get("kind") == "review" for b in st.get("blockers") or []), st)
+
     def test_inline_corpus_truncation_notice_stays_within_byte_cap(self):
         import followanalyst
         a = self.root / "a.txt"

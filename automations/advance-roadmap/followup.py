@@ -1958,6 +1958,14 @@ def repair(st, repo_dir, todo, issues=None):
                 return block(st, "review", f"review.sh failed: {text}")
             if verdict == "clean":
                 nxt = {"step": "land", "round": rnd}
+            elif not todo:
+                # No repair-eligible finding left (e.g. only analyst rows). Do not rebuild with
+                # an empty brief — builder_request indexes findings[0]. Leave PR for a human.
+                return block(
+                    st, "review",
+                    f"the review reports findings but no repair-eligible finding remains to rebuild; "
+                    f"branch {st.get('branch')} and PR {st.get('pr_url')} are left for a human",
+                    retry=False)
             elif rnd < MAX_ROUNDS:
                 nxt = {"step": "build", "round": rnd + 1, "review_text": text}
             else:
