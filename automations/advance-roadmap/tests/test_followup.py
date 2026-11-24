@@ -2439,6 +2439,23 @@ class FollowupTest(unittest.TestCase):
         self.assertIn(self.ANALYST_FINDING["title"], titles)
         self.assertEqual(self.calls("usage-record-limit"), [])
 
+    def test_analyst_empty_final_answer_does_not_treat_corpus_banner_as_a_limit(self):
+        # exit 0 + empty -o + banner only from echoed corpus must not gate the provider.
+        stamp = "20261013-103004"
+        (self.root / "runs" / stamp).mkdir(parents=True)
+        banner = "You've hit your usage limit. Upgrade to Pro or try again at 7:00 PM."
+        row = {**json.loads((FIXTURES / "runs-row.json").read_text()), "note": banner}
+        (self.root / "runs.jsonl").write_text(json.dumps(row) + "\n")
+        (self.root / "stub-codex-transcript.txt").write_text(
+            json.dumps(row) + "\n" + banner + "\n")
+        (self.root / "stub-analyst.txt").write_text("")
+        p = self.run_followup("scan", "--stage", "tooling", "--origin", "batch-2026-10-13", "--stamp", stamp,
+                              env={"ADVANCE_ROADMAP_FOLLOWUP_ANALYST": "1"})
+        doc = json.loads(p.stdout)
+        self.assertEqual(doc["analyst"], "codex: no findings block")
+        self.assertEqual(self.calls("usage-record-limit"), [])
+        self.assertNotIn("parse-limit", [c.get("cmd") for c in self.calls("usage")])
+
     def test_analyst_still_records_a_live_limit_when_the_corpus_quotes_the_same_banner(self):
         # Corpus paste often quotes prior limit text; a real failed limit must still gate.
         stamp = "20261013-103004"

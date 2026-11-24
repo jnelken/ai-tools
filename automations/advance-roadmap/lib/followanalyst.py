@@ -117,9 +117,16 @@ def analyze(st, findings, files):
                 st.setdefault("analyst_errors", []).append(
                     {"provider": provider, "at": followrepair.now_iso(), "error": f"{type(e).__name__}: {e}"})
                 continue
-            # Echoed banners in a successful final answer are not a live limit (owner: live_limit_banner).
+            # Invariant (owner: live_limit_banner + paste scrub): gate only on a live CLI limit.
+            # The analyst prompt inlines the corpus, so transcripts echo quoted banners; strip those
+            # bodies before detection. Empty -o with exit 0 is "no findings", not a limit.
+            scrubbed = _transcript_without_paste(st, transcript)
             banner = usagelib.live_limit_banner(
-                transcript, exit_code=exit_code, final_answer=answer, provider_result=provider_result)
+                scrubbed, exit_code=exit_code, final_answer=answer, provider_result=provider_result)
+            if (banner and exit_code == 0 and not (answer or "").strip()
+                    and not usagelib.provider_is_error(provider_result)
+                    and not usagelib.provider_reported_limit(provider_result)):
+                banner = None
             if banner:
                 record_analyst_limit(st, provider, banner)
                 limited.append(provider)
@@ -356,7 +363,10 @@ def _utf8_budget_slice(text, max_bytes):
 
 
 def _file_text_for_prompt(path, stamps):
-    """File text for the prompt; runs.jsonl is stamp-filtered when stamps are known."""
+    """File text for the prompt; runs.jsonl is stamp-filtered when stamps are known.
+
+    Reads through followscan.read_text so large worker logs are capped before paste truncation.
+    """
     path = Path(path)
     if path.name == "runs.jsonl" and stamps:
         lines = []
@@ -369,7 +379,16 @@ def _file_text_for_prompt(path, stamps):
             if isinstance(row, dict) and row.get("stamp") in wanted:
                 lines.append(line if line.endswith("\n") else line + "\n")
         return "".join(lines)
-    return path.read_text(errors="replace")
+    return followscan.read_text(path)
+
+
+def _transcript_without_paste(st, transcript):
+    """Drop inlined corpus bodies from a transcript so echoed banners are not live limits."""
+    text = transcript or ""
+    for body in (st.get("_analyst_paste") or {}).values():
+        if body and body in text:
+            text = text.replace(body, "")
+    return text
 
 
 def inline_corpus(files, max_bytes=CORPUS_PROMPT_MAX_BYTES, stamps=None):
