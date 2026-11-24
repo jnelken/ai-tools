@@ -2613,10 +2613,21 @@ class FollowupTest(unittest.TestCase):
         (self.root / "runs.jsonl").write_text(
             json.dumps({**row, "stamp": other, "detail": "unrelated historical quote for another stage"}) + "\n"
             + json.dumps(row) + "\n")
-        text = followanalyst.inline_corpus([self.root / "runs.jsonl"], stamps=[stamp])
+        text, _ = followanalyst.inline_corpus([self.root / "runs.jsonl"], stamps=[stamp])
         self.assertIn(stamp, text)
         self.assertNotIn("unrelated historical quote for another stage", text)
         self.assertNotIn(other, text)
+
+    def test_readonly_gate_rejects_wrong_shaped_usage_json(self):
+        import followrepair
+        import usage as usagelib
+        real_usage = ADV / "lib" / "usage.py"
+        (self.root / "lib" / "usage.py").write_text(real_usage.read_text())
+        followrepair.ROOT = self.root
+        usagelib.usage_path(self.root).write_text("[]\n")
+        gate = followrepair.gate_one("analyst", "codex", readonly=True)
+        self.assertIsNotNone(gate)
+        self.assertFalse(gate["available"])
 
     def test_analyst_cwd_sandbox_has_no_corpus_files(self):
         import followanalyst
@@ -2636,11 +2647,11 @@ class FollowupTest(unittest.TestCase):
         path = self.root / "wide.txt"
         # 3-byte UTF-8 chars: 100 chars = 300 bytes.
         path.write_text("€" * 100)
-        out = followanalyst.inline_corpus([path], max_bytes=120)
+        out, pasted = followanalyst.inline_corpus([path], max_bytes=120)
         self.assertLessEqual(len(out.encode("utf-8")), 120)
         self.assertIn("€", out)
-        self.assertIn("truncated", out)
         self.assertTrue(len(path.read_text().encode("utf-8")) > 120)
+        self.assertTrue(pasted)
 
     def test_analyst_sandbox_prepare_failure_preserves_deterministic(self):
         import followanalyst

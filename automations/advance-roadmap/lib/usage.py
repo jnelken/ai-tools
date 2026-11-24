@@ -1052,13 +1052,17 @@ def cmd_gate(args: argparse.Namespace) -> None:
             print(json.dumps({"provider": args.provider, "role": args.role, **gate, "reset_at": None}))
             sys.exit(GATED_EXIT)
         try:
-            json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            raw = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(raw, dict):
+                raise ValueError("usage state must be an object")
+            state = load(root)
+            if not isinstance(state.get("providers"), dict):
+                raise ValueError("usage state missing providers")
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError, KeyError):
             gate = {"available": False, "state": "n/a",
                     "reason": "saved usage state unreadable for readonly gate", "reset_epoch": None}
             print(json.dumps({"provider": args.provider, "role": args.role, **gate, "reset_at": None}))
             sys.exit(GATED_EXIT)
-        state = load(root)
     else:
         state = refresh(root)
     gate = provider_gate(state, args.provider, args.role)

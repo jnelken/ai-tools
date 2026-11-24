@@ -136,8 +136,11 @@ def analyze(st, findings, files):
     except ValueError:
         doc = {}
     st["analyst"] = f"{provider}: {'answered' if m else 'no findings block'}"
-    return accept_findings(
-        st, findings, files, doc if isinstance(doc, dict) else {}, provider=provider)
+    try:
+        return accept_findings(
+            st, findings, files, doc if isinstance(doc, dict) else {}, provider=provider)
+    finally:
+        st.pop("_analyst_paste", None)
 
 
 def accept_findings(st, findings, files, doc, provider=None):
@@ -185,6 +188,19 @@ def accept_findings(st, findings, files, doc, provider=None):
             rejected.append(followscan.non_finding(
                 title, "rejected: its evidence is not in the corpus", raw_ev))
             continue
+        # Also require the quote to appear in the exact pasted (possibly truncated) body.
+        paste = st.get("_analyst_paste") or {}
+        if paste:
+            ok_paste = True
+            for e in raw_ev:
+                src = _resolve_source(e.get("source"))
+                if src is None or not quote_in_paste(e.get("quote"), paste.get(src)):
+                    ok_paste = False
+                    break
+            if not ok_paste:
+                rejected.append(followscan.non_finding(
+                    title, "rejected: its evidence is not in the corpus", raw_ev))
+                continue
         try:
             ev_objs = [followscan.evidence(e["source"], e["quote"]) for e in raw_ev]
         except (OSError, TypeError, ValueError):
@@ -329,14 +345,14 @@ def _file_text_for_prompt(path, stamps):
 
 
 def inline_corpus(files, max_bytes=CORPUS_PROMPT_MAX_BYTES, stamps=None):
-    """Paste corpus file contents into the prompt. Owner of bounded-corpus network policy:
-    providers receive only this paste — cwd has no corpus files.
+    """Paste corpus file contents into the prompt. Returns (prompt_text, {source: pasted_body}).
 
-    Budget is measured in UTF-8 bytes (not Python char length).
+    Owner of bounded-corpus network policy: providers receive only this paste — cwd has no corpus
+    files. Budget is measured in UTF-8 bytes (not Python char length).
     """
-    parts, used = [], 0
+    parts, used, pasted = [], 0, {}
     for path in files:
-        path = Path(path)
+        path = Path(path).resolve()
         try:
             text = _file_text_for_prompt(path, stamps)
         except OSError as e:
@@ -351,14 +367,24 @@ def inline_corpus(files, max_bytes=CORPUS_PROMPT_MAX_BYTES, stamps=None):
         if room <= 0:
             parts.append(f"### {path}\n(truncated: corpus budget exhausted)\n")
             break
-        body = _utf8_budget_slice(text, room)
-        if len(body.encode("utf-8")) < len(text.encode("utf-8")):
-            # Leave room for an ASCII truncation marker inside the budget.
-            marker = "\n…(truncated)"
-            body = _utf8_budget_slice(text, max(0, room - len(marker.encode("utf-8")))) + marker
+        marker = "\n…(truncated)"
+        marker_n = len(marker.encode("utf-8"))
+        if len(text.encode("utf-8")) <= room:
+            body = text
+        elif room < marker_n:
+            body = _utf8_budget_slice(text, room)
+        else:
+            body = _utf8_budget_slice(text, room - marker_n) + marker
+        pasted[str(path)] = body
         parts.append(f"{header}{body}{footer}")
         used += len(parts[-1].encode("utf-8"))
-    return "\n".join(parts)
+    return "\n".join(parts), pasted
+
+
+def quote_in_paste(quote, body):
+    """True when the quote appears in the pasted body (whitespace-normalized)."""
+    q = " ".join(str(quote or "").split())
+    return bool(q) and q in " ".join(str(body or "").split())
 
 
 def analyst_prompt(st, findings, files):
@@ -367,7 +393,8 @@ def analyst_prompt(st, findings, files):
     scope = (f"Only project-specific bugs in {st.get('repo')} count here."
              if cleanup else
              "Only orchestration, routing, skills, hooks and reporting count here.")
-    corpus = inline_corpus(files, stamps=corpus_stamps(st))
+    corpus, pasted = inline_corpus(files, stamps=corpus_stamps(st))
+    st["_analyst_paste"] = pasted
     return f"""You are the read-only analyst for advance-roadmap's {stage} follow-up ({st.get('key')}).
 Do not open, search, or read any files on disk. The entire allowed corpus is pasted below.
 Cite evidence only with a source path from that paste and a verbatim quote from it.
