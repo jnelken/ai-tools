@@ -763,6 +763,12 @@ def recover_tickets():
     return issues
 
 
+def _issue_repo(issue):
+    """Repo identity for an open issue: metadata.repo or the single repo/* label."""
+    meta = followticket.parse_meta(issue.get("description") or "") or {}
+    return meta.get("repo") or followticket.repo_label(issue)
+
+
 def dedupe(st, issues):
     """Attach existing tickets to fresh findings and fold this run's evidence into them once."""
     if not issues:
@@ -773,9 +779,20 @@ def dedupe(st, issues):
         # Include duplicate: ownership may flip before evidence lands; retries must still finish.
         if f.get("status") not in ("open", "deferred", "duplicate"):
             continue
-        issue = f.get("ticket") and next((i for i in issues if i.get("identifier") == f["ticket"]), None) \
-            or followticket.match(issues, f)
+        want_repo = f.get("repo") or st.get("repo")
+        issue = None
+        if f.get("ticket"):
+            hit = next((i for i in issues if i.get("identifier") == f["ticket"]), None)
+            # Reject stale/cross-repo/unlabeled attachments before any Linear write.
+            if hit and want_repo and _issue_repo(hit) == want_repo:
+                issue = hit
+            else:
+                f.pop("ticket", None)
         if not issue:
+            issue = followticket.match(issues, f)
+        if not issue:
+            continue
+        if want_repo and _issue_repo(issue) != want_repo:
             continue
         f["ticket"] = issue["identifier"]
         meta = followticket.parse_meta(issue.get("description")) or {}

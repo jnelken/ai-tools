@@ -1111,6 +1111,33 @@ class FollowupTest(unittest.TestCase):
         self.assertFalse(st.get("pending_ticket_sync"))
         self.assertEqual(st["findings"][0].get("ticket"), "DEV-777")
 
+    def test_dedupe_rejects_cross_repo_ticket_attachment(self):
+        """A finding's stored ticket id must not rewrite an issue from another repo."""
+        import followup as fu
+        fu.ROOT = self.root
+        fu.STATE = self.root / "followups"
+        os.environ["ADVANCE_ROADMAP_ROOT"] = str(self.root)
+        os.environ["ADVANCE_ROADMAP_LINEAR_BIN"] = self.env["ADVANCE_ROADMAP_LINEAR_BIN"]
+        key = "cleanup-cross-repo"
+        fid = "aaaaaaaaaaaa"
+        title = "reject an empty listing before saving the catalog"
+        d = self.root / "followups" / key
+        d.mkdir(parents=True)
+        foreign = self.meta_ticket("DEV-777", {
+            "key": "cleanup-other", "stage": "project-cleanup", "finding_ids": [fid],
+            "repo": "mailcruxh",
+        }, repo="mailcruxh")
+        st = {"key": key, "stage": "project-cleanup", "repo": "demo", "status": "running",
+              "findings": [{"id": fid, "title": title, "kind": "t", "fix": "f", "status": "open",
+                            "repo": "demo", "ticket": "DEV-777",
+                            "evidence": [{"source": "t", "quote": title}]}],
+              "evidence_posted": [], "evidence_commented": [], "blockers": []}
+        (d / "state.json").write_text(json.dumps(st))
+        self.set("stub-linear.json", {"pages": [[foreign]]})
+        fu.dedupe(st, [foreign])
+        self.assertIsNone(st["findings"][0].get("ticket"))
+        self.assertFalse(any(c.get("issue") == "DEV-777" for c in self.calls("linear")))
+
     def test_duplicate_evidence_comment_failure_is_retried(self):
         """Marking duplicate before a failed comment must still leave pending evidence to retry."""
         import followup as fu
