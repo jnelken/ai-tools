@@ -668,6 +668,38 @@ class FollowupTest(unittest.TestCase):
         self.assertTrue(updates)
         self.assertEqual(followticket.parse_meta(updates[-1]["body"])["builder_provider"], "codex")
 
+    def test_defer_attaches_to_live_ticket_instead_of_creating_duplicate(self):
+        """Immediately before create, recheck Linear and attach when another machine already filed."""
+        import followup as fu
+        fu.ROOT = self.root
+        fu.STATE = self.root / "followups"
+        os.environ["ADVANCE_ROADMAP_ROOT"] = str(self.root)
+        os.environ["ADVANCE_ROADMAP_LINEAR_BIN"] = self.env["ADVANCE_ROADMAP_LINEAR_BIN"]
+        os.environ["ADVANCE_ROADMAP_JLIN"] = self.env["ADVANCE_ROADMAP_JLIN"]
+        key = "cleanup-defer-race"
+        fid = "cccccccccccc"
+        d = self.root / "followups" / key
+        d.mkdir(parents=True)
+        findings = [{"id": fid, "title": "quota stopped the builder", "kind": "unresolved-review",
+                     "fix": "resume", "status": "open", "repo": "demo", "stage": "project-cleanup",
+                     "evidence": [{"source": "t", "quote": "quota stopped the builder"}]}]
+        st = {"key": key, "stage": "project-cleanup", "repo": "demo", "status": "running",
+              "findings": findings, "owned_tickets": [], "builder_provider": "cursor"}
+        (d / "state.json").write_text(json.dumps(st))
+        # Drain snapshot is empty (stale); live Linear already has the matching ticket.
+        prior = self.meta_ticket("DEV-501", {
+            "key": "cleanup-other-machine", "stage": "project-cleanup", "finding_ids": [fid],
+        })
+        self.set("stub-linear.json", {"pages": [[prior]]})
+        quota = {"provider": "cursor", "role": "worker", "cause": "over its gate",
+                 "reset_at": "2026-10-14T18:00:00", "reset_epoch": time.time() + 600}
+        fu.defer(st, findings, quota, "builder round 1", issues=[])
+        self.assertEqual(findings[0]["ticket"], "DEV-501")
+        self.assertEqual(self.calls("jlin"), [], "must not create when a live ticket matches")
+        updates = [c for c in self.calls("linear")
+                   if c.get("cmd") == "issue update DEV-501" and "--description-file" in (c.get("args") or [])]
+        self.assertTrue(updates)
+
     def test_deferral_description_preserves_sibling_finding_ids(self):
         """Invariant: rewriting a shared ticket's description must keep the sibling's finding IDs."""
         import followup as fu

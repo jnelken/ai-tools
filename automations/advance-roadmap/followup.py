@@ -937,16 +937,37 @@ def sync_deferral_tickets(st, findings, quota, next_step, note, issues=None):
                 followticket.comment(ident, "advance-roadmap follow-up deferred again for quota.\n\n" + body)
             fresh = [f for f in findings if not f.get("ticket")]
             if fresh:
-                ident = followticket.create(st, fresh, quota, next_step)
-                st["owned_tickets"].append(ident)
+                # Recheck live Linear immediately before create — another machine may have filed.
+                live = followticket.fetch_open()
+                late = {}
+                remaining = []
                 for f in fresh:
-                    f["ticket"] = ident
-                    index.add(f["id"], ident, st["key"])
-                if issues is not None:
-                    issues.append({"identifier": ident, "title": followticket.title_for(st, fresh),
-                                   "description": followticket.description(st, fresh, quota, next_step),
-                                   "labels": {"nodes": [{"name": st["repo"], "parent": {"name": "repo"}}]}})
-                log(f"{st['key']}: filed {ident} for {len(fresh)} deferred finding(s)")
+                    hit = followticket.match(live, f)
+                    if hit:
+                        ident = hit["identifier"]
+                        f["ticket"] = ident
+                        index.add(f["id"], ident, st["key"])
+                        late.setdefault(ident, []).append(f)
+                    else:
+                        remaining.append(f)
+                for ident, fs in late.items():
+                    body = rewrite_ticket_description(
+                        st, ident, fs, quota=quota, next_step=next_step, issues=issues)
+                    followticket.comment(
+                        ident, "advance-roadmap follow-up deferred again for quota.\n\n" + body)
+                if remaining:
+                    ident = followticket.create(st, remaining, quota, next_step)
+                    st["owned_tickets"].append(ident)
+                    for f in remaining:
+                        f["ticket"] = ident
+                        index.add(f["id"], ident, st["key"])
+                    if issues is not None:
+                        issues.append({
+                            "identifier": ident, "title": followticket.title_for(st, remaining),
+                            "description": followticket.description(st, remaining, quota, next_step),
+                            "labels": {"nodes": [{"name": st["repo"],
+                                                  "parent": {"name": "repo"}}]}})
+                    log(f"{st['key']}: filed {ident} for {len(remaining)} deferred finding(s)")
         except followticket.LinearError as e:
             st["pending_deferral_sync"] = {
                 "note": note, "next_step": next_step,
