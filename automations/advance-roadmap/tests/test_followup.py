@@ -2311,10 +2311,10 @@ class FollowupTest(unittest.TestCase):
             (FIXTURES / "batch-verdict-apt-sqft.json").read_text())
         good = {"title": "Bookkeeping summary blames the orchestrator limit", "kind": "misleading-surface",
                 "fix": "Name the quota in the alert",
-                "evidence": [{"source": str(self.root / "runs.jsonl"),
+                "evidence": [{"source": "corpus/001-runs.jsonl",
                               "quote": "the orchestrator hit its session limit before triage"}]}
         bad = {"title": "Invented friction",
-               "evidence": [{"source": str(run / "orchestrator-result.json"),
+               "evidence": [{"source": "corpus/002-orchestrator-result.json",
                              "quote": "this text is nowhere in the corpus"}]}
         (self.root / "stub-analyst.txt").write_text(
             "thinking...\n```FOLLOWUP_FINDINGS_JSON\n" + json.dumps({"findings": [good, bad], "non_findings": [
@@ -2349,10 +2349,10 @@ class FollowupTest(unittest.TestCase):
         doc = json.loads(p.stdout)
         return doc, [f["title"] for f in doc["findings"]]
 
-    def analyst_fence(self):
+    def analyst_fence(self, source="corpus/001-runs.jsonl"):
         f = self.ANALYST_FINDING
         good = {"title": f["title"], "kind": f["kind"],
-                "evidence": [{"source": str(self.root / "runs.jsonl"), "quote": f["quote"]}]}
+                "evidence": [{"source": source, "quote": f["quote"]}]}
         return "```FOLLOWUP_FINDINGS_JSON\n" + json.dumps({"findings": [good]}) + "\n```\n"
 
     def test_analyst_findings_come_only_from_its_final_answer(self):
@@ -2533,7 +2533,7 @@ class FollowupTest(unittest.TestCase):
         (self.root / "runs" / stamp).mkdir(parents=True)
         (self.root / "runs.jsonl").write_text(json.dumps(json.loads((FIXTURES / "runs-row.json").read_text())) + "\n")
         mixed = {"title": self.ANALYST_FINDING["title"], "kind": self.ANALYST_FINDING["kind"],
-                 "evidence": [{"source": str(self.root / "runs.jsonl"),
+                 "evidence": [{"source": "corpus/001-runs.jsonl",
                                "quote": self.ANALYST_FINDING["quote"]},
                               "not-a-dict"]}
         (self.root / "stub-analyst.txt").write_text(
@@ -2670,11 +2670,12 @@ class FollowupTest(unittest.TestCase):
         a.write_text("A" * 80)
         b.write_text("B" * 80)
         # Cap that fits file a (with header/footer) but leaves no room for file b's body.
-        out, _ = followanalyst.inline_corpus([a, b], max_bytes=100)
+        out, _, _ = followanalyst.inline_corpus([a, b], max_bytes=100)
         self.assertLessEqual(len(out.encode("utf-8")), 100)
         self.assertIn("A", out)
         # Either omit b entirely or include a notice that still fits — never exceed the cap.
         self.assertNotIn("B" * 10, out)
+        self.assertNotIn(str(a.resolve()), out)
 
     def test_inline_corpus_multi_file_join_stays_within_byte_cap(self):
         """Adjacent file sections must not insert an uncounted newline past the budget."""
@@ -2686,16 +2687,16 @@ class FollowupTest(unittest.TestCase):
             files.append(p)
         # Budget large enough for both bodies+headers if join is "".join, but an extra
         # separator newline between parts would push a naive "\\n".join over the edge.
-        header_a = f"### {files[0].resolve()}\n```\n"
+        header_a = "### corpus/001-a.txt\n```\n"
         footer = "\n```\n"
         body_a = "A" * 20
         body_b = "B" * 20
-        header_b = f"### {files[1].resolve()}\n```\n"
+        header_b = "### corpus/002-b.txt\n```\n"
         exact = (
             len((header_a + body_a + footer).encode("utf-8"))
             + len((header_b + body_b + footer).encode("utf-8"))
         )
-        out, _ = followanalyst.inline_corpus(files, max_bytes=exact)
+        out, _, _ = followanalyst.inline_corpus(files, max_bytes=exact)
         self.assertLessEqual(len(out.encode("utf-8")), exact)
         self.assertIn("A", out)
         self.assertIn("B", out)
@@ -2763,7 +2764,7 @@ class FollowupTest(unittest.TestCase):
         (self.root / "runs" / stamp).mkdir(parents=True)
         (self.root / "runs.jsonl").write_text(json.dumps(json.loads((FIXTURES / "runs-row.json").read_text())) + "\n")
         bad = {"title": 99, "kind": "analyst",
-               "evidence": [{"source": str(self.root / "runs.jsonl"),
+               "evidence": [{"source": "corpus/001-runs.jsonl",
                              "quote": "the orchestrator hit its session limit before triage"}]}
         (self.root / "stub-analyst.txt").write_text(
             "```FOLLOWUP_FINDINGS_JSON\n" + json.dumps({"findings": [bad]}) + "\n```\n")
@@ -2789,10 +2790,15 @@ class FollowupTest(unittest.TestCase):
         (self.root / "runs.jsonl").write_text(
             json.dumps({**row, "stamp": other, "detail": "unrelated historical quote for another stage"}) + "\n"
             + json.dumps(row) + "\n")
-        text, _ = followanalyst.inline_corpus([self.root / "runs.jsonl"], stamps=[stamp])
+        text, pasted, label_map = followanalyst.inline_corpus(
+            [self.root / "runs.jsonl"], stamps=[stamp])
         self.assertIn(stamp, text)
         self.assertNotIn("unrelated historical quote for another stage", text)
         self.assertNotIn(other, text)
+        self.assertIn("corpus/001-runs.jsonl", pasted)
+        self.assertNotIn(str((self.root / "runs.jsonl").resolve()), text)
+        self.assertEqual(label_map["corpus/001-runs.jsonl"],
+                         str((self.root / "runs.jsonl").resolve()))
 
     def test_readonly_gate_rejects_wrong_shaped_usage_json(self):
         import followrepair
@@ -2814,7 +2820,7 @@ class FollowupTest(unittest.TestCase):
         row = json.loads((FIXTURES / "runs-row.json").read_text())
         (self.root / "runs.jsonl").write_text(
             "[1,2,3]\n" + json.dumps(row) + "\n")
-        text, _ = followanalyst.inline_corpus([self.root / "runs.jsonl"], stamps=[stamp])
+        text, _, _ = followanalyst.inline_corpus([self.root / "runs.jsonl"], stamps=[stamp])
         self.assertIn(stamp, text)
 
     def test_inline_runs_jsonl_stops_collecting_at_byte_budget(self):
@@ -2837,33 +2843,49 @@ class FollowupTest(unittest.TestCase):
         self.assertGreater(len(raw), 0)
         self.assertNotIn("AFTER_BUDGET_UNIQUE_TOKEN", raw)
         self.assertNotIn("ignored-", raw)
-        text, _ = followanalyst.inline_corpus([path], stamps=[stamp], max_bytes=budget)
+        text, _, _ = followanalyst.inline_corpus([path], stamps=[stamp], max_bytes=budget)
         self.assertLessEqual(len(text.encode("utf-8")), budget)
         self.assertNotIn("AFTER_BUDGET_UNIQUE_TOKEN", text)
 
-    def test_analyst_cwd_sandbox_has_no_corpus_files(self):
+    def test_inline_runs_jsonl_skips_oversized_line_before_parse(self):
+        import followanalyst
+        stamp = "20261013-103004"
+        path = self.root / "runs.jsonl"
+        # One huge non-matching line, then a small matching row — huge line must be skipped, not parsed.
+        path.write_bytes(b'{"stamp":"other","payload":"' + (b"Z" * 20000) + b'"}\n'
+                         + json.dumps({"stamp": stamp, "ok": True}).encode() + b"\n")
+        raw = followanalyst._file_text_for_prompt(path, [stamp], max_bytes=500)
+        self.assertIn(stamp, raw)
+        self.assertNotIn("ZZZZ", raw)
+
+    def test_analyst_sandbox_contains_only_labeled_corpus(self):
         import followanalyst
         import followrepair
         os.environ["ADVANCE_ROADMAP_ROOT"] = str(self.root)
         followrepair.ROOT = self.root
         followrepair.STATE = self.root / "followups"
-        st = {"key": "empty-cwd", "children": ["20261013-103004"]}
+        st = {"key": "labeled-cwd", "children": ["20261013-103004"]}
         (self.root / "followups" / st["key"]).mkdir(parents=True)
-        (self.root / "runs.jsonl").write_text("{}\n")
-        sandbox = followanalyst.empty_analyst_cwd(st)
+        pasted = {"corpus/001-runs.jsonl": '{"stamp":"x"}\n'}
+        sandbox = followanalyst.prepare_analyst_sandbox(st, pasted)
         self.assertTrue(sandbox.is_dir())
-        self.assertEqual(list(sandbox.iterdir()), [])
+        self.assertEqual(sorted(p.name for p in sandbox.iterdir()), ["corpus"])
+        self.assertEqual((sandbox / "corpus/001-runs.jsonl").read_text(), '{"stamp":"x"}\n')
+        # Only opaque labels under the sandbox — no host-path-shaped entries.
+        rel = sorted(str(p.relative_to(sandbox)) for p in sandbox.rglob("*") if p.is_file())
+        self.assertEqual(rel, ["corpus/001-runs.jsonl"])
 
     def test_inline_corpus_truncates_by_utf8_bytes(self):
         import followanalyst
         path = self.root / "wide.txt"
         # 3-byte UTF-8 chars: 100 chars = 300 bytes.
         path.write_text("€" * 100)
-        out, pasted = followanalyst.inline_corpus([path], max_bytes=120)
+        out, pasted, _ = followanalyst.inline_corpus([path], max_bytes=120)
         self.assertLessEqual(len(out.encode("utf-8")), 120)
         self.assertIn("€", out)
         self.assertTrue(len(path.read_text().encode("utf-8")) > 120)
         self.assertTrue(pasted)
+        self.assertIn("corpus/001-wide.txt", pasted)
 
     def test_analyst_sandbox_prepare_failure_preserves_deterministic(self):
         import followanalyst
@@ -2872,7 +2894,7 @@ class FollowupTest(unittest.TestCase):
         run.mkdir(parents=True)
         (run / "orchestrator-result.json").write_text((FIXTURES / "orchestrator-result.json").read_text())
         (self.root / "runs.jsonl").write_text(json.dumps(json.loads((FIXTURES / "runs-row.json").read_text())) + "\n")
-        with mock.patch.object(followanalyst, "empty_analyst_cwd",
+        with mock.patch.object(followanalyst, "prepare_analyst_sandbox",
                                side_effect=OSError("disk full")), \
                 mock.patch.dict(os.environ, {"ADVANCE_ROADMAP_ROOT": str(self.root),
                                              "ADVANCE_ROADMAP_FOLLOWUP_ANALYST": "1"}):
@@ -2895,7 +2917,7 @@ class FollowupTest(unittest.TestCase):
         # Quote matches after whitespace fold but not as an exact contiguous span in the file.
         folded = "the   orchestrator    hit its session limit before triage"
         bad = {"title": "whitespace fold only", "kind": "analyst",
-               "evidence": [{"source": str(self.root / "runs.jsonl"), "quote": folded}]}
+               "evidence": [{"source": "corpus/001-runs.jsonl", "quote": folded}]}
         (self.root / "stub-analyst.txt").write_text(
             "```FOLLOWUP_FINDINGS_JSON\n" + json.dumps({"findings": [bad]}) + "\n```\n")
         p = self.run_followup("scan", "--stage", "tooling", "--origin", "batch-2026-10-13", "--stamp", stamp,
@@ -2903,6 +2925,23 @@ class FollowupTest(unittest.TestCase):
         doc = json.loads(p.stdout)
         self.assertNotIn("whitespace fold only", [f["title"] for f in doc["findings"]])
         self.assertTrue(any(n["title"] == "whitespace fold only" and "rejected" in n["why"]
+                            for n in doc["non_findings"]))
+
+    def test_analyst_rejects_absolute_host_path_evidence(self):
+        """Opaque-label policy: host absolute paths are not accepted as evidence sources."""
+        stamp = "20261013-103004"
+        (self.root / "runs" / stamp).mkdir(parents=True)
+        (self.root / "runs.jsonl").write_text(json.dumps(json.loads((FIXTURES / "runs-row.json").read_text())) + "\n")
+        bad = {"title": self.ANALYST_FINDING["title"], "kind": self.ANALYST_FINDING["kind"],
+               "evidence": [{"source": str(self.root / "runs.jsonl"),
+                             "quote": self.ANALYST_FINDING["quote"]}]}
+        (self.root / "stub-analyst.txt").write_text(
+            "```FOLLOWUP_FINDINGS_JSON\n" + json.dumps({"findings": [bad]}) + "\n```\n")
+        p = self.run_followup("scan", "--stage", "tooling", "--origin", "batch-2026-10-13", "--stamp", stamp,
+                              env={"ADVANCE_ROADMAP_FOLLOWUP_ANALYST": "1"})
+        doc = json.loads(p.stdout)
+        self.assertNotIn(self.ANALYST_FINDING["title"], [f["title"] for f in doc["findings"]])
+        self.assertTrue(any(n["title"] == self.ANALYST_FINDING["title"] and "rejected" in n["why"]
                             for n in doc["non_findings"]))
 
 

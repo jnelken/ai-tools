@@ -66,12 +66,35 @@ def _resolve_source(source):
         return None
 
 
+def corpus_label(index, path):
+    """Opaque prompt/sandbox path for a corpus file — never an absolute host path."""
+    name = Path(path).name or "file"
+    return f"corpus/{int(index):03d}-{name}"
+
+
 def empty_analyst_cwd(st):
-    """Empty stage-local cwd for provider invokes — no corpus files on disk for the model to read."""
+    """Fresh stage-local cwd for provider invokes (cleared before each analyze)."""
     sandbox = followrepair.stage_dir(st["key"]) / "corpus-sandbox"
     if sandbox.exists():
         shutil.rmtree(sandbox)
     sandbox.mkdir(parents=True)
+    return sandbox
+
+
+def prepare_analyst_sandbox(st, pasted):
+    """Materialize only the labeled corpus under the sandbox cwd.
+
+    Invariant owner for filesystem isolation at the provider invoke: run_analyst (via this
+    prepare + empty-of-host-files cwd). Absolute host paths never appear as sandbox entries;
+    the prompt cites the same opaque labels. Claude additionally has no file-read tools.
+    """
+    sandbox = empty_analyst_cwd(st)
+    for label, body in (pasted or {}).items():
+        if not isinstance(label, str) or not label.startswith("corpus/") or "/" in label[7:]:
+            continue
+        dest = sandbox / label
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_text(body if isinstance(body, str) else "", encoding="utf-8")
     return sandbox
 
 
@@ -80,6 +103,10 @@ def analyze(st, findings, files):
 
     Off / empty corpus → ([], []). Quota, timeout, crash, or missing fence leave deterministic
     findings untouched and record st['analyst'].
+
+    Invariant — bounded corpus to the model network call (paths: analyze→run_analyst→Codex/Claude).
+    Owner: analyze prepares opaque labels + sandbox via prepare_analyst_sandbox / inline_corpus;
+    run_analyst is the only invoke entry and must receive that sandbox.
     """
     if not enabled() or not files:
         return [], []
@@ -88,13 +115,15 @@ def analyze(st, findings, files):
     if not files:
         st["analyst"] = "skipped: no citable corpus files"
         return [], []
+    prompt = analyst_prompt(st, findings, files)
     try:
-        sandbox = empty_analyst_cwd(st)
+        sandbox = prepare_analyst_sandbox(st, st.get("_analyst_paste") or {})
     except (OSError, ValueError, TypeError) as e:
         # Optional analyst must never abort deterministic scan/recording.
         st["analyst"] = f"failed: sandbox prepare: {e}"
+        st.pop("_analyst_paste", None)
+        st.pop("_analyst_label_map", None)
         return [], []
-    prompt = analyst_prompt(st, findings, files)
     try:
         # Invariant (owner: analyze gate check): every path to run_analyst must see an
         # available gate; an unreadable gate (None) is unavailable — fail closed.
@@ -159,6 +188,22 @@ def analyze(st, findings, files):
             st, findings, files, doc if isinstance(doc, dict) else {}, provider=provider)
     finally:
         st.pop("_analyst_paste", None)
+        st.pop("_analyst_label_map", None)
+
+
+def _evidence_with_real_sources(raw_ev, label_map):
+    """Rewrite opaque corpus labels to real host paths for verification/persistence."""
+    out = []
+    for e in raw_ev or []:
+        if not isinstance(e, dict):
+            out.append(e)
+            continue
+        src = e.get("source")
+        if isinstance(src, str) and src in label_map:
+            out.append({**e, "source": label_map[src]})
+        else:
+            out.append(e)
+    return out
 
 
 def accept_findings(st, findings, files, doc, provider=None):
@@ -181,6 +226,8 @@ def accept_findings(st, findings, files, doc, provider=None):
         return [], []
     known = {f["id"] for f in findings}
     stamps = corpus_stamps(st)
+    label_map = st.get("_analyst_label_map") or {}
+    paste = st.get("_analyst_paste") or {}
     kept, rejected = [], []
     for raw in raw_findings:
         if not isinstance(raw, dict):
@@ -203,29 +250,30 @@ def accept_findings(st, findings, files, doc, provider=None):
                 _safe_evidence(
                     [e for e in raw_ev if isinstance(e, dict)] if isinstance(raw_ev, list) else [])))
             continue
-        if any(_resolve_source(e.get("source")) is None for e in raw_ev):
-            rejected.append(followscan.non_finding(
-                title, "rejected: its evidence is not in the corpus", _safe_evidence(raw_ev)))
-            continue
-        if not all(followscan.evidence_holds(e, files, stamps) for e in raw_ev):
-            rejected.append(followscan.non_finding(
-                title, "rejected: its evidence is not in the corpus", _safe_evidence(raw_ev)))
-            continue
-        # Also require the quote to appear in the exact pasted (possibly truncated) body.
-        paste = st.get("_analyst_paste") or {}
+        # Paste check against opaque labels (what the prompt exposed) before remapping.
         if paste:
             ok_paste = True
             for e in raw_ev:
-                src = _resolve_source(e.get("source"))
-                if src is None or not quote_in_paste(e.get("quote"), paste.get(src)):
+                src = e.get("source")
+                body = paste.get(src) if isinstance(src, str) else None
+                if body is None or not quote_in_paste(e.get("quote"), body):
                     ok_paste = False
                     break
             if not ok_paste:
                 rejected.append(followscan.non_finding(
                     title, "rejected: its evidence is not in the corpus", _safe_evidence(raw_ev)))
                 continue
+        mapped_ev = _evidence_with_real_sources(raw_ev, label_map)
+        if any(_resolve_source(e.get("source")) is None for e in mapped_ev):
+            rejected.append(followscan.non_finding(
+                title, "rejected: its evidence is not in the corpus", _safe_evidence(raw_ev)))
+            continue
+        if not all(followscan.evidence_holds(e, files, stamps) for e in mapped_ev):
+            rejected.append(followscan.non_finding(
+                title, "rejected: its evidence is not in the corpus", _safe_evidence(raw_ev)))
+            continue
         try:
-            ev_objs = [followscan.evidence(e["source"], e["quote"]) for e in raw_ev]
+            ev_objs = [followscan.evidence(e["source"], e["quote"]) for e in mapped_ev]
         except (OSError, TypeError, ValueError):
             # evidence_holds is whitespace-normalized; evidence() requires an exact span.
             rejected.append(followscan.non_finding(
@@ -271,9 +319,9 @@ def run_analyst(st, provider, prompt, sandbox):
     use usage.live_limit_banner — exit status and provider error records, never a quoted banner alone.
     Process-group deadlines via procrun so a timeout never leaves descendants alive.
 
-    Bounded-corpus policy (owner: analyze → inline_corpus + empty cwd): the prompt carries the
-    corpus paste; the invoke cwd is an empty directory (no corpus files on disk for the model).
-    Claude is granted no file-read tools. Absolute-path reads outside cwd are not OS-blocked.
+    Invariant owner for the model network call: this function. Callers must pass the sandbox from
+    prepare_analyst_sandbox (opaque corpus labels only). Codex runs read-only with -C sandbox;
+    Claude gets no file-read tools. Prompt paths are labels, never host absolutes.
     """
     d = followrepair.stage_dir(st["key"])
     d.mkdir(parents=True, exist_ok=True)
@@ -286,10 +334,12 @@ def run_analyst(st, provider, prompt, sandbox):
     tokens = [sys.executable, str(Path(__file__).resolve().parent / "tokens.py")]
     provider_result = None
     if provider == "codex":
-        # read-only sandbox + empty writable roots; corpus is already in the prompt.
+        # Workspace-scoped read-only invoke; corpus copies live only under sandbox/corpus/.
         p = procrun.run(
             [CODEX, "exec", "-o", str(final), "-s", "read-only", "-C", str(sandbox),
-             "--skip-git-repo-check", prompt],
+             "--skip-git-repo-check",
+             "-c", "sandbox_permissions=[]",
+             prompt],
             timeout=ANALYST_TIMEOUT_S, text=True, cwd=str(sandbox))
         raw.write_text((p.stdout or "") + (p.stderr or ""))
         procrun.run(
@@ -362,12 +412,38 @@ def _utf8_budget_slice(text, max_bytes):
     return ""
 
 
+def iter_jsonl_lines_capped(path, max_line_bytes):
+    """Yield JSONL text lines, skipping any row whose on-disk length exceeds max_line_bytes.
+
+    Uses readline(size) so one oversized row cannot allocate unbounded memory before the
+    stamp filter or corpus byte budget runs.
+    """
+    limit = max(1, int(max_line_bytes))
+    try:
+        with open(path, "rb") as f:
+            while True:
+                raw = f.readline(limit + 1)
+                if not raw:
+                    break
+                if len(raw) > limit and not raw.endswith(b"\n"):
+                    # Discard the remainder of this oversized line.
+                    while True:
+                        more = f.readline(1024 * 1024)
+                        if not more or more.endswith(b"\n"):
+                            break
+                    continue
+                yield raw.decode("utf-8", errors="replace").rstrip("\n")
+    except OSError:
+        return
+
+
 def _file_text_for_prompt(path, stamps, max_bytes=None):
     """File text for the prompt; runs.jsonl is stamp-filtered when stamps are known.
 
     Reads through followscan.read_text so large worker logs are capped before paste truncation.
     For stamp-filtered runs.jsonl, stop collecting once max_bytes (UTF-8) is filled so a large
-    historical log cannot accumulate unbounded matching rows in memory.
+    historical log cannot accumulate unbounded matching rows in memory. Each row is also
+    bounded before json.loads so one huge line cannot blow memory during the scan.
     """
     path = Path(path)
     if path.name == "runs.jsonl" and stamps:
@@ -375,7 +451,8 @@ def _file_text_for_prompt(path, stamps, max_bytes=None):
         lines = []
         used = 0
         wanted = set(stamps)
-        for line in followscan.iter_jsonl_lines(path):
+        # Cap a single row at the remaining budget (at least 1) so parse never sees a giant line.
+        for line in iter_jsonl_lines_capped(path, max(budget, 1)):
             if used >= budget:
                 break
             try:
@@ -431,21 +508,23 @@ def _transcript_without_paste(st, transcript, *, fragments=False):
 
 
 def inline_corpus(files, max_bytes=CORPUS_PROMPT_MAX_BYTES, stamps=None):
-    """Paste corpus file contents into the prompt. Returns (prompt_text, {source: pasted_body}).
+    """Paste corpus file contents into the prompt.
 
-    Owner of bounded-corpus network policy: providers receive only this paste — cwd has no corpus
-    files. Budget is measured in UTF-8 bytes (not Python char length).
+    Returns (prompt_text, {label: pasted_body}, {label: real_path}).
+    Labels are opaque (`corpus/NNN-name`) so absolute host paths never enter the model prompt.
+    Budget is measured in UTF-8 bytes (not Python char length).
     """
-    parts, used, pasted = [], 0, {}
-    for path in files:
+    parts, used, pasted, label_map = [], 0, {}, {}
+    for index, path in enumerate(files, start=1):
         path = Path(path).resolve()
-        header = f"### {path}\n```\n"
+        label = corpus_label(index, path)
+        header = f"### {label}\n```\n"
         footer = "\n```\n"
         overhead = len(header.encode("utf-8")) + len(footer.encode("utf-8"))
         room = max_bytes - used - overhead
         if room <= 0:
             # Never push past the advertised UTF-8 cap; omit the notice when it would not fit.
-            notice = f"### {path}\n(truncated: corpus budget exhausted)\n"
+            notice = f"### {label}\n(truncated: corpus budget exhausted)\n"
             if used + len(notice.encode("utf-8")) <= max_bytes:
                 parts.append(notice)
             break
@@ -453,7 +532,7 @@ def inline_corpus(files, max_bytes=CORPUS_PROMPT_MAX_BYTES, stamps=None):
             # Pass room so stamp-filtered runs.jsonl stops collecting once the budget fills.
             text = _file_text_for_prompt(path, stamps, max_bytes=room)
         except OSError as e:
-            note = f"### {path}\n(unreadable: {e})\n"
+            note = f"### {label}\n(unreadable: {e})\n"
             used += len(note.encode("utf-8"))
             parts.append(note)
             continue
@@ -465,11 +544,12 @@ def inline_corpus(files, max_bytes=CORPUS_PROMPT_MAX_BYTES, stamps=None):
             body = _utf8_budget_slice(text, room)
         else:
             body = _utf8_budget_slice(text, room - marker_n) + marker
-        pasted[str(path)] = body
+        pasted[label] = body
+        label_map[label] = str(path)
         parts.append(f"{header}{body}{footer}")
         used += len(parts[-1].encode("utf-8"))
     # Parts already end in a newline; do not insert an uncounted separator between files.
-    return "".join(parts), pasted
+    return "".join(parts), pasted, label_map
 
 
 def quote_in_paste(quote, body):
@@ -484,11 +564,13 @@ def analyst_prompt(st, findings, files):
     scope = (f"Only project-specific bugs in {st.get('repo')} count here."
              if cleanup else
              "Only orchestration, routing, skills, hooks and reporting count here.")
-    corpus, pasted = inline_corpus(files, stamps=corpus_stamps(st))
+    corpus, pasted, label_map = inline_corpus(files, stamps=corpus_stamps(st))
     st["_analyst_paste"] = pasted
+    st["_analyst_label_map"] = label_map
     return f"""You are the read-only analyst for advance-roadmap's {stage} follow-up ({st.get('key')}).
-Do not open, search, or read any files on disk. The entire allowed corpus is pasted below.
-Cite evidence only with a source path from that paste and a verbatim quote from it.
+Do not open, search, or read any files on disk outside the labeled corpus paths below.
+The entire allowed corpus is pasted below (and mirrored under those labels in your cwd).
+Cite evidence only with a corpus/... label from that paste and a verbatim quote from it.
 These findings are already recorded (do not repeat them): {json.dumps([f['title'] for f in findings])}
 
 Apply session-hardening's recognition tests (wrong knowledge, misfiring automation, repeated manual
@@ -502,6 +584,6 @@ things that look like friction but are working as designed.
 
 End with one fence:
 ```{ANALYST_FENCE}
-{{"findings": [{{"title": "...", "kind": "...", "fix": "...", "evidence": [{{"source": "<path>", "quote": "<verbatim>"}}]}}],
+{{"findings": [{{"title": "...", "kind": "...", "fix": "...", "evidence": [{{"source": "corpus/NNN-name", "quote": "<verbatim>"}}]}}],
  "non_findings": [{{"title": "...", "why": "..."}}]}}
 ```"""
