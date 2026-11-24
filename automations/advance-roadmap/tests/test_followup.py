@@ -1988,6 +1988,49 @@ class FollowupTest(unittest.TestCase):
             with self.subTest(builder=builder, excluded=excluded):
                 self.assertEqual(followrepair.eligible_reviewers(builder, excluded), want)
 
+    def test_verify_pr_target_policy(self):
+        """Owner-policy table: verify_pr_target accepts only the stage's repo/head/base."""
+        import followrepair as fr
+        repo = self.code / "demo"
+        st = {"key": "cleanup-demo", "repo": "demo", "branch": "roadmap/followup-cleanup-demo",
+              "pr_url": "https://github.com/jnelken/demo/pull/7"}
+        self.set("stub-gh.json", {"head_ref": "roadmap/followup-cleanup-demo", "base_ref": "main"})
+        # Point followrepair.gh at the stub for in-process calls.
+        stub = self.env["ADVANCE_ROADMAP_GH_BIN"]
+        env = {"ADVANCE_ROADMAP_ROOT": str(self.root)}
+        with patch.dict(os.environ, env), patch.object(fr, "GH", stub):
+            ok, _ = fr.verify_pr_target(st, repo)
+            self.assertTrue(ok)
+            st_bad = {**st, "pr_url": "https://github.com/jnelken/other/pull/1"}
+            ok, reason = fr.verify_pr_target(st_bad, repo)
+            self.assertFalse(ok)
+            self.assertIn("not in jnelken/demo", reason)
+            self.set("stub-gh.json", {"head_ref": "wrong-branch", "base_ref": "main"})
+            ok, reason = fr.verify_pr_target(st, repo)
+            self.assertFalse(ok)
+            self.assertIn("wrong-branch", reason)
+            self.set("stub-gh.json", {"head_ref": "roadmap/followup-cleanup-demo", "base_ref": "develop"})
+            ok, reason = fr.verify_pr_target(st, repo)
+            self.assertFalse(ok)
+            self.assertIn("develop", reason)
+
+    def test_land_refuses_pr_for_wrong_repo(self):
+        """Entry-point delegation: land() must not merge a PR outside the stage repo."""
+        self.shipped_item("20261014-050000")
+        self.run_followup("hook", "item-done", "--stamp", "20261014-050000")
+        self.set("stub-review.json", {"verdicts": ["clean"], "unavailable": True})
+        self.run_followup("drain", env=self.repair_env())
+        st = self.state("cleanup-20261014-050000")
+        self.assertEqual(st["next"]["step"], "review")
+        st["pr_url"] = "https://github.com/jnelken/other/pull/99"
+        (self.root / "followups" / st["key"] / "state.json").write_text(json.dumps(st))
+        self.set("stub-review.json", {"verdicts": ["clean"]})
+        self.run_followup("drain", env=self.repair_env())
+        st = self.state("cleanup-20261014-050000")
+        self.assertNotEqual(st["status"], "done", self.report())
+        self.assertFalse(any(c["args"][:2] == ["pr", "merge"] for c in self.calls("gh")))
+        self.assertIn("not in jnelken/demo", self.report()[-1]["reason"])
+
     def test_run_review_passes_prior_builders_as_exclude(self):
         """Entry-point delegation: run_review must pass --exclude-reviewers to review.sh."""
         self.shipped_item("20261014-050000")

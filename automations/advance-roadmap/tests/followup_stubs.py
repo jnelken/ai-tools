@@ -107,8 +107,9 @@ def worker(args):
         (ROOT / "stub-pr-head.txt").write_text(git(wt, "rev-parse", "HEAD"))
         used = (opt(args, "--providers") or "cursor").split()[0]
         status = {"used": used, "session_id": f"{used}-sess-{n}"}
+        repo = orch.get("repo") or "demo"
         result = {"outcome": w.get("outcome", "blocked-branch-left"), "branch": orch["branch"],
-                  "pr_url": "https://github.com/jnelken/demo/pull/7", "summary": "fixed",
+                  "pr_url": f"https://github.com/jnelken/{repo}/pull/7", "summary": "fixed",
                   "validation": {"status": w.get("validation", "passed"), "commands": ["make test → ok"]}}
         rc = int(w.get("exit", 0))
     if w.get("after_usage") is not None:
@@ -189,7 +190,18 @@ def gh(args):
         if "state" in args:
             print(g.get("pr_state", "OPEN"))
             return
-        if g.get("head_unreadable") and "headRefOid" in args:
+        json_fields = " ".join(a for a in args if a.startswith("--json") or "," in a or a.endswith("Name"))
+        if "headRefName" in json_fields or "baseRefName" in json_fields:
+            head = g.get("head_ref")
+            if not head:
+                for c in reversed(calls("worker")):
+                    if c.get("branch"):
+                        head = c["branch"]
+                        break
+            print(json.dumps({"headRefName": head or "roadmap/followup-unknown",
+                              "baseRefName": g.get("base_ref", "main")}))
+            return
+        if g.get("head_unreadable") and any("headRefOid" in a for a in args):
             print("timed out", file=sys.stderr)
             sys.exit(99)
         # "merge_commit": "head" stands the PR head in for the merge commit (a real, fetchable sha).

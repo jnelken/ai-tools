@@ -762,6 +762,38 @@ def verify_deploy(slug, sha, repo_dir):
         time.sleep(POLL_S)
 
 
+def verify_pr_target(st, repo_dir):
+    """Approve a PR for merge: same jnelken repo, follow-up head branch, default base.
+
+    Invariant — never merge a PR outside the stage's repo/branch/base. Owner: this helper;
+    land() is the only merge entry point and must call it before gh pr merge.
+    """
+    slug = origin_slug(repo_dir)
+    if not slug:
+        return False, "could not resolve origin slug for the repair repo"
+    url = st.get("pr_url") or ""
+    if not re.search(rf"github\.com/{re.escape(slug)}/pull/\d+", url, re.I):
+        return False, f"PR {url} is not in {slug}"
+    want_head = st.get("branch") or branch_for(st)
+    want_base = default_base(repo_dir).split("/", 1)[-1]
+    p = gh("pr", "view", url, "--json", "headRefName,baseRefName")
+    if p.returncode != 0:
+        return False, f"could not read PR target for {url}: {(p.stderr or p.stdout).strip()[:200]}"
+    try:
+        meta = json.loads(p.stdout)
+    except ValueError:
+        return False, f"could not parse PR target for {url}"
+    if not isinstance(meta, dict):
+        return False, f"could not parse PR target for {url}"
+    if meta.get("headRefName") != want_head:
+        return False, (f"PR head is {meta.get('headRefName')!r}, expected follow-up branch "
+                       f"{want_head!r}")
+    if meta.get("baseRefName") != want_base:
+        return False, (f"PR base is {meta.get('baseRefName')!r}, expected default branch "
+                       f"{want_base!r}")
+    return True, ""
+
+
 def land(st, repo_dir, findings):
     """Checks → merge → deploy → install, resumable after the merge: (ok, reason, retry).
 
@@ -774,6 +806,9 @@ def land(st, repo_dir, findings):
         if not reviewed:
             st["next"] = {"step": "review", "round": (st.get("next") or {}).get("round", 1)}
             return False, "no clean review recorded for an exact commit; re-reviewing before any merge", True
+        ok_target, target_reason = verify_pr_target(st, repo_dir)
+        if not ok_target:
+            return False, target_reason, False
         checks = pr_checks(st["pr_url"])
         v["checks"] = checks
         if checks not in ("passed", "none"):
