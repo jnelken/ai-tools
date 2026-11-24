@@ -124,20 +124,28 @@ def quota_record(role, primary=None):
     return doc if isinstance(doc, dict) else None
 
 
+def prior_builders(st):
+    """Every provider that has already built on this stage (independence across rounds)."""
+    return {s.get("provider") for s in (st.get("sessions") or [])
+            if s.get("role") == "builder" and s.get("provider")}
+
+
 def feasibility(st, step, builder=None):
     """Who may take the next step: ("ok", chain) | ("quota", quota_record) | ("unknown", reason).
 
     A builder is only usable when a reviewer review.sh would pick for it is under its gate too —
-    the required review is part of whether a repair can start at all."""
+    and that reviewer must not be any prior builder on this stage."""
     gw, gr = gates("worker"), gates("reviewer")
     st["usage_snapshots"] = (st.get("usage_snapshots") or [])[-9:] + [
         {"at": now_iso(), "step": step, "worker": gw, "reviewer": gr}]
     if gw is None or gr is None:
         return "unknown", "usage.py could not read provider usage"
-    free_reviewers = {g["provider"] for g in gr if g.get("available")}
+    excluded = prior_builders(st)
+    free_reviewers = {g["provider"] for g in gr if g.get("available")} - excluded
     if step == "build":
         free_builders = [g["provider"] for g in gw if g.get("available")]
-        chain = [p for p in free_builders if free_reviewers.intersection(REVIEWERS.get(p, ()))]
+        chain = [p for p in free_builders
+                 if (free_reviewers - {p}).intersection(REVIEWERS.get(p, ()))]
         if chain:
             return "ok", chain
         if not free_builders:
@@ -146,9 +154,9 @@ def feasibility(st, step, builder=None):
                 if q and q.get("provider"):
                     return "quota", q
             return "unknown", "no worker is available and none reports a usage gate"
-        eligible = {r for p in free_builders for r in REVIEWERS.get(p, ())}
+        eligible = {r for p in free_builders for r in REVIEWERS.get(p, ())} - excluded
     else:
-        eligible = set(REVIEWERS.get(builder, ()))
+        eligible = set(REVIEWERS.get(builder, ())) - excluded
         if free_reviewers.intersection(eligible):
             return "ok", [builder]
     q = reviewer_quota(eligible)
@@ -331,38 +339,22 @@ def child_env(st, extra=None):
     return env
 
 
-def run_builder(st, repo_dir, findings, rnd, chain, review_text):
-    """("ok"|"quota"|"failed", detail): one worker.sh pass on the follow-up branch."""
-    branch = branch_for(st)
-    bdir = stage_dir(st["key"]) / f"build-r{rnd}-a{st['attempts']}"
-    bdir.mkdir(parents=True, exist_ok=True)
-    (bdir / "followup-child").write_text(st["key"] + "\n")
-    resume = bool(st.get("pr_url") or rnd > 1 or worktree_of(repo_dir, branch)
-                  or git("-C", str(repo_dir), "ls-remote", "--exit-code", "--heads", "origin", branch).returncode == 0)
-    req = bdir / "request.json"
-    write_json(req, builder_request(st, findings, rnd, review_text, branch, resume))
-    result, status = bdir / "worker-result.json", bdir / "worker-status.json"
-    cmd = [str(ROOT / "worker.sh"), "--stamp", f"{st['key']}-r{rnd}", "--request-file", str(req),
-           "--providers", " ".join(chain), "--result-file", str(result), "--status-file", str(status)]
-    st["branch"] = branch
-    if os.environ.get("ADVANCE_ROADMAP_SUPERSET", "1") == "1":
-        rc, why = run_in_superset(st, repo_dir, branch, bdir, cmd)
-    else:
-        rc, why = run_in_worktree(st, ensure_worktree(st, repo_dir, branch), bdir, cmd)
-    if why:
-        return "failed", why
-    stat, res = read_json(status) or {}, read_json(result) or {}
+def _consume_builder_artifacts(st, branch, rnd, rc, status_path, result_path):
+    """Interpret one finished builder's status/result files into a repair kind."""
+    stat, res = read_json(status_path) or {}, read_json(result_path) or {}
     if stat.get("used"):
         st["builder_provider"] = stat["used"]
-        st["sessions"].append({"role": "builder", "round": rnd, "provider": stat["used"],
-                               "session_id": stat.get("session_id")})
+        sessions = st.setdefault("sessions", [])
+        if not any(s.get("role") == "builder" and s.get("round") == rnd and s.get("provider") == stat["used"]
+                   for s in sessions):
+            sessions.append({"role": "builder", "round": rnd, "provider": stat["used"],
+                             "session_id": stat.get("session_id")})
     if (not stat.get("used") and stat.get("limited")) or res.get("outcome") == "limit_hit":
         q = stat.get("quota") or quota_record("worker", stat.get("used"))
         if q and q.get("provider"):
             return "quota", q
         return "unknown", "the builder stopped on a usage limit, but no quota record names the provider"
     if rc == 3 and not stat.get("used"):
-        # worker.sh exits 3 whenever no provider ran; only gate/limit evidence makes that quota.
         missing = " ".join(stat.get("missing") or [])
         return "failed", (f"no builder CLI could run (missing: {missing})" if missing
                           else "worker.sh ran no provider and reported no usage gate or limit")
@@ -377,7 +369,53 @@ def run_builder(st, repo_dir, findings, rnd, chain, review_text):
     if validation.get("status") != "passed":
         return "failed", f"builder verification did not pass: {validation.get('commands') or res.get('summary', '')[:300]}"
     st["branch"], st["pr_url"] = res.get("branch") or branch, res["pr_url"]
+    # Catch a builder that merged but reported blocked-branch-left (launder path).
+    state = gh("pr", "view", st["pr_url"], "--json", "state", "--jq", ".state")
+    if state.returncode == 0 and state.stdout.strip().upper() == "MERGED":
+        return "self-merged", "the builder's PR is already MERGED; follow-up merges need the runner's clean review"
     return "ok", None
+
+
+def _adopt_finished_build(st, branch, rnd):
+    """Reuse the newest finished build-r{rnd}-* dir instead of re-dispatching worker.sh."""
+    dirs = sorted(stage_dir(st["key"]).glob(f"build-r{rnd}-a*"),
+                  key=lambda path: path.stat().st_mtime, reverse=True)
+    for bdir in dirs:
+        exit_f, result, status = bdir / "worker.exit", bdir / "worker-result.json", bdir / "worker-status.json"
+        if not exit_f.exists() or not result.exists():
+            continue
+        try:
+            rc = int(exit_f.read_text().strip())
+        except ValueError:
+            rc = 1
+        return _consume_builder_artifacts(st, branch, rnd, rc, status, result)
+    return None
+
+
+def run_builder(st, repo_dir, findings, rnd, chain, review_text):
+    """("ok"|"quota"|"failed"|"self-merged"|"unknown", detail): one worker.sh pass."""
+    branch = branch_for(st)
+    st["branch"] = branch
+    adopted = _adopt_finished_build(st, branch, rnd)
+    if adopted is not None:
+        return adopted
+    bdir = stage_dir(st["key"]) / f"build-r{rnd}-a{st['attempts']}"
+    bdir.mkdir(parents=True, exist_ok=True)
+    (bdir / "followup-child").write_text(st["key"] + "\n")
+    resume = bool(st.get("pr_url") or rnd > 1 or worktree_of(repo_dir, branch)
+                  or git("-C", str(repo_dir), "ls-remote", "--exit-code", "--heads", "origin", branch).returncode == 0)
+    req = bdir / "request.json"
+    write_json(req, builder_request(st, findings, rnd, review_text, branch, resume))
+    result, status = bdir / "worker-result.json", bdir / "worker-status.json"
+    cmd = [str(ROOT / "worker.sh"), "--stamp", f"{st['key']}-r{rnd}", "--request-file", str(req),
+           "--providers", " ".join(chain), "--result-file", str(result), "--status-file", str(status)]
+    if os.environ.get("ADVANCE_ROADMAP_SUPERSET", "1") == "1":
+        rc, why = run_in_superset(st, repo_dir, branch, bdir, cmd)
+    else:
+        rc, why = run_in_worktree(st, ensure_worktree(st, repo_dir, branch), bdir, cmd)
+    if why:
+        return "failed", why
+    return _consume_builder_artifacts(st, branch, rnd, rc, status, result)
 
 
 def write_launcher(st, bdir, cmd, extra_env=None):
@@ -613,6 +651,7 @@ def deploy_state(slug, sha):
     """success | failure | pending | None (both APIs answered; nothing deploy-looking yet) | error
     (an API call failed or answered garbage, so absence is not proven)."""
     states = []
+    saw_skipped_deploy = False
     for path, key in ((f"repos/{slug}/commits/{sha}/status", "statuses"),
                       (f"repos/{slug}/commits/{sha}/check-runs", "check_runs")):
         p = gh("api", path)
@@ -630,16 +669,17 @@ def deploy_state(slug, sha):
                 if r.get("status") != "completed":
                     states.append("pending")
                 else:
-                    # Skipped/neutral is not a verified deploy (fail-closed; README invariant).
+                    # Skipped/neutral is not success; also not proof of "no deploy".
                     conc = r.get("conclusion")
                     if conc == "success":
                         states.append("success")
                     elif conc in ("neutral", "skipped"):
-                        states.append("pending")
+                        saw_skipped_deploy = True
                     else:
                         states.append("failure")
     if not states:
-        return None
+        # A skipped deploy-named check must not collapse to "none" (no deploy).
+        return "pending" if saw_skipped_deploy else None
     if "failure" in states:
         return "failure"
     return "pending" if "pending" in states else "success"
@@ -704,7 +744,13 @@ def land(st, repo_dir, findings):
                 st["merged"] = True
                 persist_stage(st)
             else:
-                return False, f"could not merge {st['pr_url']}: {(p.stderr or p.stdout).strip()[:300]}", False
+                err = (p.stderr or p.stdout).strip()
+                if p.returncode == 99 or re.search(r"head branch was modified|match-head-commit", err, re.I):
+                    st["reviewed_sha"] = None
+                    st["next"] = {"step": "review", "round": (st.get("next") or {}).get("round", 1)}
+                    persist_stage(st)
+                    return False, f"could not merge {st['pr_url']}: {err[:300]}", True
+                return False, f"could not merge {st['pr_url']}: {err[:300]}", False
         else:
             st["merged"] = True
             persist_stage(st)

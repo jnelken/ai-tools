@@ -366,9 +366,9 @@ class RepoLock:
 
 
 def take_repo_lock(repo):
-    """Exclusive non-blocking lock on every repo-locks/<repo>[.tN].lock file.
+    """Exclusive non-blocking lock on primary + thread locks up to THREADS_PER_REPO.
 
-    Matches run.sh thread locks so a follow-up never races a concurrent batch thread.
+    Creates `.tN.lock` files so a later batch thread cannot appear beside a live repair.
     """
     if not repo:
         return None
@@ -376,11 +376,18 @@ def take_repo_lock(repo):
         require_id(repo, "repo")
     except ValueError:
         return None
-    paths = repo_lock_files(repo)
-    # Ensure the primary lock path exists even when no thread locks do yet.
-    primary = ROOT / "repo-locks" / f"{repo}.lock"
-    if primary not in paths:
-        paths = [primary, *paths]
+    try:
+        n = int(os.environ.get("ADVANCE_ROADMAP_THREADS_PER_REPO", "3"))
+    except ValueError:
+        n = 3
+    n = max(1, min(n, 3))
+    base = ROOT / "repo-locks"
+    paths = [base / f"{repo}.lock"]
+    paths.extend(base / f"{repo}.t{i}.lock" for i in range(1, n + 1))
+    # Also hold any extra thread locks that already exist beyond n.
+    for extra in sorted(base.glob(f"{glob_escape(repo)}.t*.lock")):
+        if extra not in paths:
+            paths.append(extra)
     claims = []
     for path in paths:
         c = Claim(path)
@@ -1166,6 +1173,8 @@ def defer(st, findings, quota, step, issues=None):
     stage carrying the same finding — in this drain or a concurrent one — comments instead.
     """
     st.update(status="deferred", quota=quota, deferred_until=quota.get("reset_epoch"))
+    # Quota pauses are not failed attempts — refund so a later post-merge retry isn't capped out.
+    st["attempts"] = max(0, st.get("attempts", 1) - 1)
     next_step = next_step_text(st, step)
     for f in findings:
         f["status"] = "deferred"
@@ -1181,10 +1190,12 @@ def block(st, kind, reason, retry=True):
     """A non-quota stop: local report only (never a new ticket), plus progress on owned tickets.
 
     `retry` stages become `pending` (eligible next drain) up to MAX_ATTEMPTS; otherwise `blocked`.
+    Once a PR is merged, keep retrying deploy/install — the attempt cap must not strand main.
     """
     next_step = next_step_text(st, (st.get("next") or {}).get("step", "build"))
     report(st, kind, reason, next_step)
-    st["status"] = ("pending" if retry and st.get("attempts", 0) < MAX_ATTEMPTS else BLOCKED)
+    under_cap = st.get("attempts", 0) < MAX_ATTEMPTS or st.get("merged")
+    st["status"] = ("pending" if retry and under_cap else BLOCKED)
     tickets = sorted({f["ticket"] for f in (st.get("findings") or []) if f.get("ticket")})
     if tickets and os.environ.get("ADVANCE_ROADMAP_FOLLOWUP_LINEAR", "1") == "1":
         body = (f"advance-roadmap follow-up progress on `{st['key']}`: "

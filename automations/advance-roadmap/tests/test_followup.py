@@ -1745,14 +1745,15 @@ class FollowupTest(unittest.TestCase):
         self.assertTrue(registry.exists())
         out = self.run_followup("drain", env=env).stdout
         self.assertIn("still running", out)
-        self.assertEqual(len(self.calls("workspaces")), 1)
+        self.assertEqual(len(self.calls("workspaces")), 1)  # never a second builder beside the live one
         deadline = time.time() + 30
         while not list((self.root / "followups" / key).glob("build-*/worker.exit")) and time.time() < deadline:
             time.sleep(0.2)
         self.set("stub-worker.json", {"mode": "ok"})
         self.run_followup("drain", env=env)
         self.assertEqual(self.state(key)["status"], "done", self.report())
-        self.assertEqual(len(self.calls("workspaces")), 2)
+        # Finished build artifacts are adopted — worker.sh is not dispatched again.
+        self.assertEqual(len(self.calls("workspaces")), 1)
         self.assertFalse(registry.exists())
 
     def start_plain_build_then_kill_the_drain(self, key, sleep):
