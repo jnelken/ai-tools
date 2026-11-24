@@ -269,10 +269,11 @@ ai-tools install via the deploy clone's `install.sh`. `ADVANCE_ROADMAP_FOLLOWUP_
 the loop; without it, open findings stay parked. Quota stops call `defer()` (ticket create/update).
 Slice 3c adds an optional read-only **model analyst** ([`lib/followanalyst.py`](advance-roadmap/lib/followanalyst.py))
 over each stage's bounded corpus: Codex then Claude, usage-gated, process-group deadlines. The
-invoke cwd is a stage-local sandbox of corpus copies (prompt paths never name the originals; Claude
-is Read-only) — not an OS filesystem jail. Findings are accepted only from a successful final
-answer and only when every cited quote verifies in an allowed corpus file; rejected or unavailable
-analyst output never drops deterministic findings. `ADVANCE_ROADMAP_FOLLOWUP_ANALYST=0` disables it.
+corpus is inlined into the prompt (byte-capped); Claude gets no file-read tools; invoke cwd is a
+stage-local sandbox of corpus copies as defense in depth — not an OS filesystem jail. Findings are
+accepted only from a successful final answer and only when every cited quote verifies in an allowed
+corpus file; rejected or unavailable analyst output never drops deterministic findings.
+`ADVANCE_ROADMAP_FOLLOWUP_ANALYST=0` disables it.
 
 | Stage | Trigger | Corpus |
 | --- | --- | --- |

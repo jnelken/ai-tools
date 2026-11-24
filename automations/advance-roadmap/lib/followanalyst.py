@@ -27,6 +27,8 @@ import usage as usagelib  # noqa: E402
 ANALYST_FENCE = "FOLLOWUP_FINDINGS_JSON"
 ANALYST_TIMEOUT_S = float(os.environ.get("ADVANCE_ROADMAP_FOLLOWUP_ANALYST_TIMEOUT_S", "1800"))
 TOKENS_TIMEOUT_S = 60
+# Cap inlined corpus bytes so the prompt stays bounded (injection surface is the paste, not FS).
+CORPUS_PROMPT_MAX_BYTES = int(os.environ.get("ADVANCE_ROADMAP_FOLLOWUP_ANALYST_CORPUS_BYTES", "200000"))
 CODEX = os.environ.get("ADVANCE_ROADMAP_CODEX_BIN", "/opt/homebrew/bin/codex")
 CLAUDE = os.environ.get("ADVANCE_ROADMAP_CLAUDE_BIN", "/Users/jake/.local/bin/claude")
 PROVIDERS = ("codex", "claude")
@@ -296,10 +298,9 @@ def run_analyst(st, provider, prompt, sandbox):
     use usage.live_limit_banner — exit status and provider error records, never a quoted banner alone.
     Process-group deadlines via procrun so a timeout never leaves descendants alive.
 
-    Bounded-corpus policy (owner: run_analyst): both invokes use cwd/-C on a stage-local sandbox
-    that contains only corpus copies; Claude is limited to the Read tool. This is not an OS-level
-    filesystem jail — absolute-path reads outside the sandbox are not kernel-blocked. The prompt
-    must list only sandbox paths (never the original corpus locations).
+    Bounded-corpus policy (owner: analyze → inline_corpus + run_analyst): the prompt carries the
+    corpus paste; providers are invoked without file-read tools. Sandbox cwd/-C is defense in depth
+    only — not an OS filesystem jail.
     """
     d = followrepair.stage_dir(st["key"])
     d.mkdir(parents=True, exist_ok=True)
@@ -312,6 +313,7 @@ def run_analyst(st, provider, prompt, sandbox):
     tokens = [sys.executable, str(Path(__file__).resolve().parent / "tokens.py")]
     provider_result = None
     if provider == "codex":
+        # read-only sandbox + empty writable roots; corpus is already in the prompt.
         p = procrun.run(
             [CODEX, "exec", "-o", str(final), "-s", "read-only", "-C", str(sandbox),
              "--skip-git-repo-check", prompt],
@@ -323,10 +325,11 @@ def run_analyst(st, provider, prompt, sandbox):
             timeout=TOKENS_TIMEOUT_S, text=True)
         transcript = raw.read_text(errors="replace")
     else:
+        # No Read/Bash/Edit — answer only from the inlined corpus in the prompt.
         p = procrun.run(
             [CLAUDE, "-p", prompt, "--permission-mode", "plan",
-             "--allowedTools", "Read",
-             "--disallowedTools", "Edit,Write,NotebookEdit,Bash,MultiEdit",
+             "--allowedTools", "",
+             "--disallowedTools", "Read,Edit,Write,NotebookEdit,Bash,MultiEdit,Glob,Grep",
              "--output-format", "json"],
             timeout=ANALYST_TIMEOUT_S, text=True, cwd=str(sandbox))
         raw_json = d / "analyst-claude.json"
@@ -381,22 +384,48 @@ def record_analyst_limit(st, provider, text):
         pass
 
 
+def inline_corpus(files, max_bytes=CORPUS_PROMPT_MAX_BYTES):
+    """Paste corpus file contents into the prompt. Owner of bounded-corpus network policy:
+    providers receive only this paste — no file-read tools are granted."""
+    parts, used = [], 0
+    for path in files:
+        path = Path(path)
+        try:
+            text = path.read_text(errors="replace")
+        except OSError as e:
+            parts.append(f"### {path}\n(unreadable: {e})\n")
+            continue
+        header = f"### {path}\n"
+        room = max_bytes - used - len(header) - 8
+        if room <= 0:
+            parts.append(f"### {path}\n(truncated: corpus budget exhausted)\n")
+            break
+        body = text if len(text) <= room else text[:room] + "\n…(truncated)\n"
+        parts.append(f"{header}```\n{body}\n```\n")
+        used += len(header) + len(body)
+    return "\n".join(parts)
+
+
 def analyst_prompt(st, findings, files):
     stage = st.get("stage") or ""
     cleanup = stage == "project-cleanup"
     scope = (f"Only project-specific bugs in {st.get('repo')} count here."
              if cleanup else
              "Only orchestration, routing, skills, hooks and reporting count here.")
+    corpus = inline_corpus(files)
     return f"""You are the read-only analyst for advance-roadmap's {stage} follow-up ({st.get('key')}).
-Read only these files: {', '.join(str(f) for f in files)}
+Do not open, search, or read any files on disk. The entire allowed corpus is pasted below.
+Cite evidence only with a source path from that paste and a verbatim quote from it.
 These findings are already recorded (do not repeat them): {json.dumps([f['title'] for f in findings])}
 
 Apply session-hardening's recognition tests (wrong knowledge, misfiring automation, repeated manual
 work, fragile tooling, misleading surfaces, newly dead mechanisms). Report a finding ONLY with
-evidence: for each, the exact file path from the list above and a verbatim quote of at least one
-line from it. Skip speculative improvements and unrelated backlog. List deliberate non-findings —
+evidence. Skip speculative improvements and unrelated backlog. List deliberate non-findings —
 things that look like friction but are working as designed.
 {scope}
+
+## Corpus (complete; nothing else is in scope)
+{corpus}
 
 End with one fence:
 ```{ANALYST_FENCE}
