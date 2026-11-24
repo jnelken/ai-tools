@@ -215,13 +215,19 @@ def accept_findings(st, findings, files, doc, mapping=None, provider=None):
     stamps = corpus_stamps(st)
     kept, rejected = [], []
     for raw in raw_findings:
-        if not isinstance(raw, dict) or not raw.get("title"):
+        if not isinstance(raw, dict):
             continue
+        title = raw.get("title")
+        if not isinstance(title, str) or not title.strip():
+            continue
+        kind = raw.get("kind") if isinstance(raw.get("kind"), str) and raw.get("kind") else "analyst"
+        key = raw.get("key") if isinstance(raw.get("key"), str) and raw.get("key") else title
+        fix = raw.get("fix") if isinstance(raw.get("fix"), str) else ""
         raw_ev = raw.get("evidence") or []
         # Every evidence entry must be a dict that verifies — drop the whole finding otherwise.
         if not isinstance(raw_ev, list) or not raw_ev or not all(isinstance(e, dict) for e in raw_ev):
             rejected.append(followscan.non_finding(
-                raw["title"], "rejected: its evidence is not in the corpus",
+                title, "rejected: its evidence is not in the corpus",
                 [e for e in raw_ev if isinstance(e, dict)] if isinstance(raw_ev, list) else []))
             continue
         check_ev = raw_ev
@@ -229,38 +235,38 @@ def accept_findings(st, findings, files, doc, mapping=None, provider=None):
             check_ev = to_sandbox_evidence(raw_ev, mapping)
             if check_ev is None:
                 rejected.append(followscan.non_finding(
-                    raw["title"], "rejected: its evidence is not in the corpus", raw_ev))
+                    title, "rejected: its evidence is not in the corpus", raw_ev))
                 continue
         if not all(followscan.evidence_holds(e, files, stamps) for e in check_ev):
             rejected.append(followscan.non_finding(
-                raw["title"], "rejected: its evidence is not in the corpus", check_ev))
+                title, "rejected: its evidence is not in the corpus", check_ev))
             continue
         if mapping is not None:
             remapped = to_original_evidence(check_ev, mapping)
             if remapped is None:
                 rejected.append(followscan.non_finding(
-                    raw["title"], "rejected: its evidence is not in the corpus", check_ev))
+                    title, "rejected: its evidence is not in the corpus", check_ev))
                 continue
             # Re-check on originals so runs.jsonl stamp scope still applies after remap.
             originals = list(mapping.values())
             if not all(followscan.evidence_holds(e, originals, stamps) for e in remapped):
                 rejected.append(followscan.non_finding(
-                    raw["title"], "rejected: its evidence is not in the corpus", remapped))
+                    title, "rejected: its evidence is not in the corpus", remapped))
                 continue
             raw_ev = remapped
         else:
             raw_ev = check_ev
         f = followscan.finding(
-            st["stage"], st["repo"], str(raw.get("kind") or "analyst"), raw["title"],
-            raw.get("key") or raw["title"],
+            st["stage"], st["repo"], kind, title, key,
             [followscan.evidence(e["source"], e["quote"]) for e in raw_ev],
-            raw.get("fix") or "")
+            fix)
         if f["id"] not in known:
             kept.append(f)
             known.add(f["id"])
     for raw in raw_non:
-        if isinstance(raw, dict) and raw.get("title"):
-            rejected.append(followscan.non_finding(raw["title"], raw.get("why") or "", []))
+        if isinstance(raw, dict) and isinstance(raw.get("title"), str) and raw.get("title").strip():
+            why = raw.get("why") if isinstance(raw.get("why"), str) else ""
+            rejected.append(followscan.non_finding(raw["title"], why, []))
     return kept, rejected
 
 

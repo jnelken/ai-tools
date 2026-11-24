@@ -2526,6 +2526,21 @@ class FollowupTest(unittest.TestCase):
         self.assertNotIn("typed wrong", [f["title"] for f in doc["findings"]])
         self.assertTrue(any(n["title"] == "typed wrong" and "rejected" in n["why"] for n in doc["non_findings"]))
 
+    def test_analyst_ignores_non_string_title(self):
+        stamp = "20261013-103004"
+        (self.root / "runs" / stamp).mkdir(parents=True)
+        (self.root / "runs.jsonl").write_text(json.dumps(json.loads((FIXTURES / "runs-row.json").read_text())) + "\n")
+        bad = {"title": 99, "kind": "analyst",
+               "evidence": [{"source": str(self.root / "runs.jsonl"),
+                             "quote": "the orchestrator hit its session limit before triage"}]}
+        (self.root / "stub-analyst.txt").write_text(
+            "```FOLLOWUP_FINDINGS_JSON\n" + json.dumps({"findings": [bad]}) + "\n```\n")
+        p = self.run_followup("scan", "--stage", "tooling", "--origin", "batch-2026-10-13", "--stamp", stamp,
+                              env={"ADVANCE_ROADMAP_FOLLOWUP_ANALYST": "1"})
+        doc = json.loads(p.stdout)
+        self.assertTrue(all(isinstance(f["title"], str) for f in doc["findings"]))
+        self.assertTrue(all(isinstance(n["title"], str) for n in doc["non_findings"]))
+
     def test_analyst_sandbox_runs_jsonl_keeps_only_stage_stamps(self):
         import followanalyst
         import followrepair
