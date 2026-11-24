@@ -648,7 +648,8 @@ def recover_tickets():
                 continue
             if partial:
                 resume_branch, resume_pr = owner.get("branch"), owner.get("pr_url")
-                next_step, builder = "build", owner.get("builder_provider")
+                next_step = "review" if resume_pr else "build"
+                builder = owner.get("builder_provider")
                 stage_name = owner.get("stage") or meta.get("stage") or STAGES["cleanup"]
             else:
                 resume_branch, resume_pr = meta.get("branch"), meta.get("pr_url")
@@ -1058,16 +1059,10 @@ def sync_deferral_tickets(st, findings, quota, next_step, note, issues=None):
                         followticket.comment(
                             win_id,
                             "advance-roadmap follow-up deferred again for quota.\n\n" + body)
-                        try:
-                            require_ticket_repo(ident, st.get("repo"), issues=live_after)
-                            followticket.comment(
-                                ident,
-                                f"Duplicate of `{win_id}` (concurrent deferral create); canceling.")
-                            followticket.linear(
-                                "issue", "update", ident, "--state", "Canceled")
-                        except followticket.LinearError as e:
-                            report(st, "linear",
-                                   f"could not cancel duplicate deferral ticket {ident}: {e}")
+                        pending = st.setdefault("pending_cancel", [])
+                        if not any(e.get("ticket") == ident for e in pending):
+                            pending.append({"ticket": ident, "winner": win_id, "commented": False})
+                        cancel_duplicate_tickets(st, issues=live_after)
                     else:
                         if issues is not None:
                             issues.append({
@@ -1106,6 +1101,46 @@ def defer(st, findings, quota, step, issues=None):
     if os.environ.get("ADVANCE_ROADMAP_FOLLOWUP_LINEAR", "1") != "1":
         return
     sync_deferral_tickets(st, findings, quota, next_step, deferral_note(st, quota, step), issues=issues)
+
+
+def cancel_duplicate_tickets(st, issues=None):
+    """Cancel concurrent-create losers; retried until Linear confirms Canceled."""
+    done = set()
+    for entry in st.get("pending_cancel") or []:
+        ident = entry.get("ticket")
+        if not ident:
+            continue
+        try:
+            require_ticket_repo(ident, st.get("repo"), issues=issues)
+            if not entry.get("commented"):
+                followticket.comment(
+                    ident,
+                    f"Duplicate of `{entry.get('winner')}` (concurrent deferral create); canceling.")
+                entry["commented"] = True
+            followticket.linear("issue", "update", ident, "--state", "Canceled")
+            done.add(ident)
+        except followticket.LinearError as e:
+            report(st, "linear", f"could not cancel duplicate deferral ticket {ident}: {e}")
+    st["pending_cancel"] = [e for e in st.get("pending_cancel") or [] if e.get("ticket") not in done]
+    return done
+
+
+def retry_cancel_duplicates(issues=None):
+    if os.environ.get("ADVANCE_ROADMAP_FOLLOWUP_LINEAR", "1") != "1" or issues is None:
+        return
+    for snapshot in all_stages():
+        if not snapshot.get("pending_cancel"):
+            continue
+        c = claim_stage(snapshot["key"])
+        if not c:
+            continue
+        try:
+            st = load(snapshot["key"]) or snapshot
+            if st.get("pending_cancel"):
+                cancel_duplicate_tickets(st, issues=issues)
+                save(st)
+        finally:
+            c.close()
 
 
 def retry_deferral_syncs():
@@ -1707,6 +1742,7 @@ def drain(repo=None, origin=None, stage=None, wait_s=0.0):
     # Pass the real snapshot (including None) into close/ticket retries — never substitute [].
     retry_closes(issues=issues)
     retry_deferral_syncs()
+    retry_cancel_duplicates(issues=issues)
     retry_ticket_syncs(issues=issues)
     deadline = time.time() + wait_s
     while True:
