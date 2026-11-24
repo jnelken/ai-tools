@@ -742,7 +742,6 @@ def deploy_state(slug, sha):
     """success | failure | pending | None (both APIs answered; nothing deploy-looking yet) | error
     (an API call failed or answered garbage, so absence is not proven)."""
     states = []
-    saw_skipped_deploy = False
     for path, key in ((f"repos/{slug}/commits/{sha}/status", "statuses"),
                       (f"repos/{slug}/commits/{sha}/check-runs", "check_runs")):
         p = gh("api", path)
@@ -763,21 +762,18 @@ def deploy_state(slug, sha):
                 if r.get("status") != "completed":
                     states.append("pending")
                 else:
-                    # Skipped/neutral is not success; also not proof of "no deploy".
+                    # Skipped/neutral is a final non-success — surface as failure (retryable
+                    # post-merge) instead of pending forever.
                     conc = r.get("conclusion")
                     if conc == "success":
                         states.append("success")
-                    elif conc in ("neutral", "skipped"):
-                        saw_skipped_deploy = True
                     else:
                         states.append("failure")
     if not states:
-        # A skipped deploy-named check must not collapse to "none" (no deploy).
-        return "pending" if saw_skipped_deploy else None
+        return None
     if "failure" in states:
         return "failure"
-    if "pending" in states or saw_skipped_deploy:
-        # Skipped/neutral beside a success status is still unverified — do not finish.
+    if "pending" in states:
         return "pending"
     return "success"
 
