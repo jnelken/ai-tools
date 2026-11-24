@@ -658,9 +658,12 @@ def run_review(st, repo_dir, rnd):
     rows = followscan.read_jsonl(log_path)[before:]
     row = rows[-1] if rows else {}
     verdict = row.get("verdict") or ("unavailable" if p.returncode == 3 else "error")
-    # Invariant — a clean log row is never mergeable when review.sh itself failed.
-    if verdict == "clean" and p.returncode != 0:
+    # Invariant — any nonzero review.sh exit other than unavailable (3) is an error,
+    # even if the log row says findings/clean (do not burn another builder round).
+    if p.returncode not in (0, 3):
         verdict = "error"
+    elif p.returncode == 3:
+        verdict = "unavailable"
     # review.sh logs a short head; the full SHA it reviewed is what landing must match.
     reviewed = sha if sha and row.get("head") and sha.startswith(str(row["head"])) else None
     v = st.setdefault("validation", {})

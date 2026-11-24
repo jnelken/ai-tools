@@ -2052,6 +2052,18 @@ class FollowupTest(unittest.TestCase):
         self.assertFalse(any(c["args"][:2] == ["pr", "merge"] for c in self.calls("gh")))
         self.assertIn("review", self.report()[-1]["kind"])
 
+    def test_findings_review_log_with_nonzero_exit_is_error_not_rebuild(self):
+        """A findings log row with review.sh exit 1 must not burn another builder round."""
+        self.shipped_item("20261014-050000")
+        self.run_followup("hook", "item-done", "--stamp", "20261014-050000")
+        self.set("stub-review.json", {"verdicts": ["findings"], "exit": 1})
+        self.run_followup("drain", env=self.repair_env())
+        st = self.state("cleanup-20261014-050000")
+        self.assertEqual(len(self.calls("worker")), 1)  # no second builder
+        self.assertEqual(self.calls("review")[-1].get("round"), 1)
+        self.assertIn("review", self.report()[-1]["kind"])
+        self.assertNotEqual(st.get("next", {}).get("step"), "build")
+
     def test_successful_build_persists_review_step_immediately(self):
         """After build ok, next=review is on disk before review runs (crash recovery)."""
         self.shipped_item("20261014-050000")
