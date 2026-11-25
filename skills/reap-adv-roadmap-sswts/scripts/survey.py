@@ -529,10 +529,10 @@ def survey(project_filter: str | None = None) -> dict[str, Any]:
             entry["reason"] = "status-failed"
             keep.append(entry)
             continue
-        dirty = status_check.stdout.strip()
+        dirty = significant_dirt(status_check.stdout)
         if dirty:
             entry["reason"] = "dirty"
-            entry["dirty"] = dirty.splitlines()[:12]
+            entry["dirty"] = dirty[:12]
             keep.append(entry)
             continue
 
@@ -632,7 +632,7 @@ def _promote_stale_failures(
         if not wt or not os.path.isdir(wt):
             continue
         status = run("git", "-C", wt, "status", "--short")
-        if status.returncode != 0 or status.stdout.strip():
+        if status.returncode != 0 or significant_dirt(status.stdout):
             continue
         ok, detail = finished_override(e, prs_index, {})
         if not (ok and e.get("pr_state") == "MERGED"):
@@ -649,6 +649,37 @@ def _promote_stale_failures(
             reapable.append(e)
             done.append(e)
     keep[:] = [e for e in keep if not any(e is d for d in done)]
+
+
+IGNORABLE_UNTRACKED = {"?? node_modules", "?? node_modules/"}
+
+
+def significant_dirt(status_stdout: str) -> list[str]:
+    """`git status --short` lines that count as real changes.
+
+    A lone untracked `node_modules` is install residue, not work. Everything
+    else (including an IN_PROGRESS.md marker, which needs approval to discard)
+    still counts.
+    """
+    return [ln for ln in status_stdout.splitlines() if ln.strip() and ln.strip() not in IGNORABLE_UNTRACKED]
+
+
+def branch_pr_states(root: str, branch: str) -> set[str] | None:
+    """PR states for a head branch, or None when the lookup failed or is incomplete."""
+    repo = github_repo(root)
+    if not repo or not branch:
+        return None
+    p = run("gh", "pr", "list", "--repo", repo, "--state", "all", "--head", branch,
+            "--json", "state", "--limit", "100")
+    if p.returncode != 0:
+        return None
+    try:
+        prs = json.loads(p.stdout)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(prs, list) or len(prs) >= 100:
+        return None
+    return {(pr.get("state") or "").upper() for pr in prs}
 
 
 def _classify_dead_pane(
@@ -678,14 +709,23 @@ def _classify_dead_pane(
         entry["reason"] = "dead-pane-status-failed"
         keep.append(entry)
         return
-    dirty = status_check.stdout.strip()
+    dirty = significant_dirt(status_check.stdout)
     if dirty:
         entry["reason"] = "dead-pane-dirty"
-        entry["dirty"] = dirty.splitlines()[:12]
+        entry["dirty"] = dirty[:12]
         keep.append(entry)
         return
     if not main_ref:
         entry["reason"] = "dead-pane-no-main-ref"
+        keep.append(entry)
+        return
+    states = branch_pr_states(root, branch)
+    if states and states == {"CLOSED"}:
+        # Closed without merging: the work was abandoned or superseded
+        # elsewhere, so the merge-tree simulation cannot clear it. Keep and
+        # skip the (slow) simulation.
+        entry["pr_state"] = "CLOSED"
+        entry["reason"] = "dead-pane-pr-closed-unmerged"
         keep.append(entry)
         return
     status, detail = net_new_vs_main(wt, branch, main_ref)

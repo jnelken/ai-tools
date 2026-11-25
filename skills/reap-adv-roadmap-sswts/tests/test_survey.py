@@ -13,6 +13,22 @@ def result(code=0, out='', err=''):
     return subprocess.CompletedProcess([], code, out, err)
 
 
+class DirtTests(unittest.TestCase):
+    def test_lone_untracked_node_modules_is_ignored_but_other_dirt_counts(self):
+        self.assertEqual(survey.significant_dirt('?? node_modules\n'), [])
+        self.assertEqual(survey.significant_dirt('?? node_modules/\n'), [])
+        self.assertEqual(survey.significant_dirt('?? node_modules\n M IN_PROGRESS.md\n'), [' M IN_PROGRESS.md'])
+        self.assertEqual(survey.significant_dirt('?? src/new.js\n'), ['?? src/new.js'])
+
+    def test_branch_pr_states_fails_closed(self):
+        with patch.object(survey, 'github_repo', return_value='o/r'):
+            for res in (result(1), result(0, 'not json'), result(0, '{}')):
+                with patch.object(survey, 'run', return_value=res):
+                    self.assertIsNone(survey.branch_pr_states('/r', 'b'))
+            with patch.object(survey, 'run', return_value=result(0, '[{"state":"CLOSED"}]')):
+                self.assertEqual(survey.branch_pr_states('/r', 'b'), {'CLOSED'})
+
+
 class HolderTests(unittest.TestCase):
     def holders(self, ps, kids, live_tabs=None, wt='/wt'):
         def fake(*args, **kw):

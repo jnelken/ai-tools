@@ -85,7 +85,9 @@ there is nothing to lose against main:
 
 1. Zero terminals (`superset terminals list` empty).
 2. Worktree exists, is not a root checkout, is **clean**
-   (`git status --short` empty), and is not held.
+   (`git status --short` empty, ignoring a lone untracked `node_modules`), and is not held.
+   If every PR on the branch is CLOSED without merging, **keep without running the
+   merge-tree simulation** (`dead-pane-pr-closed-unmerged`).
 3. **No net-new work vs main** — same check as zsh `diffmain` / `gdiffnew`
    (`dotfiles/zsh/lib/30-git.zsh`): after one `git fetch origin --prune` per
    owning clone, simulate merging the branch into main with
