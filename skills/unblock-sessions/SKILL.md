@@ -91,7 +91,7 @@ Ask: "Reply `reap` to <project/workspace> (<one-line what it did>)?" with option
 
 **c. Everything else.** Read `final_message` (plus `earlier_turn_text` if needed) and judge
 whether it asks Jake for anything. Signals:
-- a `**Decisions**` block
+- a `❖ Decisions ───…` banner line, or a bold `**Decisions**` title from before the banner
 - a 🛑 status line
 - a direct question
 - a hand-back like "needs your push", "your call", or "pending your OK"

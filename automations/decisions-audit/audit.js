@@ -43,7 +43,7 @@ const TAXONOMY = 'open_draft_pr, undraft_pr, merge_pr, push_branch, run_post_pr,
 
 const collectPrompt = (s) => `You are auditing Jake's replies to "Decisions" blocks. Window: ${s.since} to ${s.until} (UTC).
 
-Background. Jake's Claude sessions use the "Zen" output style. A final assistant message may contain a bold **Decisions** section: questions, each followed by lettered options (A., B., ...), one marked "(recommended)", last option always "Drop it". Letters continue across questions and replies. Jake answers with a short next message, using this grammar:
+Background. Jake's Claude sessions use the "Zen" output style. A final assistant message may contain a Decisions section: questions, each followed by lettered options, one marked "(recommended)", last option always "Drop it". Older replies use a bold **Decisions** title with A. / B. option letters; sessions started after about 2026-11-25 use an inline-code banner line starting "❖ Decisions" followed by a "─" rule, with each option letter in bold inline code. Letters continue across questions and replies. Jake answers with a short next message, using this grammar:
 - "go" = do all Next items AND take every decision's recommended option
 - "next" / numbers ("1 3") = Next items only, decisions HELD
 - letters ("B", "B D") = those choices; unanswered decisions held (and re-presented later with fresh letters)
@@ -53,7 +53,7 @@ A letter resolves to its most recent use, so you must read the assistant's Decis
 
 Task, using the memex MCP tools (load them via ToolSearch select:mcp__memex__sessions,mcp__memex__search,mcp__memex__session,mcp__memex__show,mcp__memex__context,mcp__memex__hydrate if not loaded):
 1. List sessions (source=claude, no subagents) with activity in the window, using memex sessions with since=${s.since}; page with limit up to 500; discard those with last_at before ${s.since} and those that started after ${s.until}. Cover ALL projects, not only one repo.
-2. In each session find assistant records containing "**Decisions**" (memex search with role=assistant, session=<id>, query "Decisions Drop it recommended", plus reading the session if needed). Restrict to records with ts in the window.
+2. In each session find assistant records containing either "**Decisions**" or an inline-code banner line starting "❖ Decisions" followed by a "─" rule (memex search with role=assistant, session=<id>, query "Decisions Drop it recommended", plus reading the session if needed). Restrict to records with ts in the window.
 3. For each Decisions block, read the NEXT user message in that session (memex context/session around the record). Resolve every individual decision in the block to one of: took_recommended, chose_non_recommended, dropped (picked "Drop it"), held (not addressed / "next" / numbers only), refresher (letter with ?), unanswered (session ended or user moved on), unclear. Emit ONE record per individual decision question, not per block. A user reply of "go" counts as took_recommended for every decision in the block.
 4. Classify each decision's kind from: ${TAXONOMY}. Prefer a taxonomy slug over other:.
 Set reply_kind on every record: go when the reply was a bare accept-all such as "go" (or "go" plus extra Next numbers), letters when the reply picked explicit letters for this block (including batch letters like "B D G J"), free_text for prose, none when no reply was found. This lets the audit separate rubber-stamp acceptance from deliberate picks.

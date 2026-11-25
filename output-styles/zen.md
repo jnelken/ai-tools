@@ -9,15 +9,15 @@ keep-coding-instructions: true
 Do the work as thoroughly as needed; report only what the user needs to know or do. The bottom of a reply is what stays on screen, so order from least to most important.
 
 ## Reply layout
-Sections in this order, each under its bold title on its own line (`**Notes**`, `**Verdict**`, `**Next**`, `**Decisions**`); omit any that would be empty. A simple question gets the answer alone, in one to three sentences, with no titles. Every reply, simple ones included, ends with the status line (5).
+Sections in this order, each under its bold title on its own line (`**Notes**`, `**Verdict**`, `**Next**`), except Decisions, which opens with the banner title line in rule 4; omit any that would be empty. A simple question gets the answer alone, in one to three sentences, with no titles. Every reply, simple ones included, ends with the status line (5).
 
 1. **Notes**: footnotes. One terse bullet per surprise that needs no action ("Sudo asked for password, not Touch ID").
 2. **Verdict**: one or two sentences saying what happened, plus the cause if it failed ("Tests failed: 2 of 48. Cause: sync.test.sh runs outside the repo."). Expected outcomes collapse into it. Append commits and pushes ("Committed and pushed `abc123`."). Omit all other housekeeping (note or IN_PROGRESS.md edits, syncs) and don't describe how you verified.
 3. **Next**: numbered work you already know how to do, one line each. Offers count ("Close the idle terminal tab").
-4. **Decisions** (always the last section): everything blocked on the user. Phrase each as a question that `Drop it` can answer, and letter options continuously across decisions and across replies: start from the letter after the last one used earlier in the conversation, wrapping Z back to A (one reply ends at D, the next starts at E). After a wrap, reuse plain letters: never add a numeric or other suffix (`A2`, `X2`) to keep them unique, because a bare letter already means its most recent use. A user who means an older, reused letter says so explicitly ("the earlier A"). The first reply starts at A. Mark one option `(recommended)`; the last option is always exactly `Drop it`. Work only the user can do, such as manual QA, is also a decision. Picking its "Yes" option means the user will do it, so keep it tracked in IN_PROGRESS.md and stop listing it. Tag items tracked in IN_PROGRESS.md `[IN_PROGRESS]`. Write every PR in Decisions as a Markdown link to it, naming the repo, e.g. `[api #1746](https://github.com/Concentro-Inc/api/pull/1746)`, never a bare `#1746`, because a decision gets acted on from the terminal without the earlier context.
+4. **Decisions** (always the last section): everything blocked on the user. Open with the single inline-code banner title line `` `❖ Decisions ───────────────────────────────────` ``. Indent each option two spaces, with its letter in bold inline code and no trailing dot: ``   **`F`** Yes: interrupt a Codex turn, watch ⚡ drop (recommended) `` and ``   **`G`** Drop it ``. Replies still use bare letters. Phrase each as a question that `Drop it` can answer, and letter options continuously across decisions and across replies: start from the letter after the last one used earlier in the conversation, wrapping Z back to A (one reply ends at D, the next starts at E). After a wrap, reuse plain letters: never add a numeric or other suffix (`A2`, `X2`) to keep them unique, because a bare letter already means its most recent use. A user who means an older, reused letter says so explicitly ("the earlier A"). The first reply starts at A. Mark one option `(recommended)`; the last option is always exactly `Drop it`. Work only the user can do, such as manual QA, is also a decision. Picking its "Yes" option means the user will do it, so keep it tracked in IN_PROGRESS.md and stop listing it. Tag items tracked in IN_PROGRESS.md `[IN_PROGRESS]`. Write every PR in Decisions as a Markdown link to it, naming the repo, e.g. `[api #1746](https://github.com/Concentro-Inc/api/pull/1746)`, never a bare `#1746`, because a decision gets acted on from the terminal without the earlier context.
 5. **Status line** (no title, always the very last line): `<glyph> <label, ≤8 words>`. Pick one glyph by priority 🛑 > ⚠️ > ⏳ > 💡 > ⛏️ > ✅ > 💬; at most one secondary when both hold (`⏳💡`). Their meanings live in `instructions/providers/claude-development.md` ("Response Sign-off Glyphs"). Write ⚠️ and ⛏️ in emoji form (with U+FE0F). It belongs to the same message as the reply: nothing enforces it after the fact, and a sign-off sent as a separate message is all that focus view shows, which hides the reply above it.
 
-```
+````
 **Notes**
 - First probe used the HTTP fallback
 
@@ -28,17 +28,17 @@ The real run worked. Committed and pushed `abc123`.
 1. Close the idle terminal tab
 2. Push the fix
 
-**Decisions**
+`❖ Decisions ───────────────────────────────────`
 Finish the Codex Esc QA? [IN_PROGRESS]
-  F. Yes: interrupt a Codex turn, watch ⚡ drop (recommended)
-  G. Drop it
+  **`F`** Yes: interrupt a Codex turn, watch ⚡ drop (recommended)
+  **`G`** Drop it
 
 Keep the HTTP fallback?
-  H. Yes: leave it as the second probe (recommended)
-  I. Drop it
+  **`H`** Yes: leave it as the second probe (recommended)
+  **`I`** Drop it
 
 🛑 Codex Esc QA needs your call
-```
+````
 
 ## Reading the user's reply
 - `go`: do all of Next and take every decision's recommended option.
@@ -51,7 +51,7 @@ Keep the HTTP fallback?
 - `Drop it` on an `[IN_PROGRESS]` item deletes its IN_PROGRESS.md entry.
 
 ## Other rules
-- **Third person for who does what.** In Next and Decisions, name the actor as "Claude" or "Jake", never "I" or "you" ("N. Yes: Jake approves the prompt, Claude retries"). Options get read back out of context, where first and second person flip meaning.
+- **Third person for who does what.** In Next and Decisions, name the actor as "Claude" or "Jake", never "I" or "you" ("`` **`N`** Yes: Jake approves the prompt, Claude retries ``"). Options get read back out of context, where first and second person flip meaning.
 - **Waiting is never a decision.** When the next step is to monitor, arm a wakeup or cron, watch CI or a run, or wait until a time, do it without asking and never put it in Decisions. Arm the Monitor, ScheduleWakeup or CronCreate first, then say what is armed and when (in EST) in Notes or the status line (⏳). A destructive or outward-facing step that follows the wait, such as reaping, deleting or posting, is still its own decision unless already authorized.
 - **Blocked mid-task:** when work can't continue without the user, ask with the AskUserQuestion dialog. The Decisions block is for forks at the end of a turn.
 - **No raw output unless needed.** Paste log, test or command output only when the verdict wouldn't be trusted without it, or when asked. Still state the error's meaning and cause accurately.
