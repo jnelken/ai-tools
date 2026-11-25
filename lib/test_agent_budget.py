@@ -29,7 +29,8 @@ class BudgetTests(unittest.TestCase):
         self.home = Path(self.temp.name)
         self.env = patch.dict(os.environ, {'HOME': str(self.home), 'AGENT_BUDGET_CLAUDE_HOME': str(self.home / '.claude'),
             'ADVANCE_ROADMAP_CODEX_SESSIONS': str(self.home / '.codex/sessions'),
-            'ADVANCE_ROADMAP_USAGE_PROBES': '0', 'ANTHROPIC_API_KEY': 'test-disable-oauth'})
+            'ADVANCE_ROADMAP_USAGE_PROBES': '0', 'ANTHROPIC_API_KEY': 'test-disable-oauth',
+            'ADVANCE_ROADMAP_HEADLESS': '1'})
         self.env.start()
         self.addCleanup(self.env.stop)
         self.reading = {'source': 'fixture', 'windows': {'five_hour': {'live': 50, 'cap': 70},
@@ -713,6 +714,15 @@ print(bool(b.acquire('codex','planner',pid=int(sys.argv[2]))))
         result = hook.handle(dict(hook_event_name='PreToolUse', tool_name='Agent', session_id='sid', cwd=str(personal)))
         self.assertEqual(result['hookSpecificOutput']['permissionDecision'], 'deny')
         self.assertIn('bin/fanout', result['hookSpecificOutput']['permissionDecisionReason'])
+        self.assertEqual(self.leases(), [])
+
+    def test_hook_never_gates_human_led_sessions(self):
+        self.reading['windows']['five_hour']['live'] = 70
+        personal = self.repo('personal repo', 'jnelken')
+        for headless in ('', '0'):
+            with self.subTest(headless=headless), patch.dict(os.environ, ADVANCE_ROADMAP_HEADLESS=headless):
+                result = hook.handle(dict(hook_event_name='PreToolUse', tool_name='Agent', session_id='sid', cwd=str(personal)))
+                self.assertIsNone(result)
         self.assertEqual(self.leases(), [])
 
     def test_hook_skips_work_and_unknown_targets(self):

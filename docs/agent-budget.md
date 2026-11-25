@@ -248,6 +248,9 @@ prints verdict checks, saved live headroom, and the number of lanes that would b
 admitted. It uses saved Linear/deploy/quota snapshots, labels those verdict checks
 as saved, and creates no leases, batch state, probes or external requests.
 
+The gate applies only to headless advance-roadmap runs (`ADVANCE_ROADMAP_HEADLESS=1`);
+human-led sessions are never denied.
+
 The installer registers `agent-budget-gate.py` for PreToolUse (Agent/Workflow) and
 SubagentStop, preserving existing settings and removing its retired SessionStart/End
 registrations. Unknown readings, exceptions (including malformed input/state and

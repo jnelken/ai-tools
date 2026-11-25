@@ -2,7 +2,8 @@
 """Reserve before Agent/Workflow, release the exact child on SubagentStop.
 
 The hook is advisory: unknown quota, errors, and timeout allow the tool.
-Only admitted children are leased; interactive sessions use the cap reserve.
+Only admitted children are leased; human-led sessions are never gated (the
+gate applies only when ADVANCE_ROADMAP_HEADLESS=1).
 """
 import json
 import os
@@ -59,6 +60,10 @@ def handle(data):
     session = data.get('session_id')
     if event == 'PreToolUse':
         if data.get('tool_name') not in ('Agent', 'Workflow'):
+            return None
+        if os.environ.get('ADVANCE_ROADMAP_HEADLESS') != '1':
+            # Human-led sessions are never gated; only automated advance-roadmap
+            # runs (which export ADVANCE_ROADMAP_HEADLESS=1) reserve budget.
             return None
         if not is_personal_target(data.get('cwd')):
             # Only personal targets reserve from the personal shared budget.
