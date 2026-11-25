@@ -213,6 +213,14 @@ assert s["used"] == "codex", s
 assert "cursor" in s.get("missing", []), s
 PY
 
+# An auth failure on the batch-reserved worker may still use the rest of the chain
+# (outside incremental units, which never route past their reservation).
+FAKE_AUTH=1 ADVANCE_ROADMAP_BUDGET_WORKER=cursor WORKER_PROVIDERS="cursor codex" \
+  run_worker "" "$TMP_ROOT/status-leased-auth.json" \
+  || fail "leased auth failure should still fail over"
+[ "$(cat "$TMP_ROOT/calls")" = $'agent\ncodex' ] \
+  || fail "leased auth did not fail over: $(cat "$TMP_ROOT/calls")"
+
 # A live usage limit under a batch reservation must not consume an unleased fallback.
 FAKE_JSON_LIMIT=1 ADVANCE_ROADMAP_BUDGET_WORKER=cursor WORKER_PROVIDERS="cursor codex" \
   run_worker "" "$TMP_ROOT/status-leased-limit.json" || true
