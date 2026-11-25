@@ -128,15 +128,19 @@ output is JSON with the text in `.text` and can be >100 KB, so search it for the
 last finished banner rather than eyeballing the tail). A clean `exit=0` banner,
 a MERGED PR and a clean tree mean the work is done and the holder is leftover.
 
-Classify holders before deciding:
+Classify holders before deciding. `survey.py` does this per holder
+(`idle_tab_shell`) and prints `holder[tab-shell]` or `holder[LIVE]`:
 
-- **The tab's own shell** (`zsh` whose cwd is the worktree, one per tab): not a
-  real holder — reaping closes the tab. Reap.
-- **Orphaned worker leftovers** (PPID 1, hours old, e.g. a `batch-lane` / test
-  Python process whose log in `$TMPDIR` shows a killed run): inspect with
-  `ps -ww -o pid,ppid,etime,command -p <pid>` and `lsof -p <pid>`; kill only
-  after the user approves, then reap.
-- **Anything else** (editor, dev server, an agent): keep.
+- **A tab's own idle shell** — a login `/bin/zsh -l` reparented to launchd
+  (PPID 1) with **no child processes**, and no more such shells than live tabs.
+  It is not a live session; reaping closes the tab. Reap when every holder is
+  one (`tab_shells_only`).
+- **Anything else is a live holder** (`reason=held-live-holder`): a shell with a
+  running child, a hand-opened `-zsh`, an agent, dev server or test process. A
+  shell at a prompt is not a live session, but a process doing work is. Orphaned
+  worker leftovers (PPID 1, hours old, e.g. a `batch-lane` Python process whose
+  `$TMPDIR` log shows a killed run) may be killed after the user approves, then
+  reaped. Inspect with `ps -ww -o pid,ppid,etime,command -p <pid>` and `lsof -p <pid>`.
 
 ## Delete path
 

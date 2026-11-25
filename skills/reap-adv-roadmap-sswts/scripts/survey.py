@@ -313,23 +313,44 @@ def is_held(wt: str, held: list[str]) -> bool:
     return False
 
 
-def holders(wt: str) -> list[str]:
-    """`pid command` for each process whose cwd is the worktree or inside it."""
+def _ps(pid: str) -> tuple[str, str]:
+    """(ppid, full command line) for a pid, or ("", "") when it vanished."""
+    p = run("ps", "-ww", "-o", "ppid=,command=", "-p", pid)
+    parts = p.stdout.strip().split(None, 1) if p.returncode == 0 else []
+    return (parts[0], parts[1]) if len(parts) == 2 else ("", "")
+
+
+def holders(wt: str, live_tabs: int | None = None) -> list[dict[str, Any]]:
+    """Processes whose cwd is the worktree (or inside it), each classified.
+
+    `idle_tab_shell` is true only for a Superset tab's own shell at rest: a
+    login `zsh -l` reparented to launchd (PPID 1) with no child processes. A
+    shell you opened by hand differs (`-zsh` under `login`, or has a running
+    child), as does any agent, dev server or test process. When `live_tabs` is
+    given, more idle shells than live tabs also disqualifies them all, since
+    the extras cannot all be tab shells.
+    """
     p = run("lsof", "-d", "cwd", "-Fpcn")
     if p.returncode != 0:
-        return ["unknown (lsof failed)"]
+        return [{"pid": "?", "command": "unknown (lsof failed)", "idle_tab_shell": False}]
     real = os.path.realpath(wt)
-    out: list[str] = []
-    pid = cmd = ""
+    out: list[dict[str, Any]] = []
+    pid = ""
     for ln in p.stdout.splitlines():
         if ln.startswith("p"):
             pid = ln[1:]
-        elif ln.startswith("c"):
-            cmd = ln[1:]
         elif ln.startswith("n/"):
             hr = os.path.realpath(ln[1:])
             if hr == real or hr.startswith(real + os.sep):
-                out.append(f"{pid} {cmd}")
+                ppid, cmd = _ps(pid)
+                kids = run("pgrep", "-P", pid).stdout.split()
+                idle = ppid == "1" and cmd.strip() in ("/bin/zsh -l", "zsh -l") and not kids
+                out.append({"pid": pid, "ppid": ppid, "command": cmd or "?",
+                            "children": len(kids), "idle_tab_shell": idle})
+    idle_n = sum(1 for h in out if h["idle_tab_shell"])
+    if live_tabs is not None and idle_n > live_tabs:
+        for h in out:
+            h["idle_tab_shell"] = False
     return out
 
 
@@ -535,7 +556,10 @@ def survey(project_filter: str | None = None) -> dict[str, Any]:
             # only scanned for held worktrees (the one case it can change the
             # outcome). Never auto-reap: surface holders for a decision.
             entry["reason"] = "held-but-finished"
-            entry["holders"] = holders(wt)
+            entry["holders"] = holders(wt, len(entry.get("tabs") or []))
+            entry["tab_shells_only"] = all(h["idle_tab_shell"] for h in entry["holders"])
+            if not entry["tab_shells_only"]:
+                entry["reason"] = "held-live-holder"
             keep.append(entry)
             continue
         entry["reason"] = "reapable-banner"
@@ -616,7 +640,10 @@ def _promote_stale_failures(
         e["finished_evidence"] = f"{detail}; last banner stale ({e['reason']})"
         if is_held(wt, held):
             e["reason"] = "held-but-finished"
-            e["holders"] = holders(wt)
+            e["holders"] = holders(wt, len(e.get("tabs") or []))
+            e["tab_shells_only"] = all(h["idle_tab_shell"] for h in e["holders"])
+            if not e["tab_shells_only"]:
+                e["reason"] = "held-live-holder"
         else:
             e["reason"] = "reapable-banner-stale-failure"
             reapable.append(e)
@@ -740,6 +767,9 @@ def main() -> int:
                 f"  {e['id'][:8]}…  {e['project']:20}  {e.get('branch')}  "
                 f"reason={e.get('reason')}"
             )
+            for h in e.get("holders") or []:
+                tag = "tab-shell" if h.get("idle_tab_shell") else "LIVE"
+                print(f"      holder[{tag}] {h['pid']} {h['command'][:90]}")
     return 0
 
 

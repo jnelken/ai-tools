@@ -13,6 +13,27 @@ def result(code=0, out='', err=''):
     return subprocess.CompletedProcess([], code, out, err)
 
 
+class HolderTests(unittest.TestCase):
+    def holders(self, ps, kids, live_tabs=None, wt='/wt'):
+        def fake(*args, **kw):
+            if args[0] == 'lsof':
+                return result(0, ''.join(f'p{p}\nfcwd\nn{wt}\n' for p in ps))
+            if args[0] == 'ps':
+                return result(0, ps[args[-1]])
+            return result(0, kids.get(args[-1], ''))
+        with patch.object(survey, 'run', side_effect=fake), patch.object(survey.os.path, 'realpath', side_effect=lambda x: x):
+            return survey.holders(wt, live_tabs)
+
+    def test_only_idle_login_shell_under_launchd_is_a_tab_shell(self):
+        got = self.holders({'1': '1 /bin/zsh -l', '2': '1 /bin/zsh -l', '3': '5 -zsh', '4': '1 node server.js'},
+                           {'2': '9\n'})
+        self.assertEqual([h['idle_tab_shell'] for h in got], [True, False, False, False])
+
+    def test_more_idle_shells_than_live_tabs_disqualifies_all(self):
+        got = self.holders({'1': '1 /bin/zsh -l', '2': '1 /bin/zsh -l'}, {}, live_tabs=1)
+        self.assertEqual([h['idle_tab_shell'] for h in got], [False, False])
+
+
 class SafetyTests(unittest.TestCase):
     def test_json_buffer_banner_is_classified_from_text_field(self):
         import json
