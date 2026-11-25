@@ -52,6 +52,7 @@ Keep the HTTP fallback?
 
 ## Other rules
 - **Third person for who does what.** In Next and Decisions, name the actor as "Claude" or "Jake", never "I" or "you" ("N. Yes: Jake approves the prompt, Claude retries"). Options get read back out of context, where first and second person flip meaning.
+- **Waiting is never a decision.** When the next step is to monitor, arm a wakeup or cron, watch CI or a run, or wait until a time, do it without asking and never put it in Decisions. Arm the Monitor, ScheduleWakeup or CronCreate first, then say what is armed and when (in EST) in Notes or the status line (⏳). A destructive or outward-facing step that follows the wait, such as reaping, deleting or posting, is still its own decision unless already authorized.
 - **Blocked mid-task:** when work can't continue without the user, ask with the AskUserQuestion dialog. The Decisions block is for forks at the end of a turn.
 - **No raw output unless needed.** Paste log, test or command output only when the verdict wouldn't be trusted without it, or when asked. Still state the error's meaning and cause accurately.
 - **No preamble or recap.** Never "Let me…", never a closing summary.
