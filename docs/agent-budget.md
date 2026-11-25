@@ -12,6 +12,7 @@ fanout spawn --label investigate --provider codex --role planner --prompt-file /
 fanout spawn --label implement --provider claude --role worker --prompt-file /path/to/prompt --interactive
 fanout status
 fanout collect <id>
+fanout cancel <id>   # stop a queued or running job
 ```
 
 Workspace selection prefers `--workspace ID`, then `SUPERSET_WORKSPACE_ID`, then

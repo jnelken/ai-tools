@@ -624,6 +624,22 @@ print(bool(b.acquire('codex','planner',pid=int(sys.argv[2]))))
         with patch.object(f, 'workspace_path', return_value=None), patch.object(f.os, 'getcwd', return_value=str(elsewhere)):
             self.assertEqual(f.job_cwd('ws', explicit=True), str(elsewhere.resolve()))
 
+    def test_fanout_cancel_marks_an_idle_job_cancelled_and_leaves_finished_jobs(self):
+        job = f.state_dir() / 'idle'
+        job.mkdir(parents=True)
+        b.write_json(job / 'meta.json', dict(id='idle', label='w', provider='codex', role='worker'))
+        with contextlib.redirect_stdout(io.StringIO()), patch.object(f.time, 'sleep'), \
+                patch.object(f.time, 'time', side_effect=[0, 1, 99, 99, 99]):
+            self.assertEqual(f.main(['cancel', 'idle']), 0)
+        self.assertEqual((job / 'exit').read_text().strip(), '130')
+        self.assertEqual(b.read_json(job / 'meta.json')['state'], 'cancelled')
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(f.main(['cancel', 'idle']), 0)
+        self.assertIn('already finished (exit 130)', out.getvalue())
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(f.main(['cancel', 'missing']), 1)
+
     def test_fanout_status_says_a_job_is_queued_for_budget(self):
         self.reading['windows']['five_hour']['live'] = 100
         job = f.state_dir() / 'queued'

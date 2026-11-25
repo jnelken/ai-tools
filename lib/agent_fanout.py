@@ -361,6 +361,36 @@ def inspect_jobs(identifier=None, collect=False):
     return result
 
 
+def cancel(identifier):
+    """Stop one job: SIGTERM every process whose command line names its state dir.
+
+    The supervisor forwards the signal to the budget wait or provider child and
+    records the exit, so a queued job drops out of the budget queue and a running
+    one stops cleanly. If nothing is alive and no exit was recorded, the job is
+    marked cancelled (exit 130) directly. Completed jobs are left alone."""
+    job = state_dir() / identifier
+    if not (job / 'meta.json').is_file():
+        raise ValueError(f'unknown job {identifier}')
+    if (job / 'exit').exists():
+        print(f'{identifier}: already finished (exit {(job / "exit").read_text().strip()})')
+        return 0
+    found = subprocess.run(['pgrep', '-f', str(job)], capture_output=True, text=True).stdout.split()
+    pids = [int(pid) for pid in found if int(pid) != os.getpid()]
+    for pid in pids:
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+    deadline = time.time() + 10
+    while time.time() < deadline and not (job / 'exit').exists():
+        time.sleep(0.2)
+    if not (job / 'exit').exists():
+        write_exit(job, 130)
+        update(job, state='cancelled', finished=time.time())
+    print(f'{identifier}: cancelled (signalled {len(pids)} process(es))')
+    return 0
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest='cmd', required=True)
@@ -378,6 +408,8 @@ def main(argv=None):
         p = sub.add_parser(name)
         p.add_argument('id', nargs='?')
         p.add_argument('--json', action='store_true')
+    p = sub.add_parser('cancel', help='stop a queued or running job by id')
+    p.add_argument('id')
     for name in ('_run', '_interactive', '_attach', '_execute'):
         p = sub.add_parser(name, help=argparse.SUPPRESS)
         p.add_argument('job', type=Path)
@@ -385,6 +417,8 @@ def main(argv=None):
     try:
         if a.cmd == 'spawn':
             return spawn(a)
+        if a.cmd == 'cancel':
+            return cancel(a.id)
         if a.cmd == '_execute':
             return execute(a.job)
         if a.cmd == '_attach':

@@ -93,6 +93,22 @@ def is_setup(raw: str) -> bool:
     return False
 
 
+def tab_text(stdout: str) -> str:
+    """The buffer text of a `superset terminals read`.
+
+    The CLI prints JSON with the buffer under `text`, where newlines are escaped;
+    matching banners against the raw JSON never sees a line end, so every
+    finished tab used to classify as `other`. Fall back to the raw output when
+    it is not that JSON.
+    """
+    try:
+        payload = json.loads(stdout)
+    except ValueError:
+        return stdout
+    text = payload.get("text") if isinstance(payload, dict) else None
+    return text if isinstance(text, str) else stdout
+
+
 def classify_tab(raw: str) -> dict[str, Any]:
     fin = last_finished(raw)
     if fin:
@@ -431,7 +447,7 @@ def survey(project_filter: str | None = None) -> dict[str, Any]:
                 "superset", "terminals", "read", "--local",
                 "--workspace", w["id"], "--terminal", tid,
             )
-            raw = raw_p.stdout if raw_p.returncode == 0 else ""
+            raw = tab_text(raw_p.stdout) if raw_p.returncode == 0 else ""
             info = classify_tab(raw)
             info["terminal_id"] = tid
             info["title"] = (s.get("title") or s.get("customTitle") or "")[:80]

@@ -14,6 +14,14 @@ def result(code=0, out='', err=''):
 
 
 class SafetyTests(unittest.TestCase):
+    def test_json_buffer_banner_is_classified_from_text_field(self):
+        import json
+        banner = '=== worker used=cursor exit=0 finished Tue Nov 24 09:07:12 EST 2026 ==='
+        raw = json.dumps({'terminalId': 't', 'text': 'work done\n' + banner + '\n\n~/wt ❯   \n'})
+        self.assertEqual(survey.classify_tab(raw)['kind'], 'other')
+        self.assertEqual(survey.classify_tab(survey.tab_text(raw))['kind'], 'finished0')
+        self.assertEqual(survey.tab_text('plain buffer'), 'plain buffer')
+
     def test_empty_or_unknown_tab_is_not_setup(self):
         for raw in ('', 'active agent thinking'):
             with self.subTest(raw=raw):

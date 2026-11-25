@@ -162,7 +162,15 @@ Gotchas from live sweeps:
   the JSON; matching on non-empty output treats every dead pane as having tabs.
 - Hold checks must run `lsof` at reap time, not reuse the survey's snapshot.
 - The deploy copy under `~/.ai-tools/skills` is read-only; edit the dev checkout
-  at `~/Dropbox/code/ai-tools` and push (the symlinked skill follows main).
+  at `~/Dropbox/code/ai-tools` and push. To get the push onto this machine now,
+  run `~/.ai-tools/bin/ai-tools-clone-lock run -- git -C ~/.ai-tools pull --ff-only`
+  (never `chmod` the clone; a bare `git pull` fails with Permission denied).
+- Verify a skill change with a fresh subagent run, not from session memory.
+- `superset terminals read` prints JSON; the buffer is in `.text`. Banner regexes
+  must run on that text (`tab_text()` in `survey.py`), never the raw JSON.
+- Banner exits other than 0 (`exit=124` timeout, `exit=1`) with a MERGED PR, clean
+  tree and only tab-shell holders are kept by Path A rule 1; surface them for the
+  user rather than reaping.
 - After a reap, confirm the worktree dir, local branch and workspace
   registration are all gone (`git worktree list`, `git branch --list`,
   `superset workspaces list --local`). Orphan `roadmap/*` branches without a
