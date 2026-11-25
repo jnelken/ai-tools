@@ -168,9 +168,12 @@ Gotchas from live sweeps:
 - Verify a skill change with a fresh subagent run, not from session memory.
 - `superset terminals read` prints JSON; the buffer is in `.text`. Banner regexes
   must run on that text (`tab_text()` in `survey.py`), never the raw JSON.
-- Banner exits other than 0 (`exit=124` timeout, `exit=1`) with a MERGED PR, clean
-  tree and only tab-shell holders are kept by Path A rule 1; surface them for the
-  user rather than reaping.
+- A non-zero last banner (`exit=124` timeout, `exit=1`, or a failure after an
+  earlier success) is **stale once the branch's PR is MERGED**: failures only
+  matter while work is in progress. With a MERGED PR, a clean tree and only
+  finished/setup tabs, `survey.py` promotes it (`reapable-banner-stale-failure`,
+  or `held-but-finished` when a holder remains). A closed-unmerged or missing PR
+  keeps the worktree.
 - After a reap, confirm the worktree dir, local branch and workspace
   registration are all gone (`git worktree list`, `git branch --list`,
   `superset workspaces list --local`). Orphan `roadmap/*` branches without a

@@ -542,6 +542,7 @@ def survey(project_filter: str | None = None) -> dict[str, Any]:
         reapable.append(entry)
 
     _promote_finished_conflicts(reapable, keep)
+    _promote_stale_failures(reapable, keep, held)
 
     return {
         "roots_skipped": roots_skipped,
@@ -575,6 +576,52 @@ def _promote_finished_conflicts(
             e["reason"] = f"dead-pane-merge-conflicts ({detail})"
             still_keep.append(e)
     keep[:] = still_keep
+
+
+STALE_FAILURE_REASONS = ("no-exit-0", "nonzero-after-success")
+
+
+def _promote_stale_failures(
+    reapable: list[dict[str, Any]],
+    keep: list[dict[str, Any]],
+    held: list[str],
+) -> None:
+    """Failed or timed-out last banner is stale once the branch's PR is MERGED.
+
+    A non-zero exit only matters while work is in progress. With a MERGED PR on
+    the branch, a clean tree, and only finished/setup tabs, the failure is
+    superseded. Held worktrees still go to `held-but-finished`, never reapable.
+    """
+    candidates = [
+        e for e in keep
+        if str(e.get("reason", "")).split(" ")[0] in STALE_FAILURE_REASONS
+        and e.get("kinds")
+        and all(k.startswith("finished") or k == "setup" for k in e["kinds"])
+    ]
+    if not candidates:
+        return
+    repos = {github_repo(e.get("root") or "") for e in candidates}
+    prs_index = bulk_prs_by_branch({r for r in repos if r})
+    done: list[dict[str, Any]] = []
+    for e in candidates:
+        wt = e.get("path") or ""
+        if not wt or not os.path.isdir(wt):
+            continue
+        status = run("git", "-C", wt, "status", "--short")
+        if status.returncode != 0 or status.stdout.strip():
+            continue
+        ok, detail = finished_override(e, prs_index, {})
+        if not (ok and e.get("pr_state") == "MERGED"):
+            continue
+        e["finished_evidence"] = f"{detail}; last banner stale ({e['reason']})"
+        if is_held(wt, held):
+            e["reason"] = "held-but-finished"
+            e["holders"] = holders(wt)
+        else:
+            e["reason"] = "reapable-banner-stale-failure"
+            reapable.append(e)
+            done.append(e)
+    keep[:] = [e for e in keep if not any(e is d for d in done)]
 
 
 def _classify_dead_pane(
