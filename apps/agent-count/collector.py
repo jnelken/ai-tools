@@ -243,6 +243,13 @@ def collect():
     return dict(totals, hosts=hosts, errors=errors, timestamp=time.time())
 
 
+PROVIDER_LABELS = {"cursor-composer": "Cursor"}
+
+
+def provider_label(name):
+    return PROVIDER_LABELS.get(str(name).lower()) or str(name).capitalize()
+
+
 def safe(text):
     # Host/provider names are untrusted SwiftBar markup, including submenus.
     return re.sub(r"[\r\n\t|\x00-\x1f]", " ", str(text)).strip().lstrip("-")
@@ -295,7 +302,7 @@ def menu(data):
             print("No agent sessions")
         for g in host["groups"]:
             print("%s: %s working · %s waiting · %s open" %
-                  (safe(g["provider"].capitalize()), g["working"], g["waiting"], g["total"]))
+                  (safe(provider_label(g["provider"])), g["working"], g["waiting"], g["total"]))
     if data["errors"]:
         print("---")
         for error in data["errors"]:
