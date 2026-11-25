@@ -248,6 +248,33 @@ def safe(text):
     return re.sub(r"[\r\n\t|\x00-\x1f]", " ", str(text)).strip().lstrip("-")
 
 
+def linear_section():
+    """Unarchived Linear issues (personal workspace) vs the 250 cap, from the weekly history file."""
+    history = Path.home() / ".claude/automations/linear-issue-count/state/history.jsonl"
+    last = None
+    try:
+        for line in history.read_text().splitlines():
+            try:
+                record = json.loads(line)
+            except ValueError:
+                continue
+            if record.get("workspace") == "jnelken":
+                last = record
+    except OSError:
+        pass
+    print("---")
+    if not last:
+        print("Linear tickets: no count yet | size=12")
+    else:
+        n, cap = last["count"], last["cap"]
+        color = " color=#e5484d" if n / cap >= 0.9 else " color=#f5a524" if n / cap >= 0.8 else ""
+        print("Linear tickets: %s / %s (%d%%) · %s | size=14%s" % (n, cap, round(100 * n / cap), last["date"], color))
+        for kind, count in sorted(last.get("by_type", {}).items()):
+            print("--%s: %s" % (kind, count))
+    script = Path.home() / ".claude/skills/linear-issue-count/scripts/count.py"
+    print("Refresh ticket count | bash=/usr/bin/python3 param1=%s terminal=false refresh=true" % script)
+
+
 def menu(data):
     # Host-level failures already print under their own host heading.
     incomplete = bool(data["errors"]) or any(h["error"] for h in data["hosts"])
@@ -273,6 +300,7 @@ def menu(data):
         print("---")
         for error in data["errors"]:
             print("%s | size=11" % safe(error))
+    linear_section()
     print("---")
     print("Refresh now | refresh=true")
     print("Open Superset | bash=/usr/bin/open param1=-a param2=Superset terminal=false")

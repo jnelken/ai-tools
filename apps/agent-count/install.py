@@ -20,8 +20,7 @@ def main():
     current = subprocess.run(pref, text=True, capture_output=True)
     plugins = Path(current.stdout.strip()).expanduser() if current.returncode == 0 else home / "Library/Application Support/SwiftBar/Plugins"
     plugins.mkdir(parents=True, exist_ok=True)
-    # Plugins hosted by this app: the agent counter and J3u OSX (Linear issue count).
-    for name in ("agents.5s.sh", "j3u.15m.py"):
+    for name in ("agents.5s.sh",):
         link = plugins / name
         target = source / name
         if link.is_symlink() and link.resolve() == target.resolve():
