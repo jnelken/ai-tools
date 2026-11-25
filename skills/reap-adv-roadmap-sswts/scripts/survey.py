@@ -297,6 +297,26 @@ def is_held(wt: str, held: list[str]) -> bool:
     return False
 
 
+def holders(wt: str) -> list[str]:
+    """`pid command` for each process whose cwd is the worktree or inside it."""
+    p = run("lsof", "-d", "cwd", "-Fpcn")
+    if p.returncode != 0:
+        return ["unknown (lsof failed)"]
+    real = os.path.realpath(wt)
+    out: list[str] = []
+    pid = cmd = ""
+    for ln in p.stdout.splitlines():
+        if ln.startswith("p"):
+            pid = ln[1:]
+        elif ln.startswith("c"):
+            cmd = ln[1:]
+        elif ln.startswith("n/"):
+            hr = os.path.realpath(ln[1:])
+            if hr == real or hr.startswith(real + os.sep):
+                out.append(f"{pid} {cmd}")
+    return out
+
+
 def net_new_vs_main(wt: str, branch: str, main_ref: str) -> tuple[str, str]:
     """Squash-merge-aware check mirroring zsh `diffmain` / `gdiffnew`.
 
@@ -383,9 +403,7 @@ def survey(project_filter: str | None = None) -> dict[str, Any]:
         if wt and (cwd == os.path.realpath(wt) or cwd.startswith(os.path.realpath(wt) + os.sep)):
             keep.append({**base, "reason": "cwd-trap", "path_kind": None})
             continue
-        if is_held(wt, held):
-            keep.append({**base, "reason": "held", "path_kind": None})
-            continue
+        is_held_wt = is_held(wt, held)
 
         try:
             term_payload = sjson("terminals", "list", "--local", "--workspace", w["id"])
@@ -397,6 +415,9 @@ def survey(project_filter: str | None = None) -> dict[str, Any]:
             keep.append({**base, "reason": "invalid-terminals-list", "path_kind": None})
             continue
 
+        if is_held_wt and not sessions:
+            keep.append({**base, "reason": "held", "path_kind": None})
+            continue
         if not sessions:
             _classify_dead_pane(
                 base, w, wt, root, main_refs.get(root), reapable, keep,
@@ -493,6 +514,14 @@ def survey(project_filter: str | None = None) -> dict[str, Any]:
         if zeros:
             last0_raw = max(zeros, key=lambda t: t["finished_dt"])["finished_raw"]
         entry["last0"] = last0_raw
+        if is_held_wt:
+            # Held, but every other standard says reapable. Tab buffers are
+            # only scanned for held worktrees (the one case it can change the
+            # outcome). Never auto-reap: surface holders for a decision.
+            entry["reason"] = "held-but-finished"
+            entry["holders"] = holders(wt)
+            keep.append(entry)
+            continue
         entry["reason"] = "reapable-banner"
         reapable.append(entry)
 

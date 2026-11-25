@@ -116,6 +116,28 @@ its content is already reflected. `diffmain`'s merge-tree replay is what makes
 "already in main" detectable; PR/Linear finished is what clears conflict noise
 after a squash land.
 
+## Held worktrees — scan the buffer before keeping
+
+`held` alone is not a verdict. When a worktree would otherwise be reapable
+(clean, not a root, not the cwd trap) but a process cwd is inside it, do the
+Path A buffer scan anyway — it is the only case where scanning changes the
+outcome, so don't scan buffers for worktrees already kept for another reason.
+`survey.py` reports these as `held-but-finished` with the holding `pid command`s.
+Never guess from the tab list: read the buffer (`superset terminals read`; the
+output is JSON with the text in `.text` and can be >100 KB, so search it for the
+last finished banner rather than eyeballing the tail). A clean `exit=0` banner,
+a MERGED PR and a clean tree mean the work is done and the holder is leftover.
+
+Classify holders before deciding:
+
+- **The tab's own shell** (`zsh` whose cwd is the worktree, one per tab): not a
+  real holder — reaping closes the tab. Reap.
+- **Orphaned worker leftovers** (PPID 1, hours old, e.g. a `batch-lane` / test
+  Python process whose log in `$TMPDIR` shows a killed run): inspect with
+  `ps -ww -o pid,ppid,etime,command -p <pid>` and `lsof -p <pid>`; kill only
+  after the user approves, then reap.
+- **Anything else** (editor, dev server, an agent): keep.
+
 ## Delete path
 
 One call per workspace, sequential (each touches the owning clone):
@@ -127,6 +149,24 @@ sh "$REAP" <id> <project-root> <worktreePath> <branch>
 
 Report each `reaped …` / `FAILED …` line. Recovery SHAs land in
 `~/.claude/state/self-destruct.log`.
+
+Before reaping, also confirm `git status --short` is exactly what you expect.
+A dirty tree whose only change is an `IN_PROGRESS.md` agent-work marker
+(`<!-- agent-work:… -->` punch-in block, untracked/ignored going forward) is
+disposable: diff each one (they share the same shape), and with approval reap
+after `git checkout -- IN_PROGRESS.md`. Any other change keeps the worktree.
+
+Gotchas from live sweeps:
+
+- `superset terminals list` returns `{"sessions": []}` for a dead pane — parse
+  the JSON; matching on non-empty output treats every dead pane as having tabs.
+- Hold checks must run `lsof` at reap time, not reuse the survey's snapshot.
+- The deploy copy under `~/.ai-tools/skills` is read-only; edit the dev checkout
+  at `~/Dropbox/code/ai-tools` and push (the symlinked skill follows main).
+- After a reap, confirm the worktree dir, local branch and workspace
+  registration are all gone (`git worktree list`, `git branch --list`,
+  `superset workspaces list --local`). Orphan `roadmap/*` branches without a
+  worktree are a separate cleanup ([[cleanup-local-branches]]).
 
 ## Survey helper
 
