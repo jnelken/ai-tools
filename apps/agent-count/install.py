@@ -20,16 +20,18 @@ def main():
     current = subprocess.run(pref, text=True, capture_output=True)
     plugins = Path(current.stdout.strip()).expanduser() if current.returncode == 0 else home / "Library/Application Support/SwiftBar/Plugins"
     plugins.mkdir(parents=True, exist_ok=True)
-    link = plugins / "agents.5s.sh"
-    target = source / link.name
-    if link.is_symlink() and link.resolve() == target.resolve():
-        pass
-    elif link.exists() or link.is_symlink():
-        raise SystemExit("Existing plugin preserved; move it aside before installing: %s" % link)
-    else:
-        link.symlink_to(target)
-    if not os.access(link, os.X_OK):
-        raise SystemExit("Plugin must be executable in the source checkout")
+    # Plugins hosted by this app: the agent counter and J3u OSX (Linear issue count).
+    for name in ("agents.5s.sh", "j3u.15m.py"):
+        link = plugins / name
+        target = source / name
+        if link.is_symlink() and link.resolve() == target.resolve():
+            pass
+        elif link.exists() or link.is_symlink():
+            raise SystemExit("Existing plugin preserved; move it aside before installing: %s" % link)
+        else:
+            link.symlink_to(target)
+        if not os.access(link, os.X_OK):
+            raise SystemExit("Plugin must be executable in the source checkout")
     subprocess.run(["/usr/bin/defaults", "write", "com.ameba.SwiftBar", "PluginDirectory", "-string", str(plugins)], check=True)
     # Capture the installed CLI path: GUI apps do not inherit shell aliases/PATH.
     config = home / ".config/agent-count/config.json"
@@ -52,7 +54,7 @@ def main():
         subprocess.run(["/bin/launchctl", "bootstrap", domain, str(plist)], check=True)
     subprocess.run(["/usr/bin/open", "-g", str(app)], check=True)
     subprocess.run(["/usr/bin/open", "-g", "swiftbar://refreshallplugins"], check=True)
-    print("Installed:", link, "->", link.resolve())
+    print("Installed plugins in:", plugins)
     print("Login startup:", plist)
 
 

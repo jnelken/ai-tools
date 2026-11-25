@@ -65,3 +65,12 @@ SwiftBar is [open source](https://github.com/swiftbar/SwiftBar). Local-only
 alternatives considered were [so-agentbar](https://github.com/sotthang/so-agentbar)
 and [AgentBar](https://github.com/CenCiviC/AgentBar); using SwiftBar lets this
 counter include Superset hosts without maintaining a native app fork.
+
+## J3u OSX (Linear issue count)
+
+`j3u.15m.py` is a second SwiftBar plugin installed by the same `install.py`. It shows unarchived
+issues in the personal Linear workspace (`jnelken`) against the 250 cap (`J3u 154/250`), orange at
+80% and red at 90%. The menu has the state breakdown, **Refresh now** (runs the `linear-issue-count`
+skill's `count.py`) and a Linear link. It only reads
+`~/.claude/automations/linear-issue-count/state/history.jsonl`, so its 15-minute refresh makes no API
+calls; the weekly automation and **Refresh now** write the data.
