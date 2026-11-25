@@ -21,6 +21,13 @@ def api(workspace, query):
 
 
 def workspaces():
+    # Personal workspace only; Concentro is deliberately excluded even if the CLI is logged in to it.
+    if os.environ.get("LINEAR_COUNT_WORKSPACES"):
+        return os.environ["LINEAR_COUNT_WORKSPACES"].split(",")
+    return ["jnelken"]
+
+
+def _all_authenticated_workspaces():
     out = subprocess.run(["linear", "auth", "list"], capture_output=True, text=True).stdout
     out = re.sub(r"\x1b\[[0-9;]*m", "", out)
     rows = [l.split() for l in out.splitlines()[1:] if l.strip()]

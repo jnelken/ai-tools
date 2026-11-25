@@ -1,6 +1,6 @@
 ---
 name: linear-issue-count
-description: Count unarchived Linear issues in each authenticated workspace against the 250-issue plan cap, record it to a running history, and flag when it nears the cap. Use on demand ("/linear-issue-count", "how many Linear tickets do I have", "am I near the Linear limit") or via the weekly automation `linear-issue-count` (runs on Haiku through `skill-automation`).
+description: Count unarchived Linear issues in Jake's personal Linear workspace (`jnelken`, never Concentro) against the 250-issue plan cap, record it to a running history, and flag when it nears the cap. Use on demand ("/linear-issue-count", "how many Linear tickets do I have", "am I near the Linear limit") or via the weekly automation `linear-issue-count` (runs on Haiku through `skill-automation`).
 allowed-tools: Bash(python3 ~/.claude/skills/linear-issue-count/scripts/count.py *), Bash(python3 ~/.claude/skills/linear-issue-count/scripts/count.py), Bash(python3 /Users/jake/.claude/skills/linear-issue-count/scripts/count.py *), Bash(tail *)
 model: claude-haiku-5-5
 ---
