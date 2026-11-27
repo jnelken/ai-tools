@@ -20,7 +20,7 @@ side by side when the plan approver clears them. Stop cleanly with blockers reco
 nothing to do.
 
 **Every item ships as a merged PR from its own Superset workspace.** `run.sh` creates a workspace
-(a git worktree under `~/.superset/worktrees/`, outside Dropbox) on the item's branch and runs the
+(a git worktree under `~/.paradev/worktrees/`, outside Dropbox) on the item's branch and runs the
 worker in its terminal; the worker pushes the branch, opens a PR, and merges it once the review
 passes. That's the only output Superset's Production Run leaderboard credits — a direct push to
 `main` counts for nothing. With the Superset app down, a dispatch is skipped (`skipped-superset`)

@@ -297,7 +297,7 @@ reconcile, so go to Step 1. Otherwise work only in the repo it names, and only w
 passes the safety rules:
 
 1. Find the run's branch. A scheduled run builds in a Superset workspace (a worktree under
-   `~/.superset/worktrees/`), so its `roadmap/<slug>` branch is checked out *there* and the root
+   `~/.paradev/worktrees/`), so its `roadmap/<slug>` branch is checked out *there* and the root
    checkout stays on `main`: `git -C <repo> worktree list` shows it. An older or interactive run
    built in the root checkout and left it on the branch (`git -C <repo> branch --show-current`).
    `git-safe-to-autocommit` flags neither, so check directly. Dispatch a resume with that `branch`;

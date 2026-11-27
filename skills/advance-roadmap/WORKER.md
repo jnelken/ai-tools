@@ -222,7 +222,7 @@ steps below:
 ## Step 3 — Start from fresh `origin/main` in your workspace
 
 **Scheduled runs build in a Superset workspace, never the root checkout.** `run.sh` created the
-item's workspace (a git worktree under `~/.superset/worktrees/`, outside Dropbox) on the assigned
+item's workspace (a git worktree under `~/.paradev/worktrees/`, outside Dropbox) on the assigned
 branch, and launched you in its terminal; the prompt names its path, and that is your `<checkout>`
 for every step below. The leaderboard credits a merged PR only when it came from a workspace that
 ran an agent, which is why the work happens there. Don't switch branches in it — one workspace is

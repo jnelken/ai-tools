@@ -209,8 +209,10 @@ nothing but ` D` entries (a half-removed worktree, thousands of lines) is not re
 still say so before treating it as clean: it is uncommitted state that archiving will
 discard.
 
-**b. `IN_PROGRESS.md`.** Look in `.claude/IN_PROGRESS.md`, else the repo root; absent means
-nothing to lose. Verify each item the way [[pick-up]] step 3 does and classify it **still
+**b. `IN_PROGRESS.md`.** It lives only in the primary (root) checkout, never in a worktree: look in
+the root checkout's `.claude/IN_PROGRESS.md`, else its root `IN_PROGRESS.md`; absent means nothing
+to lose. A copy inside the worktree being reaped is stale state, not a handoff, so it is not
+reviewed for loss. Verify each item the way [[pick-up]] step 3 does and classify it **still
 open**, **already done** or **stale**, with the evidence. Never edit the file; that stays
 [[close-out]]'s job.
 

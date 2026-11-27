@@ -57,7 +57,7 @@ This takes credited PRs from 0 to the existing ship rate. It also moves builds o
 1. **Spike first.** Launch `worker.sh` inside a Superset workspace terminal and confirm the agent hooks write a `terminal_agent_bindings` row. They should, because the child process inherits `SUPERSET_TERMINAL_ID` and `~/.superset/hooks/notify.sh` uses it.
    - If that doesn't work, fall back to `superset agents create --local --workspace <id> --agent cursor-agent --prompt-file …`, with failover driven by `superset agents read`.
    - Call the CLI by its absolute path, `/Applications/Superset.app/Contents/Resources/resources/bin/superset`. Never put `~/.superset/bin` on PATH, because its `claude`/`codex` wrappers would shadow the real binaries.
-2. **Workspace per item.** After the orchestrator picks an item, `run.sh` runs `superset ws create --local --project <id> --name <slug> --branch roadmap/<slug> --base-branch main`. The worktree lands in `~/.superset/worktrees/<projectId>/<name>`.
+2. **Workspace per item.** After the orchestrator picks an item, `run.sh` runs `superset ws create --local --project <id> --name <slug> --branch roadmap/<slug> --base-branch main`. The worktree lands in `~/.paradev/worktrees/<projectId>/<name>`.
 3. **Remove the worktree blockers:**
    - `conductor/ORCHESTRATOR.md:266` skips any `.git` that is a file. Allow it for lane worktrees.
    - `review.sh:43` checks `[ -d "$REPO/.git" ]`. Accept a `.git` file too.
@@ -143,14 +143,14 @@ supervisor is plain Python with no model call; every role keeps a non-Claude fir
 ## Stale docs to fix in the same pass
 
 - "Every six hours" in `ORCHESTRATOR.md:164,546`, `SAFETY.md:24`, `verdict.py:5` and `gen-dashboard.py:484`.
-- `dotfiles/claude/instructions/superset-workspaces.md`: wrong port (`:48214` is the other org; J3u is `:48511`) and wrong worktree path (it's `~/.superset/worktrees/…`).
+- `dotfiles/claude/instructions/superset-workspaces.md`: wrong port (`:48214` is the other org; J3u is `:48511`) and wrong worktree path (it's `~/.paradev/worktrees/…`).
 - `dotfiles/claude/CLAUDE.md`'s note that advance-roadmap pushes local `main`. It no longer will.
 - The `_none.md` ledger still says slackagent is dirty.
 
 ## Verification
 
 1. **Phase 1:** run one interactive `/advance-roadmap` on a repo with a ready item (code-health cooldowns lift on 10/7, between about 04:00 and 14:00). Confirm:
-   - the worktree is under `~/.superset/worktrees/` and the root checkout is untouched;
+   - the worktree is under `~/.paradev/worktrees/` and the root checkout is untouched;
    - `host.db` has a `terminal_agent_bindings` row for the workspace;
    - `workspace_pull_requests` links the PR and `merged_at` is set;
    - the production deploy is green;

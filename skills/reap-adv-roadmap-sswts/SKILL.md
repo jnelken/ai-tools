@@ -157,10 +157,12 @@ Report each `reaped …` / `FAILED …` line. Recovery SHAs land in
 `~/.claude/state/self-destruct.log`.
 
 Before reaping, also confirm `git status --short` is exactly what you expect.
-A dirty tree whose only change is an `IN_PROGRESS.md` agent-work marker
-(`<!-- agent-work:… -->` punch-in block, untracked/ignored going forward) is
-disposable: diff each one (they share the same shape), and with approval reap
-after `git checkout -- IN_PROGRESS.md`. Any other change keeps the worktree.
+`IN_PROGRESS.md` lives only in the root checkout (gitignored, never committed), so a worktree
+copy is stale state. Its `<!-- agent-work:… -->` punch-in blocks are not work and do not keep
+a worktree. `workspaces.py cleanup` now reports a stray copy as a keep reason, so reconcile it
+(delete the copy after confirming its entries are only punch-in markers) before reaping. Do
+not use `git checkout -- IN_PROGRESS.md`: the file is gitignored, so that command does nothing.
+Any other change keeps the worktree.
 
 Gotchas from live sweeps:
 

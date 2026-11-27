@@ -460,7 +460,7 @@ if [ "$SUPERSET_MODE" = "1" ] && ! python3 "$WORKSPACES_PY" available >> "$LOG" 
 fi
 
 # Workspaces whose PR Superset has seen merged are done; delete them so the sidebar and
-# ~/.superset/worktrees don't pile up. Never earlier — see lib/workspaces.py.
+# ~/.paradev/worktrees don't pile up. Never earlier — see lib/workspaces.py.
 if [ "$SUPERSET_MODE" = "1" ] && [ -z "$LANE" ] && [ -f "$WORKSPACES_PY" ]; then  # lanes: the supervisor cleans up
   python3 "$WORKSPACES_PY" cleanup >> "$LOG" 2>&1 || echo "(workspace cleanup failed — non-fatal)" >> "$LOG"
 fi

@@ -3,7 +3,7 @@
 
 The Production Run leaderboard credits a merged PR only when it came from a Superset
 workspace with an agent bound to it. So each dispatched item gets its own workspace
-(a git worktree under ~/.superset/worktrees, outside Dropbox), and worker.sh runs in
+(a git worktree under ~/.paradev/worktrees, outside Dropbox), and worker.sh runs in
 that workspace's terminal — the agent hooks inherit SUPERSET_TERMINAL_ID and bind.
 
   workspaces.py available
@@ -303,6 +303,34 @@ def cleanup_terminals(root, dry_run):
             (directory / "terminal.cleaned").touch()
 
 
+def close_orphan_terminals(root, dry_run):
+    """Close idle shells left in merged advance-roadmap workspaces that no run record owns.
+
+    A shell with no run record can never be closed by cleanup_terminals, so it would keep a merged
+    workspace alive forever. Only merged, non-busy workspaces with no open PR are touched."""
+    known = set()
+    for record in (root / "runs").glob("*/workspace.json"):
+        try:
+            known.add(json.loads(record.read_text())["terminal_id"])
+        except (OSError, ValueError, KeyError, TypeError):
+            continue
+    merged = merged_workspaces()
+    for w in as_list(cli("workspaces", "list", "--local", "--tag", TAG)):
+        info = merged.get(w.get("id"))
+        if not info or info["busy"] or info["open_prs"]:
+            continue
+        sessions = terminal_sessions(w["id"])
+        if sessions is None:
+            continue
+        for s in sessions:
+            terminal = s.get("terminalId")
+            if not terminal or s.get("exited") is True or terminal in known or s.get("attached") is not False:
+                continue
+            print(f"cleanup: {'would close' if dry_run else 'closing'} orphan terminal {terminal} in merged {w.get('branch')}")
+            if not dry_run:
+                cli("terminals", "close", "--local", "--workspace", w["id"], "--terminal", terminal)
+
+
 def unfinished_branches(root):
     try:
         with closing(sqlite3.connect(f"file:{root / 'workqueue.sqlite3'}?mode=ro", uri=True)) as con:
@@ -329,22 +357,25 @@ def cmd_cleanup(a):
         except BlockingIOError:
             return 0
         cleanup_terminals(root, a.dry_run)
+        close_orphan_terminals(root, a.dry_run)
         return cleanup_worktrees(a, root)
 
 
 def merged_pr_carries_head(path, branch, head):
-    """Fresh PR evidence must cover this exact branch tip, including squash merges."""
+    """Fresh PR evidence must cover this exact HEAD: the branch tip (including squash merges) or
+    the merge commit a merge-commit PR landed on main as. A worktree left at the merge commit is
+    already on main, so teardown loses nothing."""
     try:
         result = subprocess.run(['gh', 'pr', 'list', '--head', branch, '--state', 'all',
-                                 '--json', 'state,headRefName,headRefOid,mergedAt', '--limit', '100'],
+                                 '--json', 'state,headRefName,headRefOid,mergedAt,mergeCommit', '--limit', '100'],
                                 cwd=path, capture_output=True, text=True, timeout=60)
         if result.returncode != 0:
             return False
         prs = json.loads(result.stdout)
         if not isinstance(prs, list) or any(p.get('state') == 'OPEN' for p in prs):
             return False
-        return any(p.get('state') == 'MERGED' and p.get('mergedAt') and
-                   p.get('headRefName') == branch and p.get('headRefOid') == head for p in prs)
+        return any(p.get('state') == 'MERGED' and p.get('mergedAt') and p.get('headRefName') == branch and
+                   head in (p.get('headRefOid'), (p.get('mergeCommit') or {}).get('oid')) for p in prs)
     except (OSError, ValueError, subprocess.TimeoutExpired):
         return False
 
@@ -398,7 +429,9 @@ def cleanup_worktrees(a, root):
                 print(f"cleanup: keeping {w.get('name') or w['id']} — uncommitted work in {path}")
                 continue
             if any((Path(path) / f).exists() for f in ('.claude/IN_PROGRESS.md', 'IN_PROGRESS.md')):
-                continue  # A handoff needs human reconciliation before teardown.
+                # IN_PROGRESS.md lives only in the root checkout; a worktree copy is stale state to reconcile.
+                print(f"cleanup: keeping {w.get('branch')} — stray IN_PROGRESS.md in worktree {path}")
+                continue
             head = subprocess.run(['git', '-C', path, 'rev-parse', '--verify', 'HEAD'], capture_output=True, text=True)
             branch = subprocess.run(['git', '-C', path, 'branch', '--show-current'], capture_output=True, text=True)
             common = subprocess.run(['git', '-C', path, 'rev-parse', '--path-format=absolute', '--git-common-dir'],

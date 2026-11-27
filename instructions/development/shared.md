@@ -1,8 +1,9 @@
 ## Work ownership at the start of every coding task
 
 Before changing a repository, record the ticket (or `none`), exact provider session ID,
-provider and model in that worktree's `IN_PROGRESS.md`. Use
-`python3 ~/.ai-tools/automations/advance-roadmap/lib/punchin.py --workspace <repo-root> --ticket <ticket-or-none> --session <exact-session-id> --provider <provider> --model <model>`.
+provider and model in the primary checkout's `IN_PROGRESS.md`. There is one per repository: in the root checkout (`.claude/IN_PROGRESS.md`, or `IN_PROGRESS.md` if that is where the repo keeps it), never in a linked worktree. It is gitignored and never committed. Use
+`python3 ~/.ai-tools/automations/advance-roadmap/lib/punchin.py --workspace <repo-root-or-worktree> --ticket <ticket-or-none> --session <exact-session-id> --provider <provider> --model <model>`;
+it resolves a worktree to its primary checkout and prints the file it wrote. Advance-roadmap removes the entry when the work reaches `done`.
 Use session metadata supplied by the harness (`CODEX_SESSION_ID` for Codex when set); never guess an ID or model. If either is unavailable,
 record the information you can in the handoff and report the missing field. Update the entry if the
 ticket or model changes; preserve other sessions' entries and existing handoff notes. This is for

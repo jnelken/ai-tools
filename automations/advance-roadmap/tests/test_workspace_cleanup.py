@@ -108,6 +108,14 @@ class CleanupTests(unittest.TestCase):
                     return_value=SimpleNamespace(returncode=0, stdout=json.dumps(prs))):
                 self.assertEqual(workspaces.merged_pr_carries_head(str(self.root), 'feature', 'abc'), expected)
 
+    def test_merge_commit_head_counts_as_merged_evidence(self):
+        pr = {'state': 'MERGED', 'headRefName': 'feature', 'headRefOid': 'tip', 'mergedAt': '2026-01-01',
+              'mergeCommit': {'oid': 'merge1'}}
+        for head, expected in [('merge1', True), ('tip', True), ('other', False)]:
+            with self.subTest(head=head), patch.object(workspaces.subprocess, 'run',
+                    return_value=SimpleNamespace(returncode=0, stdout=json.dumps([pr]))):
+                self.assertEqual(workspaces.merged_pr_carries_head(str(self.root), 'feature', head), expected)
+
     def test_fresh_workspace_uses_origin_base_not_primary_checkout(self):
         out = self.root / 'workspace.json'
         args = SimpleNamespace(repo=str(self.root), branch='roadmap/new', name='new',

@@ -1591,6 +1591,11 @@ def preflight(snapshot):
         if shared.py("workspaces.py", "available", timeout=60).returncode:
             raise RuntimeError("Superset is unavailable")
         shared.py("workspaces.py", "cleanup", timeout=600)
+    # Finished work clears its own punch-in block, so IN_PROGRESS.md keeps only live owners.
+    code = shared.code_dir()
+    if code:
+        shared.py("punchin.py", "sweep", "--code-dir", code,
+                  "--queue", str(workqueue.ROOT / "workqueue.sqlite3"), timeout=120)
     # Preserve label inference, once per batch rather than once per concurrent lane.
     skill = Path(os.environ.get("ADVANCE_ROADMAP_SKILL_DIR",
                                 str(Path.home() / ".claude/skills/advance-roadmap")))
