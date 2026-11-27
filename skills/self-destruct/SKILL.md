@@ -1,6 +1,6 @@
 ---
 name: self-destruct
-description: The session deletes its own Superset workspace (worktree, local branch, workspace registration, and this terminal tab) once its branch is confirmed merged, then signs off ⛏️. In a project's root checkout it keeps the workspace, reaps the merged sswts that session spawned (workspaces it created for dispatched agents), and closes the terminal (the terminal-closing part is the old /done skill, now folded in). Checks IN_PROGRESS.md, unpushed commits and sibling terminals first and puts any loss in front of the user like a delete-confirmation dialog, which can run /close-out or /pick-up first. This is the one command for ending a session. Use when the user types /self-destruct or explicitly asks this session to clean up after itself or close its terminal. Trigger phrases include "self-destruct", "close this terminal", "we're done, close it", "delete your own worktree", "reap this session", "reap this workspace", "close this workspace", "this PR merged, clean up this workspace", "tear down this superset workspace", "am I safe to close this workspace". Formerly named close-sswt.
+description: The session deletes its own Superset workspace (worktree, local branch, workspace registration, and this terminal tab) once its branch is confirmed merged, then signs off ⛏️. Without Superset IDs, in a project's root checkout, or with a missing tool, it destroys nothing: it runs /close-out, reaps the merged sswts that session spawned when the IDs are set (workspaces it created for dispatched agents), and prints a bomb instead of closing the terminal. Checks IN_PROGRESS.md, unpushed commits and sibling terminals first and puts any loss in front of the user like a delete-confirmation dialog, which can run /close-out or /pick-up first. This is the one command for ending a session. Use when the user types /self-destruct or explicitly asks this session to clean up after itself or close its terminal. Trigger phrases include "self-destruct", "close this terminal", "we're done, close it", "delete your own worktree", "reap this session", "reap this workspace", "close this workspace", "this PR merged, clean up this workspace", "tear down this superset workspace", "am I safe to close this workspace". Formerly named close-sswt.
 disable-model-invocation: true
 ---
 
@@ -16,7 +16,7 @@ This skill is `/reap` for the session itself. After a ⛏️ sign-off, a bare "r
 already authorizes the same teardown; `/self-destruct` is the explicit, guarded form of it.
 
 This is the single command for ending a session; the former `/done` (close only the tab) is
-the root-checkout path below. It shares one ecosystem with [[close-out]] and [[pick-up]]:
+the close-out path below. It shares one ecosystem with [[close-out]] and [[pick-up]]:
 `IN_PROGRESS.md` is written by close-out, read and verified here (never edited here), and
 resumed by pick-up. The confirmation dialog in step 3 can run either one first.
 
@@ -35,17 +35,18 @@ checks in code (`automations/reap-sswts/reap.py`).
 
 ## Guardrails: check before anything else
 
-Refuse outright, no exceptions, if any hold:
+The destructive path (section 1 onward: teardown and reaping) runs only when all of these
+hold. If any fails, take the close-out path below instead and say plainly which check failed.
 
-1. `$SUPERSET_WORKSPACE_ID` or `$SUPERSET_TERMINAL_ID` is unset or empty. The CLI reports
-   success for IDs that don't exist, so empty or wrong IDs would silently do nothing.
-2. `superset`, `jq` or `gh` is not on `PATH`.
+1. `$SUPERSET_WORKSPACE_ID` and `$SUPERSET_TERMINAL_ID` are both set and non-empty. The CLI
+   reports success for IDs that don't exist, so empty or wrong IDs would silently do nothing.
+2. `superset`, `jq` and `gh` are all on `PATH`.
+3. This session is in a worktree, not a root checkout (the test is below).
 
-Say plainly which guardrail tripped and stop.
+### Close-out path: destroy nothing
 
-### Root checkout: close the terminal only
-
-If either of these holds, this is a project's root checkout, not a disposable worktree:
+Use this path when any guardrail above fails, or when this is a project's root checkout, not
+a disposable worktree:
 
 - The workspace `type` is not `worktree` (root checkouts report `local` or `main`):
   ```bash
@@ -54,28 +55,30 @@ If either of these holds, this is a project's root checkout, not a disposable wo
 - The current branch is `main`/`master` (`git branch --show-current`). Belt and braces over
   the type check.
 
-Deleting it would remove the primary clone, so **never archive this session's own
-workspace, delete its branch or run `teardown.sh`.** The user still wants the session gone,
-so reap the workspaces it spawned (step 2), then close only this terminal:
+Deleting a root checkout would remove the primary clone, and without IDs nothing can be torn
+down safely, so **never archive this session's workspace, delete its branch or run
+`teardown.sh` on this path.** Run these steps in order:
 
-1. Run the loss picture's 2a and 2c, plus 2b's `IN_PROGRESS.md` check, but scoped to *this
-   session's own* work: its uncommitted changes, unpushed commits, background tasks and
-   Monitors. Dirty files that other sessions own (a root checkout is worked by several at
-   once) are one FYI line, not a blocker. Anything of this session's own goes through the
-   step 3 dialog (the "merged" check in step 1 does not apply here).
+1. Run `/close-out` for this session. It sweeps uncommitted and unpushed work,
+   `IN_PROGRESS.md`, sibling terminals, background tasks and Monitors, then files follow-ups
+   and records human-only decisions. Dirty files that other sessions own (a root checkout is
+   worked by several at once) are one FYI line, not a blocker. The loss picture in section 2
+   is not needed on this path, and the "merged" check in section 1 does not apply.
 2. **Reap the sswts this session spawned.** A root-checkout session usually ships work by
    creating a workspace, dispatching an agent into it and watching the PR (the `superset`
    skill's flow). Those workspaces are this session's loose ends: leaving them behind is the
-   gap this step closes. The "never archive" rule above covers only the root workspace
-   itself. See [Reaping spawned workspaces](#reaping-spawned-workspaces) below.
-3. Write the final message: that the workspace was kept because it is the root checkout,
-   which spawned workspaces were reaped (or left, and why), and that the terminal is left
-   open (the bomb below stands in for closing it). Sign-off is `⛏️` when every spawned
-   workspace is reaped or none existed, and nothing else is open. Otherwise `✅`, or `⏳`
-   if a Monitor is still waiting on a spawned workspace's PR.
-4. End the final message with this ASCII-art bomb in a code block, instead of closing the
-   terminal pane. Do not run `scripts/close-tab.sh` or any other terminal- or pane-closing
-   command on this path; the tab stays open for the user to close by hand.
+   gap this step closes. Only when the Superset IDs and tools are set; without them, skip
+   reaping and name the spawned workspaces that were left. The "never archive" rule above
+   covers only the root workspace itself. See
+   [Reaping spawned workspaces](#reaping-spawned-workspaces) below.
+3. Write the final message: what close-out left open, which spawned workspaces were reaped
+   (or left, and why), and that the workspace and terminal are kept (the bomb below stands in
+   for closing the terminal). Sign-off follows close-out's result: `⛏️` only when nothing is
+   left open and no spawned workspace remains; `✅` when the work is finished but something is
+   recorded; `⏳` while waiting on a decision or a PR; `🛑` when something blocks the close.
+4. Print this ASCII-art bomb in a code block at the end of the message, then the status line
+   as the very last line. Do not run `scripts/close-tab.sh` or any other terminal- or
+   pane-closing command on this path; the tab stays open for the user to close by hand.
    ```text
                           . . .
                            \|/
@@ -100,9 +103,9 @@ so reap the workspaces it spawned (step 2), then close only this terminal:
                      `--..#####..--'
    ```
 
-Skip steps 1, 2 (beyond the above) and 4 below entirely.
+On this path, skip section 1 onward (the destructive path below) entirely.
 
-**Known quirk: the dead tab** (only relevant if `close-tab.sh` is run by hand; the root-checkout path above no longer runs it). The close itself works (the host disposes the terminal and
+**Known quirk: the dead tab** (only relevant if `close-tab.sh` is run by hand; the close-out path above no longer runs it). The close itself works (the host disposes the terminal and
 ends the session within a second). What lingers is the *tab* in a desktop app that views
 this host from another machine: it keeps a dead tab and `superset panes` can't reach it.
 `close-tab.sh` uses `panes close` whenever a desktop is attached to this host, which removes
