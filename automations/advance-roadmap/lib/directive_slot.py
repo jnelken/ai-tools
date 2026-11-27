@@ -212,7 +212,9 @@ def consume_merged(plan, issues):
     decisions, skipped = directive_store.parse_snapshot(repo, snapshot)
     for reason in skipped:
         print(f"  store: skipped {reason}")
-    ids = [directive_store.decision_id(d["ticket"], d["question"]) for d in decisions]
+    # The carrier keeps its decisions pending: its Linear description is still the live merged directive.
+    ids = [directive_store.decision_id(d["ticket"], d["question"]) for d in decisions
+           if d["ticket"] != plan["carrier"]]
     count = directive_store.consume(repo, ids, f"merged into {plan['carrier']}")
     print(f"  store: {repo} consumed {count} decision(s)")
 

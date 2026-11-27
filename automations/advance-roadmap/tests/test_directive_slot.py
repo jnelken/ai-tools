@@ -201,21 +201,24 @@ class DirectiveSlotTests(unittest.TestCase):
         code, output, _ = self.run_main(['merge', '--apply'], snapshot, writer)
         self.assertEqual(code, 0)
         self.assertEqual([ident for ident, _ in writes], ['DEV-1', 'DEV-2'])
-        self.assertIn('consumed 2 decision(s)', output)
-        self.assertEqual([d['id'] for d in store.list_pending('repo')], [unrelated])
+        self.assertIn('consumed 1 decision(s)', output)
+        carrier = store.decision_id('DEV-1', 'q?')
+        self.assertEqual({d['id'] for d in store.list_pending('repo')}, {unrelated, carrier})
         decisions = json.loads(store.store_path('repo').read_text())['decisions']
-        merged = [d for d in decisions if d['id'] != unrelated]
-        self.assertEqual({d['ticket'] for d in merged}, {'DEV-1', 'DEV-2'})
-        for decision in merged:
-            self.assertEqual(decision['status'], 'consumed')
-            self.assertEqual(decision['consumed_note'], 'merged into DEV-1')
+        folded = [d for d in decisions if d['ticket'] == 'DEV-2']
+        self.assertEqual(len(folded), 1)
+        self.assertEqual(folded[0]['status'], 'consumed')
+        self.assertEqual(folded[0]['consumed_note'], 'merged into DEV-1')
+        # The carrier keeps its decision pending: its Linear description is still the live directive.
+        carrier_decision = [d for d in decisions if d['ticket'] == 'DEV-1'][0]
+        self.assertEqual(carrier_decision['status'], 'pending')
 
     def test_merge_apply_consumes_preexisting_store_decisions(self):
         snapshot = {'ok': True, 'issues': self.duplicate_issues()}
         store.import_snapshot('repo', snapshot)
         code, _, _ = self.run_main(['merge', '--apply'], snapshot, lambda *_: True)
         self.assertEqual(code, 0)
-        self.assertEqual(store.list_pending('repo'), [])
+        self.assertEqual([d['ticket'] for d in store.list_pending('repo')], ['DEV-1'])
 
     def test_merge_consumes_each_repo_only_after_its_own_linear_success(self):
         snapshot = {'ok': True, 'issues': self.duplicate_issues('alpha') + self.duplicate_issues('beta')}
@@ -224,7 +227,7 @@ class DirectiveSlotTests(unittest.TestCase):
         writes = iter([True, True, True, False])
         code, _, _ = self.run_main(['merge', '--apply'], snapshot, lambda *_: next(writes))
         self.assertEqual(code, 1)
-        self.assertEqual(store.list_pending('alpha'), [])
+        self.assertEqual([d['ticket'] for d in store.list_pending('alpha')], ['DEV-1'])
         self.assertEqual(len(store.list_pending('beta')), 2)
 
     def test_merge_dry_run_does_not_touch_store_or_linear(self):
