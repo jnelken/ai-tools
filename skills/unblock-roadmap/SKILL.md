@@ -343,6 +343,11 @@ If a ticket for this repo's description already carries an unconsumed `## Direct
 - Don't write a second one. **Edit the existing section** (`save_issue` with a `patch`
   anchored on that repo's marker comment) — adding an answered decision to a directive that
   already holds a dirty-tree resolution, for instance.
+- Before writing, check the repo with `python3 ~/.ai-tools/automations/advance-roadmap/lib/directive_slot.py check`
+  (exit 1 means a repo already has duplicates). If a duplicate exists, don't add a third: say so and
+  fold the new answer into the carrier directive. The next advance-roadmap run merges duplicates
+  onto one ticket before it plans (`directive_slot.py merge --apply`), but it leaves dirty-tree
+  directives for a human to resolve.
 - Don't re-ask about that repo in the same sweep. Mention in passing that it's already
   queued, and move on.
 - If Jake explicitly wants to change a pending directive, read the current one back to him

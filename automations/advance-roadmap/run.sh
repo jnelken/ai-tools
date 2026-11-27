@@ -649,6 +649,13 @@ if [ -f "$JLIN_PY" ] && [ -z "$BATCH_PID" ]; then
   echo "=== repo-label inference ===" >> "$LOG"
   python3 "$JLIN_PY" infer --apply >> "$LOG" 2>&1 || echo "(repo-label inference failed — non-fatal)" >> "$LOG"
 fi
+# Fold duplicate pending directives onto one per repo before the snapshot, so the planner never
+# sees a repo refused for having two (lib/directive_slot.py). Dirty-tree directives are left alone.
+DIRECTIVE_SLOT_PY="$ROOT/lib/directive_slot.py"
+if [ -f "$DIRECTIVE_SLOT_PY" ] && [ -z "$BATCH_PID" ]; then
+  echo "=== directive slot merge ===" >> "$LOG"
+  python3 -I "$DIRECTIVE_SLOT_PY" merge --apply >> "$LOG" 2>&1 || echo "(directive merge failed — non-fatal)" >> "$LOG"
+fi
 FINGERPRINT="$RUN_DIR/fingerprint.json"
 VERDICT_CHANGES="$RUN_DIR/verdict-changes.json"
 if [ -n "$TARGET_REPO" ]; then

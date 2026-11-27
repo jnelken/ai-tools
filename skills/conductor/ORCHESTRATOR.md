@@ -460,9 +460,11 @@ and only the process about to change a tree can meaningfully check it.
 
 1. **Exactly one pending directive per repo, or none.** Two tickets each carrying an unconsumed
    `## Directive` marker for the same repo is a live ambiguity, not a stale leftover:
-   `/unblock-roadmap` edits an existing directive rather than filing a second, so duplicates mean a
-   human intervened. Refuse the repo, record a blocker naming both tickets, and move on. Never pick
-   one and guess.
+   `/unblock-roadmap` edits an existing directive rather than filing a second. The run's preflight
+   (`lib/directive_slot.py merge --apply`) already folds duplicate non-dirty-tree directives onto one
+   carrier before this pass, so you only see duplicates it could not merge: a dirty-tree directive
+   involved, or a parse failure. Refuse the repo, record a blocker naming both tickets, and move on.
+   Never pick one and guess.
 2. **Read the `## Directive` section** in that ticket's description. It has up to three parts: a
    dirty-tree resolution (the canonical `git status` snapshot plus Jake's verbatim instruction),
    answered decisions, and a go-ahead. A ticket whose marker you matched but whose section doesn't
