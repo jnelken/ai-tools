@@ -20,7 +20,7 @@ The `ai-tools-deploy-guard` hook now enforces this for Claude's file tools (Edit
 **The dev checkout is dev-only.** `~/.claude/*` is symlinked from a separate deploy clone at `~/.ai-tools`, which tracks `origin/main` and is managed entirely by `install.sh` — never hand-edited. Concretely:
 
 - `git push` to `main` from this checkout **is** the deploy step — it doesn't reach any machine until something updates `~/.ai-tools` from origin.
-- After pushing, run `~/.ai-tools/install.sh` to make *this* machine pick the change up right away, instead of waiting for the next session's `ai-tools-sync` SessionStart hook to fetch/merge/re-link it automatically.
+- **Every edit to this repo ends with commit, push, then `./install.sh` from this checkout** (or `~/.ai-tools/install.sh`). That runs the hosted install: it fast-forwards the deploy clone at `~/.ai-tools` from origin and re-links `~/.claude`, so this machine runs the change now. Don't wait for the next session's `ai-tools-sync` SessionStart hook to do it. Verify with `git -C ~/.ai-tools rev-parse --short HEAD` matching your pushed commit.
 - Editing through `~/.claude/...` instead of the dev checkout targets the *deployed copy* and fails with permission denied while it's locked. The fix is always: edit here, commit, push. Edits left after an emergency unlock still trigger the dirty-clone checks.
 
 See `README.md`'s Install / Dev workflow sections for the full mechanics (`install.sh --dev` to test an unpushed change, invocation modes, env vars).
