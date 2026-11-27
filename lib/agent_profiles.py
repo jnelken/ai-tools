@@ -15,11 +15,12 @@ PROFILES = ('development/auto', 'development/work', 'development/personal', 'dev
 
 # Machine layer: facts about where a session runs (paths, hosts, tools). It never grants anything;
 # permissions come only from classify() on the target repository.
-MACHINES = ('work-mac', 'personal-mac', 'personal-pc', 'personal-cloud')
+MACHINES = ('work-mac', 'personal-mac', 'personal-pc', 'personal-wsl', 'personal-cloud')
 MACHINE_SOURCES = {
     'work-mac': ['machine/mac.md', 'machine/superset.md', 'machine/work-mac.md'],
     'personal-mac': ['machine/mac.md', 'machine/superset.md', 'machine/personal-mac.md'],
     'personal-pc': ['machine/personal-pc.md'],
+    'personal-wsl': ['machine/personal-wsl.md'],
     'personal-cloud': ['machine/personal-cloud.md'],
     # Unconfigured macOS keeps the Mac-wide rules so a Mac without a `machine` key does not lose them.
     'mac': ['machine/mac.md', 'machine/superset.md'],

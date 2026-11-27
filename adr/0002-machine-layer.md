@@ -11,6 +11,8 @@ ADR 0001 selects instructions by role and target repository. It does not know wh
 
 Add a machine layer, `instructions/machine/*.md`, composed into `development/*` profiles after the role fragment. Machines: `work-mac`, `personal-mac`, `personal-pc` (WSL Linux), `personal-cloud`.
 
+A later WSL rollout adds `personal-wsl` as a separate machine identity with current OMEN facts; `personal-pc` remains supported for existing configurations. This extends the machine catalog without changing the selection or permissions boundary.
+
 - **Facts, not grants.** Machine fragments describe paths, hosts and tools. Push/merge permissions still come only from `classify()` on the target repository.
 - **Identity precedence:** `AGENT_MACHINE`, then the `machine` key in `~/.config/agent-profiles/config.json`, then `CLAUDE_CODE_REMOTE=true` (`personal-cloud`), then unconfigured macOS (`mac`: Mac-wide fragments only, so a Mac without a key keeps the Superset rules). An invalid name fails closed.
 - **Runtime profiles ignore the machine layer**, preserving ADR 0001 isolation.

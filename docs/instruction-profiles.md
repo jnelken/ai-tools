@@ -45,7 +45,7 @@ MCP files use the existing `mcpServers` JSON format and live locally; refer to c
 
 ## Machine layer
 
-Development profiles also compose a machine fragment (`instructions/machine/`) for where the session runs: `work-mac`, `personal-mac`, `personal-pc`, `personal-cloud`. It carries facts only; grants still come from the target repository. Identity precedence: `AGENT_MACHINE`, then `"machine"` in the config file (e.g. `{"machine": "work-mac"}`), then `CLAUDE_CODE_REMOTE=true` (cloud, no setup needed), then unconfigured macOS (Mac-wide fragments only). Invalid names fail. Runtime profiles ignore it. `agent-profile resolve --explain` shows `machine` and `machine_reason`. Set the key once per physical machine; see [ADR 0002](../adr/0002-machine-layer.md).
+Development profiles also compose a machine fragment (`instructions/machine/`) for where the session runs: `work-mac`, `personal-mac`, `personal-pc`, `personal-wsl`, `personal-cloud`. It carries facts only; grants still come from the target repository. Identity precedence: `AGENT_MACHINE`, then `"machine"` in the config file (e.g. `{"machine": "work-mac"}`), then `CLAUDE_CODE_REMOTE=true` (cloud, no setup needed), then unconfigured macOS (Mac-wide fragments only). Invalid names fail. Runtime profiles ignore it. `agent-profile resolve --explain` shows `machine` and `machine_reason`. Set the key once per physical machine; for OMEN’s Ubuntu WSL use `{"machine": "personal-wsl"}`. The existing `personal-pc` profile remains available for compatibility. See [ADR 0002](../adr/0002-machine-layer.md).
 
 ## Runtime boundary
 

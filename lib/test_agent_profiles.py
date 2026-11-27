@@ -84,7 +84,7 @@ class Profiles(unittest.TestCase):
             r=p.resolve('development/work',self.base,'claude',{})
         self.assertIn('Superset Workspaces',r['instructions'])
     def test_machine_layer_in_development_not_runtime(self):
-        for name,has_superset in (('work-mac',True),('personal-mac',True),('personal-pc',False),('personal-cloud',False)):
+        for name,has_superset in (('work-mac',True),('personal-mac',True),('personal-pc',False),('personal-wsl',False),('personal-cloud',False)):
             r=p.resolve('development/personal',self.base,'claude',{'machine':name})
             self.assertEqual(r['machine'],name)
             self.assertEqual('Superset Workspaces' in r['instructions'],has_superset,name)
@@ -92,6 +92,18 @@ class Profiles(unittest.TestCase):
         for profile in ('runtime/slackagent','runtime/text'):
             r=p.resolve(profile,self.base,'claude',{'machine':'work-mac'})
             self.assertIsNone(r['machine']);self.assertFalse(any('/machine/' in s for s in r['sources']))
+    def test_personal_wsl_composes_facts_for_both_harnesses_only_in_development(self):
+        for harness in ('claude', 'codex'):
+            for profile in ('development/personal', 'development/work', 'development/unknown'):
+                result=p.resolve(profile,self.base,harness,{'machine':'personal-wsl'})
+                self.assertEqual(result['machine'],'personal-wsl')
+                self.assertTrue(any(source.endswith('/machine/personal-wsl.md') for source in result['sources']))
+                self.assertIn('paradev-j3u-host.service',result['instructions'])
+                self.assertNotIn('Superset Workspaces',result['instructions'])
+            for profile in ('runtime/slackagent', 'runtime/text'):
+                result=p.resolve(profile,self.base,harness,{'machine':'personal-wsl'})
+                self.assertIsNone(result['machine'])
+                self.assertNotIn('paradev-j3u-host.service',result['instructions'])
     def test_machine_does_not_change_classification(self):
         other,mine=self.repo('someone'),self.repo()
         for name in p.MACHINES:
@@ -102,7 +114,7 @@ class Profiles(unittest.TestCase):
             r=p.resolve('development/personal',self.base,'claude',{'machine':name})
             self.assertEqual('Lunch Money MCP Cache' in r['instructions'],expected,name)
     def test_spark_only_on_personal_mac(self):
-        for name,expected in (('personal-mac',True),('work-mac',False),('personal-pc',False),('personal-cloud',False)):
+        for name,expected in (('personal-mac',True),('work-mac',False),('personal-pc',False),('personal-wsl',False),('personal-cloud',False)):
             r=p.resolve('development/personal',self.base,'claude',{'machine':name})
             self.assertEqual('Spark CLI (personal Mac only)' in r['instructions'],expected,name)
     def test_machine_fragments_exist(self):
