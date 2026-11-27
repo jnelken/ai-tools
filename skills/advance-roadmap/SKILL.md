@@ -86,9 +86,11 @@ under 40 minutes. (For one-off human-driven work, use [[conductor]] instead.)
 
 Candidate repos: direct children of the personal code dir, `CODE_DIR=$(~/.ai-tools/bin/personal-code-dir)` (`~/Dropbox/code` on
 the personal machines; if it exits non-zero, this machine has no personal repos — stop). Check
-`~/.claude/automations/advance-roadmap/allowlist.txt` first when present, and query Linear once for
-pending directives — tickets carrying an unconsumed `## Directive` section, via the `linear` CLI
-only (see `SAFETY.md`) — from [[unblock-roadmap]] for authorized changes to existing dirty work.
+`~/.claude/automations/advance-roadmap/allowlist.txt` first when present, and read pending directives
+from the store (`python3 -I ~/.ai-tools/automations/advance-roadmap/lib/directive_store.py pending-repos`).
+For repos without a store file, fall back to a Linear scan for tickets carrying an unconsumed
+`## Directive` section, via the `linear` CLI only (see `SAFETY.md`). These directives from
+[[unblock-roadmap]] authorize changes to existing dirty work.
 
 ## Architecture (orchestrator / worker)
 

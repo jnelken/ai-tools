@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Keep one pending advance-roadmap directive per repo, merging duplicates before planning.
 
-A pending directive is a bare `## Directive` heading right after its
-`<!-- advance-roadmap:directive:<repo> -->` marker. advance-roadmap refuses a repo that has more
-than one, so duplicates from earlier answers stall it. This module folds them onto one carrier
+A pending Linear directive is a bare `## Directive` heading right after its
+`<!-- advance-roadmap:directive:<repo> -->` marker. The structured directive store is authoritative
+when present; check falls back to these sections for repos without a store file.
+This module folds duplicate Linear sections onto one carrier
 ticket (lowest DEV number). Every other heading is rewritten to `## Directive (consumed <date>,
 merged into <carrier>)`, so no answer is lost and nothing is deleted.
 
@@ -21,6 +22,9 @@ import subprocess
 import sys
 from datetime import date
 from pathlib import Path
+
+# python3 -I omits the script directory; load only our trusted sibling modules.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 LINEAR_SNAP_PY = Path(__file__).resolve().parent / "linearsnap.py"
 MARKER_RE = re.compile(r"<!--\s*advance-roadmap:directive:(?P<repo>[^\s>]+)\s*-->")
@@ -172,24 +176,68 @@ def load_snapshot(path=None):
         return json.loads(out.read_text())
 
 
-def main(argv=None):
+def check_snapshot(snap):
+    """Use each repo's store when present; legacy Linear sections are the fallback."""
+    import directive_store
+
+    counts = directive_store.pending_repos()
+    stored = {p.stem for p in directive_store.store_dir().glob("*.json")}
+    for repo in sorted(stored):
+        print(f"store: {repo} {counts.get(repo, 0)} pending decision(s)")
+    issues = snap.get("issues", [])
+    linear_repos = {repo for issue in issues
+                    for repo, _ in pending_entries(issue.get("description") or "")}
+    fallback = linear_repos - stored
+    for repo in sorted(fallback):
+        print(f"store absent for {repo}; falling back to Linear scan")
+    if not snap.get("ok", False):
+        print(f"directive_slot: Linear snapshot unavailable ({snap.get('error', 'unknown')})")
+        # With no store at all we still need the legacy scan. With store coverage,
+        # only a known repo lacking a file requires the unavailable snapshot.
+        return 2 if fallback or not stored else 0
+    dups = [repo for repo in duplicate_repos(issues) if repo in fallback]
+    for repo in dups:
+        print(f"duplicate pending directives: {repo}")
+    return 1 if dups else 0
+
+
+def consume_merged(plan, issues):
+    """Best effort after Linear succeeds; import original tickets, not the new carrier."""
+    import directive_store
+
+    snapshot = {"ok": True, "issues": [issue for issue in issues
+                if (issue.get("identifier") or issue.get("id")) in plan["updates"]]}
+    repo = plan["repo"]
+    directive_store.import_snapshot(repo, snapshot)
+    decisions, skipped = directive_store.parse_snapshot(repo, snapshot)
+    for reason in skipped:
+        print(f"  store: skipped {reason}")
+    ids = [directive_store.decision_id(d["ticket"], d["question"]) for d in decisions]
+    count = directive_store.consume(repo, ids, f"merged into {plan['carrier']}")
+    print(f"  store: {repo} consumed {count} decision(s)")
+
+
+def main(argv=None, writer=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("command", choices=["check", "merge"])
     ap.add_argument("--apply", action="store_true", help="write the merge to Linear")
     ap.add_argument("--snapshot", help="use this linearsnap JSON instead of fetching")
     args = ap.parse_args(argv)
 
-    snap = load_snapshot(args.snapshot)
+    try:
+        snap = load_snapshot(args.snapshot)
+    except (OSError, ValueError) as exc:
+        snap = {"ok": False, "error": str(exc)}
+    if args.command == "check":
+        try:
+            return check_snapshot(snap)
+        except (OSError, ValueError) as exc:
+            print(f"directive_slot: store failure: {exc}", file=sys.stderr)
+            return 2
     if not snap.get("ok", False):
         print(f"directive_slot: Linear snapshot unavailable ({snap.get('error', 'unknown')}); nothing changed")
         return 2
     issues = snap.get("issues", [])
-
-    if args.command == "check":
-        dups = duplicate_repos(issues)
-        for repo in dups:
-            print(f"duplicate pending directives: {repo}")
-        return 1 if dups else 0
 
     plans, refusals = merge_plan(issues)
     for r in refusals:
@@ -204,10 +252,14 @@ def main(argv=None):
         return 0
     for p in plans:
         for ident, desc in p["updates"].items():
-            ok = write_update(ident, desc)
+            ok = (writer or write_update)(ident, desc)
             print(f"  {ident}: success={ok}")
             if not ok:
                 return 1
+        try:
+            consume_merged(p, issues)
+        except Exception as exc:  # Store failures must not mask successful Linear writes.
+            print(f"  store: {p['repo']} failed: {exc}", file=sys.stderr)
     return 0
 
 

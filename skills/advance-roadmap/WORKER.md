@@ -85,7 +85,11 @@ For a bounded `yielded` result, include `next_phase`; a summary is optional and 
 Only when the request carries a `directive_ticket`. This is the dirty-tree exception in
 [`SAFETY.md`](SAFETY.md); the orchestrator decided it applies, and **you** are the one that acts.
 
-1. **Re-read the `## Directive` section** from that ticket's description in Linear, and re-parse
+1. **Read the pending directive from the store** with
+   `python3 -I ~/.ai-tools/automations/advance-roadmap/lib/directive_store.py list --repo <repo>`;
+   fall back to the ticket's `## Directive` section in Linear when the store has no file for that
+   repo. Once acted on, run `python3 -I ~/.ai-tools/automations/advance-roadmap/lib/directive_store.py consume --repo <repo> --ids <ID> [<ID> ...] --note "<outcome>"`
+   in addition to step 4's existing retirement. Re-parse
    live `git status --porcelain`. Do not trust the orchestrator's reading: minutes have passed and
    the tree may have moved. You are the authoritative check.
 2. **Re-run the staleness check for the instruction's kind** (Step 1a has the reasoning in full):
